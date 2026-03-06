@@ -1,0 +1,3 @@
+[workspace]
+members = ["pdf","render","font-data"]
+resolver = "3"

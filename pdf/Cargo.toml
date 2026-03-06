@@ -1,0 +1,20 @@
+[package]
+name = "pdf"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aes = "0.8.4"
+bitstream-io = "4.9.0"
+cbc = "0.1.2"
+fax = "0.2.6"
+flate2 = "1.1.9"
+freetype-rs = "0.38.0"
+lazy_static = "1.5.0"
+md-5 = "0.10.6"
+mozjpeg = "0.10.13"
+quick-xml = "0.39.2"
+thiserror = "2.0.18"
+xml-builder = "0.5.4"
+font_data = {path="../font-data/"}
+encoding_rs = "0.8.35"
