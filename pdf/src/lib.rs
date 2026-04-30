@@ -12,3 +12,4 @@ pub mod page;
 pub mod parser;
 pub mod path;
 pub mod pdf_context;
+pub mod writer;

@@ -1,10 +1,11 @@
 use crate::objects::{
-    pdf_array::PdfArray, pdf_bool::PdfBool, pdf_dict::PdfDict, pdf_name::PdfName,
-    pdf_number::PdfNumber, pdf_reference::PdfReference, pdf_stream::PdfStream,
-    pdf_string::PdfString,
+    object_id::ObjectId, pdf_array::PdfArray, pdf_bool::PdfBool, pdf_dict::PdfDict,
+    pdf_name::PdfName, pdf_number::PdfNumber, pdf_reference::PdfReference,
+    pdf_stream::PdfStream, pdf_string::PdfString,
 };
 
 pub(crate) mod object_streams;
+pub mod object_id;
 pub mod pdf_array;
 pub mod pdf_bool;
 pub mod pdf_dict;
@@ -29,6 +30,10 @@ pub enum PdfObject {
 }
 
 impl PdfObject {
+    pub fn as_object_id(&self) -> Option<ObjectId> {
+        self.as_reference().map(PdfReference::id)
+    }
+
     pub fn as_u16(&self) -> Option<u16> {
         if let Some(num) = self.as_number() {
             Some(num.get_u16())

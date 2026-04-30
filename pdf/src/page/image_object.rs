@@ -6,7 +6,7 @@ use crate::{
     },
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ImageObject {
     pub matrix: Matrix,
     pub image: PdfImage,

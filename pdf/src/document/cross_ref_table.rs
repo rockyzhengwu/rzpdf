@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 
-use crate::objects::pdf_dict::PdfDict;
+use crate::objects::{object_id::ObjectId, pdf_dict::PdfDict};
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObjectState {
     Normal,
     Free,
     Compressed,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ObjectInfo {
     objnum: u32,
     offset: u64,
@@ -37,9 +37,13 @@ impl ObjectInfo {
     pub fn state(&self) -> &ObjectState {
         &self.state
     }
+
+    pub fn object_id(&self) -> ObjectId {
+        ObjectId::new(self.objnum, self.gennum)
+    }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct CrossRefTable {
     objects: HashMap<u32, ObjectInfo>,
     trailer: PdfDict,
@@ -69,6 +73,13 @@ impl CrossRefTable {
     pub fn lookup(&self, objnum: &u32) -> Option<&ObjectInfo> {
         self.objects.get(objnum)
     }
+
+    pub fn lookup_id(&self, object_id: ObjectId) -> Option<&ObjectInfo> {
+        self.lookup(&object_id.obj_num()).filter(|info| {
+            matches!(info.state(), ObjectState::Compressed) || info.gennum() == object_id.gen_num()
+        })
+    }
+
     pub fn objects(&self) -> &HashMap<u32, ObjectInfo> {
         &self.objects
     }

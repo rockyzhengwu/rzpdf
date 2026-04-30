@@ -39,7 +39,10 @@ impl Font {
                 unimplemented!("Type3 is not unimplemented");
             }
             _ => {
-                panic!("invalid font name");
+                Err(PdfError::FontError(format!(
+                    "unsupported font subtype: {}",
+                    subtype.name()
+                )))?
             }
         }
     }

@@ -5,7 +5,7 @@ use crate::{
         colorspace::ColorSpace, device_cmyk::DeviceCmyk, device_gray::DeviceGray,
         device_rgb::DeviceRgb, value::ColorValue,
     },
-    device::Device,
+    device::{Device, trace::TraceDevice},
     error::{PdfError, PdfResult},
     font::{WritingMode, pdf_font::Font},
     geom::{matrix::Matrix, point::Point},
@@ -14,6 +14,7 @@ use crate::{
         PdfPage,
         all_state::AllState,
         content_parser::ContentParser,
+        display_list::DisplayList,
         graph_state::{LineCap, LineJoin},
         graphic_state::FillType,
         image_object::ImageObject,
@@ -65,6 +66,12 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
         }
         device.end_page();
         Ok(())
+    }
+
+    pub fn run_to_display_list(&mut self) -> PdfResult<DisplayList> {
+        let mut device = TraceDevice::new();
+        self.run(&mut device)?;
+        Ok(device.into_display_list())
     }
 
     fn invoke_oeration(&mut self, op: Operator, device: &mut dyn Device) -> PdfResult<()> {
@@ -225,7 +232,9 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                         }
                     }
                     _ => {
-                        panic!("invalid param in TJ operator");
+                        return Err(PdfError::PageOperatorError(
+                            "invalid parameter type in TJ operator".to_string(),
+                        ));
                     }
                 }
             }
@@ -563,7 +572,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                 } else {
                     let colorobj = self.page.get_resource_color(name.name())?;
                     println!("colorobj:{:?}", colorobj);
-                    let colorspace = ColorSpace::try_new(colorobj, self.ctx)?;
+                    let colorspace = ColorSpace::try_new(&colorobj, self.ctx)?;
                     return Ok(colorspace);
                 }
             }
@@ -594,7 +603,8 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
     }
     fn handle_set_extend_gs(&mut self, op: Operator) -> PdfResult<()> {
         let name = op.operand(0)?.as_name().unwrap().name();
-        let extgs = self.page.get_resource_extgstate(name)?.as_dict().ok_or(
+        let extgs_obj = self.page.get_resource_extgstate(name)?;
+        let extgs = extgs_obj.as_dict().ok_or(
             PdfError::PageResourceError(format!("Page ExtGs state is not a dict")),
         )?;
         self.current_state.process_ext_gs(extgs)?;
@@ -923,7 +933,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
 
         match subtype {
             "Image" => {
-                let pdfimage = PdfImage::try_new(name.to_string(), xobject, self.ctx)?;
+                let pdfimage = PdfImage::try_new(name.to_string(), &xobject, self.ctx)?;
                 let matrix = self.current_state.ctm();
                 let image_to_user = Matrix::new(1.0, 0.0, 0.0, -1.0, 0.0, 1.0);
                 let matrix = image_to_user.mul(&matrix);
@@ -936,14 +946,14 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                 device.do_image(imageobject);
             }
             "Form" => {
-                // TODO
-                println!("Form:{:?}", xobject);
+                return Err(PdfError::PageXobjectNotFound);
             }
             _ => {
-                panic!("xobject not supported:{:?}", subtype);
+                return Err(PdfError::PageResourceError(format!(
+                    "xobject subtype not supported: {subtype}"
+                )));
             }
         }
-        //println!("do:{:?}", xobject.as_stream().unwrap().dict());
         Ok(())
     }
 }

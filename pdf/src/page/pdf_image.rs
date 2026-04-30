@@ -4,7 +4,7 @@ use crate::{
     color::colorspace::ColorSpace, error::PdfResult, objects::PdfObject, pdf_context::PDFContext,
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PdfImage {
     name: String,
     width: f32,

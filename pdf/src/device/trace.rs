@@ -2,6 +2,7 @@ use crate::{
     device::Device,
     font::GlyphDesc,
     page::{
+        display_list::DisplayList,
         graphic_state::FillType, image_object::ImageObject, page_object::PageObject,
         path_object::PathObject, text_object::TextObject,
     },
@@ -78,6 +79,11 @@ impl TraceDevice {
     pub fn objects(&self) -> &[PageObject] {
         &self.objects
     }
+
+    pub fn into_display_list(self) -> DisplayList {
+        DisplayList::new(self.page_width, self.page_height, self.objects)
+    }
+
     pub fn pathname(&self, path: &PathObject) -> &str {
         match path.fill_type() {
             FillType::NoFill => {

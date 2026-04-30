@@ -2,7 +2,7 @@ use std::io::{Read, Seek};
 
 use crate::{
     error::{PdfError, PdfResult},
-    filter::apply_filter,
+    filter::{FilterContext, apply_filters},
     objects::{PdfObject, pdf_dict::PdfDict},
     pdf_context::PDFContext,
 };
@@ -28,54 +28,60 @@ impl PdfStream {
 
     pub fn decode_data<R: Seek + Read>(&self, ctx: &PDFContext<R>) -> PdfResult<Vec<u8>> {
         let params = match self.dict.get("DecodeParms") {
-            Some(obj) => Some(ctx.resolve(obj)?),
+            Some(obj) => Some(ctx.resolve_owned(obj)?),
             None => None,
         };
+        let jbig2_globals = resolve_jbig2_globals(params.as_ref(), ctx)?;
         if let Some(filter) = self.dict.get("Filter") {
-            match filter {
-                PdfObject::PdfName(n) => match params {
-                    Some(PdfObject::PdfDict(d)) => {
-                        apply_filter(n.name(), self.data.as_slice(), Some(&d))
-                    }
-                    None => apply_filter(n.name(), self.data.as_slice(), None),
-                    _ => Err(PdfError::FilterError(
-                        "Filter param must be Dict ".to_string(),
-                    )),
+            apply_filters(
+                filter,
+                params.as_ref(),
+                self.data.as_slice(),
+                FilterContext {
+                    stream_dict: Some(&self.dict),
+                    jbig2_globals: jbig2_globals.as_deref(),
                 },
-                PdfObject::PdfArray(filters) => match params {
-                    Some(PdfObject::PdfArray(param_arr)) => {
-                        assert_eq!(filters.len(), param_arr.len());
-                        let mut data = self.data.clone();
-                        for (name, param) in filters.into_iter().zip(param_arr.into_iter()) {
-                            data = apply_filter(
-                                name.as_name().unwrap().name(),
-                                data.as_slice(),
-                                Some(param.as_dict().unwrap()),
-                            )?;
-                        }
-                        Ok(data)
-                    }
-                    None => {
-                        let mut data = self.data.clone();
-                        for name in filters.into_iter() {
-                            data = apply_filter(
-                                name.as_name().unwrap().name(),
-                                data.as_slice(),
-                                None,
-                            )?;
-                        }
-                        Ok(data)
-                    }
-                    _ => Err(PdfError::FilterError(
-                        "Filter param must be Dict ".to_string(),
-                    )),
-                },
-                _ => Err(PdfError::FilterError(
-                    "Stream filter must be PdfName or Array".to_string(),
-                )),
-            }
+            )
         } else {
             Ok(self.data.clone())
         }
     }
+}
+
+fn resolve_jbig2_globals<R: Seek + Read>(
+    params: Option<&PdfObject>,
+    ctx: &PDFContext<R>,
+) -> PdfResult<Option<Vec<u8>>> {
+    let Some(params) = params else {
+        return Ok(None);
+    };
+    match params {
+        PdfObject::PdfDict(dict) => resolve_jbig2_globals_from_dict(dict, ctx),
+        PdfObject::PdfArray(array) => {
+            for item in array {
+                let Some(dict) = item.as_dict() else {
+                    continue;
+                };
+                if let Some(data) = resolve_jbig2_globals_from_dict(dict, ctx)? {
+                    return Ok(Some(data));
+                }
+            }
+            Ok(None)
+        }
+        _ => Ok(None),
+    }
+}
+
+fn resolve_jbig2_globals_from_dict<R: Seek + Read>(
+    dict: &PdfDict,
+    ctx: &PDFContext<R>,
+) -> PdfResult<Option<Vec<u8>>> {
+    let Some(globals) = dict.get("JBIG2Globals") else {
+        return Ok(None);
+    };
+    let resolved = ctx.resolve_owned(globals)?;
+    let stream = resolved.as_stream().ok_or(PdfError::FilterError(
+        "JBIG2Globals must resolve to a stream".to_string(),
+    ))?;
+    stream.decode_data(ctx).map(Some)
 }

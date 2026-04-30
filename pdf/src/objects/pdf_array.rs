@@ -9,11 +9,23 @@ impl PdfArray {
     pub fn add_obj(&mut self, obj: PdfObject) {
         self.items.push(obj)
     }
+
+    pub fn insert(&mut self, index: usize, obj: PdfObject) {
+        self.items.insert(index, obj);
+    }
+
     pub fn get(&self, index: usize) -> Option<&PdfObject> {
         self.items.get(index)
     }
     pub fn len(&self) -> usize {
         self.items.len()
+    }
+
+    pub fn remove(&mut self, index: usize) -> Option<PdfObject> {
+        if index < self.items.len() {
+            return Some(self.items.remove(index));
+        }
+        None
     }
 }
 

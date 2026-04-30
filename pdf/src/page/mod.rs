@@ -14,6 +14,8 @@ use crate::{
 pub mod all_state;
 pub mod clip_path;
 pub mod color_state;
+pub mod display_list;
+pub mod content_builder;
 pub mod content_interpreter;
 pub mod content_parser;
 pub mod content_syntax;
@@ -31,7 +33,7 @@ pub mod text_state;
 
 #[derive(Debug)]
 pub struct PdfPage<'a, R: Seek + Read> {
-    pagedict: &'a PdfDict,
+    page_node: PdfObject,
     ctx: &'a PDFContext<R>,
     page_width: f32,
     page_height: f32,
@@ -40,9 +42,9 @@ pub struct PdfPage<'a, R: Seek + Read> {
 }
 
 impl<'a, R: Seek + Read> PdfPage<'a, R> {
-    pub fn new(pagedict: &'a PdfDict, ctx: &'a PDFContext<R>) -> PdfPage<'a, R> {
+    pub fn new(page_node: PdfObject, ctx: &'a PDFContext<R>) -> PdfPage<'a, R> {
         Self {
-            pagedict,
+            page_node,
             ctx,
             page_width: 612.0,
             page_height: 792.0,
@@ -51,12 +53,19 @@ impl<'a, R: Seek + Read> PdfPage<'a, R> {
         }
     }
 
+    fn pagedict(&self) -> PdfResult<PdfDict> {
+        self.ctx
+            .resolve_owned(&self.page_node)?
+            .into_dict()
+            .ok_or(PdfError::DocumentError("page node is not a dict".to_string()))
+    }
+
     fn update_dimensions(&mut self) -> PdfResult<()> {
         if let Some(mediaobj) = self.get_pageattr("MediaBox")? {
-            self.bbox = Rectangle::try_from(mediaobj)?;
+            self.bbox = Rectangle::try_from(&mediaobj)?;
         }
         if let Some(cropobj) = self.get_pageattr("CropBox")? {
-            let cropbox = Rectangle::try_from(cropobj)?;
+            let cropbox = Rectangle::try_from(&cropobj)?;
             self.bbox.intersect(&cropbox);
         }
         self.page_width = self.bbox.width();
@@ -100,45 +109,45 @@ impl<'a, R: Seek + Read> PdfPage<'a, R> {
         }
     }
 
-    fn get_pageattr(&self, name: &str) -> PdfResult<Option<&PdfObject>> {
-        let mut page_dict = self.pagedict;
+    fn get_pageattr(&self, name: &str) -> PdfResult<Option<PdfObject>> {
+        let mut page_dict = self.pagedict()?;
         loop {
             if let Some(obj) = page_dict.get(name) {
-                let resolve_obj = self.ctx.resolve(obj)?;
-                return Ok(Some(resolve_obj));
+                return self.ctx.resolve_owned(obj).map(Some);
+            }
+            if let Some(parent) = page_dict.get("Parent") {
+                let parent = self.ctx.resolve_owned(parent)?;
+                page_dict = parent.into_dict().ok_or(PdfError::PageParentIsNotDict)?;
             } else {
-                if let Some(parent) = page_dict.get("Parent") {
-                    let parent = self.ctx.resolve(parent)?;
-                    page_dict = parent.as_dict().ok_or(PdfError::PageParentIsNotDict)?;
-                } else {
-                    break;
-                }
+                break;
             }
         }
-        return Ok(None);
+        Ok(None)
     }
 
-    pub fn resource(&self) -> PdfResult<&PdfDict> {
+    pub fn resource(&self) -> PdfResult<PdfDict> {
         if let Some(resource) = self.get_pageattr("Resources")? {
-            let resource_dict = resource.as_dict().ok_or(PdfError::PageResourcesIsNotDict)?;
+            let resource_dict = resource
+                .into_dict()
+                .ok_or(PdfError::PageResourcesIsNotDict)?;
             return Ok(resource_dict);
         }
         return Err(PdfError::PageResourceError(format!(
             "Page Resources is not found"
         )));
     }
-    pub fn get_resource_color(&self, name: &str) -> PdfResult<&PdfObject> {
-        if let Some(colors) = self.resource()?.get("ColorSpace") {
+    pub fn get_resource_color(&self, name: &str) -> PdfResult<PdfObject> {
+        let resource = self.resource()?;
+        if let Some(colors) = resource.get("ColorSpace") {
             let color_dict =
                 self.ctx
-                    .resolve(colors)?
-                    .as_dict()
+                    .resolve_owned(colors)?
+                    .into_dict()
                     .ok_or(PdfError::PageResourceError(
                         "Colorspace is not dict".to_string(),
                     ))?;
             if let Some(obj) = color_dict.get(name) {
-                let colorobj = self.ctx.resolve(obj)?;
-                return Ok(colorobj);
+                return self.ctx.resolve_owned(obj);
             }
         }
         Err(PdfError::PageResourceError(format!(
@@ -146,12 +155,12 @@ impl<'a, R: Seek + Read> PdfPage<'a, R> {
             name
         )))
     }
-    pub fn get_resource_pattern(&self, name: &str) -> PdfResult<&PdfObject> {
-        if let Some(pattern) = self.resource()?.get("Pattern") {
-            let pattern_dict = self.ctx.resolve(pattern)?;
+    pub fn get_resource_pattern(&self, name: &str) -> PdfResult<PdfObject> {
+        let resource = self.resource()?;
+        if let Some(pattern) = resource.get("Pattern") {
+            let pattern_dict = self.ctx.resolve_owned(pattern)?;
             if let Some(p) = pattern_dict.get_attr(name) {
-                let pobj = self.ctx.resolve(p)?;
-                return Ok(pobj);
+                return self.ctx.resolve_owned(p);
             }
         }
         Err(PdfError::PageResourceError(format!(
@@ -160,18 +169,18 @@ impl<'a, R: Seek + Read> PdfPage<'a, R> {
         )))
     }
 
-    pub fn get_resource_extgstate(&self, name: &str) -> PdfResult<&PdfObject> {
-        if let Some(extend) = self.resource()?.get("ExtGState") {
+    pub fn get_resource_extgstate(&self, name: &str) -> PdfResult<PdfObject> {
+        let resource = self.resource()?;
+        if let Some(extend) = resource.get("ExtGState") {
             let extend_dict =
                 self.ctx
-                    .resolve(extend)?
-                    .as_dict()
+                    .resolve_owned(extend)?
+                    .into_dict()
                     .ok_or(PdfError::PageResourceError(format!(
                         "Extend in Resource is not dict"
                     )))?;
             if let Some(obj) = extend_dict.get(name) {
-                let resobj = self.ctx.resolve(obj)?;
-                return Ok(resobj);
+                return self.ctx.resolve_owned(obj);
             }
         }
         Err(PdfError::PageResourceError(format!(
@@ -180,34 +189,33 @@ impl<'a, R: Seek + Read> PdfPage<'a, R> {
         )))
     }
 
-    pub fn get_xobject(&self, objname: &str) -> PdfResult<&PdfObject> {
+    pub fn get_xobject(&self, objname: &str) -> PdfResult<PdfObject> {
         let resource = self.resource()?;
         if let Some(xobject) = resource.get("XObject") {
             let xobject_dict = self
                 .ctx
-                .resolve(xobject)?
-                .as_dict()
+                .resolve_owned(xobject)?
+                .into_dict()
                 .ok_or(PdfError::PageXobjectIsNotDict)?;
             if let Some(xobj) = xobject_dict.get(objname) {
-                let xxobj = self.ctx.resolve(xobj)?;
-                return Ok(xxobj);
+                return self.ctx.resolve_owned(xobj);
             }
         }
         Err(PdfError::PageXobjectNotFound)
     }
 
-    pub fn get_resource_font(&self, fontname: &str) -> PdfResult<Option<&PdfObject>> {
+    pub fn get_resource_font(&self, fontname: &str) -> PdfResult<Option<PdfObject>> {
         let resource = self.resource()?;
         if let Some(fonts) = resource.get("Font") {
             let fonts_dict =
                 self.ctx
-                    .resolve(fonts)?
-                    .as_dict()
+                    .resolve_owned(fonts)?
+                    .into_dict()
                     .ok_or(PdfError::PageResourceError(format!(
                         "page font is not dict"
                     )))?;
             if let Some(font) = fonts_dict.get(fontname) {
-                return Ok(Some(self.ctx.resolve(font)?));
+                return self.ctx.resolve_owned(font).map(Some);
             }
         }
         Ok(None)
@@ -215,13 +223,12 @@ impl<'a, R: Seek + Read> PdfPage<'a, R> {
 
     fn content_streams(&self) -> PdfResult<Vec<Vec<u8>>> {
         let mut result = Vec::new();
-        if let Some(contents) = self.pagedict.get("Contents") {
+        if let Some(contents) = self.pagedict()?.get("Contents") {
             match contents {
                 PdfObject::PdfArray(contents_array) => {
                     for c in contents_array.into_iter() {
-                        let cobj = self
-                            .ctx
-                            .resolve(c)?
+                        let stream_obj = self.ctx.resolve_owned(c)?;
+                        let cobj = stream_obj
                             .as_stream()
                             .ok_or(PdfError::PageContentIsNotStream)?;
                         let data = cobj.decode_data(self.ctx)?;
@@ -229,13 +236,12 @@ impl<'a, R: Seek + Read> PdfPage<'a, R> {
                     }
                 }
                 PdfObject::PdfReference(_) => {
-                    let sobj = self.ctx.resolve(contents)?;
+                    let sobj = self.ctx.resolve_owned(contents)?;
                     match sobj {
                         PdfObject::PdfArray(contents_array) => {
                             for c in contents_array.into_iter() {
-                                let cobj = self
-                                    .ctx
-                                    .resolve(c)?
+                                let stream_obj = self.ctx.resolve_owned(c)?;
+                                let cobj = stream_obj
                                     .as_stream()
                                     .ok_or(PdfError::PageContentIsNotStream)?;
                                 let data = cobj.decode_data(self.ctx)?;
@@ -252,7 +258,7 @@ impl<'a, R: Seek + Read> PdfPage<'a, R> {
                     }
                 }
                 _ => {
-                    panic!("Page Content stream need to be an array or a stream object");
+                    return Err(PdfError::PageContentIsNotStream);
                 }
             }
         } else {
@@ -261,19 +267,21 @@ impl<'a, R: Seek + Read> PdfPage<'a, R> {
         Ok(result)
     }
 
-    pub fn display(&mut self, device: &mut dyn Device) -> PdfResult<()> {
+    pub fn display_list(&mut self) -> PdfResult<display_list::DisplayList> {
         self.update_dimensions()?;
         let contents = self.content_streams()?;
         let mut all_content = Vec::new();
         for content in contents {
             all_content.extend(content);
         }
-        println!("{}", String::from_utf8(all_content.clone()).unwrap());
         let reader = StreamReader::try_new(Cursor::new(all_content))?;
         let syntax = SyntaxParser::new(reader);
         let content_parser = ContentParser::new(syntax);
         let mut interpreter = Interpreter::new(self, &self.ctx, content_parser);
-        interpreter.run(device)?;
-        Ok(())
+        interpreter.run_to_display_list()
+    }
+
+    pub fn display(&mut self, device: &mut dyn Device) -> PdfResult<()> {
+        self.display_list()?.replay(device)
     }
 }

@@ -17,6 +17,10 @@ impl PdfDict {
     pub fn get(&self, key: &str) -> Option<&PdfObject> {
         self.map.get(key)
     }
+
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.map.contains_key(key)
+    }
 }
 impl<'a> IntoIterator for &'a PdfDict {
     type Item = (&'a String, &'a PdfObject);
