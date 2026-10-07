@@ -100,11 +100,11 @@ Indexed XObject 已增加专用索引采样路径：默认 Decode 保留原始�
 
 Type4 计算函数已支持规定的数值/逻辑/栈/条件运算符和 Domain/Range 裁剪，按现有 Limits 约束程序存储、执行步数与过程深度。Separation/DeviceN 条件颜色及图像的两保存策略严格读回已验证；不是通用 PostScript 执行器，Pattern/Shading、独立阅读器及共享聚合预算仍未完成。本文历史 Type4 不支持说明由此更新。
 
-Shading Type2/3 已接入资源、显示事件和 Skia 逐像素函数求值，支持 Domain、Extend、BBox 与图形状态裁剪/透明度/混合模式；直接 sh 不使用 Background。颜色空间必须直接定义，不允许资源别名；注册在事务前预检。模型、像素及保存版本已有定向回归，MuPDF/Ghostscript 样本仍存在已记录的边缘与色阶差异。Type1/4–7、Pattern、完整跨后端验收和操作级聚合预算尚未完成；具体测试版本与结果见 TODO/docs/testing.md。
+Shading Type1/2/3 与 Type4/5 三角网格已接入资源、显示事件和 Skia 点采样；Type1支持二维Domain/Matrix，Type2/3支持Domain/Extend，网格先插值分量或函数参数再转换颜色。BBox与图形状态裁剪/透明度/混合模式共用绘制路径；直接 sh 不使用 Background。颜色空间必须自包含定义（可间接引用），不允许资源别名；注册在事务前预检。模型、像素、导入和两保存策略已有定向回归，固定 MuPDF/Ghostscript 样本仍存在已记录的边缘与色阶差异。Type6/7、Pattern、网格性能/抗锯齿、完整跨后端验收和操作级聚合预算尚未完成；具体测试版本与结果见 TODO/docs/testing.md，不表示完整类型矩阵已验收。
 
 普通 CalGray/CalRGB/Lab/ICCBased/Separation/DeviceN XObject 也支持 1/2/4/8/16 位采样和 Decode：保留 packed 精度，RGBA 转换时应用空间端点；Lab/ICC 16 位默认/反转、六分量 DeviceN 低位深/行填充/末分量反转及两保存策略严格读回已验证。动态 Decode 不限于设备颜色的四分量。ICC 仅使用 Alternate，专色仅使用 tint-transform；非零 Lab BlackPoint、原生色版/叠印、完整颜色管理与独立阅读器对照未完成。
 
-Indexed 的 DeviceN 基空间通过现有 tint-transform/替代空间转换，不再一概拒绝；混合 None 分量仍保留并传给显示转换，不将其当作整体不绘制。Indexed 基空间为 Separation /None 或全 None DeviceN 时，绘制适配层会抑制路径、文字和普通图像，DisplayList 仍保留对象。原生专色版、叠印、Type4 函数执行与完整 DeviceN 兼容性仍未实现。
+Indexed 的 DeviceN 基空间通过现有 tint-transform/替代空间转换，不再一概拒绝；混合 None 分量仍保留并传给显示转换，不将其当作整体不绘制。Indexed 基空间为 Separation /None 或全 None DeviceN 时，绘制适配层会抑制路径、文字和普通图像，DisplayList 仍保留对象。Type4 calculator 函数执行已有受限实现；原生专色版、叠印与完整 DeviceN 兼容性仍未实现。
 
 `document.resources().embed_png_image(page, encoded)` 使用 png 0.18.1 解码 PNG，展开调色板/透明信息并复用 RGB/RGBA 注册；RGB、RGBA、灰度、灰度 alpha 和调色板+tRNS 已有保存/解释回归。检查原始文件字节、像素、转换输出大小及解码内部限额；校验 CRC 和结束数据，无效页号在解码前拒绝。APNG、16 位和 ICC 转换暂不支持，gamma/色彩管理未实现；多缓冲聚合峰值不在单项限额内。`create_transparency` 示例增加 `--png` 模式，基础 RGBA 导入已通过 MuPDF 中心像素对照，其他变体仍需独立验收。
 
@@ -188,13 +188,13 @@ SaveOptions 位于 `pdf::document::save_options`；`save_to_bytes/writer/file_wi
 
 Separation 的普通专色通过替代空间/tint-transform 作显示近似；`/All` 忽略该函数并用 `1 - tint` 显示灰度（不是原生分色输出）。`/None` 直接 RGB 转换明确返回 UnsupportedFeature；直接解释/DisplayList 回放会抑制对应路径填充/描边，文字转换为有效绘制模式但保留裁剪，普通图像仍使用自身颜色空间。DisplayList 保留原对象以支持编辑与文本提取。一位 stencil XObject 已接入解析和当前填充色绘制；None 填充会抑制 stencil。None 的独立阅读器像素对照与完整图像验收未完成。
 
-PDF Type 3 **Stitching functions**（不同于 Type3 字体）已支持单输入分段求值、Domain 裁剪、正向/反向 Encode、可选 Range 输出裁剪及嵌套函数；构造时校验子函数输入/输出维度，并保留深度和总节点限额。Type 4 PostScript 函数求值仍明确返回不支持。此功能不代表 Shading/Pattern 或操作级聚合内存预算已经完成。
+PDF Type 3 **Stitching functions**（不同于 Type3 字体）已支持单输入分段求值、Domain 裁剪、正向/反向 Encode、可选 Range 输出裁剪及嵌套函数；构造时校验子函数输入/输出维度，并保留深度和总节点限额。Type 4 PostScript calculator 函数已有受限求值实现；具体支持边界及回归见 TODO。此功能不代表全部 Shading/Pattern 或操作级聚合内存预算已经完成。
 
-Type 4 构造支持间接 Domain/Range 及数组内间接数值，先检查非空成对、有限有序参数和每数组条目/字节上限，再解码函数流；构造成功不代表代码已解析或可执行。数组检查仍是单项 Limits，不是两个参数数组与流解码的聚合内存预算。
+Type 4 构造支持间接 Domain/Range 及数组内间接数值，先检查非空成对、有限有序参数和每数组条目/字节上限，再解码函数流并编译受限 calculator 程序；求值时仍检查运行额度、输入输出维度和数值类型，构造成功不保证任意输入均能成功求值。数组检查仍是单项 Limits，不是两个参数数组与流解码的聚合内存预算。
 
 Lab 已支持零 BlackPoint 的颜色转换：L/a/b 按定义域裁剪，经 XYZ 与 Bradford 白点适配到 D65，再使用 sRGB 传递函数和通道裁剪。非零 BlackPoint 补偿仍返回 UnsupportedFeature；不能适配的白点返回 ColorError。当前是固定 sRGB 显示策略，不包含 OutputIntent/ICC 渲染意图或感知色域映射，也未统一 CalRGB/CalGray 的现有转换策略。
 
-DeviceN 已接入颜色空间解析、资源注册及显示用替代空间转换：验证非空/不同名组件（None 可重复、All 禁止）、函数输入输出维度，默认 tint 为 1，转换前裁剪有限 tint 至 0..1。支持现有函数求值器；Type4 仍返回不支持。NChannel 按 required tint-transform 作显示近似，不提供原生专色版、叠印或自定义混色；全 None 的直接 RGB 转换返回 UnsupportedFeature，绘制回放通过统一适配层抑制对应绘制，不丢弃原对象。组件及名称有数量/字节检查，但尚未贯通 OperationBudget。原空 `DeviceN {}` 占位结构已改为通过 `DeviceN::try_new`/`ColorSpace::try_new` 构造。
+DeviceN 已接入颜色空间解析、资源注册及显示用替代空间转换：验证非空/不同名组件（None 可重复、All 禁止）、函数输入输出维度，默认 tint 为 1，转换前裁剪有限 tint 至 0..1。支持现有函数求值器，包括受限 Type4 calculator。NChannel 按 required tint-transform 作显示近似，不提供原生专色版、叠印或自定义混色；全 None 的直接 RGB 转换返回 UnsupportedFeature，绘制回放通过统一适配层抑制对应绘制，不丢弃原对象。组件及名称有数量/字节检查，但尚未贯通 OperationBudget。原空 `DeviceN {}` 占位结构已改为通过 `DeviceN::try_new`/`ColorSpace::try_new` 构造。
 
 ---
 

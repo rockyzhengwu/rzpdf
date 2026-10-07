@@ -3527,7 +3527,7 @@ mod tests {
         // sh is now implemented for types 2/3; keep this diagnostic fixture
         // genuinely unsupported rather than referencing a missing resource.
         let mut shading = PdfDict::default();
-        shading.insert("ShadingType".into(), PdfObject::PdfNumber(crate::objects::pdf_number::PdfNumber::new(4.0)));
+        shading.insert("ShadingType".into(), PdfObject::PdfNumber(crate::objects::pdf_number::PdfNumber::new(6.0)));
         let mut shadings = PdfDict::default();
         shadings.insert("S".into(), PdfObject::PdfDict(shading));
         resources.insert("Shading".into(), PdfObject::PdfDict(shadings));

@@ -729,6 +729,52 @@ impl Device for SkiaRender {
 mod tests {
     use super::*;
     #[test]
+    fn triangle_mesh_pixels_follow_parameter_interpolation() {
+        use pdf::{document::{PdfDocument, resource_manager::ResourceKind,
+                save_options::{SaveOptions, StreamCompression}},
+            io::stream_reader::StreamReader, objects::{PdfObject, pdf_stream::PdfStream},
+            page::page_builder::PageBuilder, parser::syntax::SyntaxParser};
+        for (nonlinear, mirrored, lattice) in [(false, false, false), (true, false, false),
+            (false, true, false), (true, true, false), (false, false, true),
+            (true, false, true), (false, true, true), (true, true, true)] {
+            let doc = PdfDocument::new().unwrap();
+            doc.add_page_with_builder(0, PageBuilder::new().size(40.0, 20.0)).unwrap();
+            let function = if nonlinear { "/Function << /FunctionType 2 /Domain [0 1] /N 2 >>" } else { "" };
+            let geometry = if lattice { "/ShadingType 5 /VerticesPerRow 2" } else { "/ShadingType 4 /BitsPerFlag 8" };
+            let source = format!("<< {geometry} /ColorSpace /DeviceGray /BitsPerCoordinate 8 /BitsPerComponent 8 /Decode [0 40 0 20 0 1] /BBox [4 4 36 16] {function} >>");
+            let dict = SyntaxParser::new(StreamReader::try_new(std::io::Cursor::new(source.into_bytes())).unwrap())
+                .get_object().unwrap().into_dict().unwrap();
+            let data = if lattice { vec![0, 0, 0, 255, 0, 255, 0, 255, 0, 255, 255, 255] }
+                else { vec![0, 0, 0, 0, 0, 255, 0, 255, 0, 0, 255, 0, 1, 255, 255, 255] };
+            let id = doc.try_insert_object(PdfObject::PdfStream(PdfStream::new(dict, data))).unwrap();
+            let name = doc.resources().register_existing(0, ResourceKind::Shading, id).unwrap();
+            let transform = if mirrored { "-1 0 0 1 40 0 cm " } else { "" };
+            doc.replace_page_contents(0, format!("q {transform}/{name} sh Q").into_bytes()).unwrap();
+            let mut renderer = SkiaRender::new(72.0, 72.0).unwrap();
+            doc.get_page(0).unwrap().display(&mut renderer).unwrap();
+            let info = skia_safe::ImageInfo::new((40, 20), skia_safe::ColorType::RGBA8888, skia_safe::AlphaType::Unpremul, None);
+            let mut bytes = vec![0; 3200];
+            assert!(renderer.surface.read_pixels(&info, &mut bytes, 160, (0, 0)));
+            for (x, y) in [(10usize, 5usize), (30, 15), (20, 10)] {
+                let coordinate = (x as f64 + 0.5) / 40.0;
+                let t = if mirrored { 1.0 - coordinate } else { coordinate };
+                let expected = (255.0 * if nonlinear { t * t } else { t }).round() as u8;
+                assert_eq!(&bytes[(y * 40 + x) * 4..(y * 40 + x) * 4 + 4], &[expected, expected, expected, 255]);
+            }
+            assert_eq!(&bytes[(10 * 40 + 2) * 4..(10 * 40 + 2) * 4 + 4], &[255; 4]);
+            for compression in [StreamCompression::Preserve, StreamCompression::FlateUnencoded] {
+                let saved = doc.save_to_bytes_with_options(SaveOptions { compression, ..Default::default() }).unwrap();
+                let reopened = PdfDocument::from_bytes_with_mode(saved, pdf::parser::syntax::ParseMode::Strict).unwrap();
+                let mut readback_renderer = SkiaRender::new(72.0, 72.0).unwrap();
+                reopened.get_page(0).unwrap().display(&mut readback_renderer).unwrap();
+                let mut readback_pixels = vec![0; 3200];
+                assert!(readback_renderer.surface.read_pixels(&info, &mut readback_pixels, 160, (0, 0)));
+                assert_eq!(readback_pixels, bytes);
+            }
+        }
+    }
+
+    #[test]
     fn type1_shading_pixels_and_bbox_survive_strict_save() {
         use pdf::{
             document::{

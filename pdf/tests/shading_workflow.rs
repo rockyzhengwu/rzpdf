@@ -18,6 +18,232 @@ fn parse(source: &str) -> PdfObject {
 }
 
 #[test]
+fn incomplete_lattice_registration_is_atomic_and_repairable() {
+    let doc = PdfDocument::new().unwrap();
+    doc.add_page(0).unwrap();
+    let dict = parse("<< /ShadingType 5 /ColorSpace /DeviceGray /VerticesPerRow 2 /BitsPerCoordinate 8 /BitsPerComponent 8 /Decode [0 40 0 20 0 1] >>").into_dict().unwrap();
+    let id = doc
+        .try_insert_object(PdfObject::PdfStream(PdfStream::new(
+            dict.clone(),
+            vec![0, 0, 0, 255, 0, 255, 0, 255, 0],
+        )))
+        .unwrap();
+    let revision = doc.revision();
+    let before = doc.save_to_bytes().unwrap();
+    assert!(
+        doc.resources()
+            .register_existing(0, ResourceKind::Shading, id)
+            .is_err()
+    );
+    assert_eq!(doc.revision(), revision);
+    assert_eq!(doc.save_to_bytes().unwrap(), before);
+    doc.update_object(
+        id,
+        PdfObject::PdfStream(PdfStream::new(
+            dict,
+            vec![0, 0, 0, 255, 0, 255, 0, 255, 0, 255, 255, 255],
+        )),
+    )
+    .unwrap();
+    let name = doc
+        .resources()
+        .register_existing(0, ResourceKind::Shading, id)
+        .unwrap();
+    doc.replace_page_contents(0, format!("/{name} sh").into_bytes())
+        .unwrap();
+    assert!(
+        doc.get_page(0)
+            .unwrap()
+            .display_list()
+            .unwrap()
+            .diagnostics()
+            .is_empty()
+    );
+}
+
+#[test]
+fn rgb_mesh_three_component_records_survive_save_and_import() {
+    let doc = PdfDocument::new().unwrap();
+    doc.add_page_with_builder(0, PageBuilder::new().size(40.0, 20.0))
+        .unwrap();
+    let dict = parse("<< /ShadingType 4 /ColorSpace /DeviceRGB /BitsPerFlag 8 /BitsPerCoordinate 8 /BitsPerComponent 8 /Decode [0 40 0 20 0 1 0 1 0 1] >>").into_dict().unwrap();
+    let id = doc
+        .try_insert_object(PdfObject::PdfStream(PdfStream::new(
+            dict,
+            vec![
+                0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 255, 0, 0, 0, 255, 0, 0, 255,
+            ],
+        )))
+        .unwrap();
+    let name = doc
+        .resources()
+        .register_existing(0, ResourceKind::Shading, id)
+        .unwrap();
+    doc.replace_page_contents(0, format!("/{name} sh").into_bytes())
+        .unwrap();
+    let verify = |target: &PdfDocument<Cursor<Vec<u8>>>| {
+        let list = target.get_page(0).unwrap().display_list().unwrap();
+        assert!(list.diagnostics().is_empty());
+        let [PageObject::Shading(object)] = list.objects() else {
+            panic!("expected RGB mesh")
+        };
+        for (point, expected) in [
+            ([0.0, 0.0], [255, 0, 0]),
+            ([40.0, 0.0], [0, 255, 0]),
+            ([0.0, 20.0], [0, 0, 255]),
+            ([10.0, 5.0], [128, 64, 64]),
+        ] {
+            let color = object
+                .shading
+                .color_at_point(point[0], point[1])
+                .unwrap()
+                .unwrap();
+            assert_eq!([color.r(), color.g(), color.b()], expected);
+        }
+        assert!(object.shading.color_at_point(30.0, 15.0).unwrap().is_none());
+    };
+    verify(&doc);
+    let imported = PdfDocument::new().unwrap();
+    imported.import_page_from(&doc, 0, 0).unwrap();
+    verify(&imported);
+    for target in [&doc, &imported] {
+        for compression in [
+            StreamCompression::Preserve,
+            StreamCompression::FlateUnencoded,
+        ] {
+            let bytes = target
+                .save_to_bytes_with_options(SaveOptions {
+                    compression,
+                    ..Default::default()
+                })
+                .unwrap();
+            verify(&PdfDocument::from_bytes_with_mode(bytes, ParseMode::Strict).unwrap());
+        }
+    }
+}
+
+#[test]
+fn invalid_mesh_registration_preserves_revision_and_saved_bytes() {
+    let doc = PdfDocument::new().unwrap();
+    doc.add_page(0).unwrap();
+    let source = "<< /ShadingType 4 /ColorSpace /DeviceGray /BitsPerFlag 8 /BitsPerCoordinate 8 /BitsPerComponent 8 /Decode [0 40 0 20 0 1] >>";
+    for data in [vec![0, 0, 0], vec![1, 0, 0, 0], vec![0, 0, 0, 0]] {
+        let id = doc
+            .try_insert_object(PdfObject::PdfStream(PdfStream::new(
+                parse(source).into_dict().unwrap(),
+                data,
+            )))
+            .unwrap();
+        let revision = doc.revision();
+        let before = doc.save_to_bytes().unwrap();
+        assert!(
+            doc.resources()
+                .register_existing(0, ResourceKind::Shading, id)
+                .is_err()
+        );
+        assert_eq!(doc.revision(), revision);
+        assert_eq!(doc.save_to_bytes().unwrap(), before);
+        // Repairing the same retained object permits registration and painting.
+        doc.update_object(
+            id,
+            PdfObject::PdfStream(PdfStream::new(
+                parse(source).into_dict().unwrap(),
+                vec![0, 0, 0, 0, 0, 255, 0, 255, 0, 0, 255, 0],
+            )),
+        )
+        .unwrap();
+        let name = doc
+            .resources()
+            .register_existing(0, ResourceKind::Shading, id)
+            .unwrap();
+        doc.replace_page_contents(0, format!("/{name} sh").into_bytes())
+            .unwrap();
+        assert!(
+            doc.get_page(0)
+                .unwrap()
+                .display_list()
+                .unwrap()
+                .diagnostics()
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn type4_and_type5_mesh_resources_import_and_both_stream_strategies() {
+    for (nonlinear, lattice) in [(false, false), (true, false), (false, true), (true, true)] {
+        let doc = PdfDocument::new().unwrap();
+        doc.add_page_with_builder(0, PageBuilder::new().size(40.0, 20.0))
+            .unwrap();
+        let function = if nonlinear {
+            "/Function << /FunctionType 2 /Domain [0 1] /N 2 >>"
+        } else {
+            ""
+        };
+        let geometry = if lattice {
+            "/ShadingType 5 /VerticesPerRow 2"
+        } else {
+            "/ShadingType 4 /BitsPerFlag 8"
+        };
+        let data = if lattice {
+            vec![0, 0, 0, 255, 0, 255, 0, 255, 0, 255, 255, 255]
+        } else {
+            vec![0, 0, 0, 0, 0, 255, 0, 255, 0, 0, 255, 0, 1, 255, 255, 255]
+        };
+        let id = doc.try_insert_object(PdfObject::PdfStream(PdfStream::new(
+            parse(&format!("<< {geometry} /ColorSpace /DeviceGray /BitsPerCoordinate 8 /BitsPerComponent 8 /Decode [0 40 0 20 0 1] {function} >>")).into_dict().unwrap(),
+            data,
+        ))).unwrap();
+        let name = doc
+            .resources()
+            .register_existing(0, ResourceKind::Shading, id)
+            .unwrap();
+        doc.replace_page_contents(0, format!("/{name} sh").into_bytes())
+            .unwrap();
+        let verify = |target: &PdfDocument<Cursor<Vec<u8>>>| {
+            let list = target.get_page(0).unwrap().display_list().unwrap();
+            assert!(list.diagnostics().is_empty());
+            let [PageObject::Shading(object)] = list.objects() else {
+                panic!("expected mesh shading")
+            };
+            assert!(object.source().is_some());
+            for (point, direct, squared) in [
+                ([10.0, 5.0], 64, 16),
+                ([30.0, 15.0], 191, 143),
+                ([20.0, 10.0], 128, 64),
+            ] {
+                let color = object
+                    .shading
+                    .color_at_point(point[0], point[1])
+                    .unwrap()
+                    .unwrap();
+                let expected = if nonlinear { squared } else { direct };
+                assert_eq!([color.r(), color.g(), color.b()], [expected; 3]);
+            }
+            assert!(object.shading.color_at_point(41.0, 10.0).unwrap().is_none());
+        };
+        verify(&doc);
+        let imported = PdfDocument::new().unwrap();
+        imported.import_page_from(&doc, 0, 0).unwrap();
+        verify(&imported);
+        for target in [&doc, &imported] {
+            for compression in [
+                StreamCompression::Preserve,
+                StreamCompression::FlateUnencoded,
+            ] {
+                let bytes = target
+                    .save_to_bytes_with_options(SaveOptions {
+                        compression,
+                        ..Default::default()
+                    })
+                    .unwrap();
+                verify(&PdfDocument::from_bytes_with_mode(bytes, ParseMode::Strict).unwrap());
+            }
+        }
+    }
+}
+
+#[test]
 fn type1_shading_functions_resources_and_import_survive_strict_save() {
     for sampled in [false, true] {
         let doc = PdfDocument::new().unwrap();

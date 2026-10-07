@@ -116,6 +116,51 @@ fn main() -> PdfResult<()> {
         .resources()
         .register_existing(7, ResourceKind::Shading, id)?;
     doc.replace_page_contents(7, format!("/{name} sh").into_bytes())?;
+    // Free-form mesh: two triangles sharing an edge, with direct components,
+    // nonlinear parameter evaluation, and a mirrored current transformation.
+    for (index, nonlinear, mirrored, lattice) in [
+        (8, false, false, false),
+        (9, true, false, false),
+        (10, true, true, false),
+        (11, false, false, true),
+        (12, true, false, true),
+        (13, true, true, true),
+    ] {
+        doc.add_page_with_builder(index, PageBuilder::new().size(200.0, 120.0))?;
+        let function = if nonlinear {
+            "/Function << /FunctionType 2 /Domain [0 1] /N 2 >>"
+        } else {
+            ""
+        };
+        let geometry = if lattice {
+            "/ShadingType 5 /VerticesPerRow 2"
+        } else {
+            "/ShadingType 4 /BitsPerFlag 8"
+        };
+        let source = format!(
+            "<< {geometry} /ColorSpace /DeviceGray /BitsPerCoordinate 8 /BitsPerComponent 8 /Decode [20 180 20 100 0 1] {function} >>"
+        );
+        let dict = SyntaxParser::new(StreamReader::try_new(std::io::Cursor::new(
+            source.into_bytes(),
+        ))?)
+        .get_object()?
+        .into_dict()
+        .ok_or_else(|| PdfError::ObjectError("expected mesh dictionary".into()))?;
+        let mesh = pdf::objects::pdf_stream::PdfStream::from_decoded_data(
+            dict,
+            if lattice {
+                vec![0, 0, 0, 255, 0, 255, 0, 255, 0, 255, 255, 255]
+            } else {
+                vec![0, 0, 0, 0, 0, 255, 0, 255, 0, 0, 255, 0, 1, 255, 255, 255]
+            },
+        )?;
+        let id = doc.try_insert_object(pdf::objects::PdfObject::PdfStream(mesh))?;
+        let name = doc
+            .resources()
+            .register_existing(index, ResourceKind::Shading, id)?;
+        let prefix = if mirrored { "-1 0 0 1 200 0 cm " } else { "" };
+        doc.replace_page_contents(index, format!("q {prefix}/{name} sh Q").into_bytes())?;
+    }
     doc.save_to_file_with_options(
         path,
         SaveOptions {

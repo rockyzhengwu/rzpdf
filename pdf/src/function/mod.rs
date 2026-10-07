@@ -96,6 +96,14 @@ pub(crate) fn create_function_at_depth<R: Seek + Read>(
 }
 
 impl Function {
+    pub(crate) fn input_domain(&self) -> &[f32] {
+        match self {
+            Self::Type0(function) => function.input_domain(),
+            Self::Type2(function) => function.input_domain(),
+            Self::Type3(function) => function.input_domain(),
+            Self::Type4(function) => function.input_domain(),
+        }
+    }
     pub(crate) fn two_input_domain(&self) -> Option<&[f32]> {
         match self {
             Self::Type0(function) => Some(function.input_domain()),

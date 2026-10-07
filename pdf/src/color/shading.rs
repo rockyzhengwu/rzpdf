@@ -1,3 +1,4 @@
+use super::shading_mesh::TriangleMesh;
 use std::io::{Read, Seek};
 
 use crate::{
@@ -16,9 +17,12 @@ pub enum ShadingGeometry {
     FunctionBased { domain: [f32; 4], matrix: [f32; 6] },
     Axial([f32; 4]),
     Radial([f32; 6]),
+    FreeformMesh,
+    LatticeMesh,
 }
 
-/// Function-based, axial and radial shading, independent of page graphics state.
+/// Function-based, axial, radial and free-form triangle shading, independent
+/// of page graphics state.
 #[derive(Debug, Clone)]
 pub struct Shading {
     geometry: ShadingGeometry,
@@ -30,6 +34,7 @@ pub struct Shading {
     background: Option<ColorValue>,
     anti_alias: bool,
     retained_payload_bytes: usize,
+    mesh: Option<TriangleMesh>,
 }
 
 fn invalid(message: &str) -> PdfError {
@@ -61,6 +66,7 @@ impl Shading {
         let object = ctx.resolve(object)?;
         let dict = object
             .as_dict()
+            .or_else(|| object.as_stream().map(|stream| stream.dict()))
             .ok_or_else(|| invalid("requires a dictionary"))?;
         let required = |key: &str| {
             dict.get(key)
@@ -96,6 +102,10 @@ impl Shading {
                 }
                 ShadingGeometry::Radial(values)
             }
+            4 if object.as_stream().is_some() => ShadingGeometry::FreeformMesh,
+            4 => return Err(invalid("Type4 requires a stream")),
+            5 if object.as_stream().is_some() => ShadingGeometry::LatticeMesh,
+            5 => return Err(invalid("Type5 requires a stream")),
             _ => return Err(PdfError::UnsupportedFeature(format!("ShadingType {kind}"))),
         };
         let color_object = ctx.resolve(required("ColorSpace")?)?;
@@ -110,7 +120,10 @@ impl Shading {
             ));
         }
         let colorspace = ColorSpace::try_new(&color_object, ctx)?;
-        if matches!(colorspace, ColorSpace::Pattern(_) | ColorSpace::Indexed(_)) {
+        if matches!(colorspace, ColorSpace::Pattern(_))
+            || matches!(colorspace, ColorSpace::Indexed(_))
+                && (!matches!(kind, 4 | 5) || dict.get("Function").is_some())
+        {
             return Err(invalid(
                 "axial/radial ColorSpace must not be Pattern or Indexed",
             ));
@@ -157,9 +170,19 @@ impl Shading {
                 .ok_or_else(|| invalid("AntiAlias must be boolean"))?
                 .value(),
         };
-        let function = ctx.resolve(required("Function")?)?;
-        let count = function.as_array().map_or(1, |array| array.len());
-        if function.as_array().is_some() && count != components {
+        let function = if matches!(kind, 4 | 5) && dict.get("Function").is_none() {
+            None
+        } else {
+            Some(ctx.resolve(required("Function")?)?)
+        };
+        let count = function.as_ref().map_or(0, |function| {
+            function.as_array().map_or(1, |array| array.len())
+        });
+        if function
+            .as_ref()
+            .is_some_and(|function| function.as_array().is_some())
+            && count != components
+        {
             return Err(invalid("Function array must match color components"));
         }
         if count > ctx.limits().max_objects
@@ -175,7 +198,7 @@ impl Shading {
             .map_err(|_| PdfError::ResourceLimit("shading function allocation".into()))?;
         let mut remaining = ctx.limits().max_objects;
         let inputs = if kind == 1 { 2 } else { 1 };
-        if let Some(array) = function.as_array() {
+        if let Some(array) = function.as_ref().and_then(|function| function.as_array()) {
             for object in array {
                 let function = create_function_at_depth(object, ctx, 0, &mut remaining)?;
                 if function.dimensions() != (inputs, 1) {
@@ -185,7 +208,7 @@ impl Shading {
                 }
                 functions.push(function);
             }
-        } else {
+        } else if let Some(function) = function {
             let function = create_function_at_depth(&function, ctx, 0, &mut remaining)?;
             if function.dimensions() != (inputs, components) {
                 return Err(invalid("function dimensions must match ColorSpace"));
@@ -253,6 +276,36 @@ impl Shading {
                 .filter(|bytes| *bytes <= ctx.limits().max_decoded_bytes)
                 .ok_or_else(|| PdfError::ResourceLimit("shading retained background".into()))?;
         }
+        let mesh = if matches!(kind, 4 | 5) {
+            if !functions.is_empty() {
+                let decode: [f32; 6] = numbers(required("Decode")?, ctx)?;
+                let low = decode[4].min(decode[5]);
+                let high = decode[4].max(decode[5]);
+                for function in &functions {
+                    let domain = function.input_domain();
+                    if domain.len() != 2 || domain[0] > low || domain[1] < high {
+                        return Err(invalid(
+                            "mesh function Domain must contain Decode parameter interval",
+                        ));
+                    }
+                }
+            }
+            let mesh = TriangleMesh::from_stream_with_retained(
+                object
+                    .as_stream()
+                    .ok_or_else(|| invalid("mesh shading requires a stream"))?,
+                if functions.is_empty() { components } else { 1 },
+                ctx,
+                retained_payload_bytes,
+            )?;
+            retained_payload_bytes = retained_payload_bytes
+                .checked_add(mesh.retained_payload_bytes()?)
+                .filter(|bytes| *bytes <= ctx.limits().max_decoded_bytes)
+                .ok_or_else(|| PdfError::ResourceLimit("shading mesh and functions".into()))?;
+            Some(mesh)
+        } else {
+            None
+        };
         Ok(Self {
             geometry,
             colorspace,
@@ -263,6 +316,7 @@ impl Shading {
             background,
             anti_alias,
             retained_payload_bytes,
+            mesh,
         })
     }
 
@@ -314,6 +368,31 @@ impl Shading {
                 && (fraction <= 1.0 || self.extend[1])
         };
         let fraction = match self.geometry {
+            ShadingGeometry::FreeformMesh | ShadingGeometry::LatticeMesh => {
+                let mesh = self
+                    .mesh
+                    .as_ref()
+                    .ok_or_else(|| invalid("missing mesh geometry"))?;
+                if !mesh.bounds_contains([x, y]) {
+                    return Ok(None);
+                }
+                let mut values = Vec::new();
+                values
+                    .try_reserve_exact(mesh.component_count())
+                    .map_err(|_| PdfError::ResourceLimit("mesh sample components".into()))?;
+                values.resize(mesh.component_count(), 0.0);
+                // Later stream triangles paint over earlier triangles.
+                for index in (0..mesh.triangle_count()).rev() {
+                    if mesh.sample_triangle(index, [x, y], &mut values)? {
+                        return if self.functions.is_empty() {
+                            self.colorspace.rgb(&ColorValue::new(values)).map(Some)
+                        } else {
+                            self.evaluate_color(&values).map(Some)
+                        };
+                    }
+                }
+                return Ok(None);
+            }
             ShadingGeometry::FunctionBased { domain, matrix } => {
                 let [a, b, c, d, e, f] = matrix.map(f64::from);
                 let determinant = a * d - b * c;
@@ -396,8 +475,13 @@ impl Shading {
     /// Evaluate a normalized location within the shading's domain.
     /// Geometry/Extend/BBox and background application belong to the painter.
     pub fn color_at(&self, fraction: f64) -> PdfResult<ColorRgb> {
-        if matches!(self.geometry, ShadingGeometry::FunctionBased { .. }) {
-            return Err(invalid("Type1 requires two-dimensional point sampling"));
+        if matches!(
+            self.geometry,
+            ShadingGeometry::FunctionBased { .. }
+                | ShadingGeometry::FreeformMesh
+                | ShadingGeometry::LatticeMesh
+        ) {
+            return Err(invalid("this shading requires point sampling"));
         }
         if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
             return Err(invalid("fraction must be in [0,1]"));
@@ -442,6 +526,113 @@ mod tests {
         SyntaxParser::new(StreamReader::try_new(Cursor::new(source.as_bytes().to_vec())).unwrap())
             .get_object()
             .unwrap()
+    }
+
+    #[test]
+    fn type5_lattice_stream_samples_complete_rows_and_rejects_bad_widths() {
+        use crate::objects::pdf_stream::PdfStream;
+        let doc = PdfDocument::new().unwrap();
+        let make = |width: &str, data: Vec<u8>, function: &str| {
+            PdfObject::PdfStream(PdfStream::new(
+            parse(&format!("<< /ShadingType 5 /ColorSpace /DeviceGray /VerticesPerRow {width} /BitsPerCoordinate 8 /BitsPerComponent 8 /Decode [0 4 0 4 0 1] {function} >>")).into_dict().unwrap(), data))
+        };
+        let data = vec![0, 0, 0, 255, 0, 255, 0, 255, 0, 255, 255, 255];
+        for function in ["", "/Function << /FunctionType 2 /Domain [0 1] /N 2 >>"] {
+            let shading = Shading::try_new(&make("2", data.clone(), function), doc.ctx()).unwrap();
+            assert!(matches!(shading.geometry(), ShadingGeometry::LatticeMesh));
+            for point in [[1.0, 1.0], [1.0, 3.0]] {
+                assert_eq!(
+                    shading
+                        .color_at_point(point[0], point[1])
+                        .unwrap()
+                        .unwrap()
+                        .r(),
+                    if function.is_empty() { 64 } else { 16 }
+                );
+            }
+            assert!(shading.color_at_point(5.0, 1.0).unwrap().is_none());
+            assert!(shading.color_at(0.25).is_err());
+        }
+        for width in ["0", "1", "2.0", "3", "4", "-2"] {
+            assert!(Shading::try_new(&make(width, data.clone(), ""), doc.ctx()).is_err());
+        }
+        assert!(Shading::try_new(&make("2", data[..9].to_vec(), ""), doc.ctx()).is_err());
+    }
+
+    #[test]
+    fn type4_mesh_component_functions_and_indexed_restrictions() {
+        use crate::objects::pdf_stream::PdfStream;
+        let doc = PdfDocument::new().unwrap();
+        let make = |colorspace: &str, function: &str| {
+            PdfObject::PdfStream(PdfStream::new(parse(&format!(
+                "<< /ShadingType 4 /ColorSpace {colorspace} /BitsPerFlag 8 /BitsPerCoordinate 8 /BitsPerComponent 8 /Decode [0 4 0 4 0 1] {function} >>"
+            )).into_dict().unwrap(), vec![0, 0, 0, 0, 0, 255, 0, 255, 0, 0, 255, 0]))
+        };
+        let functions = "/Function [<< /FunctionType 2 /Domain [0 1] /N 1 >> << /FunctionType 2 /Domain [0 1] /N 2 >> << /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 1 >>]";
+        let shading = Shading::try_new(&make("/DeviceRGB", functions), doc.ctx()).unwrap();
+        let color = shading.color_at_point(1.0, 1.0).unwrap().unwrap();
+        assert_eq!([color.r(), color.g(), color.b()], [64, 16, 191]);
+        let indexed = "[/Indexed /DeviceRGB 1 <000000ffffff>]";
+        let shading = Shading::try_new(&make(indexed, ""), doc.ctx()).unwrap();
+        assert_eq!(shading.color_at_point(0.0, 0.0).unwrap().unwrap().r(), 0);
+        assert_eq!(shading.color_at_point(4.0, 0.0).unwrap().unwrap().r(), 255);
+        assert!(
+            Shading::try_new(
+                &make(
+                    indexed,
+                    "/Function << /FunctionType 2 /Domain [0 1] /N 1 >>"
+                ),
+                doc.ctx()
+            )
+            .is_err()
+        );
+        assert!(Shading::try_new(&make("/Pattern", ""), doc.ctx()).is_err());
+        assert!(
+            Shading::try_new(
+                &make(
+                    "/DeviceRGB",
+                    "/Function [<< /FunctionType 2 /Domain [0 1] /N 1 >>]"
+                ),
+                doc.ctx()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn type4_mesh_samples_components_before_nonlinear_function() {
+        use crate::objects::pdf_stream::PdfStream;
+        let doc = PdfDocument::new().unwrap();
+        let data = vec![0, 0, 0, 0, 0, 255, 0, 255, 0, 0, 255, 0];
+        let make = |function: &str| {
+            PdfObject::PdfStream(PdfStream::new(
+            parse(&format!("<< /ShadingType 4 /ColorSpace /DeviceGray /BitsPerFlag 8 /BitsPerCoordinate 8 /BitsPerComponent 8 /Decode [0 4 0 4 0 1] {function} >>")).into_dict().unwrap(), data.clone()))
+        };
+        let direct = Shading::try_new(&make(""), doc.ctx()).unwrap();
+        assert!(matches!(direct.geometry(), ShadingGeometry::FreeformMesh));
+        assert_eq!(direct.color_at_point(1.0, 1.0).unwrap().unwrap().r(), 64);
+        assert!(direct.color_at_point(4.0, 4.0).unwrap().is_none());
+        assert!(direct.color_at(0.25).is_err());
+        let nonlinear = Shading::try_new(
+            &make("/Function << /FunctionType 2 /Domain [0 1] /N 2 >>"),
+            doc.ctx(),
+        )
+        .unwrap();
+        assert_eq!(nonlinear.color_at_point(1.0, 1.0).unwrap().unwrap().r(), 16);
+        assert!(
+            Shading::try_new(
+                &make("/Function << /FunctionType 2 /Domain [0 0.5] /N 2 >>"),
+                doc.ctx()
+            )
+            .is_err()
+        );
+        assert!(
+            Shading::try_new(
+                &parse("<< /ShadingType 4 /ColorSpace /DeviceGray >>"),
+                doc.ctx()
+            )
+            .is_err()
+        );
     }
 
     #[test]

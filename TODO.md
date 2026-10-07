@@ -93,6 +93,96 @@ P0 的普通回归、错误处理、预算和真实样本登记贯穿上述工�
 
 ### 实施记录
 
+- 2026-10-08 提交检查点：按用户要求整理 Type4/5 网格 Shading、测试与文档，以及尚未注册到引擎的 Type6 几何基础。四角插值独立测试日志 `/tmp/rzpdf-coons-colors.log` 显示8项通过；网格注册集成6项、八组合像素专项1项通过。全量测试 Cargo PID90238 仍在运行，不宣称全量通过；Type6尚未接入，整体计划保持未完成。不包含来源未确认的 `test.png`，不推送远端、不运行 fuzz。
+
+- 2026-10-08 Type6折叠前向几何确认：session28090退出0，7项独立几何通过，日志 `/tmp/rzpdf-coons-folds.log`，包含三参数映到同一点及弯曲内部精确值；不证明逆映射/多根覆盖选择已实现，新四角颜色插值另待专项。
+
+- 2026-10-08 Type6四角分量插值：独立patch模块新增不分配缓冲区的参数空间四角插值，验证单位域、维度和有限值后才写出，供后续颜色转换/函数求值使用。新增RGB精确值[0.25,0.625,0.25]、单参数0.625→平方0.390625顺序，以及域外/错误维度/NaN保留原缓冲回归；session64780运行中，日志 `/tmp/rzpdf-coons-colors.log`，尚未计通过。折叠session28090复核仍活跃，未取终态；全量Cargo PID90238仍活跃，继续日志观察，不重启。patch模块仍未接入workspace/流解码/折叠求逆/显示，不宣称Type6完整支持；未提交、未运行 fuzz。
+
+- 2026-10-08 Type6导数确认与折叠回归：session10504退出0，5项独立几何测试通过，日志 `/tmp/rzpdf-coons-derivatives.log`。新增同一位置对应三个u参数的折叠曲面，检查导数方向反转；新增弯曲内部精确值[1.5,2.625]，明确不以角点双线性几何替代Coons曲面。独立session28090运行中，日志 `/tmp/rzpdf-coons-folds.log`，尚未计通过；只是前向几何验证，未实现逆映射多根选择/绘制。全量原session7123句柄观察返回Unknown process id，但ps确认Cargo PID90238仍活跃，日志继续新增通过目标；继续以PID/日志观察，不重启、不宣称终态。新模块仍未注册，现有接入源码不变；未提交、未运行 fuzz。
+
+- 2026-10-08 Type6共享边与导数：独立几何 session99367退出0、3项通过；随后共享边独立测试退出0、4项通过，日志 `/tmp/rzpdf-coons-shared-edge.log`，确认标志1/2/3继承控制点及角点索引、各曲线方向连续和非法标志/新点拒绝。已核对PDF Reference Table4.32原文。新增Coons解析u/v导数及矩形/弯曲曲面有限差分对照，独立session10504运行中，日志 `/tmp/rzpdf-coons-derivatives.log`，尚未计通过；导数不是逆映射/折叠多根求解。模块仍未注册到工作区，既有接入源码指纹不变，不宣称Type6对外支持；未提交、未运行 fuzz。
+
+- 2026-10-08 Type6纯几何核心：新增尚未注册到color模块的 shading_patch.rs，按PDF12控制点顺序构造Coons参数映射（两组边界线性混合减去角点双线性混合），de Casteljau求四条曲线，提供PDF角点顺序的参数颜色权重与有限/单位域检查。新增矩形、四条弯曲边界方向与非法参数3项独立单元，rustc --test session 99367 运行中，日志 `/tmp/rzpdf-coons-geometry.log`，尚未计通过。该新文件未纳入正在运行的工作区编译，已有接入源码指纹不变，不声称全量覆盖新模块；Type6流解码、折叠/重复映射覆盖、显示与完整预算仍未实现。规范公式依据：https://chromium.googlesource.com/external/skia/+/7983cf450ea4da39f8a9bd2a27d0412fb6a2fad0/experimental/PdfViewer/PdfReference-okular-1.txt 。未提交、未运行 fuzz，P4/整体目标保持未完成。
+
+- 2026-10-08 Flate 本库视觉对照确认：session 90428 退出0，十四页Flate严格读入/Skia渲染完成，第9–14页最新PNG按 PDF 技能目视检查；与同目录Preserve对应六页RGBA逐像素相同（200×120）。保存策略内一致性不消除MuPDF/Skia非线性色阶差异，不泛化为复杂网格验收。README校正Type1/4/5接入、DeviceN的受限Type4求值，以及Type4构造已编译程序的旧描述；保持未完成范围，源码未改，全量7123仍运行。未提交、未运行 fuzz。
+
+- 2026-10-08 Flate 网格独立显示：session 35498 退出0，十四页 Flate 样本生成成功。MuPDF渲染第9–14页无诊断，按 PDF 技能检查六个最新PNG，与Preserve对应页面六页RGB逐像素完全相同（均200×120）。证据 `tmp/pdfs/shading-lattice.TcXO6V/flate.pdf` 与 `flate-*.png`，固定样本不代替复杂类型矩阵。Skia Flate session 90428 已启动，日志 `/tmp/rzpdf-shading-lattice-flate-skia.log`，尚未终态；工作区7123已开始执行测试，跟踪源码指纹仍一致。未提交、未运行 fuzz。
+
+- 2026-10-08 格点行宽专项与Flate独立样本：session 73623 退出0，13个网格单元通过（549 filtered），包含解码前最低格点规模额度拒绝，日志 `/tmp/rzpdf-shading-lattice-row-budget.log`。使用现有示例启动十四页 Flate 样本生成 session 35498，输出 `tmp/pdfs/shading-lattice.TcXO6V/flate.pdf`、日志 `/tmp/rzpdf-shading-lattice-flate.log`；按 PDF 技能准备生成后独立渲染与Preserve网格页面对照，尚未生成/渲染终态，不计通过。当前源码汇总仍 `97fa1fe7f2048249d7b5db89f1fb55360984da04042f06679c4d74396a9e725f`，全量 session 7123 继续活跃，源码未改；未提交、未运行 fuzz。
+
+- 2026-10-08 网格验收文档归并：session 65853 退出0，6项Shading集成通过，残缺格点注册不改变修订号/保存字节及补齐后恢复通过。docs/testing.md 新增 Type4/5 检查点，归并模型/流程/八组合像素、独立样本差异和未完成边界；架构补 Type5 接入说明，未把 P4 勾选。全量 session 7123 仍运行，暂保持Rust/清单/锁文件不变；当前跟踪源码 SHA-256 汇总 `97fa1fe7f2048249d7b5db89f1fb55360984da04042f06679c4d74396a9e725f`（git ls-files→逐文件shasum→汇总，排除文档和test.png），门禁未终态。行宽专项73623继续跟踪；未提交、未运行 fuzz。
+
+- 2026-10-08 Type5 独立对照与旧组合终态：session 93718 退出0，十四页 Skia 渲染成功，第12–14页最新PNG按 PDF 技能逐页目视；MuPDF/Skia 均200×120，最大通道差2/4/4、平均最大差0.6965/0.959833/0.852875、差>3像素0/400/388，内部三个选点与外部白色的Skia值均符合解析公式，不宣称非线性全页完全一致或其差异原因已证实。证据 `tmp/pdfs/shading-lattice.TcXO6V/`，仅固定2×2灰度格点矩阵。较早 PDF组合 session 29860 退出0：557单元、25颜色、17版本、14资源、5Shading流程通过；源码期间有变化，且早于当前Type5，不据此宣称当前完整绿色。新工作区 `cargo test --workspace --locked --quiet` 已启动，日志 `/tmp/rzpdf-workspace-mesh-current.log`，尚未确认通过；注册恢复65853和行宽73623仍跟踪。未提交、未运行 fuzz，P4与整体TODO未完成。
+
+- 2026-10-08 Type5 像素/容量确认与行宽前置额度：session 2500 退出0，网格像素专项1项通过（36 filtered，八组合+两策略严格重开全页一致），日志 `/tmp/rzpdf-shading-lattice-pixels.log`；session 24851 退出0，12项网格单元通过（549 filtered），日志 `/tmp/rzpdf-shading-lattice-capacity.log`。新增流解码前最低格点规模检查：两行2*w顶点+2*(w-1)三角形 checked 总量超过max_objects立即 ResourceLimit，新增缺其余字段仍优先额度拒绝专项；session 73623 运行中，日志 `/tmp/rzpdf-shading-lattice-row-budget.log`，尚未计通过。独立Skia93718/注册恢复65853仍活跃，未完成对照。完整性能/操作级预算与P4仍未完成，未提交、未运行 fuzz。
+
+- 2026-10-08 Type5 独立显示初证与注册恢复：样本生成 session 68287 退出0；MuPDF info确认 PDF1.7、14页，第12–14页200×120 Lattice，draw成功无诊断，三个最新MuPDF PNG按 PDF 技能逐页目视，梯度/镜像正常。Skia同一文件 session 93718 运行中，日志 `/tmp/rzpdf-shading-lattice-independent-skia.log`，对照未完成；临时证据 `tmp/pdfs/shading-lattice.TcXO6V/`。新增不完整格点行注册失败保持修订号/保存字节、补齐后注册恢复回归，新日志 `/tmp/rzpdf-shading-lattice-registration.log`，尚未记通过。像素2500/容量24851继续跟踪，完整Type5矩阵/独立对照/预算与P4未完成；未提交、未运行 fuzz。
+
+- 2026-10-08 Type5 流程确认：session 89611 退出0，5个 Shading 集成通过（0失败），包含Type4/5×直接/非线性注册、导入与两策略严格保存重读，日志 `/tmp/rzpdf-shading-lattice-workflow.log`；该门禁早于随后Type5容量前置修正，不替代新额度专项和独立显示验收。
+
+- 2026-10-08 Type5 解码输入容量前置检查：复查发现格点路径虽在拓扑分配前扣除完整输入容量，但顶点分配阶段仍只计有效长度；新增 owned-lattice 入口先扣除 capacity-len，再顶点解码及输入/拓扑共存检查。新增128容量解码输入、完整网格精确额度、少1字节 ResourceLimit 和重试回归；session 24851 运行中，日志 `/tmp/rzpdf-shading-lattice-capacity.log`，尚未计通过。已读 PDF 技能，样本生成68287、流程89611、像素2500均复核仍活跃，暂未生成可检查PDF，不重启会话。局部额度仍不能替代完整操作级预算，Type5独立验收/整个P4仍未完成；未提交、未运行 fuzz。
+
+- 2026-10-08 Type5 模型专项与独立样本准备：session 34876 退出0，19个 Shading/网格单元通过（541 filtered），日志 `/tmp/rzpdf-shading-lattice-model-tests.log`，覆盖Type5流/模型与此前网格数值。create_shading新增第12–14页格点直接灰度、非线性/镜像样本，session 68287 生成中，日志 `/tmp/rzpdf-shading-lattice-fixture.log`，临时目录 `tmp/pdfs/shading-lattice.TcXO6V/`。已重新读 PDF 技能，生成后需独立渲染/目视及本库对照，目前不能计样本验收；Type5流程89611、像素2500、较早PDF组合29860均继续跟踪。未提交、未运行 fuzz，完整P4及整体TODO仍未完成。
+
+- 2026-10-08 Type5 流程与像素矩阵：Type5无标志顶点 session 58745 退出0，11项网格单元通过，日志 `/tmp/rzpdf-shading-lattice-vertices.log`；格点拓扑 session 94214 亦退出0，两者均早于后续Type5流/模型接入，不混报全部支持。流程扩展 Type4/5×直接/非线性四组合，session 89611 运行中，日志 `/tmp/rzpdf-shading-lattice-workflow.log`；像素扩展 Type4/5×直接/非线性×原始/镜像八组合，保留BBox和两策略严格重开全页一致断言，新日志 `/tmp/rzpdf-shading-lattice-pixels.log`，尚未确认通过。模型 session 34876 与较早 PDF组合29860继续跟踪；独立Type5样本/性能/完整预算仍未完成，未提交、未运行 fuzz。
+
+- 2026-10-08 Type5 模型编译确认：session 90787 退出 0，cargo check -p pdf --locked --quiet 成功；专项与实际显示证据仍待验证，不据此标记 Type5 完成。
+
+- 2026-10-08 Type5 流/模型接入与渲染门禁：from_stream 允许 Type4/5，Type5 校验精确整数 VerticesPerRow≥2、无 BitsPerFlag，解码后扣除活跃输入容量再构造完整格点行拓扑；Shading 新增 LatticeMesh，复用可选 Function、Decode 域与 Indexed 限制、保留载荷检查和逐点采样。新增完整2×2直接/非线性数值、外部点、实数/非法/不完整行宽回归。编译 session 90787，日志 `/tmp/rzpdf-shading-lattice-model-check.log`；专项 session 34876，日志 `/tmp/rzpdf-shading-lattice-model-tests.log`，均尚未确认通过。较早 render 全量 session 97909 已退出 0，37项通过、0失败/忽略（52.81秒），包含Type4镜像/保存像素；门禁早于Type5且测试期间网格基础曾变化，不宣称当前全部代码全量通过。Type5流程/像素/独立阅读器、性能和完整P4仍未完成。未提交、未运行 fuzz。
+
+- 2026-10-08 Type5 无标志记录与网格持有：提取共同顶点位读取，新增无标志位 lattice 解码，保持 Type4 入口拒绝零位宽标志；新增逐记录补齐/截断/精确额度回归，session 58745 运行中，日志 `/tmp/rzpdf-shading-lattice-vertices.log`，尚未确认通过。随后新增 try_new_lattice，复用顶点有限值/维度、边界和共享索引持有，拓扑专项补网格采样断言；该后续修改尚未计入已启动门禁。Type5 PDF 流构造/Shading/显示仍未接入，不能计对外支持；原会话 94214/29860/97909 继续跟踪，不重启。未提交、未运行 fuzz。
+
+- 2026-10-08 Type5 格点拓扑基础：依据 Adobe PDF Reference 的逐行顶点顺序与两组三角形连接规则，新增 assemble_lattice，要求至少两条完整且每行至少2顶点；三角形数量 checked 运算，复用提取的 Type4 顶点/分量/三角形合计存储检查。新增2×3精确连接、非法行宽/不完整行及对象额度边界回归；session 94214 运行中，日志 `/tmp/rzpdf-shading-lattice-topology.log`，尚未计通过。规范镜像来源：https://chromium.googlesource.com/external/skia/+/7983cf450ea4da39f8a9bd2a27d0412fb6a2fad0/experimental/PdfViewer/PdfReference-okular-1.txt 。Type5 无标志位解码、流构造/显示及像素尚未接入，仍不支持，不勾选 P4。原 PDF组合 session 29860/render全量 session 97909 继续跟踪；提取公共检查已改变前者源快照范围，不能混报当前全部代码全量通过。未提交、未运行 fuzz。
+
+- 2026-10-08 网格输入容量专项确认：session 62698 退出 0，9 个 shading_mesh 单元通过（548 filtered），日志 `/tmp/rzpdf-shading-mesh-capacity.log`；输入空余容量及既有载荷共存边界通过。此门禁启动早于整体边界缓存改动，不替代当前 PDF 组合门禁。
+
+- 2026-10-08 Type4 网格保存后全页像素：在直接/非线性×原始/镜像四组合中增加 Preserve/Flate 保存、严格重开、全页 RGBA 完全一致断言，覆盖既有明确选点与 BBox 外白色。启动 render 全量 session 97909，日志 `/tmp/rzpdf-shading-mesh-render-full.log`，尚未确认通过。PDF组合 session 29860 与容量 session 62698 已复核仍活跃，继续等待同一会话，不重启；新 render 测试修改不属于 PDF组合的验证目标。项目整体 TODO、Type5–7/Pattern/复杂网格性能/完整预算仍未完成；未提交、未运行 fuzz。
+
+- 2026-10-08 RGB流程与网格外快速排除：session 34625 退出 0，5 个 Shading 流程测试通过，包含 RGB 三分量顶点/内部值/域外及导入、两保存策略严格重读，日志 `/tmp/rzpdf-shading-mesh-rgb-workflow.log`。TriangleMesh 构造缓存整体有限边界，Shading 在分配分量缓冲/扫描三角形前排除边界外点；边界包含只作保守筛选，不替代三角形判断，新增边界端点/外部/NaN 回归，不改变内部插值。启动当前 PDF lib+shading_workflow+color_workflow+feature_versions+resources 组合门禁 session 29860，日志 `/tmp/rzpdf-shading-mesh-current-gate.log`，尚未确认通过；容量专项 session 62698 仍跟踪，不重启活跃会话。内部逐像素分配/线性扫描、抗锯齿和完整预算仍待完善。未提交、未运行 fuzz。
+
+- 2026-10-08 网格既有载荷额度与输入容量：session 24965 退出 0，15 个 Shading/网格单元通过，日志 `/tmp/rzpdf-shading-mesh-retained-budget.log`。流入口新增 owned-input 解码边界，将解码 Vec 的 capacity-len 空余容量也计入共存额度，不仅按有效字节长度计算；新增128容量输入精确边界、少1字节拒绝，并区分借用切片的已知长度计费回归。session 62698 运行中，日志 `/tmp/rzpdf-shading-mesh-capacity.log`，尚未确认通过；RGB流程 session 34625 仍待终态。解码器构造期间临时峰值、对象解析及全操作共享租约仍未贯通，不标记 AR-03 完成。未提交、未运行 fuzz。
+
+- 2026-10-08 Type4 RGB 直接分量流程补充：新增三分量记录 RGB 三顶点、内部 [128,64,64] 混合色、三角形外不绘制，以及资源注册/导入/两保存策略严格重读回归；session 34625 运行中，日志 `/tmp/rzpdf-shading-mesh-rgb-workflow.log`，尚未记通过。同步 README 的 Type4 calculator 过时描述和架构的 Type1/4 接入检查点，仍明确 Type5–7/Pattern/性能/操作级预算未完成。新额度 session 24965 继续跟踪；未提交、未运行 fuzz。
+
+- 2026-10-08 非法网格注册恢复确认：session 33657 退出 0，4 个 Shading 流程测试通过，日志 `/tmp/rzpdf-shading-mesh-registration.log`；新增错误网格注册保持修订号/保存字节及修复后重试已通过。该门禁早于后续保留载荷额度修改，不替代新预算专项。
+
+- 2026-10-08 Type4 既有载荷共存额度：修正 Shading 网格构造的分配前边界，from_stream_with_retained 从网格局部额度预先扣除已保留 Function/Background，随后 Decode/输入/顶点/拓扑按剩余额度验证，避免仅最终合计检查。Decode 容量乘法也改 checked_mul。新增既有100字节载荷+完整网格精确边界、少1字节 ResourceLimit 及去掉既有载荷后重试回归；session 24965 运行中，日志 `/tmp/rzpdf-shading-mesh-retained-budget.log`，尚未计通过。流解码器/对象解析临时分配与原生开销仍未完整聚合，不标记 AR-03 完成；注册失败专项 session 33657 仍活跃。未提交、未运行 fuzz。
+
+- 2026-10-08 Type4 独立对照与注册失败：session 46013 退出 0，十一页 Skia 渲染成功，第9–11页最新PNG均按 PDF 技能目视检查。三页 MuPDF/Skia 均200×120，最大通道差分别2/4/4，平均最大差0.6965/0.959833/0.852875，差>3像素0/400/388；三个内部选点及外部白色的 Skia 与解析公式一致，不把非线性差异归结为已证实的单一原因或宣称完全一致。临时证据 `tmp/pdfs/shading-mesh.LNagm8/`，仅固定灰度双三角形/函数/镜像组合。新增截断记录、非法起始共享边和不完整三角形注册失败的修订号/保存字节不变及修复后重试回归；session 33657 运行中，日志 `/tmp/rzpdf-shading-mesh-registration.log`，尚未计通过。网格性能/预算、颜色/几何全矩阵与完整P4仍未完成，未提交、未运行 fuzz。
+
+- 2026-10-08 Type4 独立显示初证：session 78832 镜像像素专项和 session 84370 样本生成均退出 0。MuPDF info 确认 preserve.pdf 为 PDF1.7、11页，第9–11页200×120 Triangle mesh；draw 成功无诊断，三个最新 MuPDF PNG 均目视检查，直接/非线性/镜像梯度方向正常。PDF 技能指导渲染后目视检查，不仅看解析结果；系统 Poppler 依赖问题仍存在，使用已有 MuPDF。Skia 同一PDF渲染 session 46013 运行中，日志 `/tmp/rzpdf-shading-mesh-independent-skia.log`，尚无对照证据；临时目录 `tmp/pdfs/shading-mesh.LNagm8/` 保留待对照，不交付为最终验收。未提交、未运行 fuzz，完整网格功能矩阵/P4仍未完成。
+
+- 2026-10-08 Type4 独立样本准备：组件/颜色限制 session 10804 退出 0，14 项 Shading/网格单元通过（541 filtered），覆盖新函数域及组件/Indexed 限制。create_shading 示例新增第9–11页共享边网格直接灰度、非线性及镜像，session 84370 生成中，日志 `/tmp/rzpdf-shading-mesh-fixture.log`，临时目录 `tmp/pdfs/shading-mesh.LNagm8/`。按 PDF 技能检查 Poppler，再次确认缺 libtiff.5.dylib 无法启动，计划使用现有 MuPDF，不修改系统库。尚未生成/渲染/目视确认，不能计独立验收；镜像像素 session 78832 仍待终态。未提交、未运行 fuzz。
+
+- 2026-10-08 Type4 像素专项与镜像：session 51921 退出 0，1 个网格像素测试通过（36 filtered），确认共享边两三角形直接/非线性颜色的像素中心数值与 BBox 外白色，日志 `/tmp/rzpdf-shading-mesh-pixels.log`。随后扩展水平镜像 CTM，按逆变换参数核对四个组合；旧专项结束后启动 session 78832，日志 `/tmp/rzpdf-shading-mesh-mirrored-pixels.log`，新版尚未通过。较早工作区 session 75157 已退出 0，日志 `/tmp/rzpdf-workspace-shading.log`；执行期间源码有变化且起始指纹早于当前 Type1/网格/示例，不把此门禁称为当前工作区完整通过。组件模型 session 10804 继续活跃。未提交、未运行 fuzz；独立网格样本及完整 P4 尚未完成。
+
+- 2026-10-08 Shading 保存/导入专项确认：session 45931 退出 0，日志 `/tmp/rzpdf-shading-mesh-workflow.log` 确认 3 个集成测试通过，包含新增 Type4 两三角形直接/非线性组合、注册/来源/导入及 Preserve/Flate 严格重读。像素 session 51921 尚未终态，不据此宣称渲染/独立工具验收。
+
+- 2026-10-08 Type4 模型数值与颜色组合：session 84956 已退出 0，13 项 Shading/网格单元通过，日志 `/tmp/rzpdf-shading-mesh-model-tests.log`；该门禁启动早于随后函数域修改，不据此宣称新域检查全量通过。新增 RGB 三个组件函数精确颜色 [64,16,191]、无 Function 的 Indexed 顶点黑白值，以及 Indexed+Function、Pattern、错误函数数组拒绝专项；session 10804 运行中，日志 `/tmp/rzpdf-shading-mesh-component-tests.log`。保存/导入 session 45931、像素 session 51921 继续确认活跃，尚无终态；网格性能/预算、独立工具、完整 P4 仍未完成。未提交、未运行 fuzz。
+
+- 2026-10-08 Type4 流程/像素回归接入：新增共享边双三角形、直接灰度与非线性 Function 两组合的资源注册、来源事件、跨文档导入、两种流保存策略严格重读回归（session 45931，日志 `/tmp/rzpdf-shading-mesh-workflow.log`）；新增 Skia 明确像素中心值及 BBox 外空白回归（日志 `/tmp/rzpdf-shading-mesh-pixels.log`），门禁尚未确认通过。函数域校验 cargo check session 77367 已退出 0；新模型回归 session 84956 仍待终态，独立阅读器和完整网格验证未完成，不勾选 P4-03。未提交、未运行 fuzz。
+
+- 2026-10-07 Type4 点采样接入：流字段 session 13234 退出 0，7 项通过。Shading FreeformMesh 点采样按三角形插值编码分量/参数，直接颜色经 ColorSpace 转换，有函数先插值参数再 evaluate_color，域外不绘制；增加直接灰度64与非线性结果16、域外和非流拒绝模型回归，writer 既有不支持类型 fixture 改为仍不支持的 Type6。点采样 cargo check session 54163 退出 0；模型回归 session 84956 运行中，日志 `/tmp/rzpdf-shading-mesh-model-tests.log`。随后新增全类型 Function input_domain getter 与 Decode 参数区间包含校验/过窄域拒绝回归；新编译日志 `/tmp/rzpdf-shading-mesh-domain-check.log`，尚未确认新门禁。Skia 复用既有逐点路径，但尚无网格实际像素/保存/独立阅读器证据，不计 P4-03 完成。逐像素缓冲分配与全三角形扫描仍需性能/工作量预算完善；未提交、未运行 fuzz。
+
+- 2026-10-07 Type4 Shading 模型初步接入：Shading 构造允许 stream 字典，新增 FreeformMesh 几何标记与持有网格；Function 可选，直接颜色采用 ColorSpace 分量数，有函数采用单参数，Indexed 仅无函数网格允许，保留网格与函数载荷合计检查。cargo check session 94893 退出 0，日志 `/tmp/rzpdf-shading-mesh-model-check.log`。网格点采样暂明确返回 UnsupportedFeature，不静默略过；Function Decode 域覆盖校验、构造专项、旧不支持 fixture 迁移及显示/像素仍待接入，本次不计完整 Type4 支持。字段回归 session 13234 仍待终态；未提交、未运行 fuzz。
+
+- 2026-10-07 Type4 流字段回归：新增有效流采样、间接引用位宽、错误 ShadingType、实数/负数/缺失位宽、非法位宽、Decode 长度/非数值、截断及编码分量数不匹配测试。首轮 session 35517 退出 101，测试初始化未解包 PdfDocument::new 的 Result；已修正初始化并使用现有 get_object 解析接口，重跑 session 13234，日志 `/tmp/rzpdf-shading-mesh-stream-tests-fixed.log`，尚未确认通过。生产私有流入口此前 cargo check 成功；新测试不计通过，Type4 注册/显示/像素仍未接入。未提交、未运行 fuzz。
+
+- 2026-10-07 Type4 私有流入口编译确认：cargo check -p pdf --locked --quiet，session 96950 退出 0。仅证明编译，不替代尚未增加的字段回归、Shading 注册/显示和像素验收。
+
+- 2026-10-07 网格专项及 Type4 流入口：session 47928/98786 均退出 0，分别确认 5 项所有权阶段和 6 项解码阶段网格单元通过。新增私有 from_stream，解析精确整数 ShadingType/位宽、动态有限 Decode，并经现有 decode_data 接入网格解码；编码分量数仍由后续 ColorSpace/Function 构造方提供。Decode 存储也从局部额度扣除；流解码器/对象解析临时分配不在此局部检查完整覆盖范围。cargo check session 96950 已启动，日志 `/tmp/rzpdf-shading-mesh-stream-check.log`；新流入口尚无字段单元回归，不计 Type4 对外支持。未提交、未运行 fuzz。
+
+- 2026-10-07 网格插值专项确认：session 15186 退出 0，日志 `/tmp/rzpdf-shading-mesh-interpolation.log` 确认 4 项通过、0 失败；覆盖此前顶点解码、拓扑、权重和分量插值，不包含后续新增的网格所有权及解码入口测试，后两项门禁仍待终态。
+
+- 2026-10-07 Type4 解码/网格持有入口：新增 MeshEncoding 和 TriangleMesh::decode，串联字节解码、共享顶点与拓扑；分配拓扑时从额度扣除仍活跃的输入数据，并提供按容量计算的 retained_payload_bytes 供后续显示事件记账。新增完整字节记录→采样、输入与拓扑共存额度精确边界/少1字节拒绝及失败后重试测试；session 98786 运行中，日志 `/tmp/rzpdf-shading-mesh-decoded.log`，尚未确认通过。该局部检查不等同 AR-03 操作级聚合预算；Type4 Shading 构造与渲染尚未接入，未提交、未运行 fuzz。
+
+- 2026-10-07 Type4 网格所有权/采样准备：新增私有 TriangleMesh，统一持有共享顶点与经验证的三角形索引，检查顶点分量维度和有限值，提供不分配缓冲区的单三角形采样及安全索引检查。新增共享边一致性、第二三角形内部精确值、非法维度/坐标回归；session 47928 运行中，日志 `/tmp/rzpdf-shading-mesh-owned.log`，尚未计通过。重心权重 session 41800 已退出 0、3 项通过；此证据早于新所有权测试。Type4 PDF 流构造及 sh/渲染接入仍未完成；未提交、未运行 fuzz。
+
+- 2026-10-07 Type4 颜色分量插值准备：增加接受调用方缓冲区的 triangle 插值，不分配逐像素临时 Vec；先插值编码颜色分量或函数参数，不先转换顶点 RGB/求函数值。新增双分量精确值、非线性函数顺序、域外不改写及维度错误回归。session 15186 正在运行，日志 `/tmp/rzpdf-shading-mesh-interpolation.log`；上一重心权重 session 41800 也确认仍活跃，均尚未记为通过。Type4 仍未接入构造和渲染，本轮未提交、未运行 fuzz。
+
+- 2026-10-07 Type4 网格插值准备：私有 shading_mesh 增加按顶点顺序的 f64 重心权重，支持正反绕序、边界，并拒绝域外、非有限或零面积三角形；权重用于颜色分量/函数参数插值之前，不对顶点 RGB 做插值。新增边界、退化、极大/极小坐标专项；session 41800 正在运行，日志 `/tmp/rzpdf-shading-mesh-weights.log`，尚无通过结论。Type4 构造/插值接入/渲染仍未完成，不勾选网格支持；未运行 fuzz，本轮未自动提交。
+
 - 2026-10-07 用户要求本地提交检查点：提交 Shading 渲染、Type1 二维函数着色、资源校验、版本检查、流程/示例与私有 Type4 网格基础。网格顶点专项日志确认 1 项通过，新增共享边三角形组装专项日志 `/tmp/rzpdf-shading-mesh-topology.log` 确认 2 项通过；Type4 尚未接入 Shading 构造、插值或渲染，仍不支持。此前 render 全量 36 项通过；工作区全量仍运行且期间源码有变化，不代表本次提交全量通过。不提交来源未确认的 `test.png`，不推送远端、不运行 fuzz；项目总体 TODO 仍未完成。
 
 - 2026-10-07 Type1 render 全量确认：session 31572 退出 0，36 渲染测试通过、0 失败/忽略（47.07 秒），日志 `/tmp/rzpdf-shading-type1-render-full.log`。该门禁早于新增网格模块，不代表 Type4 网格或全部当前工作区通过；Type1 固定独立页面证据及明确未完成边界保留。未运行 fuzz 或自动提交。
@@ -1685,6 +1775,9 @@ P0 的普通回归、错误处理、预算和真实样本登记贯穿上述工�
 - [ ] P4-01 完成内联图像边界识别与解码，避免将图像数据中的 EI 误判为结束。
 - [ ] P4-02 完成 Type3、字体编码回退、复杂 CJK/竖排和更多 TrueType cmap 格式。
 - [ ] P4-03 完成 Pattern、Shading、Lab/ICC 等颜色和 PDF 函数实现。
+  - [ ] Type6 Coons 曲面：解析12个边界控制点与4角颜色、共享边标志及输入/保留预算；实现参数曲面与参数颜色插值后求函数，不以控制点多边形替代曲面。先验收四条边界和角点、直边退化矩形、非线性函数与共享边方向，再接入绘制。
+  - [ ] Type6 折叠与重叠：曲面可折叠，投影绘制区域不一定等于补丁边界；同像素多个参数映射选择最大v，再最大u，后出现补丁覆盖前补丁。验证曲面内部折叠、重复映射与补丁叠加，采用有误差/工作量上限的策略，不以固定粗网格或单根反解冒充完整实现。
+  - [ ] Type6完整交付：资源scope/矩阵/裁剪/透明度、显示来源、注册失败恢复、导入、两种保存策略严格重开及独立阅读器对照；保留Type4/5回归，之后实现Type7张量积补丁和Pattern，不把Type6单项当作整个P4完成。规范：[Adobe PDF Reference 1.5](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/pdfreference1.5_v6.pdf)、[1.6控制点/共享边说明](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/pdfreference1.6.pdf)。
   - [ ] Shading Type2/3 交付验收：已有参数/点采样、资源与显示事件、Skia 实际函数求值像素以及保存版本检查；补 Form 局部资源/来源、旋转与非均匀 DPI、Extend 与 Background 页面样本、独立阅读器对比和性能/临时分配预算，不能以现有专项代替完整验收。
   - [ ] Shading Type1 与 Type4–7：分别实现函数域映射和网格/补片解析、求值、资源/显示事件与保存读回，建立各类型独立像素样本。
   - [ ] Pattern：实现平铺与 Shading Pattern 的坐标/资源作用域、着色/非着色语义和背景绘制，与直接 sh 的 Background 语义区分。

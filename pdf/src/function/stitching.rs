@@ -171,6 +171,9 @@ mod tests {
 }
 
 impl Stitching {
+    pub(crate) fn input_domain(&self) -> &[f32] {
+        &self.domain
+    }
     pub(super) fn retained_own_bytes(&self) -> PdfResult<usize> {
         super::retained_total(&[
             super::retained_vector_bytes(&self.domain)?,

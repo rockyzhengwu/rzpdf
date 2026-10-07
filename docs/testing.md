@@ -1,6 +1,24 @@
 # 解析回归与异常输入验证
 
+## 三角网格 Shading 验证检查点（2026-10-08）
+
+Flate 本库对照补充：session 90428 退出0，十四页严格读取/渲染成功；第9–14页最新 Skia PNG 均已目视检查，与同文件 Preserve 的对应六页 RGBA 逐像素相同（200×120）。连同 MuPDF 的保存策略内一致性证据，仅证明此固定网格样本的压缩保存显示不变，不消除两后端原有色阶差异。
+
+Type4 自由网格与 Type5 格点网格已接入流解析、Shading 模型、资源注册、显示列表和 Skia 点采样。Type4 处理新三角形/共享边标志；Type5 按完整行生成索引。两者先插值颜色分量或单个函数参数，再转换颜色或求值函数；Function Domain 必须包含 Decode 参数区间，Indexed 只允许无 Function 的网格。
+
+已通过的定向证据：
+
+- Shading 流程6项（`/tmp/rzpdf-shading-lattice-registration.log`）：含 Type4/5 直接/非线性组合、RGB直接分量、导入与 Preserve/Flate 严格读回；非法网格/残缺格点注册不改变修订号和保存字节，修复后可以注册。
+- 像素专项1项、八种参数组合（`/tmp/rzpdf-shading-lattice-pixels.log`）：Type4/5 × 直接/非线性 × 原始/镜像，检查像素中心、BBox 外白色、两保存策略严格重开全页 RGBA 相同。不按参数组合重复计算测试数量。
+- Type5 模型专项19项（`/tmp/rzpdf-shading-lattice-model-tests.log`）及输入容量专项12项（`/tmp/rzpdf-shading-lattice-capacity.log`）通过，范围包括此前网格单元；不是19项全部只针对Type5。
+
+独立样本：`create_shading` 第9–11页为 Type4，第12–14页为 Type5；各自使用2×2灰度顶点、直接/平方函数/镜像。MuPDF info/draw 与本库严格读取渲染成功，新增各页两后端 PNG 均目视检查。两类型三页的最大通道差均为2/4/4，平均最大差0.6965/0.959833/0.852875，差>3像素为0/400/388；内部选点本库值与解析公式一致，但非线性整页不能称为完全一致。证据分别在 `tmp/pdfs/shading-mesh.LNagm8/` 与 `tmp/pdfs/shading-lattice.TcXO6V/`，Poppler 缺 libtiff.5.dylib，使用现有 MuPDF，未修改系统依赖。
+
+限制：这些固定样本不能证明任意复杂网格兼容性。边缘抗锯齿、内部逐像素分配/线性三角形扫描、工作量预算、颜色空间保留数据/解码器临时峰值/原生开销的完整共享预算仍未完成；Type6/7 和 Pattern 尚不支持。当前工作区全量运行中，结论见 TODO，不将早于源码变化的门禁宣称为当前完整绿色。
+
 ## Shading 参数模型回归（2026-10-07）
+
+网格 Flate 补充（2026-10-08）：十四页压缩样本生成成功，MuPDF 渲染第9–14页无诊断，六张最新 PNG 已目视检查；六个网格页面与 Preserve 对应页面逐像素完全相同。证据在 `tmp/pdfs/shading-lattice.TcXO6V/flate.pdf` 和 `flate-9.png` 至 `flate-14.png`。本库 Flate 独立渲染仍在运行，尚不据此宣称其终态。
 
 Type1 固定独立样本：create_shading 第八页使用 Type4 双输入 RGB 与 Matrix [160 0 0 80 20 20]。MuPDF info/draw 和 Skia 严格读取/渲染成功，最新两张图均目视检查；200×120、最大通道差2、平均最大差0.6、差>3为0。Skia 的 (60,60)/(100,40)/(140,80) RGB 分别 (65,126,95)/(128,190,159)/(192,62,127)，与像素中心反变换后的解析函数一致；MuPDF 选点存在1色阶采样差。临时证据 `tmp/pdfs/shading-type1.l7PEIo/`，不能泛化为整个 Type1/Pattern 验收。
 
