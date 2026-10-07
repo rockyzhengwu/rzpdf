@@ -4,6 +4,8 @@
 use crate::error::{PdfError, PdfResult};
 use std::{cell::Cell, rc::Rc};
 
+pub(crate) mod table_allocator;
+
 #[derive(Debug)]
 struct State {
     maximum: usize,
@@ -19,6 +21,10 @@ pub struct OperationBudget {
 }
 
 impl OperationBudget {
+    pub(crate) fn shares_pool(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.state, &other.state)
+    }
+
     pub fn new(maximum: usize) -> Self {
         Self {
             state: Rc::new(State {
@@ -455,6 +461,48 @@ mod tests {
         assert_eq!(other.live_bytes(), 4);
         drop(second);
         assert_eq!(budget.live_bytes(), 0);
+    }
+
+    #[test]
+    fn budgeted_input_failure_preserves_neighbor_and_releases_temporary_bytes() {
+        use std::io::{self, Read};
+        struct FailingReader { calls: usize, panic_on_failure: bool }
+        impl Read for FailingReader {
+            fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+                self.calls += 1;
+                if self.calls == 1 {
+                    out[0] = b'x';
+                    return Ok(1);
+                }
+                if self.panic_on_failure { panic!("injected input unwind"); }
+                Err(io::Error::other("injected partial input failure"))
+            }
+        }
+        let pool = OperationBudget::new(8);
+        let neighbor = BudgetedBytes::copy_from_slice(&pool, b"keep").unwrap();
+        let retained = pool.live_bytes();
+        let mut rejected = FailingReader { calls: 0, panic_on_failure: false };
+        assert!(BudgetedBytes::read_exact_from(&pool, &mut rejected, 5).is_err());
+        assert_eq!(rejected.calls, 0);
+        assert_eq!(pool.live_bytes(), retained);
+        for panic_on_failure in [false, true] {
+            let mut reader = FailingReader { calls: 0, panic_on_failure };
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                BudgetedBytes::read_exact_from(&pool, &mut reader, 4)
+            }));
+            if panic_on_failure { assert!(result.is_err()); }
+            else { assert!(result.unwrap().is_err()); }
+            assert_eq!(reader.calls, 2);
+            assert_eq!(pool.live_bytes(), retained);
+            assert_eq!(neighbor.as_slice(), b"keep");
+        }
+        let output = BudgetedBytes::read_exact_from(&pool, &mut &b"okay"[..], 4).unwrap();
+        assert_eq!(output.as_slice(), b"okay");
+        assert_eq!(pool.live_bytes(), retained + output.capacity());
+        drop(output);
+        assert_eq!(pool.live_bytes(), retained);
+        drop(neighbor);
+        assert_eq!(pool.live_bytes(), 0);
     }
 
     #[test]

@@ -1,6 +1,14 @@
 # 解析回归与异常输入验证
 
+## 操作级对象表预算接入（2026-10-08，回归通过）
+
+工作区最终验收：原session1967退出0，`cargo test --workspace --locked --offline --quiet` 共46组、938项通过、0失败、0忽略，日志 `/tmp/rzpdf-table-budget-full-workspace.log`。Rust源码在验收期间保持冻结；此结果取代下段的待确认状态，不表示完整AR-03已完成。
+
+当前PDF全部单元633项通过，原session7874退出0，日志 `/tmp/rzpdf-table-budget-pdf-unit.log`；此前对象表4项、事务最新7项及表分配器2项专项均通过。验证实际Layout、扩容旧新共存、三入口拒绝不改原表、回滚对象号恢复、同池嵌套/普通内层继承、异池拒绝、外层unwind保留邻居额度。工作区全量已启动，日志 `/tmp/rzpdf-table-budget-full-workspace.log`，终态待确认，源码冻结。低层entries改只读视图，迁移说明见architecture；当前证据不代表完整AR-03、完整PDF兼容性或所有外部下游编译通过，未运行fuzz。
+
 ## Type6 部分接入检查点（2026-10-08）
+
+当前提交53a9011的全量终态：原session39247退出0，`cargo test --workspace --locked --quiet` 共46组、933项通过、0失败、0忽略，日志 `/tmp/rzpdf-coons-retained-domain-full-workspace.log`。包括628项PDF单元、8项着色流程及38项render（53.40秒）；验收期间Rust源码保持冻结。本记录取代下方本轮运行中的状态，不证明一般曲面边界、任意折叠或完整Type6及整个TODO交付。未运行fuzz。
 
 区间映射版render终态：原session3626退出0，38项通过、0失败/忽略，54.68秒，日志 `/tmp/rzpdf-coons-retained-domain-render.log`。当前源码对应模型87项、流程8项、render38项专项通过；全工作区复验已启动，原session39247、日志 `/tmp/rzpdf-coons-retained-domain-full-workspace.log`，Rust源码冻结至终态，最终结果待确认。此证据仍不代表任意边界/折叠及完整Type6交付，不沿用927项旧版全量结果。
 

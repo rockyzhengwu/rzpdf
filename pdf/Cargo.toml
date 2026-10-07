@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+allocator-api2 = "0.2.21"
+hashbrown = { version = "0.16.1", default-features = false, features = ["allocator-api2"] }
 aes = "0.8.4"
 bitstream-io = "4.9.0"
 cbc = "0.1.2"

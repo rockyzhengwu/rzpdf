@@ -50,6 +50,8 @@
       - [x] Form预检与拥有副本：普通/预算共享字段验证核心，预算对象/引用数组/数值/Resources/Group分配前预留，BBox/Matrix数值采用栈数组；返回仅保留资源/Group租约。准备链XObject/Form对象解析已同池，首次源缓存仍未计费；间接字段、null语义、错误类型、峰值拒绝及unwind清理已验收。
       - [x] 局部XObject绑定/Form.Resources重建：预算字典替换先克隆保留值与新值、再原子交换，覆盖键/表扩容旧新共存；FmEdit名称由栈缓冲生成后预算复制，返回租约保留至事务返回。验证碰撞命名、峰值拒绝原字典不变、释放恢复/unwind及深度/键长/条目限制；页根注册、父/根程序和流输出仍待接入。
   - [ ] 解码/图片/事务克隆按容量与共存峰值计费，明确持久缓存转移及保留额度。
+    - [ ] 工作对象表增长：DocumentStore.try_insert_object与reserve_entry目前直接HashMap.try_reserve，预算事务仅计费回滚数组/载荷。先确定可在分配前准确计费的表存储（不能以HashMap.capacity乘条目尺寸推测控制桶）；在插入、更新缺失ID、删除缺失ID三条入口统一接入事务预算作用域。嵌套同池/异池与普通事务混用须有明确规则，旧新表共存须计费，成功持久化和失败回滚须保持所有权。验收：触发扩容前拒绝不消耗对象号、不新增键、不改变原对象；错误/unwind及内层回滚后外层仍可重试，回滚复用现有存储不额外分配。对外entries返回HashMap的兼容性需随存储方案处理，不开放声称完整峰值约束的新接口。
+      - 方案核验：锁定依赖已有hashbrown 0.16.1，但当前pdf未直接依赖它；本地源码提供Allocator入口，需用实际Layout在allocate前预留并在deallocate归还，扩容期间旧新分配同时持有租约。评估适配器的租约存储本身（避免用另一未计费HashMap登记）、无预算分配/事务入池/成功转持久与嵌套异池拒绝；保持平均常数查找，不以有序Vec线性插入作为默认替代。DocumentStore.entries公开标准HashMap类型，切换实现须提供只读遍历接口迁移说明及下游编译验收。此为候选方案，尚未加入依赖或实现，不计作完成。
   - [x] 固定Compressed/ObjStm保存组合：合法xref流样本中四压缩对象冷加载，原始/Flate对象流与Preserve/FlateUnencoded四组合的小额度拒绝不发布缓存、释放归零；拒绝后编辑压缩对象、充足额度保存不会被源展开覆盖，与独立普通保存字节一致且严格重开保留页/修改值。仅覆盖固定样本，不表示兼容性/持久总量/后端内存完整验收。
   - [x] 固定普通xref源流保存冷加载：未引用64 KiB流在严格打开时未加载，小额度保存拒绝不发布该缓存、额度归零且修订号不变；充足额度重试输出一致，缓存转为持久内存后普通/预算保存与页面读取不变。只覆盖此固定样本，不代表Compressed/ObjStm完整保存或持久缓存总量验收。
   - [x] 固定内存文档保存结果组合预算：Preserve/Flate结果持有期间计费，保留首结果导致第二次合计超限拒绝且原输出/修订号不变，释放后同池重试恢复；充足额度下双结果共存并逐份归还容量。仅覆盖已计费分配，不代表冷源加载、编码器私有内存或完整AR-03验收。
@@ -92,6 +94,18 @@ P0 的普通回归、错误处理、预算和真实样本登记贯穿上述工�
 执行约束：不新增或运行 fuzz，不接入 fuzz CI，不删除已有 fuzz 文件；常规单元、集成、像素回归和合法样本验证继续。每项仅在其验收条件达成后勾选，不因暂缓 fuzz 将完整项目标记完成。
 
 ### 实施记录
+
+- 2026-10-08 对象表预算工作区验收终态：原session1967退出0，`cargo test --workspace --locked --offline --quiet` 汇总46组、938项通过、0失败、0忽略，日志 `/tmp/rzpdf-table-budget-full-workspace.log`。验收期间Rust源码保持冻结，此结果取代下方本轮待确认状态；工作对象表已接入真实Layout计费与事务作用域，完整AR-03及整个TODO仍未完成。按用户要求准备本地提交，不推送、不纳入test.png、未运行fuzz。
+
+- 2026-10-08 对象表预算当前单元终态：原session7874退出0，全部PDF单元633项通过、0失败/忽略、1.76秒，日志 `/tmp/rzpdf-table-budget-pdf-unit.log`，包含实际编辑/字体/保存预算及对象表/事务新增回归。当前开始工作区`cargo test --workspace --locked --offline --quiet`，日志 `/tmp/rzpdf-table-budget-full-workspace.log`，终态待确认，Rust源码冻结至终态。完整AR-03及整个TODO仍未完成，未运行fuzz、未提交，不套用旧提交933项结果。
+
+- 2026-10-08 AR-03工作对象表接入专项：DocumentStore迁移hashbrown真实Layout分配器，entries改只读StoreEntries视图（迁移说明见docs/architecture）；预算事务激活同池表作用域，普通内层继承预算并用数组快照，异池在快照前拒绝，回滚/快照销毁后最外层转持久。对象表专项4项、原事务5项、扩容三入口事务6项和最新嵌套/unwind事务7项均退出0，最新原session39734日志 `/tmp/rzpdf-transaction-table-unwind.log`。插入/更新缺失ID/删除缺失ID峰值少1拒绝、拒绝原表不变、回滚对象号恢复、足额重试、内层回滚保留外层额度与外层panic邻居额度恢复已覆盖。当前启动全部PDF单元，日志 `/tmp/rzpdf-table-budget-pdf-unit.log`，终态待确认；尚未全工作区复验，完整AR-03未完成，不沿用旧提交933项结果，未运行fuzz、未提交。
+
+- 2026-10-08 AR-03表分配器原型：新增内部TableAllocator，按Global收到的真实Layout在分配前预留；两个内联登记槽覆盖单表扩容旧新共存，不另分配登记HashMap，释放实际存储后归还租约。hashbrown真实表专项原session9309退出0，1项通过；锁文件恢复四个无关平台依赖，仅保留allocator-api2 0.2.21及pdf直接使用既有hashbrown 0.16.1的变更。锁定/离线预算组原session47948退出0，日志 `/tmp/rzpdf-table-budget-locked.log`。当前仅原型，未接入DocumentStore、事务作用域和持久化转移，内联控制结构/Rc及载荷不由此计费；完整AR-03保持未完成，未运行fuzz、未提交。
+
+- 2026-10-08 AR-03预算输入所有权补充验收：新增底层读取回归，额度预留失败不调用Reader，部分读取错误/panic释放临时缓冲额度且保留邻居结果，成功重试返回所有者持有容量直至释放。专项原session29695退出0，1项通过、628项筛选，日志 `/tmp/rzpdf-budget-input-failure.log`。现有StreamReader普通错误不回退源位置，而SyntaxParser.read_stream_block普通错误尝试恢复解析位置；未将panic清理等同位置回滚。未改变生产逻辑、未运行fuzz、未提交；933项全量对应前一提交，不覆盖本新增测试，完整AR-03仍未完成。
+
+- 2026-10-08 当前提交全量验收终态：提交53a9011的Rust源码在验收期间保持不变；原session39247退出0，`cargo test --workspace --locked --quiet`日志 `/tmp/rzpdf-coons-retained-domain-full-workspace.log` 汇总46组、933项通过、0失败、0忽略，包含628项PDF单元、8项着色流程与38项render（53.40秒）。此结果取代下方本轮待确认状态；提交已按用户要求完成，未推送、未纳入test.png、未运行fuzz。仅证明当前回归基线，完整Type6、操作级聚合预算及整个TODO仍未完成。
 
 - 2026-10-08 区间映射版render终态/新全量启动：原session3626退出0，render38项通过、0失败/忽略，54.68秒，日志 `/tmp/rzpdf-coons-retained-domain-render.log`，覆盖当前三根分割线修订及精确边界整页像素回归。此前模型87项、流程8项也退出0；完整Type6及整个TODO仍未完成。差异检查通过后启动`cargo test --workspace --locked --quiet`，原session39247、Cargo PID742，日志 `/tmp/rzpdf-coons-retained-domain-full-workspace.log`，最终退出码待确认。Rust源码冻结至终态，不套用927项旧版结果，不重启等待超时的进程；未运行fuzz、未提交。
 

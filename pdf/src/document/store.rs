@@ -1,4 +1,26 @@
-use std::collections::HashMap;
+use std::collections::hash_map::RandomState;
+use crate::budget::table_allocator::TableAllocator;
+
+type ObjectTable = hashbrown::HashMap<ObjectId, StoreEntry, RandomState, TableAllocator>;
+
+/// Read-only object-store view. The backing allocation strategy is private.
+/// Unlike the former standard HashMap reference, this does not permit naming
+/// a concrete hash-table type; keys/get/iter retain their borrowing semantics.
+#[derive(Clone, Copy)]
+pub struct StoreEntries<'a> {
+    table: &'a ObjectTable,
+}
+
+impl<'a> StoreEntries<'a> {
+    pub fn len(&self) -> usize { self.table.len() }
+    pub fn is_empty(&self) -> bool { self.table.is_empty() }
+    pub fn capacity(&self) -> usize { self.table.capacity() }
+    pub fn get(&self, id: &ObjectId) -> Option<&'a StoreEntry> { self.table.get(id) }
+    pub fn contains_key(&self, id: &ObjectId) -> bool { self.table.contains_key(id) }
+    pub fn keys(&self) -> impl Iterator<Item = &'a ObjectId> + 'a { self.table.keys() }
+    pub fn values(&self) -> impl Iterator<Item = &'a StoreEntry> + 'a { self.table.values() }
+    pub fn iter(&self) -> impl Iterator<Item = (&'a ObjectId, &'a StoreEntry)> + 'a { self.table.iter() }
+}
 
 use crate::error::{PdfError, PdfResult};
 use crate::objects::{object_id::ObjectId, PdfObject};
@@ -136,7 +158,7 @@ mod tests {
 
 #[derive(Debug, Clone)]
 pub struct DocumentStore {
-    entries: HashMap<ObjectId, StoreEntry>,
+    entries: ObjectTable,
     next_obj_num: u32,
 }
 
@@ -148,6 +170,14 @@ pub(crate) struct StoreSnapshot {
 }
 
 impl DocumentStore {
+    pub(crate) fn enter_table_budget(&self, budget: &crate::budget::OperationBudget) -> PdfResult<()> {
+        self.entries.allocator().enter(budget)
+    }
+
+    pub(crate) fn leave_table_budget(&self) {
+        self.entries.allocator().leave();
+    }
+
     /// Snapshot table slots and recursively owned payloads reserve before
     /// allocation; no additional HashMap buckets are created.
     pub(crate) fn snapshot_with_budget(
@@ -212,7 +242,7 @@ impl DocumentStore {
 
     pub fn new(next_obj_num: u32) -> Self {
         Self {
-            entries: HashMap::new(),
+            entries: ObjectTable::with_hasher_in(RandomState::new(), TableAllocator::persistent()),
             next_obj_num,
         }
     }
@@ -272,7 +302,7 @@ impl DocumentStore {
         self.entries.get(&object_id)
     }
 
-    pub fn entries(&self) -> &HashMap<ObjectId, StoreEntry> {
-        &self.entries
+    pub fn entries(&self) -> StoreEntries<'_> {
+        StoreEntries { table: &self.entries }
     }
 }

@@ -17,6 +17,7 @@ pub(crate) struct DocumentState {
     pub(crate) commit_revision: Cell<u64>,
     dirty: Cell<bool>,
     pub(crate) transaction_depth: Cell<u64>,
+    active_table_budget: RefCell<Option<(crate::budget::OperationBudget, crate::parser::options::Limits)>>,
 }
 
 impl DocumentState {
@@ -30,6 +31,7 @@ impl DocumentState {
             commit_revision: Cell::new(0),
             dirty: Cell::new(false),
             transaction_depth: Cell::new(0),
+            active_table_budget: RefCell::new(None),
         }
     }
     pub(crate) fn transaction<T>(&self, edit: impl FnOnce() -> PdfResult<T>) -> PdfResult<T> {
@@ -53,6 +55,17 @@ impl DocumentState {
         )>,
         edit: impl FnOnce() -> PdfResult<T>,
     ) -> PdfResult<T> {
+        let inherited = self.active_table_budget.borrow().clone();
+        let effective = match budget {
+            Some((budget, limits)) => {
+                if inherited.as_ref().is_some_and(|(outer, _)| !outer.shares_pool(budget)) {
+                    return Err(PdfError::ResourceLimit("transaction budget pool mismatch".into()));
+                }
+                Some((budget.clone(), limits))
+            }
+            None => inherited.clone(),
+        };
+        let budget = effective.as_ref().map(|(budget, limits)| (budget, *limits));
         self.ensure_commit_capacity()?;
         let depth = self
             .transaction_depth
@@ -87,6 +100,13 @@ impl DocumentState {
             )
         };
         let _snapshot_lease = snapshot_lease;
+        // Declared before rollback: restore/discard snapshots before returning
+        // retained table allocations to persistent memory at outer scope exit.
+        let _table_scope = if let Some((budget, _)) = budget {
+            self.store.borrow().enter_table_budget(budget)?;
+            let previous = self.active_table_budget.replace(effective.clone());
+            Some(TableBudgetScope { state: self, previous })
+        } else { None };
         let mut rollback = StoreRollback {
             commit_revision: &self.commit_revision,
             dirty: &self.dirty,
@@ -133,6 +153,18 @@ impl DocumentState {
         } else {
             self.dirty.set(true);
         }
+    }
+}
+
+struct TableBudgetScope<'a> {
+    state: &'a DocumentState,
+    previous: Option<(crate::budget::OperationBudget, crate::parser::options::Limits)>,
+}
+
+impl Drop for TableBudgetScope<'_> {
+    fn drop(&mut self) {
+        self.state.store.borrow().leave_table_budget();
+        self.state.active_table_budget.replace(self.previous.take());
     }
 }
 
@@ -184,6 +216,123 @@ impl Drop for StoreRollback<'_> {
 mod tests {
     use super::*;
     use crate::objects::{object_id::ObjectId, PdfObject};
+
+    #[test]
+    fn table_budget_inherits_plain_savepoints_rejects_foreign_pool_and_unwinds() {
+        use crate::{budget::OperationBudget, parser::options::Limits};
+        let state = DocumentState::new(PdfDict::default(), 10, "1.7".into());
+        let pool = OperationBudget::new(1024 * 1024);
+        let neighbor = pool.reserve(7).unwrap();
+        let foreign = OperationBudget::new(1024 * 1024);
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: PdfResult<()> = state.transaction_with_budget(&pool, Limits::default(), || {
+                state.store.borrow_mut().try_insert_object(PdfObject::PdfNull)?;
+                let retained = pool.live_bytes();
+                assert!(retained > 7);
+                let revision = state.revision.get();
+                let mut called = false;
+                let result = state.transaction_with_budget(&foreign, Limits::default(), || {
+                    called = true;
+                    Ok(())
+                });
+                assert!(matches!(result, Err(PdfError::ResourceLimit(_))));
+                assert!(!called);
+                assert_eq!(foreign.live_bytes(), 0);
+                assert_eq!(state.revision.get(), revision);
+                assert_eq!(pool.live_bytes(), retained);
+                let inner: PdfResult<()> = state.transaction(|| {
+                    // A nominally plain savepoint must charge its array snapshot
+                    // to the enclosing pool, not silently clone a persistent map.
+                    assert!(pool.live_bytes() > retained);
+                    for _ in 0..32 {
+                        state.store.borrow_mut().try_insert_object(PdfObject::PdfNull)?;
+                    }
+                    Err(PdfError::DocumentError("inner rollback".into()))
+                });
+                assert!(inner.is_err());
+                assert_eq!(state.store.borrow().entries().len(), 1);
+                assert!(pool.live_bytes() > retained);
+                assert_eq!(state.store.borrow_mut().try_insert_object(PdfObject::PdfNull)?, ObjectId::new(11, 0));
+                panic!("outer table budget unwind");
+            });
+        }));
+        assert!(caught.is_err());
+        assert_eq!(pool.live_bytes(), 7);
+        assert_eq!(state.transaction_depth.get(), 0);
+        assert!(state.active_table_budget.borrow().is_none());
+        assert!(state.store.borrow().entries().is_empty());
+        state.transaction_with_budget(&foreign, Limits::default(), || {
+            assert_eq!(state.store.borrow_mut().try_insert_object(PdfObject::PdfNull)?, ObjectId::new(10, 0));
+            Ok(())
+        }).unwrap();
+        assert_eq!(foreign.live_bytes(), 0);
+        assert_eq!(pool.live_bytes(), 7);
+        drop(neighbor);
+        assert_eq!(pool.live_bytes(), 0);
+    }
+
+    #[test]
+    fn table_growth_budget_rejects_insert_update_delete_and_restores_retry() {
+        use crate::{budget::OperationBudget, parser::options::Limits};
+        fn seeded() -> DocumentState {
+            let state = DocumentState::new(PdfDict::default(), 10, "1.7".into());
+            for key in 1..=3 {
+                state.store.borrow_mut().update_object(ObjectId::new(key, 0), PdfObject::PdfNull).unwrap();
+            }
+            assert_eq!(state.store.borrow().entries().capacity(), 3);
+            state
+        }
+        fn append(state: &DocumentState, mode: usize, key: u32) -> PdfResult<()> {
+            let mut store = state.store.borrow_mut();
+            match mode {
+                0 => { assert_eq!(store.try_insert_object(PdfObject::PdfNull)?, ObjectId::new(key, 0)); }
+                1 => store.update_object(ObjectId::new(key, 0), PdfObject::PdfNull)?,
+                _ => store.delete_object(ObjectId::new(key, 0))?,
+            }
+            Ok(())
+        }
+        for mode in 0..3 {
+            let measured = seeded();
+            let probe = OperationBudget::new(1024 * 1024);
+            measured.transaction_with_budget(&probe, Limits::default(), || {
+                for key in 10..15 { append(&measured, mode, key)?; }
+                Ok(())
+            }).unwrap();
+            assert_eq!(probe.live_bytes(), 0);
+            let state = seeded();
+            let pool = OperationBudget::new(probe.peak_bytes() - 1);
+            let mut completed = 0;
+            let result = state.transaction_with_budget(&pool, Limits::default(), || {
+                for key in 10..15 {
+                    let capacity = state.store.borrow().entries().capacity();
+                    let length = state.store.borrow().entries().len();
+                    if let Err(error) = append(&state, mode, key) {
+                        assert_eq!(state.store.borrow().entries().capacity(), capacity);
+                        assert_eq!(state.store.borrow().entries().len(), length);
+                        assert!(state.store.borrow().entry(ObjectId::new(key, 0)).is_none());
+                        return Err(error);
+                    }
+                    completed += 1;
+                }
+                Ok(())
+            });
+            assert!(matches!(result, Err(PdfError::ResourceLimit(_))));
+            assert_eq!(completed, 4);
+            assert_eq!(pool.live_bytes(), 0);
+            assert_eq!(state.transaction_depth.get(), 0);
+            assert_eq!(state.store.borrow().entries().len(), 3);
+            for key in 1..=3 {
+                assert!(matches!(state.store.borrow().entry(ObjectId::new(key, 0)), Some(crate::document::store::StoreEntry::Upsert(PdfObject::PdfNull))));
+            }
+            let enough = OperationBudget::new(probe.peak_bytes());
+            state.transaction_with_budget(&enough, Limits::default(), || {
+                for key in 10..15 { append(&state, mode, key)?; }
+                Ok(())
+            }).unwrap();
+            assert_eq!(enough.live_bytes(), 0);
+            assert_eq!(state.store.borrow().entries().len(), 8);
+        }
+    }
 
     #[test]
     fn array_snapshot_rollback_handles_mixed_nested_transactions_and_growth() {
