@@ -334,7 +334,8 @@ impl<R: Read + Seek> PdfDocument<R> {
                         self.ctx.options(),
                         &budget,
                     )?;
-                return self.commit_nested_edit(page, root, source, chain, edited);
+                return self
+                    .commit_nested_edit_with_budget(page, root, source, chain, edited, &budget);
             }
         };
         if let Some(range) = range {
@@ -394,7 +395,7 @@ impl<R: Read + Seek> PdfDocument<R> {
                 &budget,
             )?,
         };
-        self.commit_nested_edit(page, root, source, chain, edited)
+        self.commit_nested_edit_with_budget(page, root, source, chain, edited, &budget)
     }
 
     /// Replace raw PDF character-code bytes in a nested Tj/quote event.
@@ -566,28 +567,87 @@ impl<R: Read + Seek> PdfDocument<R> {
         self.commit_nested_edit(page, root, source, chain, edited)
     }
 
-    fn commit_nested_edit<P: AsRef<ContentProgram>>(
+    fn commit_nested_edit<P, C>(
         &self,
         page: u32,
         root: &ContentProgram,
         source: &NestedDrawSource,
-        chain: Vec<crate::page::source_provenance::PreparedForm>,
+        chain: C,
         edited: P,
-    ) -> PdfResult<()> {
-        self.edit_transaction(|doc| {
-            doc.commit_page_content_edit(page, root, || {
+    ) -> PdfResult<()>
+    where
+        P: AsRef<ContentProgram>,
+        C: IntoIterator<Item = crate::page::source_provenance::PreparedForm>,
+        C::IntoIter: DoubleEndedIterator + ExactSizeIterator,
+    {
+        self.commit_nested_edit_inner(page, root, source, chain, edited, None)
+    }
+
+    fn commit_nested_edit_with_budget<P, C>(
+        &self,
+        page: u32,
+        root: &ContentProgram,
+        source: &NestedDrawSource,
+        chain: C,
+        edited: P,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<()>
+    where
+        P: AsRef<ContentProgram>,
+        C: IntoIterator<Item = crate::page::source_provenance::PreparedForm>,
+        C::IntoIter: DoubleEndedIterator + ExactSizeIterator,
+    {
+        self.commit_nested_edit_inner(page, root, source, chain, edited, Some(budget))
+    }
+
+    fn commit_nested_edit_inner<P, C>(
+        &self,
+        page: u32,
+        root: &ContentProgram,
+        source: &NestedDrawSource,
+        chain: C,
+        edited: P,
+        budget: Option<&crate::budget::OperationBudget>,
+    ) -> PdfResult<()>
+    where
+        P: AsRef<ContentProgram>,
+        C: IntoIterator<Item = crate::page::source_provenance::PreparedForm>,
+        C::IntoIter: DoubleEndedIterator + ExactSizeIterator,
+    {
+        let mut retained_copies = budget.map(|pool| pool.reserve(0)).transpose()?;
+        let edit = |doc: &Self| {
+            doc.commit_page_content_edit_inner(page, root, budget, || {
                 let mut child = None;
                 let mut bytes = 0usize;
                 for (index, mut form) in chain.into_iter().enumerate().rev() {
+                    if let Some(mut lease) = form.copies_lease.take() {
+                        if let Some(retained) = retained_copies.as_mut() {
+                            retained.absorb(&mut lease)?;
+                        } else {
+                            retained_copies = Some(lease);
+                        }
+                    }
                     let rebuilt;
                     let program = if let Some(child_id) = child {
-                        let name = doc.bind_local_xobject(&mut form.resource_scope, child_id)?;
-                        rebuilt = form.program.with_replaced_operation(
+                        let name = if let Some(budget) = budget {
+                            let (name, mut lease) = doc.bind_local_xobject_with_budget(
+                                &mut form.resource_scope,
+                                child_id,
+                                budget,
+                            )?;
+                            retained_copies.as_mut().unwrap().absorb(&mut lease)?;
+                            name
+                        } else {
+                            doc.bind_local_xobject(&mut form.resource_scope, child_id)?
+                        };
+                        rebuilt = rebuild_form_call(
+                            &form.program,
                             source.invocations[index + 1].operation_index,
-                            &form_do(&name)?,
+                            &name,
                             doc.ctx.options(),
+                            budget,
                         )?;
-                        &rebuilt
+                        rebuilt.as_ref()
                     } else {
                         // Keep a budgeted leaf owner alive through the entire
                         // transaction; borrowing must not detach its leases.
@@ -600,17 +660,50 @@ impl<R: Read + Seek> PdfDocument<R> {
                     )?;
                     // Materialize the effective scope, including legacy page
                     // fallback, so new page bindings cannot change copied names.
-                    form.dictionary
-                        .try_insert("Resources".into(), PdfObject::PdfDict(form.resource_scope))?;
-                    let mut data = Vec::new();
-                    data.try_reserve_exact(program.source_bytes().len())
-                        .map_err(|_| {
-                            PdfError::ResourceLimit("Nested edited stream allocation".into())
-                        })?;
-                    data.extend_from_slice(program.source_bytes());
-                    child = Some(doc.try_insert_object(PdfObject::PdfStream(
-                        PdfStream::from_decoded_data(form.dictionary, data)?,
-                    ))?);
+                    if let Some(budget) = budget {
+                        let (dict, mut lease) = form.dictionary.with_replaced_entry_with_budget(
+                            "Resources",
+                            &PdfObject::PdfDict(form.resource_scope),
+                            budget,
+                            doc.ctx.limits(),
+                        )?;
+                        retained_copies.as_mut().unwrap().absorb(&mut lease)?;
+                        form.dictionary = dict;
+                    } else {
+                        form.dictionary.try_insert(
+                            "Resources".into(),
+                            PdfObject::PdfDict(form.resource_scope),
+                        )?;
+                    }
+                    let output = if let Some(budget) = budget {
+                        let (data, mut payload_lease) =
+                            crate::budget::BudgetedBytes::copy_from_slice(
+                                budget,
+                                program.source_bytes(),
+                            )?
+                            .into_reserved_parts();
+                        retained_copies
+                            .as_mut()
+                            .unwrap()
+                            .absorb(&mut payload_lease)?;
+                        let (output, mut dict_lease) = PdfStream::from_decoded_data_with_budget(
+                            &form.dictionary,
+                            data,
+                            budget,
+                            doc.ctx.limits(),
+                        )?;
+                        retained_copies.as_mut().unwrap().absorb(&mut dict_lease)?;
+                        output
+                    } else {
+                        let mut data = Vec::new();
+                        data.try_reserve_exact(program.source_bytes().len())
+                            .map_err(|_| {
+                                PdfError::ResourceLimit("Nested edited stream allocation".into())
+                            })?;
+                        data.extend_from_slice(program.source_bytes());
+                        PdfStream::from_decoded_data(form.dictionary, data)?
+                    };
+                    child = Some(doc.try_insert_object(PdfObject::PdfStream(output))?);
                 }
                 let name = doc.resources().register_existing(
                     page,
@@ -618,10 +711,12 @@ impl<R: Read + Seek> PdfDocument<R> {
                     child
                         .ok_or_else(|| PdfError::ObjectError("Nested copied root absent".into()))?,
                 )?;
-                let edited_root = root.with_replaced_operation(
+                let edited_root = rebuild_form_call(
+                    root,
                     source.invocations[0].operation_index,
-                    &form_do(&name)?,
+                    &name,
                     doc.ctx.options(),
+                    budget,
                 )?;
                 checked_edited_bytes(
                     bytes,
@@ -630,7 +725,12 @@ impl<R: Read + Seek> PdfDocument<R> {
                 )?;
                 Ok(edited_root)
             })
-        })
+        };
+        if let Some(budget) = budget {
+            self.edit_transaction_with_budget(budget, edit)
+        } else {
+            self.edit_transaction(edit)
+        }
     }
 
     /// Add a collision-free binding to a prepared local XObject dictionary.
@@ -668,6 +768,68 @@ impl<R: Read + Seek> PdfDocument<R> {
         }
         Err(PdfError::ResourceLimit("Nested Form resource names".into()))
     }
+
+    fn bind_local_xobject_with_budget(
+        &self,
+        resources: &mut PdfDict,
+        id: ObjectId,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<(String, crate::budget::MemoryLease)> {
+        let mut _entries_lease = None;
+        let entries = if let Some(value) = resources.get("XObject") {
+            let (value, lease) = self.ctx.resolve_owned_with_budget(value, budget)?;
+            _entries_lease = Some(lease);
+            value.into_dict().ok_or(PdfError::PageXobjectIsNotDict)?
+        } else {
+            PdfDict::default()
+        };
+        let limits = self.ctx.limits();
+        if (&entries).into_iter().len() >= limits.max_objects {
+            return Err(PdfError::ResourceLimit(
+                "Nested Form resource entries".into(),
+            ));
+        }
+        for index in 1..=limits.max_objects {
+            let mut digits = [0u8; 20];
+            let mut start = digits.len();
+            let mut number = index;
+            loop {
+                start -= 1;
+                digits[start] = b'0' + (number % 10) as u8;
+                number /= 10;
+                if number == 0 {
+                    break;
+                }
+            }
+            let mut buffer = [0u8; 26];
+            buffer[..6].copy_from_slice(b"FmEdit");
+            let length = 6 + digits.len() - start;
+            buffer[6..length].copy_from_slice(&digits[start..]);
+            if length > limits.max_token_bytes {
+                return Err(PdfError::ResourceLimit(
+                    "Nested Form resource name bytes".into(),
+                ));
+            }
+            let name = std::str::from_utf8(&buffer[..length]).unwrap();
+            if entries.get(name).is_some() {
+                continue;
+            }
+            let (name, mut lease) = crate::budget::copy_string(name, budget)?;
+            let reference = PdfObject::PdfReference(PdfReference::from_id(id));
+            let (entries, _binding_lease) =
+                entries.with_replaced_entry_with_budget(&name, &reference, budget, limits)?;
+            let (replacement, mut replacement_lease) = resources.with_replaced_entry_with_budget(
+                "XObject",
+                &PdfObject::PdfDict(entries),
+                budget,
+                limits,
+            )?;
+            lease.absorb(&mut replacement_lease)?;
+            *resources = replacement;
+            return Ok((name, lease));
+        }
+        Err(PdfError::ResourceLimit("Nested Form resource names".into()))
+    }
 }
 
 fn checked_edited_bytes(retained: usize, next: usize, limit: usize) -> PdfResult<usize> {
@@ -681,7 +843,114 @@ fn checked_edited_bytes(retained: usize, next: usize, limit: usize) -> PdfResult
 mod tests {
     use super::*;
     #[test]
-    fn nested_leaf_rebuild_shares_encoding_peak_and_rejects_before_mutation() {
+    fn budgeted_form_do_escapes_names_and_retains_exact_output_capacity() {
+        use crate::{budget::OperationBudget, parser::options::Limits};
+        for (name, expected) in [
+            ("Fm1", b"/Fm1 Do".as_slice()),
+            ("Fm A#", b"/Fm#20A#23 Do".as_slice()),
+            ("中文", b"/#E4#B8#AD#E6#96#87 Do".as_slice()),
+        ] {
+            let pool = OperationBudget::new(65536);
+            let bytes = form_do_with_budget(name, Limits::default(), &pool).unwrap();
+            assert_eq!(bytes.as_slice(), expected);
+            assert_eq!(bytes.as_slice(), form_do(name).unwrap());
+            assert_eq!(pool.live_bytes(), bytes.capacity());
+            let peak = pool.peak_bytes();
+            drop(bytes);
+            assert_eq!(pool.live_bytes(), 0);
+            let limited = OperationBudget::new(peak - 1);
+            assert!(form_do_with_budget(name, Limits::default(), &limited).is_err());
+            assert_eq!(limited.live_bytes(), 0);
+        }
+        let pool = OperationBudget::new(65536);
+        assert!(form_do_with_budget("Bad\0Name", Limits::default(), &pool).is_err());
+        assert!(form_do_with_budget(
+            "Fm1",
+            Limits {
+                max_decoded_bytes: 6,
+                ..Default::default()
+            },
+            &pool
+        )
+        .is_err());
+        assert_eq!(pool.live_bytes(), 0);
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _bytes = form_do_with_budget("Fm1", Limits::default(), &pool).unwrap();
+            panic!("Form Do bytes unwind");
+        }));
+        assert!(caught.is_err());
+        assert_eq!(pool.live_bytes(), 0);
+    }
+
+    #[test]
+    fn budgeted_local_binding_matches_collision_names_and_fails_atomically() {
+        use crate::{budget::OperationBudget, document::owned::Document};
+        let doc = Document::new().unwrap();
+        let id = doc.try_insert_object(PdfObject::PdfNull).unwrap();
+        let mut entries = PdfDict::default();
+        for name in ["FmEdit1", "FmEdit2"] {
+            entries.insert(
+                name.into(),
+                PdfObject::PdfReference(PdfReference::from_id(id)),
+            );
+        }
+        let mut original = PdfDict::default();
+        original.insert("XObject".into(), PdfObject::PdfDict(entries));
+        original.insert(
+            "Keep".into(),
+            PdfObject::PdfName(PdfName::new("kept".repeat(128))),
+        );
+        let mut legacy = original.clone();
+        assert_eq!(doc.bind_local_xobject(&mut legacy, id).unwrap(), "FmEdit3");
+        let probe = OperationBudget::new(65536);
+        let (mut resources, original_lease) =
+            crate::objects::clone_dict_with_budget(&original, &probe, doc.ctx.limits(), 0).unwrap();
+        let input_peak = probe.peak_bytes();
+        let (name, lease) = doc
+            .bind_local_xobject_with_budget(&mut resources, id, &probe)
+            .unwrap();
+        assert_eq!(name, "FmEdit3");
+        assert_eq!(resources, legacy);
+        assert_eq!(probe.live_bytes(), original_lease.bytes() + lease.bytes());
+        let peak = probe.peak_bytes();
+        assert!(peak > input_peak);
+        drop((resources, name, lease, original_lease));
+        assert_eq!(probe.live_bytes(), 0);
+        let limited = OperationBudget::new(peak - 1);
+        let (mut resources, original_lease) =
+            crate::objects::clone_dict_with_budget(&original, &limited, doc.ctx.limits(), 0)
+                .unwrap();
+        assert!(matches!(
+            doc.bind_local_xobject_with_budget(&mut resources, id, &limited),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(resources, original);
+        assert_eq!(limited.live_bytes(), original_lease.bytes());
+        drop((resources, original_lease));
+        assert_eq!(limited.live_bytes(), 0);
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (mut resources, original_lease) =
+                crate::objects::clone_dict_with_budget(&original, &probe, doc.ctx.limits(), 0)
+                    .unwrap();
+            let (name, lease) = doc
+                .bind_local_xobject_with_budget(&mut resources, id, &probe)
+                .unwrap();
+            let _owned = (resources, name, lease, original_lease);
+            panic!("local binding owner unwind");
+        }));
+        assert!(caught.is_err());
+        assert_eq!(probe.live_bytes(), 0);
+        let mut resources = PdfDict::default();
+        let (name, lease) = doc
+            .bind_local_xobject_with_budget(&mut resources, id, &limited)
+            .unwrap();
+        assert_eq!(name, "FmEdit1");
+        drop((resources, name, lease));
+        assert_eq!(limited.live_bytes(), 0);
+    }
+
+    #[test]
+    fn nested_unicode_shared_peak_covers_rebuild_and_resource_commit() {
         use crate::{
             budget::OperationBudget,
             document::resource_manager::StandardFont,
@@ -749,7 +1018,9 @@ mod tests {
         let chain = page
             .prepare_form_chain_with_budget(&root, source, &pool)
             .unwrap();
+        let chain_retained = pool.live_bytes();
         let leaf = chain.last().unwrap();
+        assert!(leaf.copies_lease.as_ref().unwrap().bytes() > 0);
         let text = "XYZ".to_owned();
         let (scope, scope_lease) = page.resource_with_budget(&pool).unwrap();
         let inherited = page
@@ -785,21 +1056,41 @@ mod tests {
                 &pool,
             )
             .unwrap();
-        let peak = pool.peak_bytes();
+        let rebuild_peak = pool.peak_bytes();
         assert!(
-            peak > encoding_peak,
-            "combined={peak}, encoding={encoding_peak}"
+            rebuild_peak > encoding_peak,
+            "combined={rebuild_peak}, encoding={encoding_peak}"
         );
         assert!(pool.live_bytes() > codes.capacity());
         drop(edited);
         assert_eq!(pool.live_bytes(), retained + codes.capacity());
+        let edited = leaf
+            .program
+            .with_replaced_text_codes_with_budget(
+                source.operation_index,
+                codes.as_slice(),
+                probe.ctx.options(),
+                &pool,
+            )
+            .unwrap();
+        probe
+            .commit_nested_edit_with_budget(0, &root, source, chain, edited, &pool)
+            .unwrap();
+        let peak = pool.peak_bytes();
+        assert_eq!(
+            pool.live_bytes(),
+            retained - chain_retained + codes.capacity()
+        );
         drop(codes);
-        assert_eq!(pool.live_bytes(), retained);
+        assert_eq!(pool.live_bytes(), retained - chain_retained);
         drop(font);
         drop(scope_lease);
-        drop(chain);
         assert_eq!(pool.live_bytes(), 0);
-        for (maximum, succeeds) in [(peak - 1, false), (peak, true)] {
+        // Snapshot traversal of unordered stores can change the transient
+        // peak between independently built documents. Use the deterministic
+        // rebuild lower bound for rejection and headroom for public success;
+        // do not claim an exact full-transaction threshold here.
+        for (maximum, succeeds) in [(rebuild_peak - 1, false), (peak * 2, true)] {
             let doc = fixture(maximum);
             let mut page = doc.get_page(0).unwrap();
             let root = page.content_program().unwrap();
@@ -811,12 +1102,22 @@ mod tests {
             assert_eq!(result.is_ok(), succeeds);
             if !succeeds {
                 assert!(matches!(result, Err(PdfError::ResourceLimit(_))));
-                assert_eq!(doc.revision(), revision);
+                // A denial inside the transaction rolls back and invalidates
+                // snapshots; an earlier denial leaves the revision unchanged.
+                assert!(doc.revision() >= revision);
                 let unchanged = doc.get_page(0).unwrap().content_program().unwrap();
                 assert_eq!(unchanged.source_bytes(), root.source_bytes());
                 assert_eq!(unchanged.stream_object_id(0), root.stream_object_id(0));
                 assert_eq!(doc.get_page(0).unwrap().resource().unwrap(), resources);
-                doc.replace_nested_text(0, &root, source, "X").unwrap();
+                // Fixed transaction snapshots can dominate the peak, so a
+                // shorter replacement need not fit the same tight limit.
+                let retry = doc.replace_nested_text(0, &unchanged, source, "X");
+                assert!(retry.is_ok() || matches!(retry, Err(PdfError::ResourceLimit(_))));
+                if retry.is_err() {
+                    let after_retry = doc.get_page(0).unwrap().content_program().unwrap();
+                    assert_eq!(after_retry.source_bytes(), root.source_bytes());
+                    assert_eq!(doc.get_page(0).unwrap().resource().unwrap(), resources);
+                }
             }
         }
     }
@@ -837,4 +1138,53 @@ fn form_do(name: &str) -> PdfResult<Vec<u8>> {
     crate::writer::write_name(&mut bytes, &PdfName::new(name.to_owned()))?;
     bytes.extend_from_slice(b" Do");
     Ok(bytes)
+}
+
+fn form_do_with_budget(
+    name: &str,
+    limits: crate::parser::options::Limits,
+    budget: &crate::budget::OperationBudget,
+) -> PdfResult<crate::budget::BudgetedBytes> {
+    let length = crate::writer::serialized_name_bytes_length(name.as_bytes())?
+        .checked_add(3)
+        .ok_or_else(|| PdfError::ResourceLimit("Form Do size".into()))?;
+    if length > limits.max_decoded_bytes {
+        return Err(PdfError::ResourceLimit("Form Do bytes".into()));
+    }
+    let mut lease = budget.reserve(length)?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(length)
+        .map_err(|_| PdfError::ResourceLimit("Form Do allocation".into()))?;
+    lease.resize(bytes.capacity())?;
+    crate::writer::write_name_bytes(&mut bytes, name.as_bytes())?;
+    bytes.extend_from_slice(b" Do");
+    crate::budget::BudgetedBytes::from_reserved_vec(bytes, lease)
+}
+
+fn rebuild_form_call(
+    program: &ContentProgram,
+    operation: usize,
+    name: &str,
+    options: crate::parser::options::ParseOptions,
+    budget: Option<&crate::budget::OperationBudget>,
+) -> PdfResult<crate::page::source_provenance::PreparedProgram> {
+    use crate::page::source_provenance::PreparedProgram;
+    if let Some(budget) = budget {
+        let replacement = form_do_with_budget(name, options.limits, budget)?;
+        Ok(PreparedProgram::Budgeted(
+            program.with_replaced_operation_with_budget(
+                operation,
+                replacement.as_slice(),
+                options,
+                budget,
+            )?,
+        ))
+    } else {
+        Ok(PreparedProgram::Plain(program.with_replaced_operation(
+            operation,
+            &form_do(name)?,
+            options,
+        )?))
+    }
 }

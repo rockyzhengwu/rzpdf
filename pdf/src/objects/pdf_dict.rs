@@ -130,6 +130,45 @@ impl PartialEq for PdfDict {
 }
 
 impl PdfDict {
+    /// Build a charged replacement while the original dictionary remains live.
+    /// The caller swaps only after success and retains the returned lease.
+    pub(crate) fn with_replaced_entry_with_budget(
+        &self,
+        replacement_key: &str,
+        replacement: &PdfObject,
+        budget: &crate::budget::OperationBudget,
+        limits: crate::parser::options::Limits,
+    ) -> PdfResult<(Self, crate::budget::MemoryLease)> {
+        if limits.max_depth == 0 || self.into_iter().len() > limits.max_objects {
+            return Err(PdfError::ResourceLimit(
+                "dictionary replacement limits".into(),
+            ));
+        }
+        if replacement_key.len() > limits.max_token_bytes {
+            return Err(PdfError::ResourceLimit(
+                "dictionary replacement key bytes".into(),
+            ));
+        }
+        let mut builder = BudgetedDictBuilder::new(budget, limits.max_objects)?;
+        for (key, value) in self {
+            if key == replacement_key {
+                continue;
+            }
+            if key.len() > limits.max_token_bytes {
+                return Err(PdfError::ResourceLimit("dictionary clone key bytes".into()));
+            }
+            let (key, key_lease) = crate::budget::copy_string(key, budget)?;
+            let (value, value_lease) =
+                crate::objects::clone_object_with_budget(value, budget, limits, 1)?;
+            builder.insert(key, value, key_lease, value_lease)?;
+        }
+        let (key, key_lease) = crate::budget::copy_string(replacement_key, budget)?;
+        let (value, value_lease) =
+            crate::objects::clone_object_with_budget(replacement, budget, limits, 1)?;
+        builder.insert(key, value, key_lease, value_lease)?;
+        builder.finish()
+    }
+
     pub fn new(map: HashMap<String, PdfObject>) -> Self {
         Self { map, entries: None }
     }
@@ -216,6 +255,72 @@ impl PdfDict {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn budgeted_replacement_preserves_input_and_checks_dictionary_limits() {
+        use crate::{budget::OperationBudget, parser::options::Limits};
+        let pool = OperationBudget::new(65536);
+        let mut original = PdfDict::default();
+        original.insert("A".into(), PdfObject::PdfNull);
+        for limits in [
+            Limits {
+                max_depth: 0,
+                ..Default::default()
+            },
+            Limits {
+                max_depth: 1,
+                ..Default::default()
+            },
+            Limits {
+                max_objects: 0,
+                ..Default::default()
+            },
+            Limits {
+                max_objects: 1,
+                ..Default::default()
+            },
+            Limits {
+                max_token_bytes: 0,
+                ..Default::default()
+            },
+        ] {
+            assert!(matches!(
+                original.with_replaced_entry_with_budget("B", &PdfObject::PdfNull, &pool, limits),
+                Err(PdfError::ResourceLimit(_))
+            ));
+            assert_eq!(pool.live_bytes(), 0);
+            assert_eq!(original.into_iter().len(), 1);
+            assert_eq!(original.get("A"), Some(&PdfObject::PdfNull));
+            assert!(original.get("B").is_none());
+        }
+        let limits = Limits {
+            max_depth: 2,
+            max_objects: 1,
+            max_token_bytes: 1,
+            ..Default::default()
+        };
+        let (replacement, lease) = original
+            .with_replaced_entry_with_budget("A", &PdfObject::PdfNull, &pool, limits)
+            .unwrap();
+        assert_eq!(replacement, original);
+        assert!(lease.bytes() > 0);
+        assert_eq!(pool.live_bytes(), lease.bytes());
+        drop((replacement, lease));
+        assert_eq!(pool.live_bytes(), 0);
+        original.insert("Long".into(), PdfObject::PdfNull);
+        assert!(original
+            .with_replaced_entry_with_budget(
+                "B",
+                &PdfObject::PdfNull,
+                &pool,
+                Limits {
+                    max_token_bytes: 1,
+                    ..Default::default()
+                }
+            )
+            .is_err());
+        assert_eq!(pool.live_bytes(), 0);
+    }
+
     #[test]
     fn replace_existing_preserves_storage_and_rejects_missing_keys() {
         let mut map = PdfDict::default();

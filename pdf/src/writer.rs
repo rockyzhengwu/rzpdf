@@ -6,8 +6,8 @@ mod feature_versions;
 use crate::document::PdfDocument;
 use crate::error::{PdfError, PdfResult};
 use crate::objects::{
-    PdfObject, object_id::ObjectId, pdf_array::PdfArray, pdf_dict::PdfDict, pdf_name::PdfName,
-    pdf_stream::PdfStream, pdf_string::PdfString,
+    object_id::ObjectId, pdf_array::PdfArray, pdf_dict::PdfDict, pdf_name::PdfName,
+    pdf_stream::PdfStream, pdf_string::PdfString, PdfObject,
 };
 
 pub fn save_document<R: std::io::Read + std::io::Seek>(
@@ -206,7 +206,7 @@ fn prepare_document_output_object<R: std::io::Read + std::io::Seek>(
 ) -> PdfResult<PdfObject> {
     use crate::{
         document::save_options::StreamCompression,
-        objects::pdf_stream::{PdfStream, resolve_setting_reference},
+        objects::pdf_stream::{resolve_setting_reference, PdfStream},
     };
     if !matches!(compression, StreamCompression::FlateUnencoded) {
         return Ok(object);
@@ -624,10 +624,14 @@ fn write_stream(output: &mut Vec<u8>, stream: &PdfStream) -> PdfResult<()> {
 }
 
 fn serialized_name_length(name: &PdfName) -> PdfResult<usize> {
-    if name.bytes().contains(&0) {
+    serialized_name_bytes_length(name.bytes())
+}
+
+pub(crate) fn serialized_name_bytes_length(bytes: &[u8]) -> PdfResult<usize> {
+    if bytes.contains(&0) {
         return Err(PdfError::ObjectError("name contains zero byte".into()));
     }
-    name.bytes().iter().try_fold(1usize, |length, byte| {
+    bytes.iter().try_fold(1usize, |length, byte| {
         let escaped = !(33..=126).contains(byte) || b"()<>[]{}/%#".contains(byte);
         length
             .checked_add(if escaped { 3 } else { 1 })
@@ -645,14 +649,18 @@ fn serialized_string_length(string: &PdfString) -> PdfResult<usize> {
 }
 
 pub(crate) fn write_name(output: &mut Vec<u8>, name: &PdfName) -> PdfResult<()> {
-    let length = serialized_name_length(name)?;
+    write_name_bytes(output, name.bytes())
+}
+
+pub(crate) fn write_name_bytes(output: &mut Vec<u8>, bytes: &[u8]) -> PdfResult<()> {
+    let length = serialized_name_bytes_length(bytes)?;
     let escaped = |byte: u8| !(33..=126).contains(&byte) || b"()<>[]{}/%#".contains(&byte);
     output
         .try_reserve_exact(length)
         .map_err(|_| PdfError::ResourceLimit("serialized name allocation".into()))?;
     output.extend_from_slice(b"/");
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    for &byte in name.bytes() {
+    for &byte in bytes {
         if escaped(byte) {
             output.extend_from_slice(&[
                 b'#',
@@ -847,7 +855,7 @@ mod tests {
     fn trailer_direct_streams_are_rejected_before_writing_without_mutation() {
         use crate::{
             document::PdfDocument,
-            objects::{PdfObject, pdf_array::PdfArray, pdf_dict::PdfDict, pdf_stream::PdfStream},
+            objects::{pdf_array::PdfArray, pdf_dict::PdfDict, pdf_stream::PdfStream, PdfObject},
         };
         for nested in 0..3 {
             let doc = PdfDocument::new().unwrap();
@@ -926,7 +934,7 @@ mod tests {
     #[test]
     fn trailer_serialization_respects_remaining_output_budget() {
         use crate::{
-            objects::{PdfObject, pdf_dict::PdfDict, pdf_string::PdfString},
+            objects::{pdf_dict::PdfDict, pdf_string::PdfString, PdfObject},
             parser::options::Limits,
         };
         let limits = Limits::default();
@@ -957,7 +965,7 @@ mod tests {
 
     #[test]
     fn token_preflight_uses_exact_escaped_length_before_output() {
-        use crate::objects::{PdfObject, pdf_name::PdfName, pdf_string::PdfString};
+        use crate::objects::{pdf_name::PdfName, pdf_string::PdfString, PdfObject};
         let string = PdfObject::PdfString(PdfString::new((0..=255).collect(), false));
         let name = PdfObject::PdfName(PdfName::new("A /#中文".into()));
         for object in [string, name] {
@@ -979,7 +987,7 @@ mod tests {
     #[test]
     fn limited_serialization_bounds_nested_containers_and_stream_copy() {
         use crate::objects::{
-            PdfObject, pdf_array::PdfArray, pdf_dict::PdfDict, pdf_stream::PdfStream,
+            pdf_array::PdfArray, pdf_dict::PdfDict, pdf_stream::PdfStream, PdfObject,
         };
         let mut array = PdfArray::default();
         for _ in 0..20 {
@@ -1030,7 +1038,7 @@ mod tests {
     fn compression_budget_bounds_finish_bytes_and_input() {
         use crate::{
             document::save_options::StreamCompression,
-            objects::{PdfObject, pdf_dict::PdfDict, pdf_stream::PdfStream},
+            objects::{pdf_dict::PdfDict, pdf_stream::PdfStream, PdfObject},
             parser::options::Limits,
         };
         let empty = PdfObject::PdfStream(PdfStream::new(PdfDict::default(), Vec::new()));
@@ -1041,14 +1049,12 @@ mod tests {
             max_raw_stream_bytes: length,
             ..Default::default()
         };
-        assert!(
-            super::prepare_output_object_with_limits(
-                empty.clone(),
-                StreamCompression::FlateUnencoded,
-                limits
-            )
-            .is_ok()
-        );
+        assert!(super::prepare_output_object_with_limits(
+            empty.clone(),
+            StreamCompression::FlateUnencoded,
+            limits
+        )
+        .is_ok());
         assert!(matches!(
             super::prepare_output_object_with_limits(
                 empty,
@@ -1095,7 +1101,7 @@ mod tests {
     fn output_compression_preserves_encoded_streams_and_rejects_ambiguous_parameters() {
         use crate::{
             document::save_options::StreamCompression,
-            objects::{PdfObject, pdf_dict::PdfDict, pdf_name::PdfName, pdf_stream::PdfStream},
+            objects::{pdf_dict::PdfDict, pdf_name::PdfName, pdf_stream::PdfStream, PdfObject},
         };
         let mut dict = PdfDict::default();
         dict.try_insert(
@@ -1198,7 +1204,7 @@ mod tests {
     #[test]
     fn serialization_preflight_bounds_direct_nesting_and_nodes() {
         use crate::{
-            objects::{PdfObject, pdf_array::PdfArray},
+            objects::{pdf_array::PdfArray, PdfObject},
             parser::options::Limits,
         };
         let mut object = PdfObject::PdfNull;
@@ -1213,50 +1219,42 @@ mod tests {
             ..Default::default()
         };
         assert!(super::validate_serialization_graph(&object, limits).is_ok());
-        assert!(
-            super::validate_serialization_nodes(
-                std::iter::once((&object, 2)),
-                1,
-                Limits {
-                    max_depth: 5,
-                    max_objects: 5,
-                    ..limits
-                }
-            )
-            .is_ok()
-        );
-        assert!(
-            super::validate_serialization_nodes(
-                std::iter::once((&object, 2)),
-                1,
-                Limits {
-                    max_depth: 4,
-                    max_objects: 5,
-                    ..limits
-                }
-            )
-            .is_err()
-        );
-        assert!(
-            super::validate_serialization_graph(
-                &object,
-                Limits {
-                    max_depth: 3,
-                    ..limits
-                }
-            )
-            .is_err()
-        );
-        assert!(
-            super::validate_serialization_graph(
-                &object,
-                Limits {
-                    max_objects: 3,
-                    ..limits
-                }
-            )
-            .is_err()
-        );
+        assert!(super::validate_serialization_nodes(
+            std::iter::once((&object, 2)),
+            1,
+            Limits {
+                max_depth: 5,
+                max_objects: 5,
+                ..limits
+            }
+        )
+        .is_ok());
+        assert!(super::validate_serialization_nodes(
+            std::iter::once((&object, 2)),
+            1,
+            Limits {
+                max_depth: 4,
+                max_objects: 5,
+                ..limits
+            }
+        )
+        .is_err());
+        assert!(super::validate_serialization_graph(
+            &object,
+            Limits {
+                max_depth: 3,
+                ..limits
+            }
+        )
+        .is_err());
+        assert!(super::validate_serialization_graph(
+            &object,
+            Limits {
+                max_objects: 3,
+                ..limits
+            }
+        )
+        .is_err());
     }
     #[test]
     fn xref_output_checks_sparse_slot_count_before_allocation() {
@@ -1323,8 +1321,8 @@ mod tests {
     use crate::{
         document::PdfDocument,
         objects::{
-            PdfObject, pdf_array::PdfArray, pdf_dict::PdfDict, pdf_name::PdfName,
-            pdf_number::PdfNumber, pdf_reference::PdfReference, pdf_string::PdfString,
+            pdf_array::PdfArray, pdf_dict::PdfDict, pdf_name::PdfName, pdf_number::PdfNumber,
+            pdf_reference::PdfReference, pdf_string::PdfString, PdfObject,
         },
         page::content_builder::ContentBuilder,
     };
@@ -2343,11 +2341,9 @@ mod tests {
                 panic!("Expected path");
             };
             assert_eq!(first.graphic_state().clip_path.elements().len(), 1);
-            assert!(
-                first.graphic_state().clip_path.elements()[0]
-                    .path
-                    .is_empty()
-            );
+            assert!(first.graphic_state().clip_path.elements()[0]
+                .path
+                .is_empty());
             let PageObject::Path(second) = &list.objects()[1] else {
                 panic!("Expected path");
             };
@@ -2384,14 +2380,13 @@ mod tests {
         assert_eq!((curve.p1().x(), curve.p1().y()), (10.0, 20.0));
         doc.replace_page_contents(index, b"10 20 m 30 40 l n S".to_vec())
             .unwrap();
-        assert!(
-            doc.get_page(index)
-                .unwrap()
-                .display_list()
-                .unwrap()
-                .objects()
-                .is_empty()
-        );
+        assert!(doc
+            .get_page(index)
+            .unwrap()
+            .display_list()
+            .unwrap()
+            .objects()
+            .is_empty());
     }
 
     #[test]

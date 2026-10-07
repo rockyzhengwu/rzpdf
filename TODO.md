@@ -41,10 +41,14 @@
       - [x] 字体构造双结果共存：Courier/Helvetica分别在共享门槛内成功，保留Courier再构造Helvetica时合计峰值超限拒绝；仅保留首字体额度，释放后第二字体重试成功。此项不代替资源/顶层编辑共存与全链路unwind验收。
       - [x] 页面资源字体结果共存与unwind：两页Courier/Helvetica经资源解析在同池共存，合计超限不影响首结果，释放后重试恢复；两个结果同时unwind归零，页面内容不变。此项不代替顶层编辑提交失败及全链路验收。
       - [x] 字体/编码所有者跨内容提交与外层回滚：Tj/TJ同池保留编码字体所有者直到提交返回，外层错误/unwind恢复源字节及流对象，邻居额度不变，旧快照失效后新快照同池重试成功。覆盖共享内部提交路径，不代表所有公开入口及全部失败点完成。
-    - [ ] 嵌套Form文字编辑同池贯通：原始Form解码/程序解析、页面资源与继承字体、编码、叶节点重建已同池，准备链槽位及Form字典/资源复制、父Form复制/根内容重建与事务快照尚未贯通；继续接入并验证共享峰值拒绝、失败/unwind恢复及新快照重试。
+    - [ ] 嵌套Form文字编辑同池贯通：准备链/循环检测槽位、XObject/Form拥有副本及预检、原始Form解码/程序解析、页面资源与继承字体、prepared副本、局部XObject绑定/Form.Resources重建、编码、叶节点重建已同池，首次源缓存、页根资源注册增长、父Form复制/根内容重建与事务快照尚未贯通；继续接入并验证共享峰值拒绝、失败/unwind恢复及新快照重试。
       - [x] 嵌套文字叶节点重建：整字符串/单TJ项/字符串范围/TJ跨项范围重建同池返回BudgetedContentProgram，commit_nested_edit借用所有者保留租约至事务结束；精确峰值少1拒绝且文档/资源不变，释放后短文本重试恢复。此项不代表父Form复制与完整提交预算。
       - [x] 嵌套继承字体所有者：页面资源同池解析，BudgetedFont逐流移动并合并新前缀构造额度，q/Q恢复继承字体不深Clone；错误/异池拒绝/unwind释放，结果持有期间额度保留。原始Form链及prepared资源副本仍未计费。
       - [x] 原始Form解码/程序解析：预算解码字节直接移交ContentProgram预算解析，PreparedProgram保留源码/边界表/操作表/递归操作数租约，Unicode准备链实际接入；异池拒绝、精确峰值门槛、解析失败及unwind清理已验证。此项不覆盖链槽位、Form字典/资源复制及首次源缓存。
+      - [x] 准备链/循环检测槽位：分配前按PreparedForm/ObjectId槽位预留，按实际capacity校准；BudgetedFormChain与双端迭代器保持槽位租约直到Vec实际释放，部分/耗尽反向迭代与unwind不提前归还额度。Form字典/资源堆数据仍未计费。
+      - [x] prepared字典/有效资源副本：使用分配前预算克隆，PreparedForm持有副本租约，取出Form并释放链迭代器后额度不归零，提交时汇入外层租约保留至事务返回。页面资源准备同池，并去除重复工作资源克隆；Form预检临时分配与复制时资源增长仍未计费。
+      - [x] Form预检与拥有副本：普通/预算共享字段验证核心，预算对象/引用数组/数值/Resources/Group分配前预留，BBox/Matrix数值采用栈数组；返回仅保留资源/Group租约。准备链XObject/Form对象解析已同池，首次源缓存仍未计费；间接字段、null语义、错误类型、峰值拒绝及unwind清理已验收。
+      - [x] 局部XObject绑定/Form.Resources重建：预算字典替换先克隆保留值与新值、再原子交换，覆盖键/表扩容旧新共存；FmEdit名称由栈缓冲生成后预算复制，返回租约保留至事务返回。验证碰撞命名、峰值拒绝原字典不变、释放恢复/unwind及深度/键长/条目限制；页根注册、父/根程序和流输出仍待接入。
   - [ ] 解码/图片/事务克隆按容量与共存峰值计费，明确持久缓存转移及保留额度。
   - [ ] 保存/渲染接入，验证返回转移、扩容共存、失败/unwind释放及原生后端未计费边界。顺序与验收细节见docs/architecture.md的AR-03小节。
 - [ ] AR-04（A3 / P1-06、P1-08）明确原始编码流与修改后解码内容的状态转换，统一 Filter/DecodeParms/Length 和有效版本策略。验收：未修改流保留编码，修改流字典与字节一致，Header/Catalog/功能最低版本无冲突。
@@ -85,6 +89,18 @@ P0 的普通回归、错误处理、预算和真实样本登记贯穿上述工�
 执行约束：不新增或运行 fuzz，不接入 fuzz CI，不删除已有 fuzz 文件；常规单元、集成、像素回归和合法样本验证继续。每项仅在其验收条件达成后勾选，不因暂缓 fuzz 将完整项目标记完成。
 
 ### 实施记录
+
+- 2026-10-07 本次提交验证：pdf单元469项及content_edit_transaction、nested_text_edit、nested_path_edit、nested_image_edit合计19项集成全部通过，0忽略；git diff --check通过。未运行全工作区测试或fuzz，不代表完整AR-03验收。
+
+- 2026-10-07 提交准备：嵌套Unicode提交接入父/根程序重建、转义Do输出、复制流载荷/字典及外层和内部内容事务快照载荷预算。无序对象存储的快照遍历可能改变临时峰值，组合测试以确定性重建下界验证拒绝、以充足额度验证公共提交；不再宣称跨独立文档的完整事务精确门槛，固定快照峰值也不保证缩短文字即可成功。页根资源注册内部普通分配、HashMap桶及首次源缓存等仍未覆盖，AR-03未完成；fuzz继续暂缓。提交排除未确认用途的test.png，不推送远端。
+
+- 2026-10-07 局部XObject绑定与Form.Resources重建预算：新增预算字典替换构建器，预算克隆保留值/替换值及键，覆盖构建/最终表共存并检查深度、键长、条目限制，失败不改原字典；局部FmEdit名称由栈缓冲生成、查重后预算复制，分类字典解析、绑定表与资源父字典重建同池。Unicode提交使用预算变体，Form.Resources亦预算重建，新增租约与prepared副本额度一起保留至外层事务返回。新增碰撞命名/普通结果一致、共同峰值少1原子拒绝、释放恢复/unwind、字典限制失败清理；已有精确峰值测试扩展到实际资源提交，提交内拒绝允许事务修订号推进但内容/资源回滚，新快照短文本重试成功。cargo test -p pdf --lib --test content_edit_transaction --test nested_text_edit --test nested_path_edit --test nested_image_edit --locked --quiet退出0，468单元＋19编辑集成通过，git diff --check通过。页根资源注册、form_do/父根程序重建、复制流及事务快照仍待贯通，AR-03未完成，fuzz暂缓，本轮未另行提交。
+
+- 2026-10-07 Form预检与XObject/Form拥有解析预算：PdfForm普通/预算共用验证核心，ResolvedFormObject将对象/租约一起持有，全部预检字段预算拥有解析；BBox/Matrix采用栈数值数组，保持有限值、坐标规范化、字段类型/长度规则，Resources/Group直接移交解析结果，仅其额度保留到返回。准备链分类字典及Form对象解析同池，预检结果额度覆盖prepared副本构造。新增间接字段及逐数值引用、BBox规范化/矩阵/资源/Group结果一致、nullable语义、六字段错误类型一致、峰值少1拒绝/恢复和unwind释放测试。cargo test -p pdf --lib --test content_edit_transaction --test nested_text_edit --test nested_path_edit --test nested_image_edit --locked --quiet退出0，466单元＋19编辑集成通过；cargo test -p render --lib --locked --quiet退出0，30渲染单元通过；git diff --check通过。首次源缓存、复制时资源增长、父/根重建、复制流与事务快照仍待贯通，AR-03未完成，fuzz暂缓，本轮未另行提交。
+
+- 2026-10-07 prepared Form字典/有效资源副本预算：页面资源准备同池，后继调用借用上一prepared资源，移除重复工作克隆；最终字典与资源使用clone_dict_with_budget分配前预留，副本租约置于PreparedForm末字段。提交前汇入外层retained_copies保留到事务返回，已移交持久文档的数据不作为常驻内存继续计费。新增取出Form/释放迭代器后副本额度仍保留、字典/资源内容一致、丢弃/unwind与邻居额度保持测试，真实Form准备结果检查非零副本租约，并纳入实测峰值门槛。cargo test -p pdf --lib --test content_edit_transaction --test nested_text_edit --test nested_path_edit --test nested_image_edit --locked --quiet退出0，465单元＋3事务＋6嵌套文字＋8嵌套路径＋2嵌套图片集成通过，git diff --check通过。Form预检临时对象/资源副本、复制时资源增长、父/根重建、流输出及事务快照仍待贯通，AR-03未完成，fuzz暂缓，本轮未另行提交。
+
+- 2026-10-07 Form准备链与循环检测槽位预算：链Vec与seen数组在分配前checked_mul元素大小预留，按实际capacity校准；BudgetedFormChain返回Vec与槽位所有者，BudgetedFormIter在双端/反向消费中保持租约至数组实际销毁，commit_nested_edit兼容普通/预算迭代器。新增部分反向消费、耗尽但数组仍保留、丢弃/unwind及邻居额度保持测试，嵌套编辑实测峰值同时计入新槽位。cargo test -p pdf --lib --locked --quiet退出0，最新464项单元通过；选定content_edit_transaction/nested_text_edit/nested_path_edit/nested_image_edit回归退出0，3＋6＋8＋2共19项集成通过；git diff --check通过。仅勾选槽位子项，不代表Form预检/字典/资源堆数据、父/根重建、复制事务及完整AR-03验收；fuzz继续暂缓。本轮改动尚未另行提交。
 
 - 2026-10-07 原始Form解码/程序解析预算验收与阶段快照：Unicode准备链实际使用预算解码及from_decoded_bytes_with_budget，源码不复制、解析结果携带边界/操作/递归操作数租约，由PreparedProgram保留至提交。新增普通/预算源码与操作边界一致、峰值少1拒绝、短程序恢复、解析失败/异池拒绝/unwind清理；嵌套编辑精确峰值探测同步计入准备链额度。最近完成的cargo test -p pdf --lib --test content_edit_transaction --test nested_text_edit --test nested_path_edit --test nested_image_edit --locked --quiet退出0，463单元＋3事务＋6嵌套文字＋8嵌套路径＋2嵌套图片集成通过；此为所选回归，不代表当前全工作区验收。准备链槽位、Form预检/字典/资源副本、父/根重建及复制事务仍待接入，AR-03未完成；fuzz暂缓且保留既有文件。阶段快照排除target/output/tmp与未确认用途的test.png，不删除本地文件。
 

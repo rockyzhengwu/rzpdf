@@ -1003,7 +1003,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         self.commit_page_content_edit_inner(page, expected, Some(budget), edit)
     }
 
-    fn commit_page_content_edit_inner<E: AsRef<ContentProgram>>(
+    pub(super) fn commit_page_content_edit_inner<E: AsRef<ContentProgram>>(
         &self,
         page: u32,
         expected: &ContentProgram,
