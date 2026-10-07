@@ -152,6 +152,10 @@ Info/XMP 默认独立编辑，不自动修改另一侧。`set_info_and_metadata(
 
 标准字体可用 `StandardFont::Helvetica.encode_text("Café €")?` 将可表示的 Unicode 转为 WinAnsi 字符码，再传给 `show_encoded_text`。无法表示的字符与控制字符返回错误，不替换成问号；不做 Unicode 归一化，也不支持中文。
 
+颜色空间对象可通过 `document.resources().register_handle(page_index, ResourceKind::ColorSpace, &handle)?` 注册，返回如 `CS1` 的页内名称，用于内容中的 `cs/CS`；名称冲突会避让，同一对象已有绑定会复用。注册校验颜色空间解析，不保证所有颜色空间都可转换/渲染。`import_resource_from(&source, &handle, ResourceKind::ColorSpace)` 可先复制跨文档颜色空间对象图，再注册返回的目标文档句柄；不要直接注册外文档句柄。新增枚举分支可能需要下游穷举match同步增加ColorSpace处理。
+
+也可直接调用 `document.resources().register_color_space(page_index, color_space_object)?`，原子创建/注册对象并复用页内相等值；间接根会先在当前文档解析。比较是PDF对象值相等，不进行不同对象图的语义等价推断。内部裸引用必须属于当前文档，跨文档请使用上述导入与句柄注册路径。
+
 `encode_text_with_limits(text, limits)` 在分配前限制字符数和编码输出字节；`encode_text` 使用默认 Limits。该额度按编码后的一字节字符计，不按输入 UTF-8 字节计。
 
 `document.save_to_writer(&mut output)?` 支持任意实现 Write 的输出：先完整序列化，再处理短写直至完成，不主动 flush/close。I/O 失败可能留下部分输出；当前仍在内存构造完整 PDF，不是流式节省内存的保存。
@@ -171,6 +175,12 @@ SaveOptions 位于 `pdf::document::save_options`；`save_to_bytes/writer/file_wi
 读取可通过 `ParseOptions` 设置 `Limits`；Skia 渲染可用 `SkiaRender::with_limits(xdpi, ydpi, limits)` 复用限制配置。页面表面由 `max_render_pixels` 和 `max_render_bytes` 限制，与嵌入图像的 `max_image_pixels` 分开；这些限额不等于整个进程的峰值内存预算。
 
 > **Note:** This library is currently under active development. Several features, such as Pattern colorspaces and Type3 fonts, are not yet implemented.
+
+PDF Type 3 **Stitching functions**（不同于 Type3 字体）已支持单输入分段求值、Domain 裁剪、正向/反向 Encode、可选 Range 输出裁剪及嵌套函数；构造时校验子函数输入/输出维度，并保留深度和总节点限额。Type 4 PostScript 函数求值仍明确返回不支持。此功能不代表 Shading/Pattern 或操作级聚合内存预算已经完成。
+
+Type 4 构造支持间接 Domain/Range 及数组内间接数值，先检查非空成对、有限有序参数和每数组条目/字节上限，再解码函数流；构造成功不代表代码已解析或可执行。数组检查仍是单项 Limits，不是两个参数数组与流解码的聚合内存预算。
+
+Lab 已支持零 BlackPoint 的颜色转换：L/a/b 按定义域裁剪，经 XYZ 与 Bradford 白点适配到 D65，再使用 sRGB 传递函数和通道裁剪。非零 BlackPoint 补偿仍返回 UnsupportedFeature；不能适配的白点返回 ColorError。当前是固定 sRGB 显示策略，不包含 OutputIntent/ICC 渲染意图或感知色域映射，也未统一 CalRGB/CalGray 的现有转换策略。
 
 ---
 

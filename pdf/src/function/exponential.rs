@@ -72,6 +72,10 @@ mod tests {
 }
 
 impl Exponential {
+    pub(super) fn dimensions(&self) -> (usize, usize) {
+        (self.m, self.n)
+    }
+
     pub fn try_new<R: Seek + Read>(obj: &PdfObject, ctx: &PDFContext<R>) -> PdfResult<Self> {
         let obj = ctx.resolve(obj)?;
         let dict = obj

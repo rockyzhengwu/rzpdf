@@ -93,6 +93,30 @@ P0 的普通回归、错误处理、预算和真实样本登记贯穿上述工�
 
 ### 实施记录
 
+- 2026-10-07 直接颜色注册对象额度边界：新增max_objects=16固定文档填满对象额度的回归，已有DeviceRGB值重复注册仍复用CS1且不改修订；新DeviceGray两次注册均ResourceLimit拒绝、页资源表及原颜色保持，失败后仍可复用CS1。color_workflow10项全部通过、0失败/忽略，退出码0，git diff --check通过。本轮仅回归/文档，不改生产代码；未重跑单元/全工作区/独立视觉验证，未提交。对象数量门槛不是操作级活跃内存预算，fuzz暂缓。
+
+- 2026-10-07 P1-03颜色空间直接构建入口：新增register_color_space(page_index, PdfObject)，校验页面/颜色空间、解析间接根，在当前继承页作用域中复用相等颜色值与确定性最小名称，否则事务化创建间接对象并注册；内部裸引用仍由调用方保证属于当前文档，跨文档使用导入/句柄入口。新增重复值/间接根复用不改修订、非法值/页面无状态修改、外层失败恢复字节与名称、短值重试及严格重开回归。pdf单元516项、color_workflow9项、resources14项全部通过、0失败/忽略，退出码0，git diff --check通过。README/测试文档同步；未重跑全工作区/独立视觉验证，未提交，fuzz暂缓；P1-03与聚合预算仍未整体完成。
+
+- 2026-10-07 颜色空间导入失败边界：新增非法Lab白点在复制前拒绝、max_objects=4下间接参数图复制中途超限的重复失败回归；每次目标保存字节恢复、源文档不变，随后较小DeviceRGB资源导入成功且下一对象号恢复为3，严格重开保留该对象。color_workflow8项全部通过、0失败/忽略，退出码0，git diff --check通过。本轮仅集成回归/文档，未改生产代码、未重跑单元/全工作区/独立视觉验证，未提交；图节点限制不等于操作级活跃内存预算，fuzz暂缓。
+
+- 2026-10-07 P1-03/P2-04颜色空间资源注册与导入：ResourceKind增加ColorSpace，register_existing/register_handle经ColorSpace解析校验后写入页ColorSpace类别，使用CS前缀避让名称、同对象复用，复用现有事务和共享资源表复制后修改。import_resource_from支持名称/数组颜色空间根及间接参数图，保留文档身份/版本/加密前置规则；原Font/Image/Form类型约束保持。新增名称冲突/重复绑定不改修订、共享表隔离、外文档句柄拒绝、Lab间接参数导入/源修改隔离、同文档复用、非法注册与外层失败回滚和严格重开回归3项。pdf单元516项、color_workflow7项、resources14项全部通过、0失败/忽略，退出码0，git diff --check通过。README/架构/测试文档同步；下游穷举ResourceKind需补ColorSpace分支，解析注册不代表全部颜色空间可渲染。未重跑全工作区/独立视觉验证，未提交，fuzz暂缓；P1-03/P2-04及聚合预算仍未整体完成。
+
+- 2026-10-07 P0-08 Lab数组标识校验：直接/上下文Lab构造入口在解释参数前要求首项为Lab名称，上下文入口解析间接名称，避免将DeviceRGB/CalRGB等错误数组按Lab处理；参数字典入口保持兼容。新增名称/类型拒绝、正确直接/间接名称、低层名称修改、引用成环与恢复回归；pdf单元516项与color_workflow集成4项全部通过、0失败/忽略，命令退出码0，git diff --check通过。未重跑全工作区或独立视觉验证，前轮775项完整通过不是本次变更的全量验证；未提交，fuzz暂缓。
+
+- 2026-10-07 共享颜色函数修订可见性：color_workflow新增源文档冷打开后两页共享间接Stitching函数的低层修改回归；先加载两页蓝色结果，修改函数后旧stamp失效、新页面读取同时变红，已有DisplayList仍是拥有蓝色数据的旧快照，保存严格重开两页保持红色。color_workflow目标4项全部通过、0失败/忽略，git diff --check通过。本轮仅新增集成回归及文档，不改生产代码；没有重跑全工作区，前轮775项通过记录不包含本次新增用例；未独立视觉验证、未提交，fuzz暂缓。
+
+- 2026-10-07 本地完整工作区再验收：cargo test --workspace --locked --quiet同一次进程最终退出码0；pdf单元515项、39个pdf集成目标合计230项、render测试30项，合计775项全部通过，0失败/忽略，零测试目标亦正常结束。平台Darwin x86_64，rustc 1.96.0 (ac68faa20 2026-05-25)、cargo 1.96.0 (30a34c682 2026-05-25)，git diff --check通过。覆盖最新函数/颜色及保存等当前工作区回归；未运行独立fuzz工作区、未触发远端CI或独立阅读器视觉检查，未提交。编译仍有未使用项及本机cargo配置弃用警告，普通CI的Ubuntu原生依赖/远端结果未验收，P0-01及总体仍未完成。
+
+- 2026-10-07 P4-03颜色公共工作流回归：新增color_workflow集成目标，PageBuilder页资源中的Lab/Separation-Stitching经内容解释和DisplayList设备回放校验灰/蓝/白填充描边、q/Q颜色恢复；Preserve/FlateUnencoded保存严格重开颜色保持，复制页编辑不影响原页，不支持的非零BlackPoint在设备回放时停止后续绘制。首次编译误给按值SaveOptions传引用，修正后3项全部通过、0失败/忽略，退出码0，git diff --check通过。本轮生产代码未改，未重跑单元/全工作区或独立阅读器视觉验证，未提交；低层RGB转换与自定义设备测试不代表完整ICC/渲染验收，P4-03仍未完成，fuzz暂缓。
+
+- 2026-10-07 P0-08/P0-10 Lab参数路径收口：上下文构造复用校准颜色固定数组读取器，在3/4项长度检查后再解析成员，不再逐成员重建PdfArray及回写参数字典；直接/上下文入口共享白点/黑点/Range验证。新增畸形长度数组包含循环引用时优先ColorError，以及两个入口默认值/合法参数/错误验证一致回归2项；最终pdf单元515项全部通过、0失败/忽略，git diff --check通过。普通resolve仍可能分配拥有副本，本项不是完整OperationBudget；未运行集成目标/全工作区/独立视觉验证，未提交，fuzz暂缓。
+
+- 2026-10-07 P4-03 Lab颜色转换：零BlackPoint的Lab已从明确不支持改为L/a/b域裁剪、CIE Lab到XYZ、Bradford白点适配到D65、sRGB传递及通道裁剪，全部矩阵/中间值使用f64栈数组；非零BlackPoint补偿仍明确UnsupportedFeature，不可适配白点返回ColorError。新增5项灰阶/D50-D65及等能白点、RGB主色、输入/Range裁剪、异常与间接颜色空间保存严格重开回归；最终pdf单元513项全部通过、0失败/忽略，git diff --check通过。README/架构/测试文档记录固定显示策略与未完成边界；未运行独立阅读器/视觉验证、集成目标或全工作区，未提交。ICC意图/BlackPoint补偿/感知色域映射及CalRGB/CalGray策略统一仍待实施，P4-03保持未完成，fuzz暂缓。
+
+- 2026-10-07 P0-08/P0-10 Type4参数构造补充：Domain/Range及数组成员均解析间接引用，非空成对/有限有序、数组条目和请求字节上限在函数流解码前检查，分配使用try_reserve_exact；明确不支持求值的路径不再无用分配100槽位。新增间接参数保存严格重开、非法参数优先拒绝、精确字节/条目门槛、解码失败重试及循环引用回归4项；首轮误将未知滤镜错误断言为UnsupportedFeature，已按既有FilterError契约修正。最终pdf单元508项全部通过，0失败/忽略，git diff --check通过；README/测试文档同步。Type4代码仍未解析/执行，参数与解码仍是单项Limits而非操作聚合预算，P0/P4主项不勾选；未运行集成目标/全工作区/独立阅读器，未提交，fuzz暂缓。
+
+- 2026-10-07 P4-03 Stitching函数实现与P0构造校验补充：Type3从明确不支持改为单输入分段求值，Domain裁剪、右侧区间边界、反向Encode、可选Range裁剪、嵌套子函数及末界等于Domain上界的单点区间已实现；插值采用f64中间计算。内部Function维度查询使构造时拒绝多输入子函数、输出维度不匹配和非法Range，保留深度/总节点预算。新增6项函数回归与1项Separation RGB转换保存严格重开回归；首轮宽域样本误用PDF不支持的指数数字语法，已改为完整十进制，最终pdf单元504项全部通过，0失败/忽略，git diff --check通过。README/测试文档同步；未重跑独立渲染、集成目标或全工作区，未提交。Type4求值、Shading/Pattern及函数聚合内存仍未完成，P0/P4主任务保持未完成，fuzz暂缓。
+
 - 2026-10-07 本地提交前验证：pdf单元497项，以及page_transfer_edit、page_rotation、page_revision、create_document、stream_edit、stream_structure、feature_versions、structural_rewrite、owned_document九集成目标合计42项全部通过，0失败/忽略，命令退出码0；git diff --check通过。提交本轮保存预算、原子保存清理、页面组合回归及计划/架构/测试文档，不包含来源未确认的test.png，不推送远端。未运行全工作区测试及fuzz，AR-03与总体目标仍未完成。
 
 - 2026-10-07 页面转移组合回归：新增“重排 → 跨文档导入 → 复制页编辑 → 严格重开”测试，验证CropBox/Rotate/UserUnit对应的页面尺寸、字符位置及书写轴保留；无效重排与旧内容快照拒绝不改状态，编辑副本不影响源文档和其他页。仅覆盖固定Helvetica样本，不代表P2或完整继承属性矩阵验收，fuzz仍暂缓。
@@ -1527,6 +1551,8 @@ P0 的普通回归、错误处理、预算和真实样本登记贯穿上述工�
 - [ ] P4-01 完成内联图像边界识别与解码，避免将图像数据中的 EI 误判为结束。
 - [ ] P4-02 完成 Type3、字体编码回退、复杂 CJK/竖排和更多 TrueType cmap 格式。
 - [ ] P4-03 完成 Pattern、Shading、Lab/ICC 等颜色和 PDF 函数实现。
+  - [x] 零BlackPoint的Lab数值转换：白点适配到D65的固定sRGB策略、输入/Range裁剪、灰阶/主色及间接参数严格往返已验证；完整颜色管理与独立视觉矩阵仍未验收。
+  - [x] Type3 Stitching单输入分段求值与构造维度校验：Domain/Encode/Range、嵌套/间接参数、端点与错误回归及Separation颜色转换保存重开已验证；不表示Type4、Shading/Pattern或聚合内存验收完成。
 - [ ] P4-04 完成 ExtGState、透明组、软蒙版、混合模式与文字渲染模式；扩展 Device/DisplayList 事件。
 - [ ] P4-05 评估并接入进程内 JPX/JBIG2 解码后端，记录许可、构建成本与支持范围。
 - [ ] P4-06 完善损坏文件恢复和混合版本链解析；恢复产生诊断，不静默掩盖错误。

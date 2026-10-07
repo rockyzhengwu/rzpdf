@@ -1,7 +1,7 @@
 use super::PdfDocument;
 use crate::{
     error::{PdfError, PdfResult},
-    objects::{object_id::ObjectId, pdf_dict::PdfDict, pdf_reference::PdfReference, PdfObject},
+    objects::{PdfObject, object_id::ObjectId, pdf_dict::PdfDict, pdf_reference::PdfReference},
 };
 use std::io::{Read, Seek};
 
@@ -10,6 +10,7 @@ pub enum ResourceKind {
     Font,
     Image,
     Form,
+    ColorSpace,
 }
 
 /// Unembedded standard Latin fonts. Unicode text still needs font-specific encoding.
@@ -601,6 +602,49 @@ impl<R: Read + Seek> ResourceManager<'_, R> {
         doc.edit_transaction(|doc| doc.update_object(location.page_id, PdfObject::PdfDict(page)))
     }
 
+    /// Register a color-space value, reusing an exactly equal value in this
+    /// page's resource scope. References inside the value must belong to this
+    /// document; use import_resource_from for foreign object graphs.
+    pub fn register_color_space(&self, page_index: u32, object: PdfObject) -> PdfResult<String> {
+        self.document.edit_transaction(|doc| {
+            let location = doc.page_location(page_index)?;
+            let object = if object.as_reference().is_some() {
+                doc.ctx.resolve_owned(&object)?
+            } else {
+                object
+            };
+            crate::color::colorspace::ColorSpace::try_new(&object, &doc.ctx)?;
+            if let Some(resources) = super::page_tree::PageTree::inherited_attribute(
+                &doc.ctx,
+                &PdfObject::PdfReference(PdfReference::from_id(location.page_id)),
+                "Resources",
+            )? {
+                let resources = resources
+                    .into_dict()
+                    .ok_or(PdfError::PageResourcesIsNotDict)?;
+                if let Some(entries) = resources.get("ColorSpace") {
+                    let entries = doc.ctx.resolve(entries)?.into_dict().ok_or_else(|| {
+                        PdfError::ObjectError("color space resources must be a dictionary".into())
+                    })?;
+                    let mut reused: Option<&String> = None;
+                    for (name, value) in &entries {
+                        if doc.ctx.resolve(value)? == object
+                            && reused.is_none_or(|previous| name < previous)
+                        {
+                            reused = Some(name);
+                        }
+                    }
+                    if let Some(name) = reused {
+                        return Ok(name.clone());
+                    }
+                }
+            }
+            let id = doc.try_insert_object(object)?;
+            doc.resources()
+                .register_existing(page_index, ResourceKind::ColorSpace, id)
+        })
+    }
+
     /// Register a scoped address, rejecting foreign documents before editing.
     pub fn register_handle(
         &self,
@@ -624,6 +668,10 @@ impl<R: Read + Seek> ResourceManager<'_, R> {
         doc.edit_transaction(|doc| {
             let object = doc.resolve_object(id)?;
             let (category, prefix) = match kind {
+                ResourceKind::ColorSpace => {
+                    crate::color::colorspace::ColorSpace::try_new(&object, &doc.ctx)?;
+                    ("ColorSpace", "CS")
+                }
                 ResourceKind::Form => {
                     crate::page::pdf_form::PdfForm::try_new(&object, &doc.ctx)?;
                     ("XObject", "Fm")

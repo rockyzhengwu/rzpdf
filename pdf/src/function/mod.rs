@@ -80,6 +80,15 @@ pub(crate) fn create_function_at_depth<R: Seek + Read>(
 }
 
 impl Function {
+    pub(crate) fn dimensions(&self) -> (usize, usize) {
+        match self {
+            Self::Type0(f) => f.dimensions(),
+            Self::Type2(f) => f.dimensions(),
+            Self::Type3(f) => f.dimensions(),
+            Self::Type4(f) => f.dimensions(),
+        }
+    }
+
     pub fn eval(&self, inputs: &[f32]) -> PdfResult<Vec<f32>> {
         match self {
             Function::Type0(f) => f.eval(inputs),

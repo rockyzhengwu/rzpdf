@@ -1,9 +1,9 @@
-use super::{identity::ObjectHandle, resource_manager::ResourceKind, PdfDocument};
+use super::{PdfDocument, identity::ObjectHandle, resource_manager::ResourceKind};
 use crate::{
     error::{PdfError, PdfResult},
     objects::{
-        object_id::ObjectId, pdf_array::PdfArray, pdf_dict::PdfDict, pdf_reference::PdfReference,
-        pdf_stream::PdfStream, PdfObject,
+        PdfObject, object_id::ObjectId, pdf_array::PdfArray, pdf_dict::PdfDict,
+        pdf_reference::PdfReference, pdf_stream::PdfStream,
     },
 };
 use std::{
@@ -356,25 +356,28 @@ impl<T: Read + Seek> PdfDocument<T> {
             ));
         }
         let object = source.resolve_object(id)?;
-        let dict = match &object {
-            PdfObject::PdfDict(dict) => dict,
-            PdfObject::PdfStream(stream) => stream.dict(),
-            _ => {
-                return Err(PdfError::ObjectError(
-                    "Imported resource must be dictionary or stream".into(),
-                ));
-            }
+        let dict = || match &object {
+            PdfObject::PdfDict(dict) => Ok(dict),
+            PdfObject::PdfStream(stream) => Ok(stream.dict()),
+            _ => Err(PdfError::ObjectError(
+                "Imported resource must be dictionary or stream".into(),
+            )),
         };
         let valid = match kind {
+            ResourceKind::ColorSpace => {
+                crate::color::colorspace::ColorSpace::try_new(&object, source.ctx())?;
+                true
+            }
             ResourceKind::Form => {
+                dict()?;
                 crate::page::pdf_form::PdfForm::try_new(&object, source.ctx())?;
                 true
             }
-            ResourceKind::Font => dict
+            ResourceKind::Font => dict()?
                 .get("Type")
                 .and_then(PdfObject::as_name)
                 .is_some_and(|name| name.name() == "Font"),
-            ResourceKind::Image => dict
+            ResourceKind::Image => dict()?
                 .get("Subtype")
                 .and_then(PdfObject::as_name)
                 .is_some_and(|name| name.name() == "Image"),
@@ -442,12 +445,14 @@ mod tests {
         assert_eq!(source.version(), "1.7");
         let extracted = source.extract_pages(&[0]).unwrap();
         assert_eq!(extracted.version(), "2.0");
-        assert!(extracted
-            .save_to_bytes_with_options(SaveOptions {
-                version: Some(PdfVersion::V1_7),
-                ..Default::default()
-            })
-            .is_err());
+        assert!(
+            extracted
+                .save_to_bytes_with_options(SaveOptions {
+                    version: Some(PdfVersion::V1_7),
+                    ..Default::default()
+                })
+                .is_err()
+        );
     }
     #[test]
     fn merge_and_extract_keep_order_identity_and_source_options() {
@@ -568,10 +573,12 @@ mod tests {
         assert!(target.import_pages_from(&source, &[0, 0], 0).is_err());
         assert!(target.import_pages_from(&source, &[2], 0).is_err());
         assert!(target.import_pages_from(&source, &[0], 4).is_err());
-        assert!(target
-            .import_pages_from(&source, &[], 0)
-            .unwrap()
-            .is_empty());
+        assert!(
+            target
+                .import_pages_from(&source, &[], 0)
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(target.revision(), revision);
         let isolated = PdfDocument::new().unwrap();
         assert!(isolated.import_page_from(&source, 0, 0).is_err());
@@ -763,9 +770,11 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        assert!(limited
-            .import_resource_from(&source, &handle, ResourceKind::Font)
-            .is_err());
+        assert!(
+            limited
+                .import_resource_from(&source, &handle, ResourceKind::Font)
+                .is_err()
+        );
         assert_eq!(
             limited
                 .try_insert_object(PdfObject::PdfNull)
@@ -838,12 +847,16 @@ mod tests {
         );
         let other = PdfDocument::new().unwrap();
         let revision = other.revision();
-        assert!(other
-            .import_resource_from(&target, &handle, ResourceKind::Font)
-            .is_err());
-        assert!(other
-            .import_resource_from(&source, &handle, ResourceKind::Image)
-            .is_err());
+        assert!(
+            other
+                .import_resource_from(&target, &handle, ResourceKind::Font)
+                .is_err()
+        );
+        assert!(
+            other
+                .import_resource_from(&source, &handle, ResourceKind::Image)
+                .is_err()
+        );
         assert_eq!(other.revision(), revision);
         let small_token = PdfDocument::new_with_options(crate::parser::options::ParseOptions {
             limits: crate::parser::options::Limits {
@@ -853,9 +866,11 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        assert!(small_token
-            .import_resource_from(&source, &handle, ResourceKind::Font)
-            .is_err());
+        assert!(
+            small_token
+                .import_resource_from(&source, &handle, ResourceKind::Font)
+                .is_err()
+        );
         assert_eq!(
             small_token
                 .try_insert_object(PdfObject::PdfNull)

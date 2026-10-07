@@ -30,6 +30,32 @@ mod tests {
     use std::{collections::HashMap, io::Cursor};
 
     #[test]
+    fn separation_stitching_tint_transform_survives_save_and_reopen() {
+        use crate::{document::PdfDocument, parser::syntax::ParseMode};
+        let doc = PdfDocument::new().unwrap();
+        let object = SyntaxParser::new(StreamReader::try_new(Cursor::new(
+            b"[/Separation /Spot /DeviceRGB << /FunctionType 3 /Domain [0 1] /Bounds [0.5] /Encode [0 1 0 1] /Functions [<< /FunctionType 2 /Domain [0 1] /N 1 /C0 [1 0 0] /C1 [0 1 0] >> << /FunctionType 2 /Domain [0 1] /N 1 /C0 [0 0 1] /C1 [1 1 1] >>] >>]".to_vec(),
+        )).unwrap()).get_object().unwrap();
+        let id = doc.try_insert_object(object).unwrap();
+        let reopened =
+            PdfDocument::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict)
+                .unwrap();
+        for doc in [&doc, &reopened] {
+            let object = doc
+                .ctx()
+                .resolve_owned(&PdfObject::PdfReference(
+                    crate::objects::pdf_reference::PdfReference::from_id(id),
+                ))
+                .unwrap();
+            let color = ColorSpace::try_new(&object, doc.ctx()).unwrap();
+            for (tint, expected) in [(0., [255, 0, 0]), (0.5, [0, 0, 255]), (1., [255, 255, 255])] {
+                let rgb = color.rgb(&ColorValue::new(vec![tint])).unwrap();
+                assert_eq!([rgb.r(), rgb.g(), rgb.b()], expected);
+            }
+        }
+    }
+
+    #[test]
     fn separation_tints_and_cyclic_colors_return_results() {
         let parser = PdfParser::new(SyntaxParser::new(
             StreamReader::try_new(Cursor::new(Vec::<u8>::new())).unwrap(),
