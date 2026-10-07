@@ -18,6 +18,9 @@ impl PdfIndirect {
     pub fn obj(&self) -> &PdfObject {
         &self.obj
     }
+    pub fn id(&self) -> crate::objects::object_id::ObjectId {
+        crate::objects::object_id::ObjectId::new(self.objnum, u32::from(self.gennum))
+    }
     pub fn to_obj(self) -> PdfObject {
         self.obj
     }

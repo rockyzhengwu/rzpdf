@@ -11,7 +11,7 @@ impl<'a> TrueTypeReader<'a> {
     }
 
     pub fn read_be_u16(&mut self) -> PdfResult<u16> {
-        if self.offset + 2 >= self.data.len() {
+        if self.remaining() < 2 {
             return Err(PdfError::FontError(
                 "Tretype Program reader eof".to_string(),
             ));
@@ -26,7 +26,7 @@ impl<'a> TrueTypeReader<'a> {
     }
 
     pub fn read_be_i16(&mut self) -> PdfResult<i16> {
-        if self.offset + 2 >= self.data.len() {
+        if self.remaining() < 2 {
             return Err(PdfError::FontError(
                 "Tretype Program reader eof".to_string(),
             ));
@@ -41,7 +41,7 @@ impl<'a> TrueTypeReader<'a> {
     }
 
     pub fn read_be_u32(&mut self) -> PdfResult<u32> {
-        if self.offset + 4 >= self.data.len() {
+        if self.remaining() < 4 {
             return Err(PdfError::FontError(
                 "Tretype Program read be_u32 eof".to_string(),
             ));
@@ -67,7 +67,7 @@ impl<'a> TrueTypeReader<'a> {
     }
 
     pub fn read_tag(&mut self) -> PdfResult<String> {
-        if self.offset + 4 >= self.data.len() {
+        if self.remaining() < 4 {
             return Err(PdfError::FontError(
                 "Tretype Program read tag eof".to_string(),
             ));
@@ -84,6 +84,12 @@ impl<'a> TrueTypeReader<'a> {
     }
     pub fn offset(&self) -> usize {
         self.offset
+    }
+    pub fn remaining(&self) -> usize {
+        self.data.len().saturating_sub(self.offset)
+    }
+    pub fn length(&self) -> usize {
+        self.data.len()
     }
 }
 

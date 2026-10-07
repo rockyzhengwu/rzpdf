@@ -5,6 +5,15 @@ use crate::{
     page::{clip_path::ClipPath, graphic_state::GraphicState},
 };
 
+pub(crate) fn supported_ext_gs_keys(state: &PdfDict) -> bool {
+    state.into_iter().all(|(key, _)| {
+        matches!(
+            key.as_str(),
+            "Type" | "Font" | "LW" | "LC" | "LJ" | "ML" | "D" | "FL" | "CA" | "ca" | "BM"
+        )
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct AllState {
     pub(crate) graphic_state: GraphicState,
@@ -39,12 +48,12 @@ impl AllState {
     }
 
     pub fn process_ext_gs(&mut self, state: &PdfDict) -> PdfResult<()> {
-        // TODO
-        //println!("{:?}", state);
-        //for (key, obj) in state.into_iter() {
-        //    println!("extgs: {:?},{:?}", key, obj);
-        //}
-        Ok(())
+        if state.into_iter().next().is_none() {
+            return Ok(());
+        }
+        Err(crate::error::PdfError::UnsupportedFeature(
+            "ExtGState application requires the resource-aware content interpreter".into(),
+        ))
     }
     pub fn set_text_matrix(&mut self, matrix: Matrix) {
         self.text_matrix = matrix;

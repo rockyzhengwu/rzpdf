@@ -1,3 +1,4 @@
+use crate::error::{PdfError, PdfResult};
 use crate::objects::PdfObject;
 
 #[derive(Debug, PartialEq, Clone, Default)]
@@ -6,12 +7,34 @@ pub struct PdfArray {
 }
 
 impl PdfArray {
+    pub(crate) fn from_items(items: Vec<PdfObject>) -> Self {
+        Self { items }
+    }
+
     pub fn add_obj(&mut self, obj: PdfObject) {
         self.items.push(obj)
     }
 
-    pub fn insert(&mut self, index: usize, obj: PdfObject) {
+    /// Fallible append for parsing and transactional editing.
+    pub fn try_add_obj(&mut self, obj: PdfObject) -> PdfResult<()> {
+        self.items
+            .try_reserve(1)
+            .map_err(|_| PdfError::ResourceLimit("array append allocation".into()))?;
+        self.items.push(obj);
+        Ok(())
+    }
+
+    pub fn insert(&mut self, index: usize, obj: PdfObject) -> PdfResult<()> {
+        if index > self.items.len() {
+            return Err(PdfError::ObjectError(
+                "array insertion index out of bounds".into(),
+            ));
+        }
+        self.items
+            .try_reserve(1)
+            .map_err(|_| PdfError::ResourceLimit("array insertion allocation".into()))?;
         self.items.insert(index, obj);
+        Ok(())
     }
 
     pub fn get(&self, index: usize) -> Option<&PdfObject> {
@@ -26,6 +49,26 @@ impl PdfArray {
             return Some(self.items.remove(index));
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn insertion_checks_bounds_and_preserves_array_on_error() {
+        let mut array = PdfArray::default();
+        assert!(array.insert(1, PdfObject::PdfNull).is_err());
+        assert_eq!(array.len(), 0);
+        array.insert(0, PdfObject::PdfNull).unwrap();
+        array.insert(1, PdfObject::PdfNull).unwrap();
+        array.insert(0, PdfObject::PdfNull).unwrap();
+        let before = array.clone();
+        assert!(array.insert(usize::MAX, PdfObject::PdfNull).is_err());
+        assert_eq!(array, before);
+        array.try_add_obj(PdfObject::PdfNull).unwrap();
+        assert_eq!(array.len(), before.len() + 1);
     }
 }
 

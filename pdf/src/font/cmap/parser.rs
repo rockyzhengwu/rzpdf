@@ -1,23 +1,417 @@
-use std::char;
-
 use crate::error::{PdfError, PdfResult};
 use crate::font::cmap::{Cmap, CodeSpaceRange};
 use crate::parser::character::{is_delimiter, is_end_of_line, is_white_space};
-use crate::parser::parse_utility::{hex_to_u8, real_from_buffer};
+use crate::parser::parse_utility::hex_to_u8;
+use std::rc::Rc;
+
+#[derive(Debug)]
+struct HexBytes {
+    data: Vec<u8>,
+    _lease: Option<crate::budget::MemoryLease>,
+}
+
+impl std::ops::Deref for HexBytes {
+    type Target = Vec<u8>;
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+
+impl std::ops::DerefMut for HexBytes {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.data
+    }
+}
+
+/// A token keeps the source alive without allocating or copying token bytes.
+struct Word {
+    source: Rc<Vec<u8>>,
+    start: usize,
+    end: usize,
+}
+
+impl Word {
+    fn as_slice(&self) -> &[u8] {
+        &self.source[self.start..self.end]
+    }
+}
+
+impl std::ops::Deref for Word {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
 
 fn decode_utf16be(bytes: &[u8]) -> String {
-    let (cs, _enc, has_err) = encoding_rs::UTF_16BE.decode(bytes);
-    return cs.to_string();
+    let (cs, _enc, _has_err) = encoding_rs::UTF_16BE.decode(bytes);
+    cs.into_owned()
 }
 
-pub struct CmapParser {
-    data: Vec<u8>,
+fn decode_utf16be_with_budget(
+    bytes: &[u8],
+    budget: &crate::budget::OperationBudget,
+) -> PdfResult<(String, crate::budget::MemoryLease)> {
+    let mut decoder = encoding_rs::UTF_16BE.new_decoder();
+    let capacity = decoder
+        .max_utf8_buffer_length(bytes.len())
+        .ok_or_else(|| PdfError::ResourceLimit("CMap Unicode size".into()))?;
+    let mut lease = budget.reserve(capacity)?;
+    let mut output = String::new();
+    output
+        .try_reserve_exact(capacity)
+        .map_err(|_| PdfError::ResourceLimit("CMap Unicode allocation".into()))?;
+    lease.resize(output.capacity())?;
+    let (result, read, _) = decoder.decode_to_string(bytes, &mut output, true);
+    if result != encoding_rs::CoderResult::InputEmpty || read != bytes.len() {
+        return Err(PdfError::ResourceLimit("CMap Unicode output buffer".into()));
+    }
+    Ok((output, lease))
+}
+
+pub struct CmapParser<'a> {
+    data: Rc<Vec<u8>>,
     pos: usize,
+    remaining_entries: usize,
+    remaining_depth: usize,
+    remaining_source_bytes: usize,
+    inheritance_names: Vec<String>,
+    resolver: Option<&'a dyn Fn(&str) -> PdfResult<Option<Vec<u8>>>>,
+    budget: Option<crate::budget::OperationBudget>,
+    retained_unicode: Option<crate::budget::MemoryLease>,
+    space_table: Option<crate::budget::MemoryLease>,
+    unicode_table: Option<crate::budget::MemoryLease>,
+    cid_table: Option<crate::budget::MemoryLease>,
 }
 
-impl CmapParser {
+impl<'a> CmapParser<'a> {
     pub fn new(data: Vec<u8>) -> Self {
-        Self { data, pos: 0 }
+        Self {
+            data: Rc::new(data),
+            pos: 0,
+            remaining_entries: crate::parser::options::Limits::default().max_objects,
+            remaining_depth: crate::parser::options::Limits::default().max_depth,
+            remaining_source_bytes: crate::parser::options::Limits::default().max_decoded_bytes,
+            inheritance_names: Vec::new(),
+            resolver: None,
+            budget: None,
+            retained_unicode: None,
+            space_table: None,
+            unicode_table: None,
+            cid_table: None,
+        }
+    }
+
+    pub fn with_entry_limit(data: Vec<u8>, max_entries: usize) -> Self {
+        Self {
+            data: Rc::new(data),
+            pos: 0,
+            remaining_entries: max_entries,
+            remaining_depth: crate::parser::options::Limits::default().max_depth,
+            remaining_source_bytes: crate::parser::options::Limits::default().max_decoded_bytes,
+            inheritance_names: Vec::new(),
+            resolver: None,
+            budget: None,
+            retained_unicode: None,
+            space_table: None,
+            unicode_table: None,
+            cid_table: None,
+        }
+    }
+
+    fn reserve_entries(&mut self, count: u64) -> PdfResult<()> {
+        if count > self.remaining_entries as u64 {
+            return Err(PdfError::ResourceLimit("CMap mapping entries".to_string()));
+        }
+        self.remaining_entries -= count as usize;
+        Ok(())
+    }
+
+    pub fn with_limits(data: Vec<u8>, limits: &crate::parser::options::Limits) -> Self {
+        Self {
+            data: Rc::new(data),
+            pos: 0,
+            remaining_entries: limits.max_objects,
+            remaining_depth: limits.max_depth,
+            remaining_source_bytes: limits.max_decoded_bytes,
+            inheritance_names: Vec::new(),
+            resolver: None,
+            budget: None,
+            retained_unicode: None,
+            space_table: None,
+            unicode_table: None,
+            cid_table: None,
+        }
+    }
+
+    fn inherited_cmap(&mut self, name: &[u8]) -> PdfResult<Cmap> {
+        if self.remaining_depth == 0 {
+            return Err(PdfError::ResourceLimit("CMap inheritance depth".into()));
+        }
+        let name = std::str::from_utf8(name)
+            .map_err(|_| PdfError::FontError("Invalid base CMap name".into()))?;
+        if self
+            .inheritance_names
+            .iter()
+            .any(|ancestor| ancestor == name)
+        {
+            return Err(PdfError::FontError(format!(
+                "CMap inheritance cycle at {name}"
+            )));
+        }
+        let chain_len = self
+            .inheritance_names
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| PdfError::ResourceLimit("CMap inheritance chain size".into()))?;
+        let mut chain_lease = self
+            .budget
+            .as_ref()
+            .map(|pool| {
+                pool.reserve(
+                    chain_len
+                        .checked_mul(std::mem::size_of::<String>())
+                        .ok_or_else(|| {
+                            PdfError::ResourceLimit("CMap inheritance chain size".into())
+                        })?,
+                )
+            })
+            .transpose()?;
+        let mut inheritance_names = Vec::new();
+        inheritance_names
+            .try_reserve_exact(chain_len)
+            .map_err(|_| PdfError::ResourceLimit("CMap inheritance chain allocation".into()))?;
+        if let Some(lease) = &mut chain_lease {
+            lease.resize(
+                inheritance_names
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<String>())
+                    .ok_or_else(|| {
+                        PdfError::ResourceLimit("CMap inheritance chain capacity".into())
+                    })?,
+            )?;
+        }
+        for ancestor in self
+            .inheritance_names
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(name))
+        {
+            let copy = if let Some(pool) = &self.budget {
+                let (copy, mut lease) = crate::budget::copy_string(ancestor, pool)?;
+                chain_lease.as_mut().unwrap().absorb(&mut lease)?;
+                copy
+            } else {
+                let mut copy = String::new();
+                copy.try_reserve_exact(ancestor.len()).map_err(|_| {
+                    PdfError::ResourceLimit("CMap inheritance name allocation".into())
+                })?;
+                copy.push_str(ancestor);
+                copy
+            };
+            inheritance_names.push(copy);
+        }
+        let resolved = match self.resolver {
+            Some(resolve) => resolve(name)?,
+            None => None,
+        };
+        let mut source_lease = None;
+        let copy = if let Some(data) = resolved {
+            if data.len() > self.remaining_source_bytes {
+                return Err(PdfError::ResourceLimit(
+                    "Inherited CMap source bytes".into(),
+                ));
+            }
+            if let Some(pool) = &self.budget {
+                // Resolver allocations are caller-owned; charge accepted source capacity.
+                source_lease = Some(pool.reserve(data.capacity())?);
+            }
+            data
+        } else {
+            let data = font_data::cmap::get_predefine_cmap_data(name)
+                .ok_or_else(|| PdfError::UnsupportedFeature(format!("Unknown base CMap {name}")))?;
+            if data.len() > self.remaining_source_bytes {
+                return Err(PdfError::ResourceLimit(
+                    "Inherited CMap source bytes".into(),
+                ));
+            }
+            if let Some(pool) = &self.budget {
+                let (copy, lease) = crate::budget::BudgetedBytes::copy_from_slice(pool, data)?
+                    .into_reserved_parts();
+                source_lease = Some(lease);
+                copy
+            } else {
+                let mut copy = Vec::new();
+                copy.try_reserve_exact(data.len())
+                    .map_err(|_| PdfError::ResourceLimit("Inherited CMap allocation".into()))?;
+                copy.extend_from_slice(data);
+                copy
+            }
+        };
+        let mut parser = Self {
+            data: Rc::new(copy),
+            pos: 0,
+            remaining_entries: self.remaining_entries,
+            remaining_depth: self.remaining_depth - 1,
+            remaining_source_bytes: self.remaining_source_bytes,
+            inheritance_names,
+            resolver: self.resolver,
+            budget: self.budget.clone(),
+            retained_unicode: None,
+            space_table: None,
+            unicode_table: None,
+            cid_table: None,
+        };
+        let cmap = parser.parse()?;
+        if let Some(lease) = parser.take_retained_lease() {
+            self.retain_unicode_lease(lease)?;
+        }
+        self.remaining_entries = parser.remaining_entries;
+        self.remaining_source_bytes = parser.remaining_source_bytes;
+        // Keep source quota until the parser (including source views) has dropped.
+        drop(parser);
+        drop(source_lease);
+        drop(chain_lease);
+        Ok(cmap)
+    }
+
+    fn range_length(&self, low: u32, high: u32) -> PdfResult<u64> {
+        if low > high {
+            return Err(PdfError::FontError("Reversed CMap range".to_string()));
+        }
+        Ok(u64::from(high) - u64::from(low) + 1)
+    }
+
+    pub fn set_resolver(&mut self, resolver: &'a dyn Fn(&str) -> PdfResult<Option<Vec<u8>>>) {
+        self.resolver = Some(resolver);
+    }
+
+    pub(crate) fn set_budget(&mut self, budget: &crate::budget::OperationBudget) {
+        self.budget = Some(budget.clone());
+    }
+
+    pub(crate) fn take_retained_lease(&mut self) -> Option<crate::budget::MemoryLease> {
+        for mut table in [
+            self.space_table.take(),
+            self.unicode_table.take(),
+            self.cid_table.take(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Some(retained) = &mut self.retained_unicode {
+                retained
+                    .absorb(&mut table)
+                    .expect("CMap leases share one budget and fit its live total");
+            } else {
+                self.retained_unicode = Some(table);
+            }
+        }
+        self.retained_unicode.take()
+    }
+
+    fn reserve_spaces(&mut self, cmap: &mut Cmap, additional: usize) -> PdfResult<()> {
+        let Some(pool) = &self.budget else {
+            return Ok(());
+        };
+        let needed = cmap
+            .code_space_range
+            .len()
+            .checked_add(additional)
+            .ok_or_else(|| PdfError::ResourceLimit("CMap spaces size".into()))?;
+        if needed <= cmap.code_space_range.capacity() {
+            return Ok(());
+        }
+        let capacity = cmap
+            .code_space_range
+            .capacity()
+            .max(1)
+            .checked_mul(2)
+            .unwrap_or(needed)
+            .max(needed);
+        let slots = std::mem::size_of::<CodeSpaceRange>();
+        let bytes = capacity
+            .checked_mul(slots)
+            .ok_or_else(|| PdfError::ResourceLimit("CMap spaces allocation size".into()))?;
+        let mut lease = pool.reserve(bytes)?;
+        let mut next = Vec::new();
+        next.try_reserve_exact(capacity)
+            .map_err(|_| PdfError::ResourceLimit("CMap spaces allocation".into()))?;
+        lease.resize(
+            next.capacity()
+                .checked_mul(slots)
+                .ok_or_else(|| PdfError::ResourceLimit("CMap spaces capacity".into()))?,
+        )?;
+        next.append(&mut cmap.code_space_range);
+        cmap.code_space_range = next;
+        self.space_table = Some(lease);
+        Ok(())
+    }
+
+    fn retain_unicode_lease(&mut self, mut lease: crate::budget::MemoryLease) -> PdfResult<()> {
+        if let Some(retained) = &mut self.retained_unicode {
+            retained.absorb(&mut lease)?;
+        } else {
+            self.retained_unicode = Some(lease);
+        }
+        Ok(())
+    }
+
+    fn add_unicode(&mut self, cmap: &mut Cmap, code: u32, bytes: &[u8]) -> PdfResult<()> {
+        let text = if let Some(pool) = &self.budget {
+            let (text, lease) = decode_utf16be_with_budget(bytes, pool)?;
+            self.retain_unicode_lease(lease)?;
+            text
+        } else {
+            decode_utf16be(bytes)
+        };
+        if let Some(pool) = &self.budget {
+            if cmap.cid_to_unicode.get(&code).is_none() {
+                cmap.cid_to_unicode
+                    .reserve_with_budget(1, pool, &mut self.unicode_table)?;
+            }
+        }
+        cmap.add_unicode(code, text);
+        Ok(())
+    }
+
+    fn add_cid(&mut self, cmap: &mut Cmap, code: u32, cid: u32) -> PdfResult<()> {
+        if let Some(pool) = &self.budget {
+            if cmap.code_to_cids.get(&code).is_none() {
+                cmap.code_to_cids
+                    .reserve_with_budget(1, pool, &mut self.cid_table)?;
+            }
+        }
+        cmap.add_code_to_cid(code, cid);
+        Ok(())
+    }
+
+    fn reserve_inherited_mappings(&mut self, cmap: &mut Cmap, base: &Cmap) -> PdfResult<()> {
+        if let Some(pool) = &self.budget {
+            cmap.cid_to_unicode.reserve_with_budget(
+                base.cid_to_unicode.len(),
+                pool,
+                &mut self.unicode_table,
+            )?;
+            cmap.code_to_cids.reserve_with_budget(
+                base.code_to_cids.len(),
+                pool,
+                &mut self.cid_table,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn parse_with_named_base(&mut self, name: &str) -> PdfResult<Cmap> {
+        if self.data.len() > self.remaining_source_bytes {
+            return Err(PdfError::ResourceLimit("CMap source bytes".into()));
+        }
+        let base = self.inherited_cmap(name.as_bytes())?;
+        let mut local = self.parse()?;
+        self.reserve_spaces(&mut local, base.code_space_range.len())?;
+        self.reserve_inherited_mappings(&mut local, &base)?;
+        local.inherit_defaults(base)?;
+        Ok(local)
     }
 
     fn skip_space_and_comment(&mut self) {
@@ -25,14 +419,13 @@ impl CmapParser {
             if self.pos >= self.data.len() {
                 break;
             }
-            let mut c = self.data[self.pos];
-            while is_white_space(c) {
+            while self.pos < self.data.len() && is_white_space(self.data[self.pos]) {
                 self.pos += 1;
-                c = self.data[self.pos];
-                if self.pos > self.data.len() {
-                    return;
-                }
             }
+            if self.pos >= self.data.len() {
+                return;
+            }
+            let c = self.data[self.pos];
             if c != b'%' {
                 return;
             }
@@ -40,81 +433,82 @@ impl CmapParser {
                 if self.pos >= self.data.len() {
                     break;
                 }
-                if is_end_of_line(c) {
+                if is_end_of_line(self.data[self.pos]) {
                     break;
                 }
                 self.pos += 1;
-                c = self.data[self.pos];
             }
         }
     }
-    fn handle_non_delimiter(&mut self) -> Option<Vec<u8>> {
-        let mut word = Vec::new();
+    fn word(&self, start: usize, end: usize) -> Word {
+        Word {
+            source: self.data.clone(),
+            start,
+            end,
+        }
+    }
+
+    fn handle_non_delimiter(&mut self) -> Option<Word> {
+        let start = self.pos;
         while self.pos < self.data.len() {
             let c = self.data[self.pos];
             if is_delimiter(c) || is_white_space(c) {
-                if word.is_empty() {
+                if start == self.pos {
                     return None;
                 }
-                return Some(word);
-            } else {
-                word.push(c);
+                return Some(self.word(start, self.pos));
             }
             self.pos += 1;
         }
-        Some(word)
+        Some(self.word(start, self.pos))
     }
-    fn handle_name(&mut self) -> Option<Vec<u8>> {
-        let mut name = Vec::new();
+    fn handle_name(&mut self) -> Option<Word> {
         if self.pos >= self.data.len() {
             return None;
         }
         self.pos += 1;
+        let start = self.pos;
         while self.pos < self.data.len() {
             let c = self.data[self.pos];
             if is_delimiter(c) || is_white_space(c) {
-                if name.is_empty() {
+                if start == self.pos {
                     return None;
                 }
-                return Some(name);
-            } else {
-                name.push(c);
+                return Some(self.word(start, self.pos));
             }
             self.pos += 1;
         }
-        if name.is_empty() {
+        if start == self.pos {
             return None;
         }
-        Some(name)
+        Some(self.word(start, self.pos))
     }
 
-    fn handle_begin_angle_bracket(&mut self) -> Option<Vec<u8>> {
+    fn handle_begin_angle_bracket(&mut self) -> Option<Word> {
         if self.pos > self.data.len() {
             return None;
         }
-        let mut res = Vec::new();
+        let start = self.pos;
         while self.pos < self.data.len() {
             let c = self.data[self.pos];
-            res.push(c);
             self.pos += 1;
             if c == b'>' {
-                self.pos += 1;
                 break;
             }
         }
-        if res.is_empty() {
+        if start == self.pos {
             return None;
         }
-        Some(res)
+        Some(self.word(start, self.pos))
     }
 
-    fn handle_parentness(&mut self) -> Option<Vec<u8>> {
+    fn handle_parentness(&mut self) -> Option<Word> {
         if self.pos > self.data.len() {
             return None;
         }
         self.pos += 1;
+        let start = self.pos;
         let mut level = 1;
-        let mut res = Vec::new();
         while self.pos < self.data.len() && level > 0 {
             let c = self.data[self.pos];
             if c == b'(' {
@@ -122,56 +516,56 @@ impl CmapParser {
             } else if c == b')' {
                 level -= 1;
             }
-            res.push(c);
             self.pos += 1;
         }
-        if res.is_empty() {
+        if start == self.pos {
             return None;
         }
-        Some(res)
+        Some(self.word(start, self.pos))
     }
 
-    fn handle_dict(&mut self) -> Option<Vec<u8>> {
-        let mut dict = Vec::new();
+    fn handle_dict(&mut self) -> Option<Word> {
         self.pos += 2;
+        let start = self.pos;
         if self.pos >= self.data.len() {
             return None;
         }
         loop {
-            if self.pos + 1 > self.data.len() {
-                break;
+            if self.pos + 1 >= self.data.len() {
+                self.pos = self.data.len();
+                return None;
             }
             let c = self.data[self.pos];
             if c == b'>' && self.data[self.pos + 1] == b'>' {
+                let end = self.pos;
                 self.pos += 2;
-                break;
+                return Some(self.word(start, end));
             }
             self.pos += 1;
-            dict.push(c);
         }
-        Some(dict)
     }
 
-    fn handle_array(&mut self) -> Option<Vec<u8>> {
-        let mut res = Vec::new();
-        res.push(self.data[self.pos]);
+    fn handle_array(&mut self) -> Option<Word> {
+        let start = self.pos;
         self.pos += 1;
         if self.pos >= self.data.len() {
             return None;
         }
         loop {
+            if self.pos >= self.data.len() {
+                return None;
+            }
             let c = self.data[self.pos];
-            res.push(c);
             if c == b']' {
                 self.pos += 1;
                 break;
             }
             self.pos += 1;
         }
-        Some(res)
+        Some(self.word(start, self.pos))
     }
 
-    fn get_next_word(&mut self) -> Option<Vec<u8>> {
+    fn get_next_word(&mut self) -> Option<Word> {
         self.skip_space_and_comment();
         if self.pos >= self.data.len() {
             return None;
@@ -194,27 +588,44 @@ impl CmapParser {
             _ => None,
         }
     }
-    fn get_code(&self, bytes: &[u8]) -> u32 {
-        if bytes[0] == b'<' {
-            let mut index = 1;
-            let mut res: u32 = 0;
-            while index < bytes.len() - 1 {
-                res = res * 16 + hex_to_u8(bytes[index]) as u32;
-                index += 1;
+    fn required_word(&mut self) -> PdfResult<Word> {
+        self.get_next_word().ok_or_else(|| {
+            PdfError::FontError(format!("Truncated CMap entry at byte {}", self.pos))
+        })
+    }
+    fn get_code(&self, bytes: &[u8]) -> PdfResult<u32> {
+        if bytes.first() == Some(&b'<') {
+            let decoded = self.hex_to_bytes(bytes)?;
+            if decoded.is_empty() || decoded.len() > 4 {
+                return Err(PdfError::FontError(
+                    "CMap code must contain 1–4 bytes".to_string(),
+                ));
             }
-            return res;
+            return Ok(decoded
+                .iter()
+                .fold(0u32, |value, byte| (value << 8) | u32::from(*byte)));
         }
-        let v = real_from_buffer(bytes);
-        return v as u32;
+        std::str::from_utf8(bytes)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| PdfError::FontError("Invalid CMap integer".to_string()))
     }
 
     fn process_codespace_range(&mut self, cmap: &mut Cmap, n: usize) -> PdfResult<()> {
         for _ in 0..n {
-            let low = self.get_next_word().unwrap();
-            let high = self.get_next_word().unwrap();
-            let l = self.get_code(&low);
-            let h = self.get_code(&high);
-            let size = (high.len() - 2) / 2;
+            let low = self.required_word()?;
+            let high = self.required_word()?;
+            let l = self.get_code(&low)?;
+            let h = self.get_code(&high)?;
+            self.range_length(l, h)?;
+            let size = self.hex_to_bytes(&high)?.len();
+            if self.hex_to_bytes(&low)?.len() != size {
+                return Err(PdfError::FontError(
+                    "CMap code space widths differ".to_string(),
+                ));
+            }
+            self.reserve_entries(1)?;
+            self.reserve_spaces(cmap, 1)?;
             cmap.add_code_space_range(CodeSpaceRange::new(l, h, size as u8));
         }
         Ok(())
@@ -222,15 +633,19 @@ impl CmapParser {
 
     fn process_cid_range(&mut self, cmap: &mut Cmap, n: usize) -> PdfResult<()> {
         for _ in 0..n {
-            let start = self.get_next_word().unwrap();
-            let end = self.get_next_word().unwrap();
-            let val = self.get_next_word().unwrap();
-            let l = self.get_code(start.as_slice());
-            let h = self.get_code(end.as_slice());
-            let mut gid = real_from_buffer(&val) as u32;
-            for code in l..h {
-                cmap.add_code_to_cid(code, gid);
-                gid += 1;
+            let start = self.required_word()?;
+            let end = self.required_word()?;
+            let val = self.required_word()?;
+            let l = self.get_code(start.as_slice())?;
+            let h = self.get_code(end.as_slice())?;
+            let gid = self.get_code(&val)?;
+            let count = self.range_length(l, h)?;
+            if u64::from(gid) + count - 1 > u64::from(u32::MAX) {
+                return Err(PdfError::FontError("CMap CID range overflows".to_string()));
+            }
+            self.reserve_entries(count)?;
+            for code in l..=h {
+                self.add_cid(cmap, code, gid + (code - l))?;
             }
         }
         Ok(())
@@ -238,100 +653,219 @@ impl CmapParser {
 
     fn process_cid_char(&mut self, cmap: &mut Cmap, n: usize) -> PdfResult<()> {
         for _ in 0..n {
-            let key = self.get_next_word().unwrap();
-            let val = self.get_next_word().unwrap();
-            let cid = self.get_code(&key);
-            let gid = self.get_code(&val);
-            cmap.add_code_to_cid(cid, gid);
+            let key = self.required_word()?;
+            let val = self.required_word()?;
+            let cid = self.get_code(&key)?;
+            let gid = self.get_code(&val)?;
+            self.reserve_entries(1)?;
+            self.add_cid(cmap, cid, gid)?;
         }
         Ok(())
     }
 
     fn process_bf_range(&mut self, cmap: &mut Cmap, n: usize) -> PdfResult<()> {
         for _ in 0..n {
-            let low = self.get_next_word().unwrap();
-            let high = self.get_next_word().unwrap();
-            let l = self.get_code(&low);
-            let h = self.get_code(&high);
-            let val = self.get_next_word().unwrap();
-            let mut unicode = self.get_code(&val);
-            for code in l..h {
-                let c = char::from_u32(unicode).unwrap_or(char::REPLACEMENT_CHARACTER);
-                let mut s = String::new();
-                s.push(c);
-                cmap.add_unicode(code, s);
-                unicode += 1;
+            let low = self.required_word()?;
+            let high = self.required_word()?;
+            let l = self.get_code(&low)?;
+            let h = self.get_code(&high)?;
+            let val = self.required_word()?;
+            let count = self.range_length(l, h)?;
+            self.reserve_entries(count)?;
+            if val.first() == Some(&b'[') {
+                let data = val.get(1..val.len() - 1).ok_or_else(|| {
+                    PdfError::FontError("Invalid CMap destination array".to_string())
+                })?;
+                let (data, _source_lease) = if let Some(pool) = &self.budget {
+                    let (data, lease) = crate::budget::BudgetedBytes::copy_from_slice(pool, data)?
+                        .into_reserved_parts();
+                    (data, Some(lease))
+                } else {
+                    (data.to_vec(), None)
+                };
+                let mut destinations = CmapParser::new(data);
+                destinations.budget = self.budget.clone();
+                for code in l..=h {
+                    let word = destinations.required_word()?;
+                    let bytes = self.hex_to_bytes(&word)?;
+                    self.add_unicode(cmap, code, &bytes)?;
+                }
+                if destinations.get_next_word().is_some() {
+                    return Err(PdfError::FontError(
+                        "CMap destination array has extra entries".to_string(),
+                    ));
+                }
+            } else {
+                let mut unicode = self.hex_to_bytes(&val)?;
+                if unicode.is_empty() || unicode.len() % 2 != 0 {
+                    return Err(PdfError::FontError(
+                        "CMap destination requires UTF-16BE bytes".to_string(),
+                    ));
+                }
+                for code in l..=h {
+                    self.add_unicode(cmap, code, &unicode)?;
+                    if code != h {
+                        let mut carry = true;
+                        for byte in unicode.iter_mut().rev() {
+                            let (value, overflow) = byte.overflowing_add(1);
+                            *byte = value;
+                            carry = overflow;
+                            if !carry {
+                                break;
+                            }
+                        }
+                        if carry {
+                            return Err(PdfError::FontError(
+                                "CMap destination range overflows".to_string(),
+                            ));
+                        }
+                    }
+                }
             }
         }
         Ok(())
     }
-    fn hex_to_bytes(&self, hex: &[u8]) -> Vec<u8> {
-        if hex[0] != b'<' {
-            panic!("hex value need between in < and >");
+    fn hex_to_bytes(&self, hex: &[u8]) -> PdfResult<HexBytes> {
+        let digits = hex
+            .strip_prefix(b"<")
+            .and_then(|s| s.strip_suffix(b">"))
+            .ok_or_else(|| {
+                PdfError::FontError("CMap destination must be a hexadecimal string".to_string())
+            })?;
+        let mut count = 0usize;
+        for &digit in digits {
+            if is_white_space(digit) {
+                continue;
+            }
+            if !digit.is_ascii_hexdigit() {
+                return Err(PdfError::FontError(
+                    "Invalid CMap hexadecimal digit".to_string(),
+                ));
+            }
+            count += 1;
         }
-        let mut index = 1;
+        let size = count / 2 + count % 2;
+        let mut lease = self
+            .budget
+            .as_ref()
+            .map(|pool| pool.reserve(size))
+            .transpose()?;
         let mut values = Vec::new();
-        while index < hex.len() - 1 {
-            let next = index + 1;
-            let v = hex_to_u8(hex[index]) << 4 | hex_to_u8(hex[next]);
-            values.push(v);
-            index += 2;
-        }
         values
+            .try_reserve_exact(size)
+            .map_err(|_| PdfError::ResourceLimit("CMap hexadecimal allocation".into()))?;
+        if let Some(lease) = &mut lease {
+            lease.resize(values.capacity())?;
+        }
+        let mut digits = digits.iter().copied().filter(|c| !is_white_space(*c));
+        while let Some(high) = digits.next() {
+            let low = digits.next().map(hex_to_u8).unwrap_or(0);
+            values.push(hex_to_u8(high) << 4 | low);
+        }
+        Ok(HexBytes {
+            data: values,
+            _lease: lease,
+        })
     }
 
     fn process_bf_char(&mut self, cmap: &mut Cmap, n: usize) -> PdfResult<()> {
         for _ in 0..n {
-            let code = self.get_next_word().unwrap();
-            let code_value = self.get_code(&code);
-            let c = self.get_next_word().unwrap();
-            let unicode_bytes: Vec<u8> = self.hex_to_bytes(&c);
+            let code = self.required_word()?;
+            let code_value = self.get_code(&code)?;
+            let c = self.required_word()?;
+            let unicode_bytes = self.hex_to_bytes(&c)?;
 
-            let unicode = decode_utf16be(&unicode_bytes);
-            cmap.add_unicode(code_value, unicode);
+            self.reserve_entries(1)?;
+            self.add_unicode(cmap, code_value, &unicode_bytes)?;
         }
         Ok(())
     }
 
     pub fn parse(&mut self) -> PdfResult<Cmap> {
+        self.remaining_source_bytes = self
+            .remaining_source_bytes
+            .checked_sub(self.data.len())
+            .ok_or_else(|| PdfError::ResourceLimit("CMap cumulative source bytes".into()))?;
         //println!("{}", String::from_utf8(self.data.clone()).unwrap());
         let mut cmap = Cmap::default();
-        let mut last_word = Vec::new();
+        if self.budget.is_some() {
+            cmap.cid_to_unicode.sorted = Some(Vec::new());
+            cmap.code_to_cids.sorted = Some(Vec::new());
+        }
+        let mut last_word = self.word(0, 0);
         while self.pos < self.data.len() {
             if let Some(word) = self.get_next_word() {
+                if last_word.as_slice() == b"WMode" {
+                    cmap.wmode = Some(match word.as_slice() {
+                        b"0" => 0,
+                        b"1" => 1,
+                        _ => return Err(PdfError::FontError("CMap WMode must be 0 or 1".into())),
+                    });
+                }
                 match word.as_slice() {
                     b"endcmap" => {
                         break;
                     }
                     b"usecmap" => {
-                        println!("use cmap: {:?}", last_word);
+                        let base = self.inherited_cmap(&last_word)?;
+                        self.reserve_spaces(&mut cmap, base.code_space_range.len())?;
+                        self.reserve_inherited_mappings(&mut cmap, &base)?;
+                        cmap.inherit_defaults(base)?;
                     }
                     b"begincodespacerange" => {
-                        let n = real_from_buffer(last_word.as_slice()) as usize;
+                        let n = self.get_code(last_word.as_slice())? as usize;
+                        if n > self.remaining_entries {
+                            return Err(PdfError::ResourceLimit(
+                                "CMap declared entries".to_string(),
+                            ));
+                        }
                         self.process_codespace_range(&mut cmap, n)?;
                     }
                     b"beginbfchar" => {
-                        let n = real_from_buffer(last_word.as_slice()) as usize;
+                        let n = self.get_code(last_word.as_slice())? as usize;
+                        if n > self.remaining_entries {
+                            return Err(PdfError::ResourceLimit(
+                                "CMap declared entries".to_string(),
+                            ));
+                        }
                         self.process_bf_char(&mut cmap, n)?;
                     }
                     b"beginbfrange" => {
-                        let n = real_from_buffer(last_word.as_slice()) as usize;
+                        let n = self.get_code(last_word.as_slice())? as usize;
+                        if n > self.remaining_entries {
+                            return Err(PdfError::ResourceLimit(
+                                "CMap declared entries".to_string(),
+                            ));
+                        }
                         self.process_bf_range(&mut cmap, n)?;
                     }
                     b"begincidchar" => {
-                        let n = real_from_buffer(last_word.as_slice()) as usize;
+                        let n = self.get_code(last_word.as_slice())? as usize;
+                        if n > self.remaining_entries {
+                            return Err(PdfError::ResourceLimit(
+                                "CMap declared entries".to_string(),
+                            ));
+                        }
                         self.process_cid_char(&mut cmap, n)?;
                     }
                     b"begincidrange" => {
-                        let n = real_from_buffer(last_word.as_slice()) as usize;
+                        let n = self.get_code(last_word.as_slice())? as usize;
+                        if n > self.remaining_entries {
+                            return Err(PdfError::ResourceLimit(
+                                "CMap declared entries".to_string(),
+                            ));
+                        }
                         self.process_cid_range(&mut cmap, n)?;
                     }
                     _ => {}
                 }
-                last_word = word.clone();
+                last_word = word;
             } else {
                 break;
             }
+        }
+        if last_word.as_slice() == b"WMode" {
+            return Err(PdfError::FontError("CMap WMode value missing".into()));
         }
         Ok(cmap)
     }
@@ -339,7 +873,459 @@ impl CmapParser {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn budget_nested_sources_coexist_and_release_on_limit_or_callback_error() {
+        use crate::budget::OperationBudget;
+        let resolver = |name: &str| -> crate::error::PdfResult<Option<Vec<u8>>> {
+            match name {
+                "BudgetOuter" => {
+                    let mut source = vec![b' '; 1024];
+                    let header = b"/BudgetInner usecmap\n%";
+                    source[..header.len()].copy_from_slice(header);
+                    Ok(Some(source))
+                }
+                "BudgetInner" => Ok(Some(vec![b'%'; 2048])),
+                "Cycle" => Ok(Some(b"/Cycle usecmap".to_vec())),
+                _ => Err(crate::error::PdfError::FontError("resolver failure".into())),
+            }
+        };
+        let run = |source: &[u8], pool: &OperationBudget| {
+            let mut parser = super::CmapParser::new(source.to_vec());
+            parser.set_budget(pool);
+            parser.set_resolver(&resolver);
+            parser.parse()
+        };
+        let chain_bytes =
+            3 * std::mem::size_of::<String>() + 2 * "BudgetOuter".len() + "BudgetInner".len();
+        let pool = OperationBudget::new(3072 + chain_bytes);
+        assert!(run(b"/BudgetOuter usecmap", &pool).is_ok());
+        assert_eq!(pool.peak_bytes(), 3072 + chain_bytes);
+        assert_eq!(pool.live_bytes(), 0);
+        let neighbor = pool.reserve(1).unwrap();
+        assert!(matches!(
+            run(b"/BudgetOuter usecmap", &pool),
+            Err(crate::error::PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(pool.live_bytes(), 1);
+        drop(neighbor);
+        assert!(run(b"/BudgetOuter usecmap", &pool).is_ok());
+        assert_eq!(pool.live_bytes(), 0);
+        assert!(run(b"/Unknown usecmap", &pool).is_err());
+        assert_eq!(pool.live_bytes(), 0);
+        assert!(
+            matches!(run(b"/Cycle usecmap", &pool), Err(crate::error::PdfError::FontError(message)) if message.contains("cycle"))
+        );
+        assert_eq!(pool.live_bytes(), 0);
+    }
+
+    #[test]
+    fn budget_code_spaces_count_capacity_growth_and_inherited_overlap() {
+        use crate::budget::{MemoryLease, OperationBudget};
+        let resolver = |name: &str| -> crate::error::PdfResult<Option<Vec<u8>>> {
+            Ok((name == "BudgetSpaces")
+                .then(|| b"1 begincodespacerange <0000> <FFFF> endcodespacerange".to_vec()))
+        };
+        let run = |source: &str,
+                   pool: &OperationBudget|
+         -> crate::error::PdfResult<(super::Cmap, MemoryLease)> {
+            let mut parser = super::CmapParser::new(source.as_bytes().to_vec());
+            parser.set_budget(pool);
+            parser.set_resolver(&resolver);
+            let cmap = parser.parse()?;
+            let lease = parser.take_retained_lease().unwrap();
+            Ok((cmap, lease))
+        };
+        let slots = std::mem::size_of::<super::CodeSpaceRange>();
+        let local = "3 begincodespacerange <00> <7F> <80> <FF> <0000> <FFFF> endcodespacerange";
+        let probe = OperationBudget::new(65536);
+        let (cmap, lease) = run(local, &probe).unwrap();
+        assert_eq!(cmap.code_space_range.len(), 3);
+        assert_eq!(lease.bytes(), cmap.code_space_range.capacity() * slots);
+        assert_eq!(probe.peak_bytes(), 6 * slots);
+        assert_eq!(probe.live_bytes(), lease.bytes());
+        drop((cmap, lease));
+        assert_eq!(probe.live_bytes(), 0);
+        let local = "2 begincodespacerange <00> <7F> <80> <FF> endcodespacerange";
+        for source in [
+            format!("/BudgetSpaces usecmap {local}"),
+            format!("{local} /BudgetSpaces usecmap"),
+        ] {
+            let probe = OperationBudget::new(65536);
+            let (cmap, lease) = run(&source, &probe).unwrap();
+            assert_eq!(cmap.code_space_range.len(), 3);
+            assert_eq!(lease.bytes(), 6 * slots); // Retains the consumed base table conservatively.
+            assert_eq!(probe.live_bytes(), lease.bytes());
+            assert!(probe.peak_bytes() >= 8 * slots);
+            let peak = probe.peak_bytes();
+            drop((cmap, lease));
+            assert_eq!(probe.live_bytes(), 0);
+            let pool = OperationBudget::new(peak);
+            let neighbor = pool.reserve(1).unwrap();
+            assert!(matches!(
+                run(&source, &pool),
+                Err(crate::error::PdfError::ResourceLimit(_))
+            ));
+            assert_eq!(pool.live_bytes(), 1);
+            drop(neighbor);
+            drop(run(&source, &pool).unwrap());
+            assert_eq!(pool.live_bytes(), 0);
+            assert!(run("/BudgetSpaces usecmap 1 begincodespacerange <00>", &pool).is_err());
+            assert_eq!(pool.live_bytes(), 0);
+        }
+    }
+
+    #[test]
+    fn budget_unicode_ranges_and_inheritance_retain_quota_and_recover() {
+        use crate::budget::{MemoryLease, OperationBudget};
+        let resolver = |name: &str| -> crate::error::PdfResult<Option<Vec<u8>>> {
+            Ok((name == "BudgetBase")
+                .then(|| b"2 beginbfchar <01> <0041> <02> <0042> endbfchar".to_vec()))
+        };
+        let local = "1 beginbfchar <01> <0043> endbfchar 1 beginbfrange <03> <04> [<00410042><D83DDE00>] endbfrange 1 beginbfrange <05> <06> <0044> endbfrange";
+        let cases = [
+            (format!("/BudgetBase usecmap {local}"), false),
+            (format!("{local} /BudgetBase usecmap"), false),
+            (local.to_string(), true),
+        ];
+        let run = |source: &str,
+                   named: bool,
+                   pool: &OperationBudget|
+         -> crate::error::PdfResult<(super::Cmap, MemoryLease)> {
+            let mut parser = super::CmapParser::new(source.as_bytes().to_vec());
+            parser.set_resolver(&resolver);
+            parser.set_budget(pool);
+            let cmap = if named {
+                parser.parse_with_named_base("BudgetBase")?
+            } else {
+                parser.parse()?
+            };
+            let lease = parser.take_retained_lease().unwrap();
+            Ok((cmap, lease))
+        };
+        let expected_pool = OperationBudget::new(65536);
+        let expected_retained: usize = [
+            &b"\0A"[..],
+            &b"\0B"[..],
+            &b"\0C"[..],
+            &b"\0A\0B"[..],
+            &b"\xd8\x3d\xde\0"[..],
+            &b"\0D"[..],
+            &b"\0E"[..],
+        ]
+        .into_iter()
+        .map(|bytes| {
+            let (text, lease) = super::decode_utf16be_with_budget(bytes, &expected_pool).unwrap();
+            let capacity = text.capacity();
+            drop((text, lease));
+            capacity
+        })
+        .sum();
+        for (source, named) in cases {
+            let probe = OperationBudget::new(65536);
+            let (cmap, lease) = run(&source, named, &probe).unwrap();
+            for (code, text) in [(1, "C"), (2, "B"), (3, "AB"), (4, "😀"), (5, "D"), (6, "E")] {
+                assert_eq!(
+                    cmap.cid_to_unicode.get(&code).map(String::as_str),
+                    Some(text)
+                );
+            }
+            assert_eq!(
+                lease.bytes(),
+                expected_retained + 10 * std::mem::size_of::<(u32, String)>()
+            );
+            assert_eq!(probe.live_bytes(), lease.bytes());
+            let peak = probe.peak_bytes();
+            drop((cmap, lease));
+            assert_eq!(probe.live_bytes(), 0);
+            let pool = OperationBudget::new(peak);
+            let neighbor = pool.reserve(1).unwrap();
+            assert!(matches!(
+                run(&source, named, &pool),
+                Err(crate::error::PdfError::ResourceLimit(_))
+            ));
+            assert_eq!(pool.live_bytes(), 1);
+            drop(neighbor);
+            drop(run(&source, named, &pool).unwrap());
+            assert_eq!(pool.live_bytes(), 0);
+            let malformed = "/BudgetBase usecmap 1 beginbfrange <03> <04> [<0041>] endbfrange";
+            assert!(run(malformed, false, &pool).is_err());
+            assert_eq!(pool.live_bytes(), 0);
+        }
+    }
+
+    #[test]
+    fn budget_unicode_decoder_matches_boms_malformed_sequences_and_capacity() {
+        let pool = crate::budget::OperationBudget::new(65536);
+        for bytes in [
+            &b""[..],
+            &b"\0A\0B"[..],
+            &b"\xd8\x3d\xde\0"[..],
+            &b"\xd8\0\0A"[..],
+            &b"\xd8\0\xff"[..],
+            &b"\xff\xfeA\0"[..],
+            &b"\xfe\xff\0A"[..],
+            &b"\xef\xbb\xbfA"[..],
+        ] {
+            let (text, lease) = super::decode_utf16be_with_budget(bytes, &pool).unwrap();
+            assert_eq!(text, super::decode_utf16be(bytes));
+            assert_eq!(lease.bytes(), text.capacity());
+            assert_eq!(pool.live_bytes(), lease.bytes());
+            drop((text, lease));
+            assert_eq!(pool.live_bytes(), 0);
+        }
+        for unit in 0..=u16::MAX {
+            let bytes = unit.to_be_bytes();
+            let result = super::decode_utf16be_with_budget(&bytes, &pool).unwrap();
+            assert_eq!(result.0, super::decode_utf16be(&bytes), "unit {unit}");
+            drop(result);
+        }
+        assert_eq!(pool.live_bytes(), 0);
+        let bytes = b"\0A";
+        let (_, lease) = super::decode_utf16be_with_budget(bytes, &pool).unwrap();
+        let capacity = lease.bytes();
+        drop(lease);
+        let exact = crate::budget::OperationBudget::new(capacity);
+        let neighbor = exact.reserve(1).unwrap();
+        assert!(super::decode_utf16be_with_budget(bytes, &exact).is_err());
+        assert_eq!(exact.live_bytes(), 1);
+        drop(neighbor);
+        drop(super::decode_utf16be_with_budget(bytes, &exact).unwrap());
+        assert_eq!(exact.live_bytes(), 0);
+    }
+
+    #[test]
+    fn hexadecimal_budget_tracks_live_capacity_overlap_and_recovery() {
+        let pool = crate::budget::OperationBudget::new(4);
+        let mut parser = super::CmapParser::new(Vec::new());
+        parser.set_budget(&pool);
+        let first = parser.hex_to_bytes(b"<0041>").unwrap();
+        assert_eq!(first.as_slice(), &[0, 65]);
+        assert_eq!(pool.live_bytes(), first.capacity());
+        let second = parser.hex_to_bytes(b"<0042>").unwrap();
+        assert_eq!(pool.live_bytes(), first.capacity() + second.capacity());
+        assert_eq!(pool.peak_bytes(), 4);
+        assert!(parser.hex_to_bytes(b"<01>").is_err());
+        assert_eq!(pool.live_bytes(), 4);
+        drop(second);
+        let neighbor = pool.reserve(1).unwrap();
+        assert!(parser.hex_to_bytes(b"<0042>").is_err());
+        assert_eq!(pool.live_bytes(), 3);
+        assert!(parser.hex_to_bytes(b"<004g>").is_err());
+        assert_eq!(pool.live_bytes(), 3);
+        drop(neighbor);
+        let result = parser.hex_to_bytes(b"<0042>").unwrap();
+        drop((first, result));
+        assert_eq!(pool.live_bytes(), 0);
+        let pool = crate::budget::OperationBudget::new(65536);
+        let mut parser = super::CmapParser::new(b"1 beginbfchar <41> <0041> endbfchar".to_vec());
+        parser.set_budget(&pool);
+        let cmap = parser.parse().unwrap();
+        assert_eq!(cmap.cid_to_unicode.get(&65).map(String::as_str), Some("A"));
+        let lease = parser.take_retained_lease().unwrap();
+        assert_eq!(pool.live_bytes(), lease.bytes());
+        assert!(lease.bytes() > 0);
+        drop((cmap, lease));
+        assert_eq!(pool.live_bytes(), 0);
+    }
+
+    #[test]
+    fn token_views_share_source_and_preserve_token_boundaries() {
+        let mut parser = super::CmapParser::new(
+            b"% comment\n /Name plain <00ff> [<0041><0042>] (a(b)c) << /Key 1 >>".to_vec(),
+        );
+        let source = parser.data.clone();
+        for expected in [
+            &b"Name"[..],
+            &b"plain"[..],
+            &b"<00ff>"[..],
+            &b"[<0041><0042>]"[..],
+            &b"a(b)c)"[..],
+            &b" /Key 1 "[..],
+        ] {
+            let word = parser.required_word().unwrap();
+            assert_eq!(word.as_slice(), expected);
+            assert!(std::rc::Rc::ptr_eq(&word.source, &source));
+            assert_eq!(word.as_slice().as_ptr(), source[word.start..].as_ptr());
+        }
+        assert!(parser.get_next_word().is_none());
+        let mut parser = super::CmapParser::new(b"/Final".to_vec());
+        let word = parser.required_word().unwrap();
+        drop(parser);
+        assert_eq!(word.as_slice(), b"Final");
+        for truncated in [&b"/"[..], &b"[<41>"[..], &b"<< /Key"[..]] {
+            assert!(
+                super::CmapParser::new(truncated.to_vec())
+                    .get_next_word()
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn hexadecimal_decoding_preserves_whitespace_odd_nibbles_and_validation() {
+        let parser = super::CmapParser::new(Vec::new());
+        for (input, expected) in [
+            (&b"<>"[..], &b""[..]),
+            (&b"<4 1\t4\n2\r4\x0c3\0>"[..], &b"ABC"[..]),
+            (&b"<aB c>"[..], &b"\xab\xc0"[..]),
+            (&b"<0>"[..], &b"\0"[..]),
+        ] {
+            assert_eq!(parser.hex_to_bytes(input).unwrap().as_slice(), expected);
+        }
+        for input in [&b"<41g>"[..], &b"<41"[..], &b"41>"[..], &b"<4\x014>"[..]] {
+            assert!(parser.hex_to_bytes(input).is_err());
+        }
+        assert_eq!(super::decode_utf16be(&[0, 65, 0, 66]), "AB");
+        assert_eq!(super::decode_utf16be(&[0xd8, 0x3d, 0xde, 0]), "😀");
+        assert_eq!(super::decode_utf16be(&[0xd8, 0, 0, 65]), "�A");
+    }
+
+    #[test]
+    fn embedded_usecmap_is_not_silently_ignored() {
+        assert!(matches!(
+            super::CmapParser::new(b"/Unknown-Rzpdf-CMap usecmap".to_vec()).parse(),
+            Err(crate::error::PdfError::UnsupportedFeature(_))
+        ));
+    }
     use crate::font::cmap::parser::CmapParser;
+
+    #[test]
+    fn writing_mode_values_are_checked_and_local_mode_wins() {
+        for data in [
+            b"/WMode 2 def".as_slice(),
+            b"/WMode -1 def",
+            b"/WMode 1.5 def",
+            b"/WMode /Bad def",
+            b"/WMode",
+        ] {
+            assert!(CmapParser::new(data.to_vec()).parse().is_err());
+        }
+        for data in [
+            b"/WMode 0 def /Identity-V usecmap".as_slice(),
+            b"/Identity-V usecmap /WMode 0 def",
+        ] {
+            assert_eq!(
+                CmapParser::new(data.to_vec()).parse().unwrap().wmode(),
+                Some(0)
+            );
+        }
+    }
+
+    #[test]
+    fn inheritance_cycle_detection_is_path_local() {
+        let mut parser = CmapParser::new(b"/Identity-H usecmap".to_vec());
+        parser.inheritance_names.push("Identity-H".into());
+        assert!(
+            matches!(parser.parse(), Err(crate::error::PdfError::FontError(message)) if message.contains("cycle"))
+        );
+        let cmap = CmapParser::new(b"/Identity-H usecmap /Identity-H usecmap".to_vec())
+            .parse()
+            .unwrap();
+        assert_eq!(cmap.code_to_cids.get(&1), Some(&1));
+    }
+
+    #[test]
+    fn inherited_identity_map_has_local_overrides_and_shared_limits() {
+        let inherited = b"/Identity-H usecmap".to_vec();
+        let size = inherited.len()
+            + font_data::cmap::get_predefine_cmap_data("Identity-H")
+                .unwrap()
+                .len();
+        for (budget, success) in [(size, true), (size - 1, false)] {
+            let limits = crate::parser::options::Limits {
+                max_decoded_bytes: budget,
+                ..Default::default()
+            };
+            assert_eq!(
+                CmapParser::with_limits(inherited.clone(), &limits)
+                    .parse()
+                    .is_ok(),
+                success
+            );
+        }
+        let data = b"1 begincidchar <0001> 42 endcidchar /Identity-H usecmap /WMode 1 def".to_vec();
+        let cmap = CmapParser::new(data.clone()).parse().unwrap();
+        assert_eq!(cmap.code_to_cids.get(&1), Some(&42));
+        assert_eq!(cmap.code_to_cids.get(&2), Some(&2));
+        assert_eq!(cmap.wmode(), Some(1));
+        assert_eq!(cmap.chars_limited(&[0, 1], 1).unwrap().len(), 1);
+        let after =
+            CmapParser::new(b"/Identity-H usecmap 1 begincidchar <0001> 42 endcidchar".to_vec())
+                .parse()
+                .unwrap();
+        assert_eq!(after.code_to_cids.get(&1), Some(&42));
+        assert_eq!(after.code_to_cids.get(&2), Some(&2));
+        let limits = crate::parser::options::Limits {
+            max_depth: 0,
+            ..Default::default()
+        };
+        assert!(
+            CmapParser::with_limits(data.clone(), &limits)
+                .parse()
+                .is_err()
+        );
+        let limits = crate::parser::options::Limits {
+            max_objects: 65537,
+            ..Default::default()
+        };
+        assert!(CmapParser::with_limits(data, &limits).parse().is_err());
+    }
+
+    #[test]
+    fn inclusive_ranges_and_utf16_destinations() {
+        let cmap = CmapParser::new(
+            b"1 begincidrange <01> <02> 10 1 beginbfrange <01> <02> <D83DDE00>".to_vec(),
+        )
+        .parse()
+        .unwrap();
+        assert_eq!(cmap.code_to_cids.get(&1), Some(&10));
+        assert_eq!(cmap.code_to_cids.get(&2), Some(&11));
+        assert_eq!(cmap.cid_to_unicode.get(&1).map(String::as_str), Some("😀"));
+        assert_eq!(cmap.cid_to_unicode.get(&2).map(String::as_str), Some("😁"));
+        let cmap = CmapParser::new(b"1 beginbfrange <01> <02> [<0041><00420043>]".to_vec())
+            .parse()
+            .unwrap();
+        assert_eq!(cmap.cid_to_unicode.get(&2).map(String::as_str), Some("BC"));
+    }
+
+    #[test]
+    fn invalid_ranges_and_mapping_budget_return_errors() {
+        for input in [
+            b"1 begincidrange <02> <01> 0".as_slice(),
+            b"1 begincidrange <00> <01> 4294967295",
+            b"1 begincidrange <00000000> <FFFFFFFF> 0",
+            b"-1 beginbfchar",
+            b"1 beginbfrange <01> <02> <FFFF>",
+        ] {
+            assert!(CmapParser::new(input.to_vec()).parse().is_err());
+        }
+        let mut parser = CmapParser::new(b"1 begincidrange <01> <02> 0".to_vec());
+        parser.remaining_entries = 1;
+        assert!(parser.parse().is_err());
+        let mut parser = CmapParser::new(b"1 begincidrange <01> <02> 0".to_vec());
+        parser.remaining_entries = 2;
+        assert!(parser.parse().is_ok());
+    }
+
+    #[test]
+    fn malformed_and_truncated_cmap_inputs_do_not_panic() {
+        for input in [
+            b"1 beginbfchar <01>".as_slice(),
+            b"1 beginbfchar <01> <GG>",
+            b"1 beginbfchar <0102030405> <0041>",
+            b"1 beginbfchar <01> [",
+        ] {
+            assert!(CmapParser::new(input.to_vec()).parse().is_err());
+        }
+        for input in [b"   ".as_slice(), b"% trailing comment", b"<<", b"["] {
+            assert!(CmapParser::new(input.to_vec()).parse().is_ok());
+        }
+        assert!(
+            CmapParser::new(b"1 beginbfchar <01><0041> endbfchar".to_vec())
+                .parse()
+                .is_ok()
+        );
+    }
 
     #[test]
     fn test_cmap_parse() {
@@ -703,6 +1689,7 @@ end
 
         let mut cmap_parser = CmapParser::new(content.to_vec());
         let cmap = cmap_parser.parse().unwrap();
-        assert_eq!(cmap.code_to_cids.len(), 7768_usize);
+        // CID ranges include both endpoints; the former assertion omitted 222 upper bounds.
+        assert_eq!(cmap.code_to_cids.len(), 7990_usize);
     }
 }

@@ -25,6 +25,71 @@ pub fn load_freetype_face(fontfile: Vec<u8>) -> PdfResult<Face> {
     }
 }
 
+/// Owns the Rust input-copy quota until FreeType releases its memory face.
+/// FreeType's native allocations are not charged to this pool.
+pub(crate) struct OperationFace {
+    face: Face,
+    _lease: Option<crate::budget::MemoryLease>,
+}
+
+impl std::ops::Deref for OperationFace {
+    type Target = Face;
+    fn deref(&self) -> &Self::Target {
+        &self.face
+    }
+}
+
+pub(crate) fn load_face_for_operation(
+    fontfile: &[u8],
+    budget: Option<&crate::budget::OperationBudget>,
+) -> PdfResult<OperationFace> {
+    let (data, lease) = if let Some(pool) = budget {
+        let (data, lease) =
+            crate::budget::BudgetedBytes::copy_from_slice(pool, fontfile)?.into_reserved_parts();
+        (data, Some(lease))
+    } else {
+        (fontfile.to_vec(), None)
+    };
+    let face = load_freetype_face(data)?;
+    Ok(OperationFace {
+        face,
+        _lease: lease,
+    })
+}
+
+#[cfg(test)]
+mod budget_tests {
+    #[test]
+    fn input_quota_lives_with_face_and_releases_on_error_or_unwind() {
+        use crate::{budget::OperationBudget, error::PdfError};
+        let data = crate::font::builtin_font::load_builtin_font_data("Helvetica").unwrap();
+        let pool = OperationBudget::new(data.len());
+        let face = super::load_face_for_operation(data, Some(&pool)).unwrap();
+        assert!(face.num_glyphs() > 0);
+        assert_eq!(pool.live_bytes(), data.len());
+        let neighbor = OperationBudget::new(data.len());
+        let held = neighbor.reserve(1).unwrap();
+        assert!(matches!(
+            super::load_face_for_operation(data, Some(&neighbor)),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(neighbor.live_bytes(), 1);
+        drop(held);
+        drop(super::load_face_for_operation(data, Some(&neighbor)).unwrap());
+        assert_eq!(neighbor.live_bytes(), 0);
+        drop(face);
+        assert_eq!(pool.live_bytes(), 0);
+        assert!(super::load_face_for_operation(b"not a font", Some(&pool)).is_err());
+        assert_eq!(pool.live_bytes(), 0);
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _face = super::load_face_for_operation(data, Some(&pool)).unwrap();
+            panic!("face quota unwind");
+        }));
+        assert!(unwind.is_err());
+        assert_eq!(pool.live_bytes(), 0);
+    }
+}
+
 #[derive(Debug)]
 pub enum CharmapType {
     MsSymbol,

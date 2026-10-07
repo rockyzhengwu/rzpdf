@@ -18,7 +18,7 @@ pub enum BuiltEncoding {
 }
 
 pub fn get_char_width(char: CharCode) -> Option<f32> {
-    unimplemented!()
+    None
 }
 
 pub fn load_builtin_font_data(name: &str) -> Option<&[u8]> {

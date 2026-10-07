@@ -2,6 +2,7 @@ use std::fmt::Display;
 
 mod afm;
 pub mod builtin_font;
+pub mod cid_encoding;
 pub mod cid_font;
 pub mod cmap;
 pub mod descriptor;
@@ -18,7 +19,7 @@ pub mod type0;
 pub mod type1_program;
 pub mod type1c;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WritingMode {
     Horizontal,
     Vertical,

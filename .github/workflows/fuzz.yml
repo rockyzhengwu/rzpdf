@@ -1,0 +1,58 @@
+name: Fuzz smoke checks
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    # Deferred at the user's request; retain configuration without running it.
+    if: ${{ false }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        target: [syntax, document, content, filters, fonts]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang libfontconfig1-dev libfreetype6-dev nasm ninja-build pkg-config
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz -> target
+      - name: Install pinned fuzz runner
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Prepare project-authored seeds
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: |
+          cargo check --manifest-path fuzz/Cargo.toml --locked --bins
+          mkdir -p "fuzz/corpus/$FUZZ_TARGET"
+          if [ "$FUZZ_TARGET" = document ]; then
+            cargo run --manifest-path fuzz/Cargo.toml --locked --example generate_document_seed -- fuzz/corpus/document/created.pdf
+          elif [ "$FUZZ_TARGET" = fonts ]; then
+            cargo run --manifest-path fuzz/Cargo.toml --locked --example generate_font_seed -- fuzz/corpus/fonts/format4.sfnt
+          else
+            cp -R "fuzz/seeds/$FUZZ_TARGET/." "fuzz/corpus/$FUZZ_TARGET/"
+          fi
+      - name: Run bounded coverage-guided smoke check
+        working-directory: fuzz
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: |
+          cargo fuzz run "$FUZZ_TARGET" --sanitizer address -- -max_len=65536 -max_total_time=60 -timeout=5 -rss_limit_mb=1024
+          git diff --exit-code -- Cargo.lock
+      - name: Preserve crash inputs and evolved corpus
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-${{ matrix.target }}-${{ github.run_id }}
+          path: |
+            fuzz/artifacts/
+            fuzz/corpus/
+          if-no-files-found: ignore

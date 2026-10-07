@@ -2,6 +2,15 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum PdfError {
+    #[error("unsupported feature: {0}")]
+    UnsupportedFeature(String),
+
+    #[error("invalid reference: {0}")]
+    InvalidReference(String),
+
+    #[error("resource limit exceeded: {0}")]
+    ResourceLimit(String),
+
     #[error("IO Error '{0}' ")]
     IOError(String),
 
@@ -69,3 +78,9 @@ pub enum PdfError {
 }
 
 pub type PdfResult<T> = std::result::Result<T, PdfError>;
+
+impl From<std::io::Error> for PdfError {
+    fn from(error: std::io::Error) -> Self {
+        Self::IOError(error.to_string())
+    }
+}

@@ -25,12 +25,35 @@ pub struct Sampled {
 
 impl Sampled {
     pub fn try_new<R: Seek + Read>(obj: &PdfObject, ctx: &PDFContext<R>) -> PdfResult<Self> {
+        let resolved = ctx.resolve(obj)?;
+        let obj = &resolved;
         let obj = obj.as_stream().ok_or(PdfError::FunctionError(
             "Sampled need a stream ".to_string(),
         ))?;
         let mut function = Sampled::default();
-        let domain = obj
-            .dict()
+        let mut dict = obj.dict().clone();
+        for key in [
+            "Domain",
+            "Range",
+            "Size",
+            "BitsPerSample",
+            "Order",
+            "Encode",
+            "Decode",
+        ] {
+            if let Some(value) = dict.get(key) {
+                let mut value = ctx.resolve(value)?;
+                if let PdfObject::PdfArray(array) = &mut value {
+                    let mut resolved_array = crate::objects::pdf_array::PdfArray::default();
+                    for entry in &*array {
+                        resolved_array.add_obj(ctx.resolve(entry)?);
+                    }
+                    *array = resolved_array;
+                }
+                dict.insert(key.to_string(), value);
+            }
+        }
+        let domain = dict
             .get("Domain")
             .ok_or(PdfError::FunctionError(
                 "Sample Function Domain is None".to_string(),
@@ -48,8 +71,7 @@ impl Sampled {
         }
         function.m = function.domain.len() / 2;
 
-        let range = obj
-            .dict()
+        let range = dict
             .get("Range")
             .ok_or(PdfError::FunctionError("Sampled Range is None".to_string()))?
             .as_array()
@@ -63,8 +85,7 @@ impl Sampled {
             function.range.push(value);
         }
         function.n = range.len() / 2;
-        let size_obj = obj
-            .dict()
+        let size_obj = dict
             .get("Size")
             .ok_or(PdfError::FunctionError(
                 "Smapled Function Size param is None".to_string(),
@@ -74,13 +95,51 @@ impl Sampled {
                 "Smapled Function Size need an aray".to_string(),
             ))?;
         for v in size_obj.into_iter() {
-            let value = v.as_u32().ok_or(PdfError::FunctionError(
-                "Sampled Function Size Value need to be a number".to_string(),
-            ))?;
+            let value = v.as_number().and_then(|n| n.as_u32_checked().ok()).ok_or(
+                PdfError::FunctionError(
+                    "Sampled Function Size Value need to be a number".to_string(),
+                ),
+            )?;
             function.size.push(value as usize);
         }
 
-        let corner_size: usize = 1 << function.m;
+        if function.domain.is_empty()
+            || function.domain.len() % 2 != 0
+            || function.range.is_empty()
+            || function.range.len() % 2 != 0
+            || function.size.len() != function.m
+            || function.size.contains(&0)
+            || function
+                .domain
+                .chunks_exact(2)
+                .any(|p| !p[0].is_finite() || !p[1].is_finite() || p[0] >= p[1])
+            || function
+                .range
+                .chunks_exact(2)
+                .any(|p| !p[0].is_finite() || !p[1].is_finite() || p[0] > p[1])
+        {
+            return Err(PdfError::FunctionError(
+                "Invalid Sampled Domain/Range/Size dimensions".to_string(),
+            ));
+        }
+        let sample_count = function
+            .size
+            .iter()
+            .try_fold(function.n, |total, size| total.checked_mul(*size))
+            .ok_or_else(|| PdfError::ResourceLimit("Sampled sample count overflow".to_string()))?;
+        let corner_size = 1usize
+            .checked_shl(function.m.try_into().unwrap_or(u32::MAX))
+            .ok_or_else(|| PdfError::ResourceLimit("Sampled dimensions".to_string()))?;
+        if sample_count > ctx.limits().max_objects
+            || corner_size > ctx.limits().max_objects
+            || sample_count
+                .checked_mul(4)
+                .is_none_or(|bytes| bytes > ctx.limits().max_decoded_bytes)
+        {
+            return Err(PdfError::ResourceLimit(
+                "Sampled sample/corner budget".to_string(),
+            ));
+        }
         let mut idx_offset: Vec<usize> = Vec::with_capacity(corner_size);
         for i in 0..corner_size {
             let mut idx: usize = 0;
@@ -105,13 +164,14 @@ impl Sampled {
         }
         function.idx_offset = idx_offset;
 
-        let bits_per_smaple = obj
-            .dict()
+        let bits_per_smaple = dict
             .get("BitsPerSample")
             .ok_or(PdfError::FunctionError(
                 "Sampled Function BitsPerSample is None".to_string(),
             ))?
-            .as_u8()
+            .as_number()
+            .and_then(|n| n.as_u32_checked().ok())
+            .and_then(|n| u8::try_from(n).ok())
             .ok_or(PdfError::FunctionError(
                 "Sampled Function BitsPerSample is not number".to_string(),
             ))?;
@@ -122,15 +182,25 @@ impl Sampled {
             )));
         }
         function.bits_per_sample = bits_per_smaple;
-        if let Some(o) = obj.dict().get("Order") {
-            let ov = o.as_u8().ok_or(PdfError::FunctionError(
-                "Sampled function order is not number".to_string(),
-            ))?;
+        if let Some(o) = dict.get("Order") {
+            let ov = o
+                .as_number()
+                .and_then(|n| n.as_u32_checked().ok())
+                .and_then(|n| u8::try_from(n).ok())
+                .ok_or(PdfError::FunctionError(
+                    "Sampled function order is not number".to_string(),
+                ))?;
             function.order = ov;
         } else {
             function.order = 1_u8;
         }
-        if let Some(encode) = obj.dict().get("Encode") {
+        if function.order != 1 {
+            return Err(PdfError::UnsupportedFeature(format!(
+                "Sampled interpolation Order {}",
+                function.order
+            )));
+        }
+        if let Some(encode) = dict.get("Encode") {
             let enc_array = encode.as_array().ok_or(PdfError::FunctionError(
                 "Sampled function Encode is not array".to_string(),
             ))?;
@@ -143,10 +213,10 @@ impl Sampled {
         } else {
             for s in function.size.iter() {
                 function.encode.push(0.0);
-                function.encode.push(s.to_owned() as f32);
+                function.encode.push((s - 1) as f32);
             }
         }
-        if let Some(decode) = obj.dict().get("Decode") {
+        if let Some(decode) = dict.get("Decode") {
             let dec_array = decode.as_array().ok_or(PdfError::FunctionError(
                 "Sampled function Decode is not array".to_string(),
             ))?;
@@ -159,11 +229,36 @@ impl Sampled {
         } else {
             function.decode = function.range.clone();
         }
+        if function.encode.len() != function.m * 2
+            || function.decode.len() != function.n * 2
+            || function
+                .encode
+                .iter()
+                .chain(function.decode.iter())
+                .any(|v| !v.is_finite())
+        {
+            return Err(PdfError::FunctionError(
+                "Invalid Sampled Encode/Decode dimensions".to_string(),
+            ));
+        }
         let mut samples = Vec::new();
         let bytes = obj.decode_data(ctx)?;
+        let required_bytes = sample_count
+            .checked_mul(usize::from(function.bits_per_sample))
+            .and_then(|bits| bits.checked_add(7))
+            .map(|bits| bits / 8)
+            .ok_or_else(|| PdfError::ResourceLimit("Sampled bit count overflow".to_string()))?;
+        if bytes.len() < required_bytes {
+            return Err(PdfError::FunctionError(
+                "Truncated Sampled sample data".to_string(),
+            ));
+        }
         let mut bitreader = BitReader::endian(Cursor::new(bytes), BigEndian);
         let sample_mul = 1.0 / (2.0_f32.powf(function.bits_per_sample as f32) as f32 - 1.0);
-        while let Ok(v) = bitreader.read_var::<i32>(function.bits_per_sample as u32) {
+        for _ in 0..sample_count {
+            let v = bitreader
+                .read_var::<u32>(function.bits_per_sample as u32)
+                .map_err(|_| PdfError::FunctionError("Truncated Sampled bits".to_string()))?;
             samples.push((v as f32) * sample_mul);
         }
         function.samples = samples;
@@ -171,6 +266,15 @@ impl Sampled {
     }
 
     pub fn eval(&self, inputs: &[f32]) -> PdfResult<Vec<f32>> {
+        if self.m == 0
+            || self.n == 0
+            || inputs.len() != self.m
+            || inputs.iter().any(|v| !v.is_finite())
+        {
+            return Err(PdfError::FunctionError(
+                "Invalid Sampled inputs".to_string(),
+            ));
+        }
         let mut e: Vec<usize> = Vec::with_capacity(self.m);
         let mut efrac0: Vec<f32> = Vec::with_capacity(self.m);
         let mut efrac1: Vec<f32> = Vec::with_capacity(self.m);
@@ -199,8 +303,9 @@ impl Sampled {
             } else {
                 e.push(floor);
             }
-            efrac0.push(x - floor as f32);
-            efrac1.push(1.0 - (x - floor as f32));
+            let fraction = x - e.last().copied().unwrap_or(0) as f32;
+            efrac0.push(1.0 - fraction);
+            efrac1.push(fraction);
         }
         let mut idx0: usize = 0;
         let mut k = self.m - 1;
@@ -213,7 +318,14 @@ impl Sampled {
         for i in 0..self.n {
             let mut values: Vec<f32> = Vec::with_capacity(1 << self.m);
             for j in 0..(1 << self.m) {
-                values.push(self.samples[idx0 + self.idx_offset[j] + i]);
+                values.push(
+                    *self
+                        .samples
+                        .get(idx0 + self.idx_offset[j] + i)
+                        .ok_or_else(|| {
+                            PdfError::FunctionError("Sampled index exceeds sample data".to_string())
+                        })?,
+                );
             }
             let mut j = 0;
             let mut t = 1 << self.m;
@@ -228,6 +340,11 @@ impl Sampled {
             }
             let mut o =
                 values[0] * (self.decode[2 * i + 1] - self.decode[2 * i]) + self.decode[2 * i];
+            if !o.is_finite() {
+                return Err(PdfError::FunctionError(
+                    "Sampled result is non-finite".to_string(),
+                ));
+            }
             if o < self.range[2 * i] {
                 o = self.range[2 * i];
             }
@@ -264,9 +381,128 @@ fn normalize(values: &[f32], limits: &[f32]) -> PdfResult<Vec<f32>> {
                 "SampleFunction normailize get upperbound error".to_string(),
             ))?
             .to_owned();
-        let normal = ((v - lowerbound) / (upperbound - lowerbound)).max(0.0);
-        let normal = normal.min(1.0);
+        let normal = v.max(lowerbound).min(upperbound);
         res.push(normal);
     }
     Ok(res)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        document::cross_ref_table::CrossRefTable,
+        io::stream_reader::StreamReader,
+        objects::{pdf_dict::PdfDict, pdf_stream::PdfStream},
+        parser::{parser::PdfParser, syntax::SyntaxParser},
+    };
+    use std::collections::HashMap;
+
+    #[test]
+    fn sampled_interpolation_unsigned_bits_and_invalid_dimensions() {
+        let parser = PdfParser::new(SyntaxParser::new(
+            StreamReader::try_new(Cursor::new(Vec::<u8>::new())).unwrap(),
+        ));
+        let ctx = PDFContext::try_new(
+            parser,
+            CrossRefTable::new(HashMap::new(), PdfDict::default()),
+        )
+        .unwrap();
+        let build = |parameters: &str, bytes: Vec<u8>| {
+            let mut syntax = SyntaxParser::new(
+                StreamReader::try_new(Cursor::new(parameters.as_bytes().to_vec())).unwrap(),
+            );
+            let dict = syntax.get_object().unwrap().into_dict().unwrap();
+            Sampled::try_new(&PdfObject::PdfStream(PdfStream::new(dict, bytes)), &ctx)
+        };
+        let f = build(
+            "<< /Domain [2 4] /Range [0 1] /Size [2] /BitsPerSample 8 >>",
+            vec![0, 255],
+        )
+        .unwrap();
+        assert_eq!(f.eval(&[2.0]).unwrap(), vec![0.0]);
+        assert_eq!(f.eval(&[3.0]).unwrap(), vec![0.5]);
+        assert_eq!(f.eval(&[4.0]).unwrap(), vec![1.0]);
+        assert_eq!(f.eval(&[9.0]).unwrap(), vec![1.0]);
+        let reverse = build(
+            "<< /Domain [0 1] /Range [0 1] /Size [2] /BitsPerSample 8 /Encode [1 0] >>",
+            vec![0, 255],
+        )
+        .unwrap();
+        assert_eq!(reverse.eval(&[0.0]).unwrap(), vec![1.0]);
+        assert_eq!(reverse.eval(&[1.0]).unwrap(), vec![0.0]);
+        let multidimensional = build(
+            "<< /Domain [0 1 0 1] /Range [0 1] /Size [2 2] /BitsPerSample 8 >>",
+            vec![0, 255, 255, 0],
+        )
+        .unwrap();
+        assert_eq!(multidimensional.eval(&[0.0, 0.0]).unwrap(), vec![0.0]);
+        assert_eq!(multidimensional.eval(&[1.0, 0.0]).unwrap(), vec![1.0]);
+        assert_eq!(multidimensional.eval(&[0.0, 1.0]).unwrap(), vec![1.0]);
+        assert_eq!(multidimensional.eval(&[1.0, 1.0]).unwrap(), vec![0.0]);
+        assert_eq!(multidimensional.eval(&[0.5, 0.5]).unwrap(), vec![0.5]);
+        let mut syntax = SyntaxParser::new(
+            StreamReader::try_new(Cursor::new(
+                b"<< /Domain [0 1] /Range [0 1] /Size [2] /BitsPerSample 8 >>".to_vec(),
+            ))
+            .unwrap(),
+        );
+        let mut dict = syntax.get_object().unwrap().into_dict().unwrap();
+        for key in ["Domain", "Range", "Size", "BitsPerSample"] {
+            let mut value = dict.get(key).unwrap().clone();
+            if let PdfObject::PdfArray(array) = &mut value {
+                let mut referenced = crate::objects::pdf_array::PdfArray::default();
+                for entry in &*array {
+                    let id = ctx.insert_object(entry.clone());
+                    referenced.add_obj(PdfObject::PdfReference(
+                        crate::objects::pdf_reference::PdfReference::new(
+                            id.obj_num(),
+                            id.gen_num(),
+                        ),
+                    ));
+                }
+                *array = referenced;
+            }
+            let id = ctx.insert_object(value);
+            dict.insert(
+                key.into(),
+                PdfObject::PdfReference(crate::objects::pdf_reference::PdfReference::new(
+                    id.obj_num(),
+                    id.gen_num(),
+                )),
+            );
+        }
+        let referenced = Sampled::try_new(
+            &PdfObject::PdfStream(PdfStream::new(dict, vec![0, 255])),
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(referenced.eval(&[0.5]).unwrap(), vec![0.5]);
+        assert!(f.eval(&[]).is_err());
+        assert!(f.eval(&[f32::NAN]).is_err());
+        assert!(Sampled::default().eval(&[]).is_err());
+        let f = build(
+            "<< /Domain [0 1] /Range [0 1] /Size [1] /BitsPerSample 32 >>",
+            vec![255; 4],
+        )
+        .unwrap();
+        assert_eq!(f.eval(&[0.5]).unwrap(), vec![1.0]);
+        for parameters in [
+            "<< /Domain [] /Range [0 1] /Size [] /BitsPerSample 8 >>",
+            "<< /Domain [0 1] /Range [0 1] /Size [0] /BitsPerSample 8 >>",
+            "<< /Domain [0 1] /Range [0 1] /Size [4294967295] /BitsPerSample 8 >>",
+            "<< /Domain [0 1] /Range [0 1] /Size [2] /BitsPerSample 264 >>",
+            "<< /Domain [0 1] /Range [0 1] /Size [2] /BitsPerSample 8 /Encode [0] >>",
+            "<< /Domain [0 1] /Range [0 1] /Size [2] /BitsPerSample 8 /Order 3 >>",
+        ] {
+            assert!(build(parameters, vec![0, 255]).is_err(), "{parameters}");
+        }
+        assert!(
+            build(
+                "<< /Domain [0 1] /Range [0 1] /Size [2] /BitsPerSample 8 >>",
+                vec![0]
+            )
+            .is_err()
+        );
+    }
 }

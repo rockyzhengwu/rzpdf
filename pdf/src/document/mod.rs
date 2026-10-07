@@ -10,22 +10,38 @@ use crate::{
     geom::rectangle::Rectangle,
     io::stream_reader::StreamReader,
     objects::{
-        PdfObject, object_id::ObjectId, pdf_array::PdfArray, pdf_dict::PdfDict,
-        pdf_name::PdfName, pdf_number::PdfNumber, pdf_reference::PdfReference,
-        pdf_stream::PdfStream,
+        object_id::ObjectId, pdf_array::PdfArray, pdf_dict::PdfDict, pdf_name::PdfName,
+        pdf_number::PdfNumber, pdf_reference::PdfReference, pdf_stream::PdfStream, PdfObject,
     },
-    page::{PdfPage, content_builder::ContentBuilder},
+    page::{content_builder::ContentBuilder, PdfPage},
     parser::{
-        parser::{PdfParser, parse_xref},
+        parser::{parse_xref, PdfParser},
         syntax::SyntaxParser,
     },
     pdf_context::PDFContext,
 };
 
 pub mod catalog;
+mod content_edit;
 pub mod cross_ref_table;
+pub mod embedded_font;
+pub mod identity;
+pub mod metadata;
+mod nested_edit;
+pub mod owned;
+pub use owned::Document;
+mod page_copy;
+mod page_geometry;
+mod page_order;
+pub mod page_overlay;
 pub mod page_tree;
+mod resource_import;
+pub mod resource_manager;
+pub mod save_options;
+pub(crate) mod state;
 pub mod store;
+
+use page_tree::PageTreeEntry;
 
 pub struct PdfDocument<R: Seek + Read> {
     ctx: PDFContext<R>,
@@ -41,10 +57,23 @@ impl PdfDocument<BufReader<File>> {
         path: P,
         mode: crate::parser::syntax::ParseMode,
     ) -> PdfResult<PdfDocument<BufReader<File>>> {
+        Self::open_with_options(
+            path,
+            crate::parser::options::ParseOptions {
+                mode,
+                ..Default::default()
+            },
+        )
+    }
+
+    pub fn open_with_options<P: AsRef<Path>>(
+        path: P,
+        options: crate::parser::options::ParseOptions,
+    ) -> PdfResult<PdfDocument<BufReader<File>>> {
         let file = File::open(path)
             .map_err(|e| PdfError::DocumentError(format!("load document failed:{:?}", e)))?;
         let reader = BufReader::new(file);
-        Self::from_reader_with_mode(reader, mode)
+        Self::from_reader_with_options(reader, options)
     }
 
     pub fn load<P: AsRef<Path>>(path: P) -> PdfResult<PdfDocument<BufReader<File>>> {
@@ -52,6 +81,27 @@ impl PdfDocument<BufReader<File>> {
     }
 }
 impl PdfDocument<Cursor<Vec<u8>>> {
+    /// Create an empty PDF 1.7 document, without reading a template PDF.
+    pub fn new() -> PdfResult<Self> {
+        Self::new_with_options(crate::parser::options::ParseOptions::default())
+    }
+
+    pub fn new_with_options(options: crate::parser::options::ParseOptions) -> PdfResult<Self> {
+        Self::create_with_options(options)
+    }
+
+    /// Select the initial header version, not a PDF conformance profile.
+    pub fn new_with_version(version: save_options::PdfVersion) -> PdfResult<Self> {
+        Self::new_with_version_and_options(version, Default::default())
+    }
+
+    pub fn new_with_version_and_options(
+        version: save_options::PdfVersion,
+        options: crate::parser::options::ParseOptions,
+    ) -> PdfResult<Self> {
+        Self::create_with_version_and_options(version, options)
+    }
+
     pub fn from_bytes(buffer: Vec<u8>) -> PdfResult<PdfDocument<Cursor<Vec<u8>>>> {
         Self::from_bytes_with_mode(buffer, crate::parser::syntax::ParseMode::Compatible)
     }
@@ -63,12 +113,57 @@ impl PdfDocument<Cursor<Vec<u8>>> {
         Self::from_reader_with_mode(Cursor::new(buffer), mode)
     }
 
+    pub fn from_bytes_with_options(
+        buffer: Vec<u8>,
+        options: crate::parser::options::ParseOptions,
+    ) -> PdfResult<PdfDocument<Cursor<Vec<u8>>>> {
+        Self::from_reader_with_options(Cursor::new(buffer), options)
+    }
+
     pub fn load(buffer: Vec<u8>) -> PdfResult<PdfDocument<Cursor<Vec<u8>>>> {
         Self::from_bytes(buffer)
     }
 }
 
 impl<R: Seek + Read> PdfDocument<R> {
+    pub(crate) fn create_with_options(
+        options: crate::parser::options::ParseOptions,
+    ) -> PdfResult<Self> {
+        Self::create_with_version_and_options(save_options::PdfVersion::V1_7, options)
+    }
+
+    pub(crate) fn create_with_version_and_options(
+        version: save_options::PdfVersion,
+        options: crate::parser::options::ParseOptions,
+    ) -> PdfResult<Self> {
+        let mut trailer = PdfDict::default();
+        trailer.try_insert(
+            "Root".into(),
+            PdfObject::PdfReference(PdfReference::from_id(ObjectId::new(2, 0))),
+        )?;
+        let ctx = PDFContext::new_without_source_with_version(trailer, options, version);
+        let mut pages = PdfDict::default();
+        pages.try_insert(
+            "Type".into(),
+            PdfObject::PdfName(PdfName::new("Pages".into())),
+        )?;
+        pages.try_insert("Kids".into(), PdfObject::PdfArray(PdfArray::default()))?;
+        pages.try_insert("Count".into(), PdfObject::PdfNumber(PdfNumber::new(0.0)))?;
+        let pages_id = ctx.try_insert_object(PdfObject::PdfDict(pages))?;
+        let mut root = PdfDict::default();
+        root.try_insert(
+            "Type".into(),
+            PdfObject::PdfName(PdfName::new("Catalog".into())),
+        )?;
+        root.try_insert(
+            "Pages".into(),
+            PdfObject::PdfReference(PdfReference::from_id(pages_id)),
+        )?;
+        ctx.try_insert_object(PdfObject::PdfDict(root))?;
+        let catalog = Catalog::try_new(&ctx)?;
+        Ok(Self { ctx, catalog })
+    }
+
     pub(crate) fn ctx(&self) -> &PDFContext<R> {
         &self.ctx
     }
@@ -81,34 +176,171 @@ impl<R: Seek + Read> PdfDocument<R> {
         reader: R,
         mode: crate::parser::syntax::ParseMode,
     ) -> PdfResult<PdfDocument<R>> {
+        Self::from_reader_with_options(
+            reader,
+            crate::parser::options::ParseOptions {
+                mode,
+                ..Default::default()
+            },
+        )
+    }
+
+    pub fn from_reader_with_options(
+        reader: R,
+        options: crate::parser::options::ParseOptions,
+    ) -> PdfResult<PdfDocument<R>> {
         let reader = StreamReader::try_new(reader)?;
-        let mut syntax = SyntaxParser::with_mode(reader, mode);
-        let _ = syntax.read_header()?;
+        let mut syntax = SyntaxParser::with_options(reader, options);
+        let version = syntax.read_header()?.version().to_string();
         let cross_ref_table = parse_xref(&mut syntax)?;
         let parser = PdfParser::new(syntax.with_xref_table(cross_ref_table.clone()));
-        let ctx = PDFContext::try_new(parser, cross_ref_table)?;
+        let ctx = PDFContext::try_new_with_version(parser, cross_ref_table, version)?;
         let catalog = Catalog::try_new(&ctx)?;
         Ok(PdfDocument { ctx, catalog })
+    }
+
+    /// Source header version. Catalog /Version, if present, remains in the
+    /// object graph and can specify a higher effective document version.
+    pub fn version(&self) -> &str {
+        self.ctx.source_version()
+    }
+
+    /// Latest effective version: the greater of Header and Catalog /Version.
+    /// Does not establish conformance to that version.
+    pub fn effective_version(&self) -> PdfResult<save_options::PdfVersion> {
+        let header = save_options::PdfVersion::parse(self.version())
+            .ok_or_else(|| PdfError::UnsupportedFeature("unknown PDF Header version".into()))?;
+        let root = self.ctx.get_root_owned()?;
+        let Some(value) = root.get("Version") else {
+            return Ok(header);
+        };
+        let value = self.ctx.resolve(value)?;
+        if matches!(value, PdfObject::PdfNull) {
+            return Ok(header);
+        }
+        let name = value
+            .as_name()
+            .ok_or_else(|| PdfError::DocumentError("Catalog Version must be a name".into()))?;
+        let catalog = save_options::PdfVersion::parse(name.name())
+            .ok_or_else(|| PdfError::UnsupportedFeature("unknown Catalog Version".into()))?;
+        Ok(header.max(catalog))
     }
 
     pub fn catalog(&self) -> &Catalog {
         &self.catalog
     }
 
+    pub fn resources(&self) -> resource_manager::ResourceManager<'_, R> {
+        resource_manager::ResourceManager { document: self }
+    }
+
     pub fn page_count(&self) -> usize {
-        self.catalog.total_page(&self.ctx).unwrap_or(0)
+        self.try_page_count().unwrap_or(0)
+    }
+
+    pub fn try_page_count(&self) -> PdfResult<usize> {
+        self.catalog.total_page(&self.ctx)
     }
 
     pub fn resolve_object(&self, object_id: ObjectId) -> PdfResult<PdfObject> {
         self.ctx.resolve_object_owned(object_id)
     }
 
+    /// Opaque, document-local cache invalidation token. Changes after successful
+    /// writes and transaction rollback (including unwind); never rolls back.
+    /// It is not a commit count or a cross-document identity.
+    pub fn revision(&self) -> u64 {
+        self.ctx.revision()
+    }
+
+    /// Committed-write counter: one per successful outermost dirty transaction,
+    /// or per successful low-level write outside a transaction. Rollbacks and
+    /// read-only transactions do not advance it. Not a cache invalidation token.
+    pub fn commit_revision(&self) -> u64 {
+        self.ctx.commit_revision()
+    }
+
+    pub fn identity(&self) -> identity::DocumentIdentity {
+        self.ctx.identity()
+    }
+
+    /// Capture cache provenance. This does not copy objects or freeze edits.
+    pub fn stamp(&self) -> identity::DocumentStamp {
+        identity::DocumentStamp {
+            document: self.identity(),
+            revision: self.revision(),
+        }
+    }
+
+    pub fn is_stamp_current(&self, stamp: &identity::DocumentStamp) -> bool {
+        stamp.document == self.identity() && stamp.revision == self.revision()
+    }
+
+    /// Bind an existing object address to this document, verifying it resolves.
+    pub fn object_handle(&self, id: ObjectId) -> PdfResult<identity::ObjectHandle> {
+        self.resolve_object(id)?;
+        Ok(identity::ObjectHandle {
+            document: self.identity(),
+            id,
+        })
+    }
+
+    pub(crate) fn validate_handle(&self, handle: &identity::ObjectHandle) -> PdfResult<ObjectId> {
+        if handle.document != self.identity() {
+            return Err(PdfError::InvalidReference(
+                "object handle belongs to another document".into(),
+            ));
+        }
+        Ok(handle.id)
+    }
+
+    pub fn resolve_handle(&self, handle: &identity::ObjectHandle) -> PdfResult<PdfObject> {
+        self.resolve_object(self.validate_handle(handle)?)
+    }
+
+    pub fn update_handle(
+        &self,
+        handle: &identity::ObjectHandle,
+        object: PdfObject,
+    ) -> PdfResult<()> {
+        self.update_object(self.validate_handle(handle)?, object)
+    }
+
+    pub fn delete_handle(&self, handle: &identity::ObjectHandle) -> PdfResult<()> {
+        self.delete_object(self.validate_handle(handle)?)
+    }
+
+    /// Legacy infallible allocation. Panics on allocation failure or exhausted IDs.
+    /// Prefer `try_insert_object` for recoverable editing operations.
     pub fn insert_object(&self, object: PdfObject) -> ObjectId {
         self.ctx.insert_object(object)
     }
 
+    pub fn try_insert_object(&self, object: PdfObject) -> PdfResult<ObjectId> {
+        self.ctx.try_insert_object(object)
+    }
+
     pub fn update_object(&self, object_id: ObjectId, object: PdfObject) -> PdfResult<()> {
         self.ctx.update_object(object_id, object)
+    }
+
+    /// Replace an indirect stream with decoded bytes, clearing stale encoding
+    /// parameters. This updates every reference to the object; page-specific
+    /// content edits should use the page content replacement API instead.
+    pub fn replace_stream_decoded_data(&self, object_id: ObjectId, data: Vec<u8>) -> PdfResult<()> {
+        if data.len() > self.ctx.limits().max_decoded_bytes
+            || data.len() > self.ctx.limits().max_raw_stream_bytes
+        {
+            return Err(PdfError::ResourceLimit("replacement stream bytes".into()));
+        }
+        let object = self.resolve_object(object_id)?;
+        let PdfObject::PdfStream(stream) = object else {
+            return Err(PdfError::DocumentError(
+                "replacement target is not a stream".into(),
+            ));
+        };
+        let stream = stream.with_decoded_data(data)?;
+        self.update_object(object_id, PdfObject::PdfStream(stream))
     }
 
     pub fn delete_object(&self, object_id: ObjectId) -> PdfResult<()> {
@@ -116,13 +348,82 @@ impl<R: Seek + Read> PdfDocument<R> {
     }
 
     pub fn add_page(&self, pagenum: u32) -> PdfResult<()> {
-        let page_count = self.page_count() as u32;
+        self.add_page_with_builder(pagenum, crate::page::page_builder::PageBuilder::default())
+    }
+
+    pub fn add_page_with_builder(
+        &self,
+        pagenum: u32,
+        builder: crate::page::page_builder::PageBuilder,
+    ) -> PdfResult<()> {
+        builder.validate()?;
+        if let Some(unit) = builder.user_unit {
+            if self.effective_version()? < save_options::PdfVersion::V1_6 {
+                return Err(PdfError::UnsupportedFeature(
+                    "UserUnit requires PDF 1.6 or later".into(),
+                ));
+            }
+            // Validate the same display geometry used by readers before any allocation
+            // in the object store; no Contents or resource decoding is needed.
+            let mut page = PdfDict::default();
+            page.try_insert(
+                "MediaBox".into(),
+                PdfObject::PdfArray(rect_to_array(builder.media_box.clone())?),
+            )?;
+            if let Some(crop) = &builder.crop_box {
+                page.try_insert(
+                    "CropBox".into(),
+                    PdfObject::PdfArray(rect_to_array(crop.clone())?),
+                )?;
+            }
+            page.try_insert(
+                "Rotate".into(),
+                PdfObject::PdfNumber(PdfNumber::new(builder.rotation.rem_euclid(360) as f32)),
+            )?;
+            page.try_insert(
+                "UserUnit".into(),
+                PdfObject::PdfNumber(PdfNumber::new(unit)),
+            )?;
+            crate::page::PdfPage::new(PdfObject::PdfDict(page), &self.ctx).geometry()?;
+        }
+        if builder.content.len() > self.ctx.limits().max_raw_stream_bytes
+            || builder.content.len() > self.ctx.limits().max_decoded_bytes
+        {
+            return Err(PdfError::ResourceLimit("new page content bytes".into()));
+        }
+        self.edit_transaction(|doc| doc.add_page_inner(pagenum, builder))
+    }
+
+    /// Apply a group of edits atomically. An error rolls back the entire group.
+    /// Each nested transaction is a savepoint. Original source caches are kept.
+    pub fn edit_transaction<T>(&self, edit: impl FnOnce(&Self) -> PdfResult<T>) -> PdfResult<T> {
+        self.ctx.transaction(|| edit(self))
+    }
+
+    /// Atomically edit with budgeted savepoint payload copies and Trailer.
+    /// HashMap buckets, source caches and allocations made by `edit` are not
+    /// automatically tracked. Use the same pool for budget-aware edit APIs.
+    pub fn edit_transaction_with_budget<T>(
+        &self,
+        budget: &crate::budget::OperationBudget,
+        edit: impl FnOnce(&Self) -> PdfResult<T>,
+    ) -> PdfResult<T> {
+        self.ctx.transaction_with_budget(budget, || edit(self))
+    }
+
+    fn add_page_inner(
+        &self,
+        pagenum: u32,
+        builder: crate::page::page_builder::PageBuilder,
+    ) -> PdfResult<()> {
+        let page_count = u32::try_from(self.try_page_count()?)
+            .map_err(|_| PdfError::ResourceLimit("page count exceeds u32".into()))?;
         if pagenum > page_count {
             return Err(PdfError::PageNotExist);
         }
 
         let insertion = self.page_insertion_point(pagenum)?;
-        let new_page_id = self.create_empty_page(insertion.parent_id)?;
+        let new_page_id = self.create_page(insertion.parent_id, builder)?;
         self.update_pages_kids(
             insertion.parent_id,
             insertion.kid_index,
@@ -134,27 +435,40 @@ impl<R: Seek + Read> PdfDocument<R> {
     }
 
     pub fn delete_page(&self, pagenum: u32) -> PdfResult<()> {
-        let page_count = self.page_count() as u32;
+        self.edit_transaction(|doc| doc.delete_page_inner(pagenum))
+    }
+
+    fn delete_page_inner(&self, pagenum: u32) -> PdfResult<()> {
+        let page_count = self.try_page_count()? as u32;
         if pagenum >= page_count {
             return Err(PdfError::PageNotExist);
         }
 
         let location = self.page_location(pagenum)?;
-        self.update_pages_kids(location.parent_id, location.kid_index, PdfObject::PdfNull, true)?;
+        self.update_pages_kids(
+            location.parent_id,
+            location.kid_index,
+            PdfObject::PdfNull,
+            true,
+        )?;
         self.adjust_page_counts(&location.ancestor_ids, -1)?;
         self.delete_object(location.page_id)?;
-        self.delete_page_content_streams(&location.page_dict)?;
+        // Contents and resources can be shared. Unlinking the page does not
+        // authorize deleting those objects; explicit graph cleanup handles them.
         Ok(())
     }
 
     pub fn replace_page_contents(&self, pagenum: u32, content: Vec<u8>) -> PdfResult<()> {
+        self.validate_content_bytes(content.len())?;
+        self.edit_transaction(|doc| doc.replace_page_contents_inner(pagenum, content))
+    }
+
+    fn replace_page_contents_inner(&self, pagenum: u32, content: Vec<u8>) -> PdfResult<()> {
         let location = self.page_location(pagenum)?;
         let mut page_dict = location.page_dict;
-        self.delete_page_content_streams(&page_dict)?;
-        let stream_id = self.insert_object(PdfObject::PdfStream(PdfStream::new(
-            PdfDict::default(),
-            content,
-        )));
+        let stream_id = self.try_insert_object(PdfObject::PdfStream(
+            PdfStream::from_decoded_data(PdfDict::default(), content)?,
+        ))?;
         page_dict.insert(
             "Contents".to_string(),
             PdfObject::PdfReference(PdfReference::from_id(stream_id)),
@@ -168,26 +482,39 @@ impl<R: Seek + Read> PdfDocument<R> {
         pagenum: u32,
         builder: &ContentBuilder,
     ) -> PdfResult<()> {
-        self.replace_page_contents(pagenum, builder.build())
+        self.replace_page_contents(pagenum, builder.try_build_with_limits(self.ctx.limits())?)
     }
 
     pub fn append_page_contents(&self, pagenum: u32, content: Vec<u8>) -> PdfResult<()> {
+        self.validate_content_bytes(content.len())?;
+        self.edit_transaction(|doc| doc.append_page_contents_inner(pagenum, content))
+    }
+
+    fn validate_content_bytes(&self, length: usize) -> PdfResult<()> {
+        if length > self.ctx.limits().max_raw_stream_bytes
+            || length > self.ctx.limits().max_decoded_bytes
+        {
+            return Err(PdfError::ResourceLimit("page content bytes".into()));
+        }
+        Ok(())
+    }
+
+    fn append_page_contents_inner(&self, pagenum: u32, content: Vec<u8>) -> PdfResult<()> {
         let location = self.page_location(pagenum)?;
         let mut page_dict = location.page_dict;
-        let stream_id = self.insert_object(PdfObject::PdfStream(PdfStream::new(
-            PdfDict::default(),
-            content,
-        )));
+        let stream_id = self.try_insert_object(PdfObject::PdfStream(
+            PdfStream::from_decoded_data(PdfDict::default(), content)?,
+        ))?;
         let new_ref = PdfObject::PdfReference(PdfReference::from_id(stream_id));
         let contents = match page_dict.get("Contents").cloned() {
             Some(PdfObject::PdfArray(mut items)) => {
-                items.add_obj(new_ref);
+                items.try_add_obj(new_ref)?;
                 PdfObject::PdfArray(items)
             }
             Some(existing) => {
                 let mut items = PdfArray::default();
-                items.add_obj(existing);
-                items.add_obj(new_ref);
+                items.try_add_obj(existing)?;
+                items.try_add_obj(new_ref)?;
                 PdfObject::PdfArray(items)
             }
             None => new_ref,
@@ -202,7 +529,7 @@ impl<R: Seek + Read> PdfDocument<R> {
         pagenum: u32,
         builder: &ContentBuilder,
     ) -> PdfResult<()> {
-        self.append_page_contents(pagenum, builder.build())
+        self.append_page_contents(pagenum, builder.try_build_with_limits(self.ctx.limits())?)
     }
 
     pub fn get_page(&self, page: u32) -> PdfResult<PdfPage<'_, R>> {
@@ -220,6 +547,34 @@ mod tests {
     use crate::parser::syntax::ParseMode;
 
     #[test]
+    fn explicit_creation_versions_work_in_legacy_and_owned_facades() {
+        use super::save_options::PdfVersion;
+        for version in [
+            PdfVersion::V1_0,
+            PdfVersion::V1_1,
+            PdfVersion::V1_2,
+            PdfVersion::V1_3,
+            PdfVersion::V1_4,
+            PdfVersion::V1_5,
+            PdfVersion::V1_6,
+            PdfVersion::V1_7,
+            PdfVersion::V2_0,
+        ] {
+            let doc = PdfDocument::new_with_version(version).unwrap();
+            assert_eq!(doc.version(), version.as_str());
+            doc.add_page(0).unwrap();
+            let bytes = doc.save_to_bytes().unwrap();
+            assert!(bytes.starts_with(format!("%PDF-{}", version.as_str()).as_bytes()));
+            let reopened = PdfDocument::from_bytes_with_mode(bytes, ParseMode::Strict).unwrap();
+            assert_eq!(reopened.effective_version().unwrap(), version);
+            let owned = super::Document::new_with_version(version).unwrap();
+            assert_eq!(owned.version(), version.as_str());
+            assert_eq!(owned.effective_version().unwrap(), version);
+        }
+        assert_eq!(PdfDocument::new().unwrap().version(), "1.7");
+    }
+
+    #[test]
     fn test_from_bytes_with_strict_mode_rejects_missing_binary_comment() {
         let pdf = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\nxref\n0 1\n0000000000 65535 f\ntrailer\n<< /Size 1 >>\nstartxref\n20\n%%EOF\n";
         assert!(PdfDocument::from_bytes_with_mode(pdf.to_vec(), ParseMode::Strict).is_err());
@@ -228,18 +583,19 @@ mod tests {
 
 impl<R: Seek + Read> PdfDocument<R> {
     fn root_pages(&self) -> PdfResult<(ObjectId, PdfDict)> {
-        let root_ref = self
-            .ctx
-            .trailer()
+        let trailer = self.ctx.trailer();
+        let root_ref = trailer
             .get("Root")
             .and_then(PdfObject::as_reference)
             .ok_or(PdfError::DocumentError(
                 "document Root must be an indirect reference".to_string(),
             ))?;
-        let root_dict = self
-            .resolve_object(root_ref.id())?
-            .into_dict()
-            .ok_or(PdfError::DocumentError("document Root is not a dict".to_string()))?;
+        let root_dict =
+            self.resolve_object(root_ref.id())?
+                .into_dict()
+                .ok_or(PdfError::DocumentError(
+                    "document Root is not a dict".to_string(),
+                ))?;
         let pages_ref = root_dict
             .get("Pages")
             .cloned()
@@ -248,20 +604,43 @@ impl<R: Seek + Read> PdfDocument<R> {
                 "document Pages root must be an indirect reference".to_string(),
             ))?;
         let pages_id = pages_ref.id();
-        let pages_dict = self
-            .resolve_object(pages_id)?
-            .into_dict()
-            .ok_or(PdfError::DocumentError("Pages root is not a dict".to_string()))?;
+        let pages_dict =
+            self.resolve_object(pages_id)?
+                .into_dict()
+                .ok_or(PdfError::DocumentError(
+                    "Pages root is not a dict".to_string(),
+                ))?;
         Ok((pages_id, pages_dict))
     }
 
-    fn create_empty_page(&self, parent_id: ObjectId) -> PdfResult<ObjectId> {
-        let contents_id = self.insert_object(PdfObject::PdfStream(PdfStream::new(
-            PdfDict::default(),
-            Vec::new(),
-        )));
-        let page = new_page_dict(parent_id, contents_id);
-        Ok(self.insert_object(PdfObject::PdfDict(page)))
+    fn create_page(
+        &self,
+        parent_id: ObjectId,
+        builder: crate::page::page_builder::PageBuilder,
+    ) -> PdfResult<ObjectId> {
+        let contents_id = self.try_insert_object(PdfObject::PdfStream(
+            PdfStream::from_decoded_data(PdfDict::default(), builder.content)?,
+        ))?;
+        let mut page = new_page_dict(parent_id, contents_id)?;
+        page.try_insert(
+            "MediaBox".into(),
+            PdfObject::PdfArray(rect_to_array(builder.media_box)?),
+        )?;
+        if let Some(crop) = builder.crop_box {
+            page.try_insert("CropBox".into(), PdfObject::PdfArray(rect_to_array(crop)?))?;
+        }
+        page.try_insert(
+            "Rotate".into(),
+            PdfObject::PdfNumber(PdfNumber::new(builder.rotation.rem_euclid(360) as f32)),
+        )?;
+        page.try_insert("Resources".into(), PdfObject::PdfDict(builder.resources))?;
+        if let Some(unit) = builder.user_unit {
+            page.try_insert(
+                "UserUnit".into(),
+                PdfObject::PdfNumber(PdfNumber::new(unit)),
+            )?;
+        }
+        self.try_insert_object(PdfObject::PdfDict(page))
     }
 
     fn page_insertion_point(&self, pagenum: u32) -> PdfResult<PageInsertionPoint> {
@@ -303,65 +682,7 @@ impl<R: Seek + Read> PdfDocument<R> {
     }
 
     fn collect_page_entries(&self) -> PdfResult<Vec<PageTreeEntry>> {
-        let (root_id, root_dict) = self.root_pages()?;
-        let mut pages = Vec::new();
-        let mut ancestors = vec![root_id];
-        self.collect_page_entries_from_node(root_id, root_dict, &mut ancestors, &mut pages)?;
-        Ok(pages)
-    }
-
-    fn collect_page_entries_from_node(
-        &self,
-        node_id: ObjectId,
-        node_dict: PdfDict,
-        ancestors: &mut Vec<ObjectId>,
-        pages: &mut Vec<PageTreeEntry>,
-    ) -> PdfResult<()> {
-        let kids = node_dict
-            .get("Kids")
-            .and_then(PdfObject::as_array)
-            .ok_or(PdfError::DocumentError(
-                "Pages node Kids must be an array".to_string(),
-            ))?;
-
-        for (kid_index, kid) in kids.into_iter().enumerate() {
-            let kid_ref = kid.as_reference().ok_or(PdfError::DocumentError(
-                "page tree mutation requires indirect Kids references".to_string(),
-            ))?;
-            let kid_id = kid_ref.id();
-            let kid_dict = self
-                .resolve_object(kid_id)?
-                .into_dict()
-                .ok_or(PdfError::DocumentError(
-                    "page tree kid is not a dict".to_string(),
-                ))?;
-            let node_type = kid_dict
-                .get("Type")
-                .and_then(PdfObject::as_name)
-                .map(|name| name.name().to_string())
-                .ok_or(PdfError::DocumentError(
-                    "page tree node missing Type".to_string(),
-                ))?;
-
-            if node_type == "Pages" {
-                ancestors.push(kid_id);
-                self.collect_page_entries_from_node(kid_id, kid_dict, ancestors, pages)?;
-                ancestors.pop();
-            } else if node_type == "Page" {
-                pages.push(PageTreeEntry {
-                    page_id: kid_id,
-                    page_dict: kid_dict,
-                    parent_id: node_id,
-                    kid_index,
-                    ancestor_ids: ancestors.clone(),
-                });
-            } else {
-                return Err(PdfError::DocumentError(format!(
-                    "unsupported page tree node type: {node_type}"
-                )));
-            }
-        }
-        Ok(())
+        page_tree::PageTree::entries(&self.ctx)
     }
 
     fn update_pages_kids(
@@ -371,10 +692,12 @@ impl<R: Seek + Read> PdfDocument<R> {
         kid: PdfObject,
         remove: bool,
     ) -> PdfResult<()> {
-        let mut pages_dict = self
-            .resolve_object(pages_id)?
-            .into_dict()
-            .ok_or(PdfError::DocumentError("Pages node is not a dict".to_string()))?;
+        let mut pages_dict =
+            self.resolve_object(pages_id)?
+                .into_dict()
+                .ok_or(PdfError::DocumentError(
+                    "Pages node is not a dict".to_string(),
+                ))?;
         let mut kids = pages_dict
             .get("Kids")
             .cloned()
@@ -385,7 +708,7 @@ impl<R: Seek + Read> PdfDocument<R> {
         if remove {
             let _ = kids.remove(kid_index).ok_or(PdfError::PageNotExist)?;
         } else {
-            kids.insert(kid_index, kid);
+            kids.insert(kid_index, kid)?;
         }
         pages_dict.insert("Kids".to_string(), PdfObject::PdfArray(kids));
         self.update_object(pages_id, PdfObject::PdfDict(pages_dict))
@@ -393,16 +716,15 @@ impl<R: Seek + Read> PdfDocument<R> {
 
     fn adjust_page_counts(&self, ancestor_ids: &[ObjectId], delta: i32) -> PdfResult<()> {
         for object_id in ancestor_ids {
-            let mut pages_dict = self
-                .resolve_object(*object_id)?
-                .into_dict()
-                .ok_or(PdfError::DocumentError("Pages node is not a dict".to_string()))?;
-            let current = pages_dict
-                .get("Count")
-                .and_then(PdfObject::as_i32)
-                .ok_or(PdfError::DocumentError(
-                    "Pages node Count must be a number".to_string(),
-                ))?;
+            let mut pages_dict =
+                self.resolve_object(*object_id)?
+                    .into_dict()
+                    .ok_or(PdfError::DocumentError(
+                        "Pages node is not a dict".to_string(),
+                    ))?;
+            let current = pages_dict.get("Count").and_then(PdfObject::as_i32).ok_or(
+                PdfError::DocumentError("Pages node Count must be a number".to_string()),
+            )?;
             let next = current + delta;
             if next < 0 {
                 return Err(PdfError::DocumentError(
@@ -417,22 +739,6 @@ impl<R: Seek + Read> PdfDocument<R> {
         }
         Ok(())
     }
-
-    fn delete_page_content_streams(&self, page_dict: &PdfDict) -> PdfResult<()> {
-        for object_id in page_contents_object_ids(page_dict) {
-            self.delete_object(object_id)?;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone)]
-struct PageTreeEntry {
-    page_id: ObjectId,
-    page_dict: PdfDict,
-    parent_id: ObjectId,
-    kid_index: usize,
-    ancestor_ids: Vec<ObjectId>,
 }
 
 #[derive(Debug, Clone)]
@@ -442,51 +748,136 @@ struct PageInsertionPoint {
     ancestor_ids: Vec<ObjectId>,
 }
 
-fn new_page_dict(parent_id: ObjectId, contents_id: ObjectId) -> PdfDict {
+fn new_page_dict(parent_id: ObjectId, contents_id: ObjectId) -> PdfResult<PdfDict> {
     let mut page = PdfDict::default();
-    page.insert(
+    page.try_insert(
         "Type".to_string(),
         PdfObject::PdfName(PdfName::new("Page".to_string())),
-    );
-    page.insert(
+    )?;
+    page.try_insert(
         "Parent".to_string(),
         PdfObject::PdfReference(PdfReference::from_id(parent_id)),
-    );
-    page.insert(
-        "MediaBox".to_string(),
-        PdfObject::PdfArray(rect_to_array(Rectangle::new_a4())),
-    );
-    page.insert(
-        "Resources".to_string(),
-        PdfObject::PdfDict(PdfDict::default()),
-    );
-    page.insert(
+    )?;
+    page.try_insert(
         "Contents".to_string(),
         PdfObject::PdfReference(PdfReference::from_id(contents_id)),
-    );
-    page
+    )?;
+    Ok(page)
 }
 
-fn page_contents_object_ids(page_dict: &PdfDict) -> Vec<ObjectId> {
-    let Some(contents) = page_dict.get("Contents") else {
-        return Vec::new();
-    };
-    match contents {
-        PdfObject::PdfReference(reference) => vec![reference.id()],
-        PdfObject::PdfArray(items) => items
-            .into_iter()
-            .filter_map(PdfObject::as_reference)
-            .map(PdfReference::id)
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-fn rect_to_array(rect: Rectangle) -> PdfArray {
+fn rect_to_array(rect: Rectangle) -> PdfResult<PdfArray> {
     let mut array = PdfArray::default();
-    array.add_obj(PdfObject::PdfNumber(PdfNumber::new(rect.llx())));
-    array.add_obj(PdfObject::PdfNumber(PdfNumber::new(rect.lly())));
-    array.add_obj(PdfObject::PdfNumber(PdfNumber::new(rect.urx())));
-    array.add_obj(PdfObject::PdfNumber(PdfNumber::new(rect.ury())));
-    array
+    array.try_add_obj(PdfObject::PdfNumber(PdfNumber::new(rect.llx())))?;
+    array.try_add_obj(PdfObject::PdfNumber(PdfNumber::new(rect.lly())))?;
+    array.try_add_obj(PdfObject::PdfNumber(PdfNumber::new(rect.urx())))?;
+    array.try_add_obj(PdfObject::PdfNumber(PdfNumber::new(rect.ury())))?;
+    Ok(array)
+}
+
+#[cfg(test)]
+mod builder_tests {
+    use super::*;
+    use crate::page::page_builder::PageBuilder;
+
+    #[test]
+    fn page_content_limit_accepts_exact_bytes_and_rejects_before_allocation() {
+        use crate::parser::options::{Limits, ParseOptions};
+        let doc = PdfDocument::new_with_options(ParseOptions {
+            limits: Limits {
+                max_raw_stream_bytes: 4,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(matches!(
+            doc.add_page_with_builder(0, PageBuilder::new().content(b"12345".to_vec())),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(doc.try_page_count().unwrap(), 0);
+        doc.add_page_with_builder(0, PageBuilder::new().content(b"q Q\n".to_vec()))
+            .unwrap();
+        let entries = doc.collect_page_entries().unwrap();
+        assert_eq!(entries[0].page_id, ObjectId::new(4, 0));
+        let content = doc
+            .ctx
+            .resolve(entries[0].page_dict.get("Contents").unwrap())
+            .unwrap();
+        assert_eq!(content.as_stream().unwrap().raw_data(), b"q Q\n");
+    }
+
+    #[test]
+    fn configured_page_preserves_boxes_rotation_resources_and_content() {
+        let doc = PdfDocument::new().unwrap();
+        let mut resources = PdfDict::default();
+        resources
+            .try_insert("Custom".into(), PdfObject::PdfNull)
+            .unwrap();
+        doc.add_page_with_builder(
+            0,
+            PageBuilder::new()
+                .media_box(Rectangle::new(10.0, 20.0, 310.0, 420.0))
+                .crop_box(Rectangle::new(30.0, 40.0, 280.0, 380.0))
+                .rotation(-90)
+                .resources(resources)
+                .content(b"1 2 m 3 4 l S".to_vec()),
+        )
+        .unwrap();
+        let reopened = PdfDocument::from_bytes_with_mode(
+            doc.save_to_bytes().unwrap(),
+            crate::parser::syntax::ParseMode::Strict,
+        )
+        .unwrap();
+        let entries = reopened.collect_page_entries().unwrap();
+        let page = &entries[0].page_dict;
+        assert_eq!(
+            page.get("Rotate").unwrap().as_number().unwrap().lexeme(),
+            "270"
+        );
+        for (name, values) in [
+            ("MediaBox", [10.0, 20.0, 310.0, 420.0]),
+            ("CropBox", [30.0, 40.0, 280.0, 380.0]),
+        ] {
+            let expected =
+                rect_to_array(Rectangle::new(values[0], values[1], values[2], values[3])).unwrap();
+            assert_eq!(
+                format!("{:?}", page.get(name).unwrap()),
+                format!("{:?}", PdfObject::PdfArray(expected))
+            );
+        }
+        assert!(reopened
+            .get_page(0)
+            .unwrap()
+            .resource()
+            .unwrap()
+            .get("Custom")
+            .is_some());
+        let content = reopened.ctx.resolve(page.get("Contents").unwrap()).unwrap();
+        assert_eq!(
+            content
+                .as_stream()
+                .unwrap()
+                .decode_data(&reopened.ctx)
+                .unwrap(),
+            b"1 2 m 3 4 l S"
+        );
+    }
+
+    #[test]
+    fn invalid_page_configuration_does_not_allocate_objects() {
+        let doc = PdfDocument::new().unwrap();
+        for builder in [
+            PageBuilder::new().size(0.0, 100.0),
+            PageBuilder::new().size(f32::NAN, 10.0),
+            PageBuilder::new().rotation(45),
+            PageBuilder::new().crop_box(Rectangle::new(1000.0, 1000.0, 1100.0, 1100.0)),
+        ] {
+            assert!(doc.add_page_with_builder(0, builder).is_err());
+            assert_eq!(doc.try_page_count().unwrap(), 0);
+        }
+        assert_eq!(
+            doc.try_insert_object(PdfObject::PdfNull).unwrap(),
+            ObjectId::new(3, 0)
+        );
+    }
 }

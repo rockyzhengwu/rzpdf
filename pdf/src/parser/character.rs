@@ -1,4 +1,4 @@
-//   'W' - for whitespace: NUL, TAB, CR, LF, FF, SPACE, 0x80, 0xff
+//   'W' - for whitespace: NUL, TAB, CR, LF, FF, SPACE
 //   'N' - for numeric: 0123456789+-.
 //   'D' - for delimiter: %()/<>[]{}
 //   'R' - otherwise.
@@ -22,14 +22,14 @@ const PDF_CHAR_TYPES: [char; 256] = [
     'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R',
     // p    q    r    s    t    u    v    w    x    y    z    {    |    }    ~
     // DEL
-    'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'D', 'R', 'D', 'R', 'R', 'W', 'R', 'R',
+    'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'D', 'R', 'D', 'R', 'R', 'R', 'R', 'R',
     'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R',
     'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R',
     'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R',
     'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R',
     'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R',
     'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R',
-    'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'W',
+    'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R',
 ];
 
 pub fn get_char_type(c: u8) -> char {
@@ -58,11 +58,16 @@ pub fn is_end_of_line(c: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::parser::character::PDF_CHAR_TYPES;
+    use super::*;
 
     #[test]
     pub fn test_is_whitespace() {
-        let t = PDF_CHAR_TYPES[32];
-        println!("{:?}", t);
+        for byte in 0..=u8::MAX {
+            assert_eq!(
+                is_white_space(byte),
+                matches!(byte, 0 | 9 | 10 | 12 | 13 | 32),
+                "byte {byte}"
+            );
+        }
     }
 }

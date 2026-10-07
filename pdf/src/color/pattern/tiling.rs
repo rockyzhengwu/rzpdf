@@ -11,8 +11,8 @@ pub struct TilingPattern {
     paint_type: u8,
     tiling_type: u8,
     bbox: Rectangle,
-    xstep: i32,
-    ystep: i32,
+    xstep: f32,
+    ystep: f32,
     matrix: Option<Matrix>,
 }
 
@@ -37,11 +37,21 @@ impl TilingPattern {
             tp.bbox = rect;
         }
         if let Some(x) = obj.get_attr("XStep") {
-            let xs = x.as_i32().unwrap();
+            let xs = x
+                .as_f32()
+                .filter(|value| value.is_finite() && *value != 0.0)
+                .ok_or(PdfError::ColorError(
+                    "XStep must be finite and nonzero".into(),
+                ))?;
             tp.xstep = xs;
         }
         if let Some(y) = obj.get_attr("YStep") {
-            let ys = y.as_i32().unwrap();
+            let ys = y
+                .as_f32()
+                .filter(|value| value.is_finite() && *value != 0.0)
+                .ok_or(PdfError::ColorError(
+                    "YStep must be finite and nonzero".into(),
+                ))?;
             tp.ystep = ys;
         }
         if let Some(matrix) = obj.get_attr("Matrix") {
@@ -51,7 +61,12 @@ impl TilingPattern {
         if let Some(res) = obj.get_attr("Resources") {
             //println!("{:?}", res);
         }
-        let content = obj.as_stream().unwrap().decode_data(ctx)?;
+        let content = obj
+            .as_stream()
+            .ok_or(PdfError::ColorError(
+                "tiling pattern must be a stream".into(),
+            ))?
+            .decode_data(ctx)?;
         Ok(tp)
     }
 }

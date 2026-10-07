@@ -12,8 +12,8 @@ use tiling::TilingPattern;
 pub struct PatternColorSpace {}
 
 impl PatternColorSpace {
-    pub fn try_new(obj: &PdfObject) -> PdfResult<Self> {
-        unimplemented!()
+    pub fn try_new(_obj: &PdfObject) -> PdfResult<Self> {
+        Err(PdfError::UnsupportedFeature("Pattern color space construction".into()))
     }
 
     pub fn default_value(&self) -> ColorValue {
@@ -41,7 +41,7 @@ impl Pattern {
                 return Ok(Pattern::Tiling(p));
             }
             _ => {
-                unimplemented!("Shading pattern not implement")
+                return Err(PdfError::UnsupportedFeature(format!("PatternType {pt}")));
             }
         }
     }

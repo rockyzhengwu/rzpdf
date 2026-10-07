@@ -1,80 +1,263 @@
 use crate::{
     device::Device,
+    error::{PdfError, PdfResult},
     font::GlyphDesc,
     page::{
-        display_list::DisplayList,
-        graphic_state::FillType, image_object::ImageObject, page_object::PageObject,
-        path_object::PathObject, text_object::TextObject,
+        display_list::DisplayList, graphic_state::FillType, image_object::ImageObject,
+        page_object::PageObject, path_object::PathObject, text_object::TextObject,
     },
     path::pdf_path::Segment,
 };
 
-use quick_xml::Writer;
 use quick_xml::events::{BytesEnd, BytesStart, Event};
+use quick_xml::Writer;
 use std::io::Cursor;
 
 pub struct TraceDevice {
+    collect_xml: bool,
+    limits: Option<crate::parser::options::Limits>,
+    retained_payload_bytes: usize,
+    retained_path_segments: usize,
     objects: Vec<PageObject>,
     page_width: f32,
     page_height: f32,
     writer: Writer<Cursor<Vec<u8>>>,
 }
 
+#[cfg(test)]
+mod collection_tests {
+    use super::*;
+
+    #[test]
+    fn display_collection_is_bounded_and_does_not_duplicate_xml() {
+        let mut display = TraceDevice::for_display_list(crate::parser::options::Limits {
+            max_objects: 1,
+            ..Default::default()
+        });
+        display.start_page(10., 10.).unwrap();
+        display.fill_path(PathObject::default()).unwrap();
+        assert!(matches!(
+            display.fill_path(PathObject::default()),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(display.objects().len(), 1);
+        display.end_page().unwrap();
+        assert_eq!(display.to_xml(), "");
+
+        let mut debug = TraceDevice::new();
+        debug.start_page(10., 10.).unwrap();
+        debug.fill_path(PathObject::default()).unwrap();
+        debug.end_page().unwrap();
+        let xml = debug.to_xml();
+        assert!(xml.contains("<page"));
+        assert!(xml.contains("fill_path"));
+        assert!(xml.ends_with("</page>"));
+    }
+}
+
 impl Device for TraceDevice {
-    fn do_image(&mut self, imageobject: ImageObject) {
-        self.add_xml_image(&imageobject);
+    fn preflight_draw(
+        &self,
+        state: &crate::page::graphic_state::GraphicState,
+        path: Option<&crate::path::pdf_path::PdfPath>,
+    ) -> PdfResult<()> {
+        if self
+            .limits
+            .is_some_and(|limits| self.objects.len() >= limits.max_objects)
+        {
+            return Err(PdfError::ResourceLimit("display object count".into()));
+        }
+        self.next_retained_segments(path, state)?;
+        Ok(())
+    }
+    fn do_image(&mut self, imageobject: ImageObject) -> PdfResult<()> {
+        self.reserve_object()?;
+        let segments = self.next_retained_segments(None, &imageobject.graphic_state)?;
+        let total = self
+            .next_nested_source_bytes(imageobject.nested_source())?
+            .checked_add(imageobject.image.retained_sample_bytes()?)
+            .ok_or_else(|| PdfError::ResourceLimit("display retained payload overflow".into()))?;
+        if self
+            .limits
+            .is_some_and(|limits| total > limits.max_decoded_bytes)
+        {
+            return Err(PdfError::ResourceLimit(
+                "display retained payload bytes".into(),
+            ));
+        }
+        self.add_xml_image(&imageobject)?;
+        self.retained_payload_bytes = total;
+        self.retained_path_segments = segments;
         self.objects.push(PageObject::Image(imageobject));
+        Ok(())
     }
 
-    fn stroke_path(&mut self, pathobject: PathObject) {
+    fn stroke_path(&mut self, pathobject: PathObject) -> PdfResult<()> {
+        let payload = self.next_nested_source_bytes(pathobject.nested_source())?;
+        self.reserve_object()?;
+        let segments =
+            self.next_retained_segments(Some(pathobject.pdf_path()), pathobject.graphic_state())?;
         let name = "stroke_path";
-        self.add_xml_path(name, &pathobject);
+        self.add_xml_path(name, &pathobject)?;
+        self.retained_path_segments = segments;
+        self.retained_payload_bytes = payload;
         self.objects.push(PageObject::Path(pathobject));
+        Ok(())
     }
 
-    fn fill_path(&mut self, pathobject: PathObject) {
+    fn fill_path(&mut self, pathobject: PathObject) -> PdfResult<()> {
+        let payload = self.next_nested_source_bytes(pathobject.nested_source())?;
+        self.reserve_object()?;
+        let segments =
+            self.next_retained_segments(Some(pathobject.pdf_path()), pathobject.graphic_state())?;
         let name = "fill_path";
-        self.add_xml_path(name, &pathobject);
-        self.objects.push(PageObject::Path(pathobject))
-    }
-
-    fn fill_and_stroke_path(&mut self, pathobject: PathObject) {
-        let name = "stroke_and_fill_path";
-        self.add_xml_path(name, &pathobject);
+        self.add_xml_path(name, &pathobject)?;
+        self.retained_path_segments = segments;
+        self.retained_payload_bytes = payload;
         self.objects.push(PageObject::Path(pathobject));
+        Ok(())
     }
 
-    fn start_page(&mut self, page_width: f32, page_height: f32) {
+    fn fill_and_stroke_path(&mut self, pathobject: PathObject) -> PdfResult<()> {
+        let payload = self.next_nested_source_bytes(pathobject.nested_source())?;
+        self.reserve_object()?;
+        let segments =
+            self.next_retained_segments(Some(pathobject.pdf_path()), pathobject.graphic_state())?;
+        let name = "stroke_and_fill_path";
+        self.add_xml_path(name, &pathobject)?;
+        self.retained_path_segments = segments;
+        self.retained_payload_bytes = payload;
+        self.objects.push(PageObject::Path(pathobject));
+        Ok(())
+    }
+
+    fn start_page(&mut self, page_width: f32, page_height: f32) -> PdfResult<()> {
         self.page_width = page_width;
         self.page_height = page_height;
+        if !self.collect_xml {
+            return Ok(());
+        }
         let mut page = BytesStart::new("page");
         page.push_attribute(("width", format!("{}", self.page_width).as_str()));
         page.push_attribute(("height", format!("{}", self.page_height).as_str()));
-        self.writer.write_event(Event::Start(page)).unwrap();
+        self.writer.write_event(Event::Start(page))?;
+        Ok(())
     }
-    fn end_page(&mut self) {
-        self.writer
-            .write_event(Event::End(BytesEnd::new("page")))
-            .unwrap();
+    fn end_page(&mut self) -> PdfResult<()> {
+        if !self.collect_xml {
+            return Ok(());
+        }
+        self.writer.write_event(Event::End(BytesEnd::new("page")))?;
+        Ok(())
     }
 
-    fn clip_path(&mut self, patobject: PathObject) {}
+    fn clip_path(&mut self, _patobject: PathObject) -> PdfResult<()> {
+        Ok(())
+    }
 
-    fn show_text(&mut self, textobject: TextObject) {
-        self.add_xml_text(&textobject);
+    fn show_text(&mut self, textobject: TextObject) -> PdfResult<()> {
+        self.reserve_object()?;
+        let segments = self.next_retained_segments(None, &textobject.state)?;
+        let mut total = self.next_nested_source_bytes(textobject.nested_source())?;
+        for item in &textobject.items {
+            total = total
+                .checked_add(item.unicode().map_or(0, |text| text.len()))
+                .ok_or_else(|| PdfError::ResourceLimit("display Unicode bytes overflow".into()))?;
+        }
+        if self
+            .limits
+            .is_some_and(|limits| total > limits.max_decoded_bytes)
+        {
+            return Err(PdfError::ResourceLimit(
+                "display retained payload bytes".into(),
+            ));
+        }
+        self.add_xml_text(&textobject)?;
+        self.retained_payload_bytes = total;
+        self.retained_path_segments = segments;
         self.objects.push(PageObject::Text(textobject));
+        Ok(())
     }
 }
 
 impl TraceDevice {
+    fn next_nested_source_bytes(
+        &self,
+        source: Option<&crate::page::source_provenance::NestedDrawSource>,
+    ) -> PdfResult<usize> {
+        let bytes = source.map(|s| s.retained_bytes()).transpose()?.unwrap_or(0);
+        let total = self
+            .retained_payload_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| {
+                PdfError::ResourceLimit("display nested source bytes overflow".into())
+            })?;
+        if self
+            .limits
+            .is_some_and(|limits| total > limits.max_decoded_bytes)
+        {
+            return Err(PdfError::ResourceLimit(
+                "display nested source bytes".into(),
+            ));
+        }
+        Ok(total)
+    }
     pub fn new() -> Self {
         let writer = Writer::new(Cursor::new(Vec::new()));
         TraceDevice {
+            collect_xml: true,
+            limits: None,
+            retained_payload_bytes: 0,
+            retained_path_segments: 0,
             objects: Vec::new(),
             page_width: 0.0,
             page_height: 0.0,
             writer,
         }
+    }
+    /// Internal display collection does not build the unused debugging XML copy.
+    pub(crate) fn for_display_list(limits: crate::parser::options::Limits) -> Self {
+        let mut device = Self::new();
+        device.collect_xml = false;
+        device.limits = Some(limits);
+        device
+    }
+    fn next_retained_segments(
+        &self,
+        path: Option<&crate::path::pdf_path::PdfPath>,
+        state: &crate::page::graphic_state::GraphicState,
+    ) -> PdfResult<usize> {
+        let mut total = self.retained_path_segments;
+        for path in path
+            .into_iter()
+            .chain(state.clip_path.elements().iter().map(|clip| &clip.path))
+        {
+            for subpath in path.subpaths() {
+                total = total.checked_add(subpath.segments().len()).ok_or_else(|| {
+                    PdfError::ResourceLimit("display retained path segments overflow".into())
+                })?;
+            }
+        }
+        if self
+            .limits
+            .is_some_and(|limits| total > limits.max_path_segments)
+        {
+            return Err(PdfError::ResourceLimit(
+                "display retained path segments".into(),
+            ));
+        }
+        Ok(total)
+    }
+    fn reserve_object(&mut self) -> PdfResult<()> {
+        if self
+            .limits
+            .is_some_and(|limits| self.objects.len() >= limits.max_objects)
+        {
+            return Err(PdfError::ResourceLimit("display object count".into()));
+        }
+        self.objects
+            .try_reserve(1)
+            .map_err(|_| PdfError::ResourceLimit("display object allocation".into()))
     }
     pub fn objects(&self) -> &[PageObject] {
         &self.objects
@@ -103,15 +286,15 @@ impl TraceDevice {
         }
     }
 
-    fn add_xml_text(&mut self, textobject: &TextObject) {
+    fn add_xml_text(&mut self, textobject: &TextObject) -> PdfResult<()> {
+        if !self.collect_xml {
+            return Ok(());
+        }
         let mut text_item = BytesStart::new("text");
         let render_mode = format!("{:?}", textobject.state.text_state.text_rendering_mode);
         text_item.push_attribute(("render_mode", render_mode.as_str()));
-        self.writer.write_event(Event::Start(text_item)).unwrap();
+        self.writer.write_event(Event::Start(text_item))?;
         let font = &textobject.state.text_state.font;
-        if font.is_none() {
-            return;
-        }
         for char in textobject.items.iter() {
             let mut char_item = BytesStart::new("char");
             let x = char.pos().x();
@@ -133,17 +316,17 @@ impl TraceDevice {
                     }
                 }
             }
-            self.writer.write_event(Event::Start(char_item)).unwrap();
-            self.writer
-                .write_event(Event::End(BytesEnd::new("char")))
-                .unwrap();
+            self.writer.write_event(Event::Start(char_item))?;
+            self.writer.write_event(Event::End(BytesEnd::new("char")))?;
         }
-        self.writer
-            .write_event(Event::End(BytesEnd::new("text")))
-            .unwrap();
+        self.writer.write_event(Event::End(BytesEnd::new("text")))?;
+        Ok(())
     }
 
-    fn add_xml_image(&mut self, imageobject: &ImageObject) {
+    fn add_xml_image(&mut self, imageobject: &ImageObject) -> PdfResult<()> {
+        if !self.collect_xml {
+            return Ok(());
+        }
         let mut image_item = BytesStart::new("image");
         if imageobject.image.is_mask() {
             image_item.push_attribute(("mask", "true"));
@@ -164,13 +347,16 @@ impl TraceDevice {
             )
             .as_str(),
         ));
-        self.writer.write_event(Event::Start(image_item)).unwrap();
+        self.writer.write_event(Event::Start(image_item))?;
         self.writer
-            .write_event(Event::End(BytesEnd::new("image")))
-            .unwrap();
+            .write_event(Event::End(BytesEnd::new("image")))?;
+        Ok(())
     }
 
-    pub fn add_xml_path(&mut self, name: &str, p: &PathObject) {
+    pub fn add_xml_path(&mut self, name: &str, p: &PathObject) -> PdfResult<()> {
+        if !self.collect_xml {
+            return Ok(());
+        }
         let mut path_item = BytesStart::new(name);
         if p.stroke() {
             let linewidth = p.graphic_state().graph_state.line_width;
@@ -196,27 +382,29 @@ impl TraceDevice {
             )
             .as_str(),
         ));
-        self.writer.write_event(Event::Start(path_item)).unwrap();
+        self.writer.write_event(Event::Start(path_item))?;
         for subpath in p.pdf_path().subpaths() {
             for segment in subpath.segments() {
                 match segment {
+                    Segment::Close => {
+                        self.writer
+                            .write_event(Event::Empty(BytesStart::new("close")))?;
+                    }
                     Segment::MoveTo(point) => {
                         let mut seg_ele = BytesStart::new("moveto");
                         seg_ele.push_attribute(("x", format!("{}", point.x()).as_str()));
                         seg_ele.push_attribute(("y", format!("{}", point.y()).as_str()));
-                        self.writer.write_event(Event::Start(seg_ele)).unwrap();
+                        self.writer.write_event(Event::Start(seg_ele))?;
                         self.writer
-                            .write_event(Event::End(BytesEnd::new("moveto")))
-                            .unwrap();
+                            .write_event(Event::End(BytesEnd::new("moveto")))?;
                     }
                     Segment::LineTo(point) => {
                         let mut seg_ele = BytesStart::new("lineto");
                         seg_ele.push_attribute(("x", format!("{}", point.x()).as_str()));
                         seg_ele.push_attribute(("y", format!("{}", point.y()).as_str()));
-                        self.writer.write_event(Event::Start(seg_ele)).unwrap();
+                        self.writer.write_event(Event::Start(seg_ele))?;
                         self.writer
-                            .write_event(Event::End(BytesEnd::new("lineto")))
-                            .unwrap();
+                            .write_event(Event::End(BytesEnd::new("lineto")))?;
                     }
                     Segment::CurveTo(bezier) => {
                         let mut seg_ele = BytesStart::new("curveto");
@@ -231,17 +419,15 @@ impl TraceDevice {
                         let p3 = bezier.p3();
                         seg_ele.push_attribute(("x3", format!("{}", p3.x()).as_str()));
                         seg_ele.push_attribute(("y3", format!("{}", p3.y()).as_str()));
-                        self.writer.write_event(Event::Start(seg_ele)).unwrap();
+                        self.writer.write_event(Event::Start(seg_ele))?;
                         self.writer
-                            .write_event(Event::End(BytesEnd::new("curveto")))
-                            .unwrap();
+                            .write_event(Event::End(BytesEnd::new("curveto")))?;
                     }
                 }
             }
         }
-        self.writer
-            .write_event(Event::End(BytesEnd::new(name)))
-            .unwrap();
+        self.writer.write_event(Event::End(BytesEnd::new(name)))?;
+        Ok(())
     }
 
     pub fn to_xml(self) -> String {

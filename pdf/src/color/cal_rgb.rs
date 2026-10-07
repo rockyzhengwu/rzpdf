@@ -6,6 +6,36 @@ use crate::pdf_context::PDFContext;
 
 use super::value::{ColorRgb, ColorValue};
 
+pub(super) fn read_parameter<R: Seek + Read, const N: usize>(
+    dict: &crate::objects::pdf_dict::PdfDict,
+    key: &str,
+    ctx: &PDFContext<R>,
+) -> PdfResult<Option<[f32; N]>> {
+    let Some(value) = dict.get(key) else {
+        return Ok(None);
+    };
+    let value = ctx.resolve(value)?;
+    let array = value
+        .as_array()
+        .ok_or_else(|| PdfError::ColorError(format!("Color parameter {key} requires an array")))?;
+    if array.len() != N {
+        return Err(PdfError::ColorError(format!(
+            "Color parameter {key} requires {N} values"
+        )));
+    }
+    let mut values = [0.0; N];
+    for (i, entry) in array.into_iter().enumerate() {
+        values[i] = ctx
+            .resolve(entry)?
+            .as_f32()
+            .filter(|v| v.is_finite())
+            .ok_or_else(|| {
+                PdfError::ColorError(format!("Color parameter {key} requires finite numbers"))
+            })?;
+    }
+    Ok(Some(values))
+}
+
 #[derive(Debug, Clone)]
 pub struct CalRgb {
     gamma: [f32; 3],
@@ -25,103 +55,95 @@ impl Default for CalRgb {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        document::cross_ref_table::CrossRefTable,
+        io::stream_reader::StreamReader,
+        objects::pdf_dict::PdfDict,
+        parser::{parser::PdfParser, syntax::SyntaxParser},
+    };
+    use std::{collections::HashMap, io::Cursor};
+
+    #[test]
+    fn calrgb_invalid_parameters_and_components_return_errors() {
+        let parser = PdfParser::new(SyntaxParser::new(
+            StreamReader::try_new(Cursor::new(Vec::<u8>::new())).unwrap(),
+        ));
+        let ctx = PDFContext::try_new(
+            parser,
+            CrossRefTable::new(HashMap::new(), PdfDict::default()),
+        )
+        .unwrap();
+        let parse = |source: &str| {
+            let obj = SyntaxParser::new(
+                StreamReader::try_new(Cursor::new(source.as_bytes().to_vec())).unwrap(),
+            )
+            .get_object()
+            .unwrap();
+            CalRgb::try_new(&obj, &ctx)
+        };
+        let color = parse("[/CalRGB << /WhitePoint [0.95 1 1.09] /Gamma [2 2 2] >>]").unwrap();
+        assert!(color.rgb(&color.default_value()).is_ok());
+        assert!(color.rgb(&ColorValue::new(vec![])).is_err());
+        assert!(color.rgb(&ColorValue::new(vec![f32::NAN; 3])).is_err());
+        for source in [
+            "null",
+            "[/CalRGB 1]",
+            "<< >>",
+            "<< /WhitePoint [1 1 1] /Gamma [] >>",
+            "<< /WhitePoint [1 1 1] /Gamma [0 1 1] >>",
+            "<< /WhitePoint [1 /bad 1] >>",
+            "<< /WhitePoint [1 2 1] >>",
+            "<< /WhitePoint [1 1 1] /Matrix [1] >>",
+            "<< /WhitePoint [1 1 1] /BlackPoint [-1 0 0] >>",
+        ] {
+            assert!(parse(source).is_err(), "{source}");
+        }
+    }
+}
+
 impl CalRgb {
     pub fn try_new<R: Seek + Read>(obj: &PdfObject, ctx: &PDFContext<R>) -> PdfResult<Self> {
-        let color_dict = match obj {
-            PdfObject::PdfArray(array) => {
-                if array.len() < 2 {
-                    return Err(PdfError::ColorError(
-                        "CalRGB Color array need 2 param at least".to_string(),
-                    ));
-                }
-                let cd = ctx
-                    .resolve(array.get(1).unwrap())?
-                    .as_dict()
-                    .ok_or(PdfError::ColorError("CalRGB need dict".to_string()))?
-                    .to_owned();
-                cd
-            }
-            PdfObject::PdfDict(d) => d.to_owned(),
+        let obj = ctx.resolve(obj)?;
+        let parameters = match &obj {
+            PdfObject::PdfArray(array) if array.len() == 2 => ctx.resolve(
+                array
+                    .get(1)
+                    .ok_or_else(|| PdfError::ColorError("Missing CalRGB parameters".into()))?,
+            )?,
+            PdfObject::PdfDict(_) => obj,
             _ => {
-                return Err(PdfError::ColorError("Bad CalRGB Color".to_string()));
-            }
-        };
-
-        let mut color = CalRgb::default();
-        if let Some(m) = color_dict.get("Matrix") {
-            let ma = m.as_array().ok_or(PdfError::ColorError(format!(
-                "CalRgb Matrix need a array got:{:?}",
-                m
-            )))?;
-            if ma.len() != 9 {
-                return Err(PdfError::ColorError(format!(
-                    "CalRgb Matrix need 9 elements got:{:?}",
-                    ma
-                )));
-            }
-            for i in 0..9 {
-                let v = ma.get(i).unwrap().as_f32().unwrap();
-                color.matrix[i] = v;
-            }
-        }
-        if let Some(g) = color_dict.get("Gamma") {
-            let ga = g.as_array().ok_or(PdfError::ColorError(format!(
-                "CalRgb color Gamma is not a array:{:?}",
-                g
-            )))?;
-            let r = ga.get(0).unwrap().as_f32().unwrap();
-
-            let g = ga.get(1).unwrap().as_f32().unwrap();
-
-            let b = ga.get(2).unwrap().as_f32().unwrap();
-            color.gamma = [r, g, b];
-        }
-        match color_dict.get("WhitePoint") {
-            Some(wh) => {
-                let wha = wh.as_array().ok_or(PdfError::ColorError(format!(
-                    "CalRgb WhitePoint is not an array got:{:?}",
-                    obj
-                )))?;
-                if wha.len() != 3 {
-                    return Err(PdfError::ColorError(format!(
-                        "CalRgb WhitePoint need 3 elements :{:?}",
-                        wha
-                    )));
-                }
-                for i in 0..3 {
-                    let v = wha.get(i).unwrap().as_f32().unwrap();
-                    color.white_point[i] = v;
-                }
-            }
-            None => {
                 return Err(PdfError::ColorError(
-                    "CalRgb WhitePoint is required".to_string(),
+                    "CalRGB requires a two-element array or parameter dictionary".into(),
                 ));
             }
+        };
+        let dict = parameters
+            .as_dict()
+            .ok_or_else(|| PdfError::ColorError("CalRGB parameters must be a dictionary".into()))?;
+        let mut color = CalRgb::default();
+        color.white_point = read_parameter::<R, 3>(dict, "WhitePoint", ctx)?
+            .ok_or_else(|| PdfError::ColorError("CalRGB requires WhitePoint".into()))?;
+        if let Some(value) = read_parameter::<R, 3>(dict, "Gamma", ctx)? {
+            color.gamma = value;
         }
-        if let Some(bp) = color_dict.get("BlackPoint") {
-            let bpa = bp.as_array().ok_or(PdfError::ColorError(format!(
-                "CalRgb BlackPoint is not an array got:{:?}",
-                obj
-            )))?;
-            if bpa.len() != 3 {
-                return Err(PdfError::ColorError(format!(
-                    "CalRgb BlackPoint need 3 elements :{:?}",
-                    bpa
-                )));
-            }
-            for i in 0..3 {
-                let v = bpa
-                    .get(i)
-                    .unwrap()
-                    .as_f32()
-                    .ok_or(PdfError::ColorError(format!(
-                        "CalRgb BlackPoint {:?} value is not an number:{:?}",
-                        i,
-                        bpa.get(i)
-                    )))?;
-                color.black_point[i] = v;
-            }
+        if let Some(value) = read_parameter::<R, 3>(dict, "BlackPoint", ctx)? {
+            color.black_point = value;
+        }
+        if let Some(value) = read_parameter::<R, 9>(dict, "Matrix", ctx)? {
+            color.matrix = value;
+        }
+        if color.white_point[0] <= 0.0
+            || color.white_point[1] != 1.0
+            || color.white_point[2] <= 0.0
+            || color.black_point.iter().any(|v| *v < 0.0)
+            || color.gamma.iter().any(|v| *v <= 0.0)
+        {
+            return Err(PdfError::ColorError(
+                "Invalid CalRGB white/black point or Gamma".into(),
+            ));
         }
         Ok(color)
     }
@@ -134,9 +156,14 @@ impl CalRgb {
     }
 
     pub fn rgb(&self, value: &ColorValue) -> PdfResult<ColorRgb> {
-        let a = value.values()[0];
-        let b = value.values()[1];
-        let c = value.values()[2];
+        if value.value_size() != 3 || value.values().iter().any(|v| !v.is_finite()) {
+            return Err(PdfError::ColorError(
+                "CalRGB requires three finite components".into(),
+            ));
+        }
+        let a = value.values()[0].clamp(0.0, 1.0);
+        let b = value.values()[1].clamp(0.0, 1.0);
+        let c = value.values()[2].clamp(0.0, 1.0);
         let gr = a.powf(self.gamma[0]);
         let gg = b.powf(self.gamma[1]);
         let gb = c.powf(self.gamma[2]);
@@ -147,6 +174,9 @@ impl CalRgb {
         let r = 3.2406 * x - 1.5372 * y - 0.4986 * z;
         let g = -0.9689 * x + 1.8758 * y + 0.0415 * z;
         let b = 0.0557 * x - 0.2040 * y + 1.0570 * z;
+        if !r.is_finite() || !g.is_finite() || !b.is_finite() {
+            return Err(PdfError::ColorError("CalRGB conversion overflow".into()));
+        }
         Ok(ColorRgb::new(r, g, b))
     }
 }

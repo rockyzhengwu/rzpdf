@@ -41,31 +41,33 @@ impl ColorSpace {
             ColorSpace::CalRgb(cr) => cr.rgb(value),
             ColorSpace::Indexed(indexed) => indexed.rgb(value),
             ColorSpace::Separation(sep) => sep.rgb(value),
-            _ => {
-                unimplemented!("not implent rgb of colorspace:{:?}", self)
-            }
+            _ => Err(PdfError::UnsupportedFeature(format!(
+                "RGB conversion for {self}"
+            ))),
         }
     }
-    pub fn default_value(&self) -> ColorValue {
-        match self {
+    pub fn default_value(&self) -> PdfResult<ColorValue> {
+        Ok(match self {
             ColorSpace::DeviceGray(gray) => gray.default_value(),
             ColorSpace::DeviceRgb(rgb) => rgb.default_value(),
             ColorSpace::DeviceCmyk(cmyk) => cmyk.default_value(),
             ColorSpace::Lab(lab) => lab.default_value(),
-            ColorSpace::IccBased(icc) => icc.default_value(),
+            ColorSpace::IccBased(icc) => icc.default_value()?,
             ColorSpace::CalGray(cg) => cg.default_value(),
             ColorSpace::CalRgb(cr) => cr.default_value(),
             ColorSpace::Indexed(indexed) => indexed.default_value(),
             ColorSpace::Separation(sep) => sep.default_value(),
             ColorSpace::Pattern(p) => p.default_value(),
             _ => {
-                unimplemented!("not implement default_value of colorspace:{:?}", self)
+                return Err(PdfError::UnsupportedFeature(format!(
+                    "Default value for {self}"
+                )));
             }
-        }
+        })
     }
 
-    pub fn number_of_components(&self) -> usize {
-        match self {
+    pub fn number_of_components(&self) -> PdfResult<usize> {
+        Ok(match self {
             ColorSpace::DeviceGray(gray) => gray.number_of_components(),
             ColorSpace::DeviceRgb(rgb) => rgb.number_of_components(),
             ColorSpace::DeviceCmyk(cmyk) => cmyk.number_of_components(),
@@ -76,13 +78,19 @@ impl ColorSpace {
             ColorSpace::Indexed(indexed) => indexed.number_of_components(),
             ColorSpace::Separation(sep) => sep.number_of_components(),
             _ => {
-                unimplemented!("not implement number_of_components  : {:?}", self)
+                return Err(PdfError::UnsupportedFeature(format!(
+                    "Component count for {self}"
+                )));
             }
-        }
+        })
     }
     pub fn try_new<R: Seek + Read>(obj: &PdfObject, ctx: &PDFContext<R>) -> PdfResult<Self> {
+        ctx.with_color_depth(|| Self::try_new_inner(obj, ctx))
+    }
+
+    fn try_new_inner<R: Seek + Read>(obj: &PdfObject, ctx: &PDFContext<R>) -> PdfResult<Self> {
         let obj = ctx.resolve(obj)?;
-        match obj {
+        match &obj {
             PdfObject::PdfName(name) => match name.name() {
                 "G" | "DeviceGray" => Ok(ColorSpace::DeviceGray(DeviceGray::new())),
                 "RGB" | "DeviceRGB" => Ok(ColorSpace::DeviceRgb(DeviceRgb::new())),
@@ -109,16 +117,17 @@ impl ColorSpace {
                     "DeviceGray" => Ok(ColorSpace::DeviceGray(DeviceGray::new())),
                     "DeviceRGB" => Ok(ColorSpace::DeviceRgb(DeviceRgb::new())),
                     "DeviceCMYK" => Ok(ColorSpace::DeviceCmyk(DeviceCmyk::new())),
-                    "CalGray" => Ok(ColorSpace::CalGray(CalGray::try_new(obj, ctx)?)),
-                    "CalRGB" => Ok(ColorSpace::CalRgb(CalRgb::try_new(obj, ctx)?)),
+                    "CalGray" => Ok(ColorSpace::CalGray(CalGray::try_new(&obj, ctx)?)),
+                    "CalRGB" => Ok(ColorSpace::CalRgb(CalRgb::try_new(&obj, ctx)?)),
                     "Pattern" => Ok(ColorSpace::Pattern(PatternColorSpace::default())),
                     "Indexed" => Ok(ColorSpace::Indexed(Indexed::try_new(array, ctx)?)),
                     "Separation" => Ok(ColorSpace::Separation(Separation::try_new(array, ctx)?)),
-                    "ICCBased" => Ok(ColorSpace::IccBased(IccBased::try_new(obj, ctx)?)),
-                    "Lab" => Ok(ColorSpace::Lab(Lab::try_new(obj)?)),
-                    _ => {
-                        unimplemented!()
-                    }
+                    "ICCBased" => Ok(ColorSpace::IccBased(IccBased::try_new(&obj, ctx)?)),
+                    "Lab" => Ok(ColorSpace::Lab(Lab::try_new_with_context(&obj, ctx)?)),
+                    _ => Err(PdfError::UnsupportedFeature(format!(
+                        "Color space {}",
+                        cn.name()
+                    ))),
                 }
             }
             _ => {
@@ -145,6 +154,37 @@ impl Display for ColorSpace {
             ColorSpace::Separation(_) => write!(f, "Separation"),
             ColorSpace::Pattern(_) => write!(f, "Pattern"),
             ColorSpace::DeviceN(_) => write!(f, "DeviceN"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_color_queries_return_errors() {
+        let devicen = ColorSpace::DeviceN(DeviceN {});
+        assert!(devicen.default_value().is_err());
+        assert!(devicen.number_of_components().is_err());
+        assert!(devicen.rgb(&ColorValue::new(vec![])).is_err());
+        let pattern = ColorSpace::Pattern(PatternColorSpace::default());
+        assert!(pattern.number_of_components().is_err());
+        assert!(pattern.rgb(&ColorValue::new(vec![])).is_err());
+    }
+
+    #[test]
+    fn device_colors_validate_component_counts_and_finite_values() {
+        for (space, count) in [
+            (ColorSpace::DeviceGray(DeviceGray::new()), 1),
+            (ColorSpace::DeviceRgb(DeviceRgb::new()), 3),
+            (ColorSpace::DeviceCmyk(DeviceCmyk::new()), 4),
+        ] {
+            assert_eq!(space.number_of_components().unwrap(), count);
+            assert!(space.rgb(&space.default_value().unwrap()).is_ok());
+            assert!(space.rgb(&ColorValue::new(vec![])).is_err());
+            assert!(space.rgb(&ColorValue::new(vec![0.0; count + 1])).is_err());
+            assert!(space.rgb(&ColorValue::new(vec![f32::NAN; count])).is_err());
         }
     }
 }

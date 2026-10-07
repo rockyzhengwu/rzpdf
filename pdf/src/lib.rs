@@ -1,4 +1,5 @@
 pub mod color;
+pub mod budget;
 pub mod device;
 pub mod document;
 pub mod error;

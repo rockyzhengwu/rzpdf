@@ -9,7 +9,7 @@ fn main() {
     let docpath = "tests/path-test.pdf";
     let doc = PdfDocument::<BufReader<File>>::load(docpath).unwrap();
     let mut page = doc.get_page(0).unwrap();
-    let mut device = SkiaRender::new(300.0, 300.0);
+    let mut device = SkiaRender::new(300.0, 300.0).unwrap();
     page.display(&mut device).unwrap();
-    device.save("test.png");
+    device.save("test.png").unwrap();
 }

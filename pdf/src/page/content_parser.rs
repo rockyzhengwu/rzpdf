@@ -1,59 +1,147 @@
 use crate::{
     error::{PdfError, PdfResult},
-    objects::pdf_dict::PdfDict,
     page::opcode::is_op,
 };
-use std::io::Cursor;
+use std::io::{Cursor, Read, Seek};
 
 use crate::{page::operator::Operator, parser::syntax::SyntaxParser};
 
 #[derive(Debug)]
-pub struct ContentParser {
-    syntax: SyntaxParser<Cursor<Vec<u8>>>,
+pub struct ContentParser<R: Read + Seek = Cursor<Vec<u8>>> {
+    syntax: SyntaxParser<R>,
 }
 
-impl ContentParser {
-    pub fn new(syntax: SyntaxParser<Cursor<Vec<u8>>>) -> Self {
+impl<R: Read + Seek> ContentParser<R> {
+    pub fn new(syntax: SyntaxParser<R>) -> Self {
         ContentParser { syntax }
     }
 
+    pub fn position(&self) -> u64 {
+        self.syntax.position()
+    }
+
     pub fn read_operator(&mut self) -> PdfResult<Option<Operator>> {
+        self.read_operator_inner(None, None)
+    }
+
+    pub(crate) fn read_operator_with_budget(
+        &mut self,
+        budget: &crate::budget::OperationBudget,
+        retained: &mut crate::budget::MemoryLease,
+    ) -> PdfResult<Option<Operator>> {
+        self.read_operator_inner(Some(budget), Some(retained))
+    }
+
+    fn read_operator_inner(
+        &mut self,
+        budget: Option<&crate::budget::OperationBudget>,
+        mut retained: Option<&mut crate::budget::MemoryLease>,
+    ) -> PdfResult<Option<Operator>> {
+        let mut operand_lease = budget.map(|budget| budget.reserve(0)).transpose()?;
         let mut operands = Vec::new();
         loop {
-            let word = self.syntax.peek_word();
+            let start = self.syntax.position();
+            let word = if let Some(budget) = budget {
+                self.syntax.get_next_word_with_budget(budget)
+            } else {
+                self.syntax.get_next_word()
+            };
             match word {
                 Ok(word) => {
-                    if is_op(word.raw()) {
+                    let raw = word.raw();
+                    let bare_keyword = !word.is_number()
+                        && !matches!(raw, b"true" | b"false" | b"null")
+                        && raw.first().is_some_and(|byte| !b"/[]()<>{}".contains(byte));
+                    if is_op(raw) || bare_keyword {
                         if word.is_equal(b"BI") {
-                            self.syntax.get_next_word()?;
-                            let mut image_objects = PdfDict::default();
-                            loop {
-                                let next_word = self.syntax.peek_word()?;
-                                if next_word.is_equal(b"ID") {
-                                    self.syntax.get_next_word()?;
-                                    break;
-                                }
-                                let key = self.syntax.get_object()?.into_name().unwrap();
-                                let value = self.syntax.get_object()?;
-                                image_objects.insert(key.name().to_string(), value);
-                            }
-                            // TODO read Image dict
+                            self.syntax.set_pos(start)?;
+                            return Err(PdfError::UnsupportedFeature(format!(
+                                "inline image parsing at content byte {}",
+                                start
+                            )));
                         }
-                        let opword = self.syntax.get_next_word()?;
-                        let opname = opword.into_string()?;
-                        let op = Operator::new(opname, operands.clone());
-                        operands.clear();
+                        let offset = self
+                            .syntax
+                            .position()
+                            .saturating_sub(word.raw().len() as u64);
+                        let (opname, mut name_lease) = word.into_reserved_string()?;
+                        let op = Operator::new(opname, operands).with_byte_offset(offset);
+                        if let (Some(retained), Some(lease)) =
+                            (retained.as_mut(), operand_lease.as_mut())
+                        {
+                            retained.absorb(lease)?;
+                        }
+                        if let (Some(retained), Some(lease)) =
+                            (retained.as_mut(), name_lease.as_mut())
+                        {
+                            retained.absorb(lease)?;
+                        }
                         return Ok(Some(op));
                     } else {
-                        let obj = self.syntax.get_object()?;
+                        // Only operands need object parsing from the original
+                        // position. Drop the classification token first.
+                        drop(word);
+                        self.syntax.set_pos(start)?;
+                        if operands.len() >= self.syntax.limits().max_objects {
+                            return Err(PdfError::ResourceLimit("content operand count".into()));
+                        }
+                        if let Some(budget) = budget {
+                            if operands.len() == operands.capacity() {
+                                let capacity = operands
+                                    .capacity()
+                                    .saturating_mul(2)
+                                    .max(1)
+                                    .min(self.syntax.limits().max_objects);
+                                let size = std::mem::size_of::<crate::objects::PdfObject>();
+                                let mut lease = budget.reserve(
+                                    capacity.checked_mul(size).ok_or_else(|| {
+                                        PdfError::ResourceLimit("content operand table size".into())
+                                    })?,
+                                )?;
+                                let mut replacement = Vec::new();
+                                replacement.try_reserve_exact(capacity).map_err(|_| {
+                                    PdfError::ResourceLimit("content operand allocation".into())
+                                })?;
+                                lease.resize(
+                                    replacement.capacity().checked_mul(size).ok_or_else(|| {
+                                        PdfError::ResourceLimit(
+                                            "content operand table capacity".into(),
+                                        )
+                                    })?,
+                                )?;
+                                replacement.append(&mut operands);
+                                operands = replacement;
+                                operand_lease = Some(lease);
+                            }
+                        } else {
+                            operands.try_reserve(1).map_err(|_| {
+                                PdfError::ResourceLimit("content operand allocation".into())
+                            })?;
+                        }
+                        let obj =
+                            if let (Some(budget), Some(retained)) = (budget, retained.as_mut()) {
+                                let (object, mut lease) =
+                                    self.syntax.get_content_object_with_budget(budget)?;
+                                retained.absorb(&mut lease)?;
+                                object
+                            } else {
+                                self.syntax.get_object()?
+                            };
                         operands.push(obj)
                     }
                 }
-                Err(PdfError::EndofFile) => return Ok(None),
-                _ => {
-                    return Err(PdfError::ContentParseError(
-                        "Content Parser read operation error".to_string(),
-                    ));
+                Err(PdfError::EndofFile) => {
+                    self.syntax.set_pos(start)?;
+                    if !operands.is_empty() {
+                        return Err(PdfError::ContentParseError(
+                            "content ends with operands without an operator".into(),
+                        ));
+                    }
+                    return Ok(None);
+                }
+                Err(error) => {
+                    self.syntax.set_pos(start)?;
+                    return Err(error);
                 }
             }
         }
@@ -67,6 +155,87 @@ mod tests {
         parser::syntax::SyntaxParser,
     };
     use std::io::Cursor;
+
+    #[test]
+    fn operand_budget_refusal_precedes_malformed_object_parsing() {
+        use crate::{budget::OperationBudget, error::PdfError, objects::PdfObject};
+        let input = b"(unterminated".as_slice();
+        let mut parser = ContentParser::new(SyntaxParser::new(
+            StreamReader::try_new(Cursor::new(input)).unwrap(),
+        ));
+        let budget = OperationBudget::new(std::mem::size_of::<PdfObject>() - 1);
+        let mut retained = budget.reserve(0).unwrap();
+        assert!(matches!(
+            parser.read_operator_with_budget(&budget, &mut retained),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(parser.position(), 0);
+        assert_eq!(retained.bytes(), 0);
+        assert_eq!(budget.live_bytes(), 0);
+    }
+
+    #[test]
+    fn token_reuse_keeps_eof_and_inline_rejection_positions_stable() {
+        use crate::error::PdfError;
+        for bytes in [b"q  %tail\n".as_slice(), b"q  %head\n BI".as_slice()] {
+            let reader = StreamReader::try_new(Cursor::new(bytes)).unwrap();
+            let mut parser = ContentParser::new(SyntaxParser::new(reader));
+            assert_eq!(
+                parser.read_operator().unwrap().unwrap().byte_offset(),
+                Some(0)
+            );
+            let before = parser.position();
+            if bytes.ends_with(b"BI") {
+                for _ in 0..2 {
+                    assert!(matches!(
+                        parser.read_operator(),
+                        Err(PdfError::UnsupportedFeature(_))
+                    ));
+                    assert_eq!(parser.position(), before);
+                }
+            } else {
+                for _ in 0..2 {
+                    assert!(parser.read_operator().unwrap().is_none());
+                    assert_eq!(parser.position(), before);
+                }
+            }
+        }
+        let reader = StreamReader::try_new(Cursor::new(b"1".as_slice())).unwrap();
+        let mut parser = ContentParser::new(SyntaxParser::new(reader));
+        assert!(matches!(
+            parser.read_operator(),
+            Err(PdfError::ContentParseError(_))
+        ));
+        assert_eq!(parser.position(), 1);
+    }
+
+    #[test]
+    fn operand_limit_is_per_operation_and_checked_before_object_parse() {
+        use crate::{
+            error::PdfError,
+            parser::options::{Limits, ParseOptions},
+        };
+        let options = ParseOptions {
+            limits: Limits {
+                max_objects: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let reader =
+            StreamReader::try_new(Cursor::new(b"1 2 custom 3 4 custom q".to_vec())).unwrap();
+        let mut parser = ContentParser::new(SyntaxParser::with_options(reader, options));
+        assert_eq!(parser.read_operator().unwrap().unwrap().num_operands(), 2);
+        assert_eq!(parser.read_operator().unwrap().unwrap().num_operands(), 2);
+        assert_eq!(parser.read_operator().unwrap().unwrap().num_operands(), 0);
+        assert!(parser.read_operator().unwrap().is_none());
+        let reader = StreamReader::try_new(Cursor::new(b"1 2 (unterminated".to_vec())).unwrap();
+        let mut parser = ContentParser::new(SyntaxParser::with_options(reader, options));
+        assert!(matches!(
+            parser.read_operator(),
+            Err(PdfError::ResourceLimit(_))
+        ));
+    }
 
     #[test]
     fn test_content_parser() {
@@ -118,5 +287,19 @@ mod tests {
         let mut parser = ContentParser::new(syntax);
         let op = parser.read_operator();
         println!("op: {:?}", op);
+    }
+
+    #[test]
+    fn unknown_operator_preserves_operands_and_offset() {
+        let reader =
+            StreamReader::try_new(Cursor::new(b" 12 /Name customOp q Q".to_vec())).unwrap();
+        let mut parser = ContentParser::new(SyntaxParser::new(reader));
+        let op = parser.read_operator().unwrap().unwrap();
+        assert_eq!(op.name(), "customOp");
+        assert_eq!(op.byte_offset(), Some(10));
+        assert_eq!(op.num_operands(), 2);
+        assert_eq!(parser.read_operator().unwrap().unwrap().name(), "q");
+        assert_eq!(parser.read_operator().unwrap().unwrap().name(), "Q");
+        assert!(parser.read_operator().unwrap().is_none());
     }
 }

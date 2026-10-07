@@ -15,11 +15,13 @@ pub struct PostScriptFunction {
 impl PostScriptFunction {
     pub fn try_new<R: Seek + Read>(obj: &PdfObject, ctx: &PDFContext<R>) -> PdfResult<Self> {
         let mut function = PostScriptFunction::default();
+        let obj = ctx.resolve(obj)?;
+        let stream = obj
+            .as_stream()
+            .ok_or_else(|| PdfError::FunctionError("Type4 requires a stream".to_string()))?;
 
         let domain = obj
-            .as_dict()
-            .unwrap()
-            .get("Domain")
+            .get_attr("Domain")
             .ok_or(PdfError::FunctionError(
                 "Type4 Function Domain is None".to_string(),
             ))?
@@ -35,9 +37,7 @@ impl PostScriptFunction {
         }
 
         let range = obj
-            .as_dict()
-            .unwrap()
-            .get("Range")
+            .get_attr("Range")
             .ok_or(PdfError::FunctionError("Type4 Range is None".to_string()))?
             .as_array()
             .ok_or(PdfError::FunctionError(
@@ -49,13 +49,29 @@ impl PostScriptFunction {
             ))?;
             function.range.push(value);
         }
-        let data = obj.as_stream().unwrap().decode_data(ctx)?;
+        let _data = stream.decode_data(ctx)?;
+        if function.domain.is_empty()
+            || function.range.is_empty()
+            || function.domain.len() % 2 != 0
+            || function.range.len() % 2 != 0
+            || function
+                .domain
+                .chunks_exact(2)
+                .chain(function.range.chunks_exact(2))
+                .any(|p| !p[0].is_finite() || !p[1].is_finite() || p[0] > p[1])
+        {
+            return Err(PdfError::FunctionError(
+                "Type4 requires finite ordered Domain/Range pairs".to_string(),
+            ));
+        }
 
         Ok(function)
     }
 
     pub fn eval(&self, _inputs: &[f32]) -> PdfResult<Vec<f32>> {
         let mut _stack: Vec<f32> = Vec::with_capacity(100);
-        unimplemented!()
+        Err(PdfError::UnsupportedFeature(
+            "PostScript function evaluation".into(),
+        ))
     }
 }

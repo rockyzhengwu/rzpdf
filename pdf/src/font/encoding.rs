@@ -1,20 +1,113 @@
-use std::collections::HashMap;
-
-use crate::error::PdfResult;
+use crate::budget::{MemoryLease, OperationBudget, copy_string};
+use crate::error::{PdfError, PdfResult};
 use crate::objects::{PdfObject, pdf_dict::PdfDict};
 
 #[derive(Debug, Default, Clone)]
 pub struct Encoding {
     base_encoding: Option<FontEncoding>,
-    differences: HashMap<u8, String>,
+    differences: Differences,
+}
+
+#[derive(Debug, Default, Clone)]
+struct Differences(Vec<(u8, String)>);
+
+impl Differences {
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    fn get(&self, code: &u8) -> Option<&String> {
+        self.0
+            .binary_search_by_key(code, |(entry, _)| *entry)
+            .ok()
+            .map(|index| &self.0[index].1)
+    }
+    fn insert(&mut self, code: u8, name: String) -> PdfResult<()> {
+        match self.0.binary_search_by_key(&code, |(entry, _)| *entry) {
+            Ok(index) => self.0[index].1 = name,
+            Err(index) => {
+                self.0.try_reserve(1).map_err(|_| {
+                    PdfError::ResourceLimit("encoding differences allocation".into())
+                })?;
+                self.0.insert(index, (code, name));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Encoding {
+    pub(crate) fn try_new_with_context_and_budget<R: std::io::Read + std::io::Seek>(
+        enc: &PdfDict,
+        ctx: &crate::pdf_context::PDFContext<R>,
+        budget: &OperationBudget,
+    ) -> PdfResult<(Self, MemoryLease)> {
+        let mut builder =
+            crate::objects::pdf_dict::BudgetedDictBuilder::new(budget, ctx.limits().max_objects)?;
+        for key in ["Differences", "BaseEncoding"] {
+            if let Some(value) = enc.get(key) {
+                let (mut value, mut value_lease) = ctx.resolve_owned_with_budget(value, budget)?;
+                if let PdfObject::PdfArray(array) = &value {
+                    let bytes = array
+                        .len()
+                        .checked_mul(std::mem::size_of::<PdfObject>())
+                        .ok_or_else(|| PdfError::ResourceLimit("encoding array size".into()))?;
+                    let mut resolved_lease = budget.reserve(bytes)?;
+                    let mut resolved = Vec::new();
+                    resolved
+                        .try_reserve_exact(array.len())
+                        .map_err(|_| PdfError::ResourceLimit("encoding array allocation".into()))?;
+                    resolved_lease
+                        .resize(resolved.capacity() * std::mem::size_of::<PdfObject>())?;
+                    for entry in array {
+                        let (entry, mut entry_lease) =
+                            ctx.resolve_owned_with_budget(entry, budget)?;
+                        resolved.push(entry);
+                        resolved_lease.absorb(&mut entry_lease)?;
+                    }
+                    value = PdfObject::PdfArray(crate::objects::pdf_array::PdfArray::from_items(
+                        resolved,
+                    ));
+                    // Original array has been dropped; release its reservation only now.
+                    value_lease = resolved_lease;
+                }
+                let (key, key_lease) = copy_string(key, budget)?;
+                builder.insert(key, value, key_lease, value_lease)?;
+            }
+        }
+        let (dict, _temporary) = builder.finish()?;
+        Self::try_new_with_budget(&dict, budget)
+    }
+
+    pub fn try_new_with_context<R: std::io::Read + std::io::Seek>(
+        enc: &PdfDict,
+        ctx: &crate::pdf_context::PDFContext<R>,
+    ) -> PdfResult<Self> {
+        let mut dict = enc.clone();
+        for key in ["Differences", "BaseEncoding"] {
+            if let Some(value) = dict.get(key) {
+                let mut value = ctx.resolve(value)?;
+                if let PdfObject::PdfArray(array) = &mut value {
+                    let mut resolved = crate::objects::pdf_array::PdfArray::default();
+                    for entry in &*array {
+                        resolved.add_obj(ctx.resolve(entry)?);
+                    }
+                    *array = resolved;
+                }
+                dict.insert(key.into(), value);
+            }
+        }
+        Self::try_new(&dict)
+    }
     pub fn new_from_name(name: &str) -> PdfResult<Self> {
         let base_encoding = get_predefined_encoding(name);
+        if base_encoding.is_none() {
+            return Err(PdfError::UnsupportedFeature(format!(
+                "Font encoding {name}"
+            )));
+        }
         Ok(Encoding {
             base_encoding,
-            differences: HashMap::new(),
+            differences: Differences::default(),
         })
     }
 
@@ -31,6 +124,9 @@ impl Encoding {
     }
 
     pub fn unicode_from_charcode(&self, char: &u8) -> u32 {
+        if let Some(name) = self.differences.get(char) {
+            return super::glyph_name::adobe_glyph_list_to_unicode(name).unwrap_or(65533);
+        }
         match &self.base_encoding {
             Some(b) => b
                 .unicode_from_charcode(char.to_owned())
@@ -38,40 +134,135 @@ impl Encoding {
             None => 65533,
         }
     }
+
+    /// Optional mapping without replacing unknown glyph names or undefined
+    /// table entries. Zero table entries are undefined except PDFDoc code zero.
+    pub fn unicode_mapping(&self, code: u8) -> Option<u32> {
+        if let Some(name) = self.differences.get(&code) {
+            return super::glyph_name::adobe_glyph_list_to_unicode(name);
+        }
+        let base = self.base_encoding.as_ref()?;
+        base.unicode_from_charcode(code)
+            .filter(|value| *value != 0 || (*base == FontEncoding::PdfDoc && code == 0))
+    }
     pub fn base_encoding(&self) -> Option<&FontEncoding> {
         self.base_encoding.as_ref()
     }
 
     pub fn try_new(enc: &PdfDict) -> PdfResult<Self> {
-        let mut differences = HashMap::new();
-        if let Some(PdfObject::PdfArray(arr)) = enc.get("Differences") {
-            let mut code = 0;
+        Self::try_new_inner(enc, None).map(|(encoding, _)| encoding)
+    }
+
+    /// Accounts for owned Differences storage, not context resolution or native fonts.
+    pub(crate) fn try_new_with_budget(
+        enc: &PdfDict,
+        budget: &OperationBudget,
+    ) -> PdfResult<(Self, MemoryLease)> {
+        let (encoding, lease) = Self::try_new_inner(enc, Some(budget))?;
+        Ok((encoding, lease.expect("budget entry retains storage lease")))
+    }
+
+    fn try_new_inner(
+        enc: &PdfDict,
+        budget: Option<&OperationBudget>,
+    ) -> PdfResult<(Self, Option<MemoryLease>)> {
+        let mut names_lease = budget.map(|pool| pool.reserve(0)).transpose()?;
+        let mut table_lease = budget.map(|pool| pool.reserve(0)).transpose()?;
+        let mut differences = Differences::default();
+        if let Some(value) = enc.get("Differences") {
+            let arr = value
+                .as_array()
+                .ok_or_else(|| PdfError::FontError("Differences must be an array".into()))?;
+            let mut code: Option<u32> = None;
             for v in arr.into_iter() {
                 match &v {
                     &PdfObject::PdfNumber(n) => {
-                        code = n.get_u8();
+                        let value = n.as_u32_checked().map_err(|_| {
+                            PdfError::FontError("Differences code must be an integer".into())
+                        })?;
+                        if value > 255 {
+                            return Err(PdfError::FontError("Differences code exceeds 255".into()));
+                        }
+                        code = Some(value);
                     }
                     &PdfObject::PdfName(n) => {
                         let s = n.name();
-                        differences.insert(code, s.to_string());
-                        if code < u8::MAX - 1 {
-                            code += 1;
+                        let current = code.filter(|c| *c <= 255).ok_or_else(|| {
+                            PdfError::FontError(
+                                "Differences requires an initial code and cannot exceed 255".into(),
+                            )
+                        })?;
+                        if let Some(pool) = budget {
+                            let (name, mut name_lease) = copy_string(s, pool)?;
+                            let index = differences
+                                .0
+                                .binary_search_by_key(&(current as u8), |(entry, _)| *entry);
+                            match index {
+                                Ok(index) => differences.0[index].1 = name,
+                                Err(index) => {
+                                    if differences.0.len() == differences.0.capacity() {
+                                        let capacity = differences
+                                            .0
+                                            .capacity()
+                                            .max(1)
+                                            .saturating_mul(2)
+                                            .min(256);
+                                        let slots = std::mem::size_of::<(u8, String)>();
+                                        let mut next_lease = pool.reserve(capacity * slots)?;
+                                        let mut next = Vec::new();
+                                        next.try_reserve_exact(capacity).map_err(|_| {
+                                            PdfError::ResourceLimit(
+                                                "encoding differences allocation".into(),
+                                            )
+                                        })?;
+                                        next_lease.resize(next.capacity() * slots)?;
+                                        next.append(&mut differences.0);
+                                        differences.0 = next;
+                                        table_lease = Some(next_lease);
+                                    }
+                                    differences.0.insert(index, (current as u8, name));
+                                }
+                            }
+                            // Conservatively retain replaced names until the result is released.
+                            names_lease.as_mut().unwrap().absorb(&mut name_lease)?;
+                        } else {
+                            differences.insert(current as u8, s.to_string())?;
                         }
+                        code = Some(current + 1);
                     }
-                    _ => {}
+                    _ => {
+                        return Err(PdfError::FontError(
+                            "Differences entries must be integers or names".into(),
+                        ));
+                    }
                 }
             }
         }
 
         let mut base_encoding: Option<FontEncoding> = None;
-        if let Some(PdfObject::PdfName(base)) = enc.get("BaseEncoding") {
+        if let Some(value) = enc.get("BaseEncoding") {
+            let base = value
+                .as_name()
+                .ok_or_else(|| PdfError::FontError("BaseEncoding must be a name".into()))?;
             base_encoding = get_predefined_encoding(base.name());
+            if base_encoding.is_none() {
+                return Err(PdfError::UnsupportedFeature(format!(
+                    "Font encoding {}",
+                    base.name()
+                )));
+            }
         }
 
-        Ok(Encoding {
-            base_encoding,
-            differences,
-        })
+        if let (Some(names), Some(table)) = (&mut names_lease, &mut table_lease) {
+            names.absorb(table)?;
+        }
+        Ok((
+            Encoding {
+                base_encoding,
+                differences,
+            },
+            names_lease,
+        ))
     }
 
     pub fn get_glyph_name(&self, code: u8) -> Option<&str> {
@@ -82,6 +273,107 @@ impl Encoding {
                 None => None,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod safety_tests {
+    use super::*;
+    use crate::{io::stream_reader::StreamReader, parser::syntax::SyntaxParser};
+    use std::io::Cursor;
+    #[test]
+    fn budget_differences_tracks_growth_names_and_failure_recovery() {
+        let parse = |source: &str| {
+            SyntaxParser::new(
+                StreamReader::try_new(Cursor::new(source.as_bytes().to_vec())).unwrap(),
+            )
+            .get_object()
+            .unwrap()
+        };
+        let source = parse("<< /Differences [65 /A /B /C 65 /D] >>");
+        let pool = OperationBudget::new(4096);
+        let (encoding, lease) =
+            Encoding::try_new_with_budget(source.as_dict().unwrap(), &pool).unwrap();
+        let slots = std::mem::size_of::<(u8, String)>();
+        assert_eq!(encoding.get_glyph_name(65), Some("D"));
+        assert_eq!(encoding.unicode_mapping(65), Some(u32::from('D')));
+        assert_eq!(
+            pool.live_bytes(),
+            encoding.differences.0.capacity() * slots + 4
+        );
+        assert_eq!(lease.bytes(), pool.live_bytes());
+        assert_eq!(pool.peak_bytes(), 6 * slots + 3);
+        let peak = pool.peak_bytes();
+        drop((encoding, lease));
+        assert_eq!(pool.live_bytes(), 0);
+        let pool = OperationBudget::new(peak);
+        let neighbor = pool.reserve(1).unwrap();
+        assert!(matches!(
+            Encoding::try_new_with_budget(source.as_dict().unwrap(), &pool),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(pool.live_bytes(), 1);
+        drop(neighbor);
+        let result = Encoding::try_new_with_budget(source.as_dict().unwrap(), &pool).unwrap();
+        drop(result);
+        assert_eq!(pool.live_bytes(), 0);
+        let invalid = parse("<< /Differences [65 /A null] >>");
+        assert!(Encoding::try_new_with_budget(invalid.as_dict().unwrap(), &pool).is_err());
+        assert_eq!(pool.live_bytes(), 0);
+    }
+
+    #[test]
+    fn differences_sorted_storage_covers_all_codes_and_clone_isolation() {
+        let mut differences = Differences::default();
+        assert!(differences.is_empty());
+        assert_eq!(differences.get(&0), None);
+        for code in (0..=u8::MAX).rev() {
+            differences.insert(code, format!("glyph{code}")).unwrap();
+        }
+        assert_eq!(differences.0.len(), 256);
+        for (index, (code, name)) in differences.0.iter().enumerate() {
+            assert_eq!(usize::from(*code), index);
+            assert_eq!(differences.get(code), Some(name));
+            assert_eq!(name, &format!("glyph{code}"));
+        }
+        let mut cloned = differences.clone();
+        cloned.insert(65, "A".into()).unwrap();
+        cloned.insert(65, "B".into()).unwrap();
+        assert_eq!(cloned.0.len(), 256);
+        assert_eq!(cloned.get(&65).map(String::as_str), Some("B"));
+        assert_eq!(differences.get(&65).map(String::as_str), Some("glyph65"));
+    }
+
+    #[test]
+    fn differences_validate_codes_and_apply_unicode_mapping() {
+        let parse = |source: &str| {
+            let obj = SyntaxParser::new(
+                StreamReader::try_new(Cursor::new(source.as_bytes().to_vec())).unwrap(),
+            )
+            .get_object()
+            .unwrap();
+            Encoding::try_new(obj.as_dict().unwrap())
+        };
+        let encoding =
+            parse("<< /BaseEncoding /WinAnsiEncoding /Differences [254 /A /B 65 /A 65 /C] >>")
+                .unwrap();
+        assert_eq!(encoding.get_glyph_name(254), Some("A"));
+        assert_eq!(encoding.get_glyph_name(255), Some("B"));
+        assert_eq!(encoding.unicode_from_charcode(&65), u32::from('C'));
+        for source in [
+            "<< /Differences [/A] >>",
+            "<< /Differences [256 /A] >>",
+            "<< /Differences [-1 /A] >>",
+            "<< /Differences [1.5 /A] >>",
+            "<< /Differences [255 /A /B] >>",
+            "<< /Differences [1 null] >>",
+            "<< /Differences 1 >>",
+            "<< /BaseEncoding 1 >>",
+            "<< /BaseEncoding /Unknown >>",
+        ] {
+            assert!(parse(source).is_err(), "{source}");
+        }
+        assert!(Encoding::new_from_name("Unknown").is_err());
     }
 }
 

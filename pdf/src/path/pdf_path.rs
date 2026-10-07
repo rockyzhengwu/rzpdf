@@ -27,10 +27,12 @@ pub enum Segment {
     MoveTo(Point),
     LineTo(Point),
     CurveTo(Bezier),
+    Close,
 }
 impl Segment {
     pub fn transform(&self, matrix: &Matrix) -> Segment {
         match self {
+            Segment::Close => Segment::Close,
             Segment::MoveTo(p) => {
                 let np = matrix.transform(p);
                 Segment::MoveTo(np)
@@ -60,11 +62,15 @@ impl SubPath {
         &self.segments
     }
 
-    pub fn new(segments: Vec<Segment>, closed: bool) -> Self {
+    pub fn new(mut segments: Vec<Segment>, closed: bool) -> Self {
+        if closed && !matches!(segments.last(), Some(Segment::Close)) {
+            segments.push(Segment::Close);
+        }
         SubPath { segments, closed }
     }
 
     pub fn add_segment(&mut self, segment: Segment) {
+        self.closed = matches!(segment, Segment::Close);
         self.segments.push(segment)
     }
 
@@ -90,6 +96,9 @@ impl SubPath {
         self.segments.pop()
     }
     pub fn close(&mut self) {
+        if !self.closed {
+            self.segments.push(Segment::Close);
+        }
         self.closed = true;
     }
 
@@ -121,6 +130,13 @@ pub struct PdfPath {
     subpaths: Vec<SubPath>,
 }
 impl PdfPath {
+    pub fn try_add_subpath(&mut self, subpath: SubPath) -> crate::error::PdfResult<()> {
+        self.subpaths
+            .try_reserve(1)
+            .map_err(|_| crate::error::PdfError::ResourceLimit("path subpath allocation".into()))?;
+        self.subpaths.push(subpath);
+        Ok(())
+    }
     pub fn is_empty(&self) -> bool {
         self.subpaths.is_empty()
     }

@@ -28,30 +28,48 @@ pub fn create_function<R: Seek + Read>(
     obj: &PdfObject,
     ctx: &PDFContext<R>,
 ) -> PdfResult<Function> {
-    let t = obj
-        .as_dict()
-        .unwrap()
-        .get("FunctionType")
-        .ok_or(PdfError::FunctionError("FunctionType is None".to_string()))?
-        .as_u32()
-        .ok_or(PdfError::FunctionError(
-            "FunctionType need to be a number".to_string(),
-        ))?;
+    create_function_at_depth(obj, ctx, 0, &mut ctx.limits().max_objects)
+}
+
+pub(crate) fn create_function_at_depth<R: Seek + Read>(
+    obj: &PdfObject,
+    ctx: &PDFContext<R>,
+    depth: usize,
+    remaining_nodes: &mut usize,
+) -> PdfResult<Function> {
+    if depth >= ctx.limits().max_depth {
+        return Err(PdfError::ResourceLimit("PDF function nesting".to_string()));
+    }
+    if *remaining_nodes == 0 {
+        return Err(PdfError::ResourceLimit(
+            "PDF function total nodes".to_string(),
+        ));
+    }
+    *remaining_nodes -= 1;
+    let obj = ctx.resolve(obj)?;
+    let type_obj = obj
+        .get_attr("FunctionType")
+        .ok_or(PdfError::FunctionError("FunctionType is None".to_string()))?;
+    let resolved_type = ctx.resolve(type_obj)?;
+    let t = resolved_type
+        .as_number()
+        .ok_or_else(|| PdfError::FunctionError("FunctionType must be an integer".to_string()))?
+        .as_u32_checked()?;
     match t {
         0 => {
-            let s = Sampled::try_new(obj, ctx)?;
+            let s = Sampled::try_new(&obj, ctx)?;
             Ok(Function::Type0(s))
         }
         2 => {
-            let function = Exponential::try_new(obj, ctx)?;
+            let function = Exponential::try_new(&obj, ctx)?;
             Ok(Function::Type2(function))
         }
         3 => {
-            let function = Stitching::try_new(obj, ctx)?;
+            let function = Stitching::try_new_at_depth(&obj, ctx, depth, remaining_nodes)?;
             Ok(Function::Type3(function))
         }
         4 => {
-            let function = PostScriptFunction::try_new(obj, ctx)?;
+            let function = PostScriptFunction::try_new(&obj, ctx)?;
             Ok(Function::Type4(function))
         }
         _ => Err(PdfError::FunctionError(format!(
@@ -69,5 +87,103 @@ impl Function {
             Function::Type3(f) => f.eval(inputs),
             Function::Type4(f) => f.eval(inputs),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn function_tree_budget_counts_across_branches_and_recovers_after_error() {
+        let syntax =
+            SyntaxParser::new(StreamReader::try_new(Cursor::new(Vec::<u8>::new())).unwrap());
+        let ctx = PDFContext::try_new(
+            PdfParser::new(syntax),
+            CrossRefTable::new(HashMap::new(), PdfDict::default()),
+        )
+        .unwrap();
+        let source = "<< /FunctionType 3 /Domain [0 1] /Bounds [0.5] /Encode [0 1 0 1] /Functions [<< /FunctionType 2 /Domain [0 1] /N 1 >> << /FunctionType 2 /Domain [0 1] /N 1 >>] >>";
+        let obj = SyntaxParser::new(
+            StreamReader::try_new(Cursor::new(source.as_bytes().to_vec())).unwrap(),
+        )
+        .get_object()
+        .unwrap();
+        let mut remaining = 2;
+        assert!(matches!(
+            create_function_at_depth(&obj, &ctx, 0, &mut remaining),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        let mut remaining = 3;
+        assert!(create_function_at_depth(&obj, &ctx, 0, &mut remaining).is_ok());
+        assert_eq!(remaining, 0);
+        assert!(create_function(&obj, &ctx).is_ok());
+        let id = ctx.insert_object(PdfObject::PdfNull);
+        let source = format!(
+            "<< /FunctionType 3 /Domain [0 1] /Bounds [] /Encode [0 1] /Functions [{} {} R] >>",
+            id.obj_num(),
+            id.gen_num()
+        );
+        let cyclic =
+            SyntaxParser::new(StreamReader::try_new(Cursor::new(source.into_bytes())).unwrap())
+                .get_object()
+                .unwrap();
+        ctx.update_object(id, cyclic.clone()).unwrap();
+        for _ in 0..2 {
+            assert!(matches!(
+                create_function(&cyclic, &ctx),
+                Err(PdfError::ResourceLimit(_))
+            ));
+        }
+        assert!(create_function(&obj, &ctx).is_ok());
+    }
+    use crate::{
+        document::cross_ref_table::CrossRefTable,
+        io::stream_reader::StreamReader,
+        objects::{pdf_array::PdfArray, pdf_dict::PdfDict},
+        parser::{parser::PdfParser, syntax::SyntaxParser},
+    };
+    use std::{collections::HashMap, io::Cursor};
+
+    #[test]
+    fn stitching_parameters_and_recursive_construction_are_bounded() {
+        let syntax =
+            SyntaxParser::new(StreamReader::try_new(Cursor::new(Vec::<u8>::new())).unwrap());
+        let ctx = PDFContext::try_new(
+            PdfParser::new(syntax),
+            CrossRefTable::new(HashMap::new(), PdfDict::default()),
+        )
+        .unwrap();
+        let parse = |source: &str| {
+            SyntaxParser::new(
+                StreamReader::try_new(Cursor::new(source.as_bytes().to_vec())).unwrap(),
+            )
+            .get_object()
+            .unwrap()
+        };
+        assert!(create_function(&PdfObject::PdfNull, &ctx).is_err());
+        for source in [
+            "<< /FunctionType 3 /Domain [0 1] /Functions [] /Bounds [] /Encode [] >>",
+            "<< /FunctionType 3 /Domain [0 1 2] >>",
+            "<< /FunctionType 4 /Domain [0 1] /Range [0 1] >>",
+        ] {
+            assert!(create_function(&parse(source), &ctx).is_err());
+        }
+        let template = parse("<< /FunctionType 3 /Domain [0 1] /Bounds [] /Encode [0 1] >>");
+        let mut obj = parse("<< /FunctionType 2 /Domain [0 1] /N 1 >>");
+        for i in 0..=ctx.limits().max_depth {
+            let mut dict = template.as_dict().unwrap().clone();
+            let mut functions = PdfArray::default();
+            functions.add_obj(obj);
+            dict.insert("Functions".into(), PdfObject::PdfArray(functions));
+            obj = PdfObject::PdfDict(dict);
+            if i == 0 {
+                assert!(create_function(&obj, &ctx).is_ok());
+            }
+        }
+        assert!(matches!(
+            create_function(&obj, &ctx),
+            Err(PdfError::ResourceLimit(_))
+        ));
     }
 }

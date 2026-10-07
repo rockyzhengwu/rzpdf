@@ -18,7 +18,7 @@ impl DeviceRgb {
         3
     }
     pub fn rgb(&self, value: &ColorValue) -> PdfResult<ColorRgb> {
-        if value.value_size() != 3 {
+        if value.value_size() != 3 || value.values().iter().any(|v| !v.is_finite()) {
             return Err(PdfError::ColorError(
                 "DeviceRgb need 3 element value".to_string(),
             ));

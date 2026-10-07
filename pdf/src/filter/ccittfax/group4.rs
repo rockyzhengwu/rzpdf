@@ -1,6 +1,6 @@
-use super::Param;
 use super::bitreader::BitReader;
-use super::fax_table::{Color, Mode, decode_mode, decode_run_length};
+use super::fax_table::{decode_mode, decode_run_length, Color, Mode};
+use super::Param;
 use crate::error::{PdfError, PdfResult};
 
 pub struct Group4Decoder<'a> {
@@ -213,10 +213,6 @@ pub fn decode_g4(buffer: &[u8], param: &Param) -> PdfResult<Vec<u8>> {
         if line.is_empty() {
             break;
         }
-        if i > 406 {
-            panic!("finish");
-        }
-        println!("row: {:?},{:?}", i, decoder.reference);
         res.extend(line);
     }
 

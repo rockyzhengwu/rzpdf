@@ -1,0 +1,52 @@
+[package]
+name = "rzpdf-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+pdf = { path = "../pdf" }
+
+# Keep fuzz instrumentation and its lockfile separate from normal workspace builds.
+[workspace]
+members = ["."]
+resolver = "3"
+
+[[bin]]
+name = "syntax"
+path = "fuzz_targets/syntax.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "document"
+path = "fuzz_targets/document.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "content"
+path = "fuzz_targets/content.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "filters"
+path = "fuzz_targets/filters.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fonts"
+path = "fuzz_targets/fonts.rs"
+test = false
+doc = false
+bench = false

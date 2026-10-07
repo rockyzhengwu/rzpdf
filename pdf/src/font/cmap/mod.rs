@@ -8,6 +8,138 @@ use crate::error::PdfResult;
 
 mod parser;
 
+#[derive(Debug, Clone)]
+pub(super) struct MappingTable<T> {
+    hash: HashMap<u32, T>,
+    sorted: Option<Vec<(u32, T)>>,
+}
+
+impl<T> Default for MappingTable<T> {
+    fn default() -> Self {
+        Self {
+            hash: HashMap::new(),
+            sorted: None,
+        }
+    }
+}
+
+impl<T> From<HashMap<u32, T>> for MappingTable<T> {
+    fn from(hash: HashMap<u32, T>) -> Self {
+        Self { hash, sorted: None }
+    }
+}
+
+impl<T> MappingTable<T> {
+    pub(super) fn new_budgeted() -> Self {
+        Self {
+            hash: HashMap::new(),
+            sorted: Some(Vec::new()),
+        }
+    }
+    pub(super) fn capacity(&self) -> usize {
+        self.sorted
+            .as_ref()
+            .map_or(self.hash.capacity(), Vec::capacity)
+    }
+    pub(super) fn len(&self) -> usize {
+        self.sorted.as_ref().map_or(self.hash.len(), Vec::len)
+    }
+    pub(super) fn get(&self, code: &u32) -> Option<&T> {
+        if let Some(entries) = &self.sorted {
+            entries
+                .binary_search_by_key(code, |(key, _)| *key)
+                .ok()
+                .map(|index| &entries[index].1)
+        } else {
+            self.hash.get(code)
+        }
+    }
+    pub(super) fn insert(&mut self, code: u32, value: T) {
+        if let Some(entries) = &mut self.sorted {
+            match entries.binary_search_by_key(&code, |(key, _)| *key) {
+                Ok(index) => entries[index].1 = value,
+                Err(index) => entries.insert(index, (code, value)),
+            }
+        } else {
+            self.hash.insert(code, value);
+        }
+    }
+    fn iter(&self) -> impl Iterator<Item = (&u32, &T)> {
+        self.hash.iter().chain(
+            self.sorted
+                .iter()
+                .flat_map(|entries| entries.iter().map(|(key, value)| (key, value))),
+        )
+    }
+    fn into_entries(self) -> impl Iterator<Item = (u32, T)> {
+        self.hash
+            .into_iter()
+            .chain(self.sorted.into_iter().flatten())
+    }
+    fn try_reserve(&mut self, additional: usize) -> PdfResult<()> {
+        if let Some(entries) = &mut self.sorted {
+            entries
+                .try_reserve(additional)
+                .map_err(|_| PdfError::ResourceLimit("CMap mapping allocation".into()))
+        } else {
+            self.hash
+                .try_reserve(additional)
+                .map_err(|_| PdfError::ResourceLimit("CMap mapping allocation".into()))
+        }
+    }
+    pub(super) fn reserve_with_budget(
+        &mut self,
+        additional: usize,
+        pool: &crate::budget::OperationBudget,
+        table: &mut Option<crate::budget::MemoryLease>,
+    ) -> PdfResult<()> {
+        let entries = self
+            .sorted
+            .as_mut()
+            .expect("budget maps use sorted storage");
+        let needed = entries
+            .len()
+            .checked_add(additional)
+            .ok_or_else(|| PdfError::ResourceLimit("CMap mapping size".into()))?;
+        if needed <= entries.capacity() {
+            return Ok(());
+        }
+        let capacity = entries
+            .capacity()
+            .max(1)
+            .checked_mul(2)
+            .unwrap_or(needed)
+            .max(needed);
+        let slots = std::mem::size_of::<(u32, T)>();
+        let mut lease = pool.reserve(
+            capacity
+                .checked_mul(slots)
+                .ok_or_else(|| PdfError::ResourceLimit("CMap mapping size".into()))?,
+        )?;
+        let mut next = Vec::new();
+        next.try_reserve_exact(capacity)
+            .map_err(|_| PdfError::ResourceLimit("CMap mapping allocation".into()))?;
+        lease.resize(
+            next.capacity()
+                .checked_mul(slots)
+                .ok_or_else(|| PdfError::ResourceLimit("CMap mapping capacity".into()))?,
+        )?;
+        next.append(entries);
+        *entries = next;
+        *table = Some(lease);
+        Ok(())
+    }
+}
+
+impl<T: PartialEq> PartialEq for MappingTable<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len()
+            && self
+                .iter()
+                .all(|(key, value)| other.get(key) == Some(value))
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CodeSpaceRange {
     size: u8,
@@ -43,22 +175,163 @@ pub struct Cmap {
     wmode: Option<u8>,
     cmap_type: Option<u8>,
     code_space_range: Vec<CodeSpaceRange>,
-    cid_to_unicode: HashMap<u32, String>,
-    code_to_cids: HashMap<u32, u32>,
+    cid_to_unicode: MappingTable<String>,
+    code_to_cids: MappingTable<u32>,
 }
 
 impl Cmap {
+    /// Load a PDF CMap stream, including a named dictionary UseCMap base.
+    /// Stream-valued dictionary bases remain unsupported rather than ignored.
+    pub fn from_stream<R: std::io::Read + std::io::Seek>(
+        stream: &crate::objects::pdf_stream::PdfStream,
+        ctx: &crate::pdf_context::PDFContext<R>,
+    ) -> PdfResult<Self> {
+        Self::from_stream_inner(stream, ctx, None).map(|(cmap, _)| cmap)
+    }
+
+    /// Tracks resolution, decoded source, hexadecimal buffers and Unicode strings.
+    /// Returns retained Unicode/code-space/mapping-table quota with the map.
+    /// Inherited/array sources and inheritance names/slots are tracked; shared
+    /// control blocks remain excluded. Resolver-internal allocations belong to the caller.
+    pub(crate) fn from_stream_with_budget<R: std::io::Read + std::io::Seek>(
+        stream: &crate::objects::pdf_stream::PdfStream,
+        ctx: &crate::pdf_context::PDFContext<R>,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<(Self, crate::budget::MemoryLease)> {
+        let (cmap, lease) = Self::from_stream_inner(stream, ctx, Some(budget))?;
+        Ok((cmap, lease.unwrap_or(budget.reserve(0)?)))
+    }
+
+    fn from_stream_inner<R: std::io::Read + std::io::Seek>(
+        stream: &crate::objects::pdf_stream::PdfStream,
+        ctx: &crate::pdf_context::PDFContext<R>,
+        budget: Option<&crate::budget::OperationBudget>,
+    ) -> PdfResult<(Self, Option<crate::budget::MemoryLease>)> {
+        let resolve = |value: &crate::objects::PdfObject| {
+            if let Some(pool) = budget {
+                ctx.resolve_owned_with_budget(value, pool)
+                    .map(|(value, lease)| (value, Some(lease)))
+            } else {
+                ctx.resolve(value).map(|value| (value, None))
+            }
+        };
+        let dictionary_mode = stream
+            .dict()
+            .get("WMode")
+            .map(|value| {
+                let (value, _temporary) = resolve(value)?;
+                value
+                    .as_number()
+                    .and_then(|number| number.as_u32_checked().ok())
+                    .filter(|mode| *mode <= 1)
+                    .map(|mode| mode as u8)
+                    .ok_or_else(|| {
+                        PdfError::FontError("CMap dictionary WMode must be 0 or 1".into())
+                    })
+            })
+            .transpose()?;
+        // Declare the lease before the parser so source bytes are dropped first.
+        let (data, source_lease) = if let Some(pool) = budget {
+            let (data, lease) = stream
+                .decode_data_with_budget(ctx, pool)?
+                .into_reserved_parts();
+            (data, Some(lease))
+        } else {
+            (stream.decode_data(ctx)?, None)
+        };
+        let _source_lease = source_lease;
+        let limits = ctx.limits();
+        let mut parser = CmapParser::with_limits(data, &limits);
+        if let Some(pool) = budget {
+            parser.set_budget(pool);
+        }
+        let mut cmap = if let Some(base) = stream.dict().get("UseCMap") {
+            let (base, _temporary) = resolve(base)?;
+            let name = base.as_name().ok_or_else(|| {
+                PdfError::UnsupportedFeature("Stream-valued dictionary UseCMap".into())
+            })?;
+            parser.parse_with_named_base(name.name())?
+        } else {
+            parser.parse()?
+        };
+        if let Some(mode) = dictionary_mode {
+            if cmap.wmode.is_some_and(|program_mode| program_mode != mode) {
+                return Err(PdfError::FontError(
+                    "CMap dictionary and program WMode disagree".into(),
+                ));
+            }
+            cmap.wmode = Some(mode);
+        }
+        Ok((cmap, parser.take_retained_lease()))
+    }
     pub fn try_new(data: Vec<u8>) -> PdfResult<Self> {
         let mut parser = CmapParser::new(data);
         parser.parse()
     }
 
+    pub fn try_new_with_limits(
+        data: Vec<u8>,
+        limits: &crate::parser::options::Limits,
+    ) -> PdfResult<Self> {
+        CmapParser::with_limits(data, limits).parse()
+    }
+
     pub fn new_from_predefined(name: &str) -> PdfResult<Self> {
+        Self::new_from_predefined_with_limits(name, &crate::parser::options::Limits::default())
+    }
+
+    pub(crate) fn new_from_predefined_with_budget(
+        name: &str,
+        limits: &crate::parser::options::Limits,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<(Self, crate::budget::MemoryLease)> {
+        let data = get_predefine_cmap_data(name)
+            .ok_or_else(|| PdfError::FontError(format!("predefine cmap {name:?} not found")))?;
+        if data.len() > limits.max_decoded_bytes {
+            return Err(PdfError::ResourceLimit(
+                "Predefined CMap source bytes".into(),
+            ));
+        }
+        let (data, _source_lease) =
+            crate::budget::BudgetedBytes::copy_from_slice(budget, data)?.into_reserved_parts();
+        let mut parser = CmapParser::with_limits(data, limits);
+        parser.set_budget(budget);
+        let cmap = parser.parse()?;
+        let lease = parser.take_retained_lease().unwrap_or(budget.reserve(0)?);
+        Ok((cmap, lease))
+    }
+
+    /// Parse with caller-provided named base programs, falling back to built-ins
+    /// when the resolver returns None. Returned source bytes are charged to the
+    /// shared budget; allocations performed inside the resolver are its responsibility.
+    pub fn try_new_with_resolver(
+        data: Vec<u8>,
+        limits: &crate::parser::options::Limits,
+        resolver: &dyn Fn(&str) -> PdfResult<Option<Vec<u8>>>,
+    ) -> PdfResult<Self> {
+        let mut parser = CmapParser::with_limits(data, limits);
+        parser.set_resolver(resolver);
+        parser.parse()
+    }
+
+    pub fn new_from_predefined_with_limits(
+        name: &str,
+        limits: &crate::parser::options::Limits,
+    ) -> PdfResult<Self> {
         let cmap_data = get_predefine_cmap_data(name).ok_or(PdfError::FontError(format!(
             "predefine cmap {:?} not found",
             name
         )))?;
-        let cmap = Cmap::try_new(cmap_data.to_vec())?;
+        if cmap_data.len() > limits.max_decoded_bytes {
+            return Err(PdfError::ResourceLimit(
+                "Predefined CMap source bytes".into(),
+            ));
+        }
+        let mut data = Vec::new();
+        data.try_reserve_exact(cmap_data.len())
+            .map_err(|_| PdfError::ResourceLimit("Predefined CMap allocation".into()))?;
+        data.extend_from_slice(cmap_data);
+        let cmap = Cmap::try_new_with_limits(data, limits)?;
         Ok(cmap)
     }
 
@@ -72,6 +345,36 @@ impl Cmap {
         self.code_space_range.push(space_range);
     }
 
+    fn inherit_defaults(&mut self, other: Cmap) -> PdfResult<()> {
+        self.code_space_range
+            .try_reserve(other.code_space_range.len())
+            .map_err(|_| PdfError::ResourceLimit("Inherited CMap spaces allocation".into()))?;
+        self.cid_to_unicode
+            .try_reserve(other.cid_to_unicode.len())
+            .map_err(|_| PdfError::ResourceLimit("Inherited CMap Unicode allocation".into()))?;
+        self.code_to_cids
+            .try_reserve(other.code_to_cids.len())
+            .map_err(|_| PdfError::ResourceLimit("Inherited CMap CID allocation".into()))?;
+        self.code_space_range.extend(other.code_space_range);
+        for (key, value) in other.cid_to_unicode.into_entries() {
+            if self.cid_to_unicode.get(&key).is_none() {
+                self.cid_to_unicode.insert(key, value);
+            }
+        }
+        for (key, value) in other.code_to_cids.into_entries() {
+            if self.code_to_cids.get(&key).is_none() {
+                self.code_to_cids.insert(key, value);
+            }
+        }
+        if self.wmode.is_none() {
+            self.wmode = other.wmode;
+        }
+        if self.cmap_type.is_none() {
+            self.cmap_type = other.cmap_type;
+        }
+        Ok(())
+    }
+
     pub fn add_unicode(&mut self, src_code: u32, unicode: String) {
         self.cid_to_unicode.insert(src_code, unicode);
     }
@@ -82,6 +385,25 @@ impl Cmap {
 
     pub fn add_code_to_cid(&mut self, code: u32, cid: u32) {
         self.code_to_cids.insert(code, cid);
+    }
+
+    /// Resolve an encoding character code to a CID; unmapped codes select .notdef.
+    pub fn cid(&self, code: u32) -> u32 {
+        self.code_to_cids.get(&code).copied().unwrap_or(0)
+    }
+
+    pub(crate) fn unicode_entries(&self) -> impl Iterator<Item = (u32, &str)> {
+        self.cid_to_unicode
+            .iter()
+            .map(|(code, text)| (*code, text.as_str()))
+    }
+
+    pub(crate) fn admits_unicode_code(&self, code: u32, length: u8) -> bool {
+        self.code_space_range.is_empty()
+            || self
+                .code_space_range
+                .iter()
+                .any(|range| range.size == length && range.is_contain_code(code))
     }
 
     pub fn wmode(&self) -> Option<u8> {
@@ -103,34 +425,395 @@ impl Cmap {
     }
 
     pub fn next_char(&self, bytes: &[u8], offset: usize) -> Option<CharCode> {
-        if offset > bytes.len() {
+        if offset >= bytes.len() {
             return None;
         }
-        let mut codecs = Vec::new();
-        for i in 0..2 {
-            if offset + i > bytes.len() {
-                return None;
-            }
-            codecs.push(bytes[offset + i].to_owned());
-            if let Some(v) = self.find_charsize(codecs.as_slice()) {
-                let ch = CharCode::new(bytes_to_u32(codecs.as_slice()), v, 0.0);
+        // Borrow each candidate (at most four bytes); avoid a heap allocation
+        // for every decoded character and offset arithmetic past the input.
+        for length in 1..=4.min(bytes.len() - offset) {
+            let codecs = &bytes[offset..offset + length];
+            if let Some(v) = self.find_charsize(codecs) {
+                let ch = CharCode::new(bytes_to_u32(codecs), v, 0.0);
                 return Some(ch);
             }
         }
         None
     }
 
-    pub fn chars(&self, bytes: &[u8]) -> Vec<CharCode> {
+    pub fn chars(&self, bytes: &[u8]) -> PdfResult<Vec<CharCode>> {
+        self.chars_limited(bytes, usize::MAX)
+    }
+
+    pub fn chars_limited(&self, bytes: &[u8], limit: usize) -> PdfResult<Vec<CharCode>> {
         let mut res = Vec::new();
+        self.visit_chars_limited(bytes, limit, |character| {
+            res.try_reserve(1)
+                .map_err(|_| PdfError::ResourceLimit("CMap character allocation".into()))?;
+            res.push(character);
+            Ok(())
+        })?;
+        Ok(res)
+    }
+
+    /// Visit decoded codes without retaining a character vector. Stop before
+    /// exceeding the count limit, and propagate visitor failures immediately.
+    pub(crate) fn visit_chars_limited(
+        &self,
+        bytes: &[u8],
+        limit: usize,
+        mut visitor: impl FnMut(CharCode) -> PdfResult<()>,
+    ) -> PdfResult<usize> {
         let mut offset = 0;
+        let mut count = 0;
         while offset < bytes.len() {
-            if let Some(charcode) = self.next_char(bytes, offset) {
-                offset += charcode.length() as usize;
-                res.push(charcode);
+            if count >= limit {
+                return Err(PdfError::ResourceLimit("decoded CMap characters".into()));
             }
-            // TODO fix:this loop forever
+            if let Some(charcode) = self.next_char(bytes, offset) {
+                offset = offset
+                    .checked_add(usize::from(charcode.length()))
+                    .filter(|&next| next > offset && next <= bytes.len())
+                    .ok_or_else(|| {
+                        PdfError::FontError("CMap character made invalid progress".into())
+                    })?;
+                visitor(charcode)?;
+                count += 1;
+            } else {
+                return Err(PdfError::FontError(format!(
+                    "invalid or truncated CMap character at byte offset {offset}"
+                )));
+            }
         }
-        res
+        Ok(count)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn sorted_mapping_budget_tracks_capacity_duplicates_and_retry() {
+        use crate::budget::OperationBudget;
+        let run = |pool: &OperationBudget| {
+            let mut table = super::MappingTable::<u32>::default();
+            table.sorted = Some(Vec::new());
+            let mut lease = None;
+            for (key, value) in [(u32::MAX, 9), (5, 10), (0, 11), (5, 12)] {
+                if table.get(&key).is_none() {
+                    table.reserve_with_budget(1, pool, &mut lease)?;
+                }
+                table.insert(key, value);
+            }
+            crate::error::PdfResult::Ok((table, lease.unwrap()))
+        };
+        let slots = std::mem::size_of::<(u32, u32)>();
+        let pool = OperationBudget::new(6 * slots);
+        let (table, lease) = run(&pool).unwrap();
+        assert!(table.hash.is_empty());
+        assert_eq!(table.len(), 3);
+        assert_eq!(table.get(&5), Some(&12));
+        assert_eq!(table.get(&u32::MAX), Some(&9));
+        assert_eq!(
+            table.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+            [0, 5, u32::MAX]
+        );
+        assert_eq!(
+            lease.bytes(),
+            table.sorted.as_ref().unwrap().capacity() * slots
+        );
+        assert_eq!(pool.live_bytes(), 4 * slots);
+        assert_eq!(pool.peak_bytes(), 6 * slots);
+        drop((table, lease));
+        assert_eq!(pool.live_bytes(), 0);
+        let neighbor = pool.reserve(1).unwrap();
+        assert!(run(&pool).is_err());
+        assert_eq!(pool.live_bytes(), 1);
+        drop(neighbor);
+        drop(run(&pool).unwrap());
+        assert_eq!(pool.live_bytes(), 0);
+    }
+
+    #[test]
+    fn budget_stream_source_releases_on_success_mode_error_and_limit_recovery() {
+        use crate::{
+            budget::OperationBudget,
+            document::owned::Document,
+            objects::{
+                PdfObject, pdf_dict::PdfDict, pdf_number::PdfNumber, pdf_reference::PdfReference,
+                pdf_stream::PdfStream,
+            },
+        };
+        let doc = Document::new().unwrap();
+        let mode = doc
+            .try_insert_object(PdfObject::PdfNumber(PdfNumber::new(0.0)))
+            .unwrap();
+        let mut dict = PdfDict::default();
+        dict.insert(
+            "WMode".into(),
+            PdfObject::PdfReference(PdfReference::from_id(mode)),
+        );
+        let stream = PdfStream::new(
+            dict.clone(),
+            b"/WMode 0 def 1 beginbfchar <41> <0041> endbfchar".to_vec(),
+        );
+        let probe = OperationBudget::new(65536);
+        let (cmap, lease) =
+            super::Cmap::from_stream_with_budget(&stream, doc.ctx(), &probe).unwrap();
+        assert_eq!(
+            cmap.unicode(&crate::font::CharCode::new(65, 1, 0.0)),
+            Some("A")
+        );
+        // Unicode strings are retained; mapping table buckets remain a TODO.
+        assert_eq!(probe.live_bytes(), lease.bytes());
+        assert!(lease.bytes() > 0);
+        let peak = probe.peak_bytes();
+        drop((cmap, lease));
+        assert_eq!(probe.live_bytes(), 0);
+        assert!(peak >= stream.raw_data().len());
+        let pool = OperationBudget::new(peak);
+        let neighbor = pool.reserve(1).unwrap();
+        assert!(matches!(
+            super::Cmap::from_stream_with_budget(&stream, doc.ctx(), &pool),
+            Err(crate::error::PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(pool.live_bytes(), 1);
+        drop(neighbor);
+        assert!(super::Cmap::from_stream_with_budget(&stream, doc.ctx(), &pool).is_ok());
+        assert_eq!(pool.live_bytes(), 0);
+        doc.update_object(mode, PdfObject::PdfNumber(PdfNumber::new(1.0)))
+            .unwrap();
+        assert!(super::Cmap::from_stream_with_budget(&stream, doc.ctx(), &pool).is_err());
+        assert_eq!(pool.live_bytes(), 0);
+        let invalid = PdfStream::new(dict, b"1 beginbfchar <41>".to_vec());
+        assert!(super::Cmap::from_stream_with_budget(&invalid, doc.ctx(), &pool).is_err());
+        assert_eq!(pool.live_bytes(), 0);
+    }
+
+    #[test]
+    fn cmap_visitor_stops_at_limit_or_callback_failure() {
+        use crate::error::PdfError;
+        let cmap =
+            super::Cmap::try_new(b"1 begincodespacerange <00> <FF> endcodespacerange".to_vec())
+                .unwrap();
+        let mut visited = 0;
+        assert!(matches!(
+            cmap.visit_chars_limited(&[1, 2, 3], 2, |_| {
+                visited += 1;
+                Ok(())
+            }),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(visited, 2);
+        visited = 0;
+        assert!(matches!(
+            cmap.visit_chars_limited(&[1, 2, 3], 3, |_| {
+                visited += 1;
+                Err(PdfError::ObjectError("visitor failure".into()))
+            }),
+            Err(PdfError::ObjectError(_))
+        ));
+        assert_eq!(visited, 1);
+        assert_eq!(
+            cmap.visit_chars_limited(&[], 0, |_| panic!("empty input must not visit"))
+                .unwrap(),
+            0
+        );
+        assert_eq!(cmap.visit_chars_limited(&[1, 2], 2, |_| Ok(())).unwrap(), 2);
+    }
+
+    #[test]
+    fn borrowed_next_character_handles_all_lengths_and_invalid_offsets() {
+        let cmap = super::Cmap::try_new(b"4 begincodespacerange <21> <7F> <8000> <80FF> <810000> <81FFFF> <82000000> <82FFFFFF> endcodespacerange".to_vec()).unwrap();
+        let bytes = [0x21, 0x80, 0x01, 0x81, 0, 1, 0x82, 0, 0, 1];
+        for (offset, value, length) in [
+            (0, 0x21, 1),
+            (1, 0x8001, 2),
+            (3, 0x810001, 3),
+            (6, 0x82000001, 4),
+        ] {
+            let character = cmap.next_char(&bytes, offset).unwrap();
+            assert_eq!((character.code(), character.length()), (value, length));
+            assert!(
+                cmap.next_char(&bytes[..offset + usize::from(length) - 1], offset)
+                    .is_none()
+            );
+        }
+        for offset in [bytes.len(), bytes.len() + 1, usize::MAX] {
+            assert!(cmap.next_char(&bytes, offset).is_none());
+        }
+        assert!(cmap.next_char(&[], 0).is_none());
+        assert!(cmap.next_char(&[0], 0).is_none());
+    }
+
+    #[test]
+    fn stream_dictionary_wmode_is_validated_and_applied() {
+        use crate::{
+            objects::{PdfObject, pdf_dict::PdfDict, pdf_number::PdfNumber, pdf_stream::PdfStream},
+            parser::options::ParseOptions,
+            pdf_context::PDFContext,
+        };
+        let ctx = PDFContext::<std::io::Cursor<Vec<u8>>>::new_without_source(
+            PdfDict::default(),
+            ParseOptions::default(),
+        );
+        for mode in [0.0, 1.0] {
+            let mut dict = PdfDict::default();
+            dict.try_insert("WMode".into(), PdfObject::PdfNumber(PdfNumber::new(mode)))
+                .unwrap();
+            let cmap =
+                super::Cmap::from_stream(&PdfStream::new(dict.clone(), Vec::new()), &ctx).unwrap();
+            assert_eq!(cmap.wmode(), Some(mode as u8));
+            let program = format!("/WMode {} def", 1 - mode as u8).into_bytes();
+            assert!(super::Cmap::from_stream(&PdfStream::new(dict, program), &ctx).is_err());
+        }
+        for mode in [-1.0, 2.0, 0.5] {
+            let mut dict = PdfDict::default();
+            dict.try_insert("WMode".into(), PdfObject::PdfNumber(PdfNumber::new(mode)))
+                .unwrap();
+            assert!(super::Cmap::from_stream(&PdfStream::new(dict, Vec::new()), &ctx).is_err());
+        }
+    }
+
+    use super::{Cmap, CodeSpaceRange};
+
+    #[test]
+    fn custom_base_resolver_inherits_and_detects_real_cycles() {
+        let limits = crate::parser::options::Limits::default();
+        let resolver = |name: &str| {
+            Ok(match name {
+            "Base" => Some(b"1 begincodespacerange <00> <FF> endcodespacerange 1 beginbfchar <01> <0041> endbfchar".to_vec()),
+            "CycleA" => Some(b"/CycleB usecmap".to_vec()),
+            "CycleB" => Some(b"/CycleA usecmap".to_vec()),
+            _ => None,
+        })
+        };
+        let cmap = Cmap::try_new_with_resolver(
+            b"/Base usecmap 1 beginbfchar <01> <0042> endbfchar".to_vec(),
+            &limits,
+            &resolver,
+        )
+        .unwrap();
+        let chars = cmap.chars_limited(&[1], 1).unwrap();
+        assert_eq!(cmap.unicode(&chars[0]), Some("B"));
+        assert!(
+            matches!(Cmap::try_new_with_resolver(b"/CycleA usecmap".to_vec(), &limits, &resolver),
+            Err(crate::error::PdfError::FontError(message)) if message.contains("cycle"))
+        );
+    }
+
+    #[test]
+    fn resolver_failure_and_oversized_source_propagate() {
+        let data = b"/Base usecmap".to_vec();
+        let limits = crate::parser::options::Limits {
+            max_decoded_bytes: data.len() + 1,
+            ..Default::default()
+        };
+        let oversized = |_: &str| Ok(Some(vec![b' '; 2]));
+        assert!(matches!(
+            Cmap::try_new_with_resolver(data.clone(), &limits, &oversized),
+            Err(crate::error::PdfError::ResourceLimit(_))
+        ));
+        let failure = |_: &str| Err(crate::error::PdfError::FontError("resolver failed".into()));
+        assert!(
+            matches!(Cmap::try_new_with_resolver(data, &limits, &failure),
+            Err(crate::error::PdfError::FontError(message)) if message == "resolver failed")
+        );
+    }
+
+    #[test]
+    fn identity_vertical_mapping_retains_budget_and_code_lengths() {
+        let limits = crate::parser::options::Limits::default();
+        let cmap = Cmap::new_from_predefined_with_limits("Identity-V", &limits).unwrap();
+        assert_eq!(cmap.wmode(), Some(1));
+        assert!(
+            Cmap::new_from_predefined_with_limits(
+                "Identity-V",
+                &crate::parser::options::Limits {
+                    max_depth: 0,
+                    ..limits
+                }
+            )
+            .is_err()
+        );
+        let chars = cmap.chars_limited(&[0, 1, 255, 255], 2).unwrap();
+        assert_eq!(
+            chars
+                .iter()
+                .map(|ch| (ch.code(), ch.length()))
+                .collect::<Vec<_>>(),
+            vec![(1, 2), (65535, 2)]
+        );
+        assert!(cmap.chars_limited(&[0, 1, 255, 255], 1).is_err());
+        assert!(cmap.chars_limited(&[0], 1).is_err());
+        assert!(
+            Cmap::new_from_predefined_with_limits(
+                "Identity-V",
+                &crate::parser::options::Limits {
+                    max_objects: 1,
+                    ..limits
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn predefined_cmaps_obey_custom_mapping_limit() {
+        let size = font_data::cmap::get_predefine_cmap_data("Identity-H")
+            .unwrap()
+            .len();
+        for (budget, success) in [(size, true), (size - 1, false)] {
+            let limits = crate::parser::options::Limits {
+                max_decoded_bytes: budget,
+                ..Default::default()
+            };
+            assert_eq!(
+                Cmap::new_from_predefined_with_limits("Identity-H", &limits).is_ok(),
+                success
+            );
+        }
+        let limits = crate::parser::options::Limits {
+            max_objects: 1,
+            ..Default::default()
+        };
+        assert!(matches!(
+            Cmap::new_from_predefined_with_limits("Identity-H", &limits),
+            Err(crate::error::PdfError::ResourceLimit(_))
+        ));
+        assert!(Cmap::new_from_predefined("Identity-H").is_ok());
+    }
+
+    #[test]
+    fn invalid_and_truncated_codes_return_errors() {
+        let mut cmap = Cmap::default();
+        cmap.add_code_space_range(CodeSpaceRange::new(0x8100, 0x81ff, 2));
+        assert!(cmap.chars(&[0x80, 0x00]).is_err());
+        assert!(cmap.chars(&[0x81]).is_err());
+        assert!(cmap.next_char(&[], 0).is_none());
+        assert!(cmap.next_char(&[0x81], 1).is_none());
+        assert!(cmap.chars(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn variable_length_codes_preserve_order() {
+        let mut cmap = Cmap::default();
+        cmap.add_code_space_range(CodeSpaceRange::new(0x20, 0x7e, 1));
+        cmap.add_code_space_range(CodeSpaceRange::new(0x8100, 0x81ff, 2));
+        cmap.add_code_space_range(CodeSpaceRange::new(0x900000, 0x90ffff, 3));
+        cmap.add_code_space_range(CodeSpaceRange::new(0xa0000000, 0xa0ffffff, 4));
+        let chars = cmap
+            .chars(&[0x41, 0x81, 0x02, 0x90, 0x00, 0x03, 0xa0, 0x00, 0x00, 0x04])
+            .unwrap();
+        assert_eq!(
+            chars
+                .iter()
+                .map(|ch| (ch.code(), ch.length()))
+                .collect::<Vec<_>>(),
+            vec![(0x41, 1), (0x8102, 2), (0x900003, 3), (0xa0000004, 4)]
+        );
+        assert_eq!(cmap.chars_limited(&[0x81, 0x02], 1).unwrap().len(), 1);
+        assert!(cmap.chars_limited(&[0x41, 0x81, 0x02], 1).is_err());
+        assert!(cmap.chars_limited(&[0x41], 0).is_err());
+        assert!(cmap.chars_limited(&[], 0).unwrap().is_empty());
     }
 }
 

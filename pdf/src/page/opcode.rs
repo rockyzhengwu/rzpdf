@@ -25,3 +25,18 @@ pub fn is_op(name: &[u8]) -> bool {
     }
     false
 }
+
+/// Fixed operand counts; color component operators depend on current resources.
+pub(crate) fn operand_count(name: &str) -> Option<usize> {
+    match name {
+        "q" | "Q" | "h" | "S" | "s" | "f" | "F" | "f*" | "B" | "B*" | "b" | "b*" | "n" | "W"
+        | "W*" | "BT" | "ET" | "T*" | "EMC" | "BX" | "EX" => Some(0),
+        "w" | "J" | "j" | "M" | "i" | "ri" | "gs" | "Tc" | "Tw" | "Tz" | "TL" | "Tr" | "Ts"
+        | "Tj" | "'" | "TJ" | "cs" | "CS" | "g" | "G" | "sh" | "Do" | "MP" | "BMC" => Some(1),
+        "d" | "m" | "l" | "Tf" | "Td" | "TD" | "d0" | "DP" | "BDC" => Some(2),
+        "\"" | "rg" | "RG" => Some(3),
+        "v" | "y" | "re" | "k" | "K" => Some(4),
+        "cm" | "c" | "Tm" | "d1" => Some(6),
+        _ => None,
+    }
+}
