@@ -729,6 +729,64 @@ impl Device for SkiaRender {
 mod tests {
     use super::*;
     #[test]
+    fn nonuniform_coons_boundary_pixels_survive_function_and_strict_save() {
+        use pdf::{document::{PdfDocument, resource_manager::ResourceKind,
+                save_options::{SaveOptions, StreamCompression}},
+            io::stream_reader::StreamReader, objects::{PdfObject, pdf_stream::PdfStream},
+            page::page_builder::PageBuilder, parser::syntax::{SyntaxParser, ParseMode}};
+        for nonlinear in [false, true] {
+            let doc = PdfDocument::new().unwrap();
+            doc.add_page_with_builder(0, PageBuilder::new().size(50.0, 50.0)).unwrap();
+            let function = if nonlinear { "/Function << /FunctionType 2 /Domain [0 1] /N 2 >>" } else { "" };
+            let source = format!("<< /ShadingType 6 /ColorSpace /DeviceGray /BitsPerFlag 8 /BitsPerCoordinate 16 /BitsPerComponent 8 /Decode [0 65535 0 65535 0 1] {function} >>");
+            let dict = SyntaxParser::new(StreamReader::try_new(std::io::Cursor::new(source.into_bytes())).unwrap())
+                .get_object().unwrap().into_dict().unwrap();
+            let mut data = vec![0];
+            for point in [[0_u16, 0], [0, 512], [0, 1024], [0, 1536],
+                [576, 1536], [1088, 1536], [1536, 1536], [1536, 1024],
+                [1536, 512], [1536, 0], [1088, 0], [576, 0]] {
+                for coordinate in point { data.extend_from_slice(&coordinate.to_be_bytes()); }
+            }
+            data.extend([0, 0, 255, 255]);
+            let id = doc.try_insert_object(PdfObject::PdfStream(PdfStream::new(dict, data))).unwrap();
+            let name = doc.resources().register_existing(0, ResourceKind::Shading, id).unwrap();
+            // Exact dyadic transform places x(1/4)=420 at pixel x=13,
+            // and both y boundaries at pixel centers (display y=.5/48.5).
+            doc.replace_page_contents(0, format!("q 0.03125 0 0 0.03125 0.375 0.5 cm /{name} sh Q").into_bytes()).unwrap();
+            let render = |target: &PdfDocument<std::io::Cursor<Vec<u8>>>| {
+                let list = target.get_page(0).unwrap().display_list().unwrap();
+                let [pdf::page::page_object::PageObject::Shading(object)] = list.objects()
+                    else { panic!("expected Coons shading") };
+                for y in 0..50 {
+                    for x in 0..50 {
+                        let ux = (f64::from(x) + 0.125) * 32.0;
+                        let uy = f64::from(49 - y) * 32.0;
+                        object.shading.color_at_point(ux, uy).unwrap_or_else(|error|
+                            panic!("pixel ({x},{y}), shading ({ux},{uy}): {error:?}"));
+                    }
+                }
+                let mut renderer = SkiaRender::new(72.0, 72.0).unwrap();
+                target.get_page(0).unwrap().display(&mut renderer).unwrap();
+                let info = skia_safe::ImageInfo::new((50, 50), skia_safe::ColorType::RGBA8888,
+                    skia_safe::AlphaType::Unpremul, None);
+                let mut pixels = vec![0; 10000];
+                assert!(renderer.surface.read_pixels(&info, &mut pixels, 200, (0, 0)));
+                let expected = if nonlinear { 16 } else { 64 };
+                for y in [1_usize, 49] {
+                    let offset = (y * 50 + 13) * 4;
+                    assert_eq!(&pixels[offset..offset + 4], &[expected, expected, expected, 255]);
+                }
+                pixels
+            };
+            let original = render(&doc);
+            for compression in [StreamCompression::Preserve, StreamCompression::FlateUnencoded] {
+                let saved = doc.save_to_bytes_with_options(SaveOptions { compression, ..Default::default() }).unwrap();
+                let reopened = PdfDocument::from_bytes_with_mode(saved, ParseMode::Strict).unwrap();
+                assert_eq!(render(&reopened), original);
+            }
+        }
+    }
+    #[test]
     fn triangle_and_coons_mesh_pixels_follow_parameter_interpolation() {
         use pdf::{document::{PdfDocument, resource_manager::ResourceKind,
                 save_options::{SaveOptions, StreamCompression}},

@@ -298,17 +298,30 @@ fn type4_type5_and_type6_resources_import_and_both_stream_strategies() {
             if kind == 6 {
                 // Verify the certified-corner path in original/imported
                 // resources and after both strict save/reopen strategies.
-                for (point, expected) in [([0.0, 0.0], 0), ([0.0, 20.0], 0),
-                    ([40.0, 0.0], 255), ([40.0, 20.0], 255)] {
-                    let color = object.shading.color_at_point(point[0], point[1])
-                        .unwrap().unwrap();
+                for (point, expected) in [
+                    ([0.0, 0.0], 0),
+                    ([0.0, 20.0], 0),
+                    ([40.0, 0.0], 255),
+                    ([40.0, 20.0], 255),
+                ] {
+                    let color = object
+                        .shading
+                        .color_at_point(point[0], point[1])
+                        .unwrap()
+                        .unwrap();
                     assert_eq!([color.r(), color.g(), color.b()], [expected; 3]);
                 }
-                for (point, direct, squared) in [([0.0, 10.0], 0, 0),
-                    ([40.0, 10.0], 255, 255), ([10.0, 0.0], 64, 16),
-                    ([30.0, 20.0], 191, 143)] {
-                    let color = object.shading.color_at_point(point[0], point[1])
-                        .unwrap().unwrap();
+                for (point, direct, squared) in [
+                    ([0.0, 10.0], 0, 0),
+                    ([40.0, 10.0], 255, 255),
+                    ([10.0, 0.0], 64, 16),
+                    ([30.0, 20.0], 191, 143),
+                ] {
+                    let color = object
+                        .shading
+                        .color_at_point(point[0], point[1])
+                        .unwrap()
+                        .unwrap();
                     let expected = if nonlinear { squared } else { direct };
                     assert_eq!([color.r(), color.g(), color.b()], [expected; 3]);
                 }
@@ -330,6 +343,114 @@ fn type4_type5_and_type6_resources_import_and_both_stream_strategies() {
                     })
                     .unwrap();
                 verify(&PdfDocument::from_bytes_with_mode(bytes, ParseMode::Strict).unwrap());
+            }
+        }
+    }
+}
+
+#[test]
+fn nonuniform_coons_edges_functions_and_mirrors_survive_import_and_save() {
+    for nonlinear in [false, true] {
+        for mirror in [[false, false], [true, false], [false, true], [true, true]] {
+            for extent in [1536_u16, 65535] {
+                let doc = PdfDocument::new().unwrap();
+                doc.add_page_with_builder(0, PageBuilder::new().size(1536.0, 1536.0))
+                    .unwrap();
+                // Test both interior integer coordinates and Decode endpoints.
+                // At u=1/4 the cubic weights
+                // are [27,27,9,1]/64, giving an exact dyadic target.
+                let mut points: [[u16; 2]; 12] = [
+                    [0, 0],
+                    [0, 21845],
+                    [0, 43690],
+                    [0, 65535],
+                    [24576, 65535],
+                    [46421, 65535],
+                    [65535, 65535],
+                    [65535, 43690],
+                    [65535, 21845],
+                    [65535, 0],
+                    [46421, 0],
+                    [24576, 0],
+                ];
+                if extent == 1536 {
+                    for point in &mut points {
+                        for coordinate in point {
+                            *coordinate = ((u32::from(*coordinate) * 1536 + 32767) / 65535) as u16;
+                        }
+                    }
+                }
+                let x = (27.0 * f64::from(points[11][0])
+                    + 9.0 * f64::from(points[10][0])
+                    + f64::from(extent))
+                    / 64.0;
+                let mut data = vec![0];
+                for point in &mut points {
+                    for axis in 0..2 {
+                        if mirror[axis] {
+                            point[axis] = extent - point[axis];
+                        }
+                        data.extend_from_slice(&point[axis].to_be_bytes());
+                    }
+                }
+                data.extend([0, 0, 255, 255]);
+                let function = if nonlinear {
+                    "/Function << /FunctionType 2 /Domain [0 1] /N 2 >>"
+                } else {
+                    ""
+                };
+                let dict = parse(&format!("<< /ShadingType 6 /ColorSpace /DeviceGray /BitsPerFlag 8 /BitsPerCoordinate 16 /BitsPerComponent 8 /Decode [0 65535 0 65535 0 1] {function} >>")).into_dict().unwrap();
+                let id = doc
+                    .try_insert_object(PdfObject::PdfStream(PdfStream::new(dict, data)))
+                    .unwrap();
+                let name = doc
+                    .resources()
+                    .register_existing(0, ResourceKind::Shading, id)
+                    .unwrap();
+                doc.replace_page_contents(0, format!("/{name} sh").into_bytes())
+                    .unwrap();
+                let verify = |target: &PdfDocument<Cursor<Vec<u8>>>| {
+                    let list = target.get_page(0).unwrap().display_list().unwrap();
+                    assert!(list.diagnostics().is_empty());
+                    let [PageObject::Shading(object)] = list.objects() else {
+                        panic!("expected Coons shading")
+                    };
+                    assert!(object.source().is_some());
+                    for mut point in [[x, 0.0], [x, f64::from(extent)]] {
+                        for axis in 0..2 {
+                            if mirror[axis] {
+                                point[axis] = f64::from(extent) - point[axis];
+                            }
+                        }
+                        let color = object
+                            .shading
+                            .color_at_point(point[0], point[1])
+                            .unwrap()
+                            .unwrap();
+                        let expected = if nonlinear { 16 } else { 64 };
+                        assert_eq!([color.r(), color.g(), color.b()], [expected; 3]);
+                    }
+                };
+                verify(&doc);
+                let imported = PdfDocument::new().unwrap();
+                imported.import_page_from(&doc, 0, 0).unwrap();
+                verify(&imported);
+                for target in [&doc, &imported] {
+                    for compression in [
+                        StreamCompression::Preserve,
+                        StreamCompression::FlateUnencoded,
+                    ] {
+                        let saved = target
+                            .save_to_bytes_with_options(SaveOptions {
+                                compression,
+                                ..Default::default()
+                            })
+                            .unwrap();
+                        verify(
+                            &PdfDocument::from_bytes_with_mode(saved, ParseMode::Strict).unwrap(),
+                        );
+                    }
+                }
             }
         }
     }

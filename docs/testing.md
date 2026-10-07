@@ -2,6 +2,38 @@
 
 ## Type6 部分接入检查点（2026-10-08）
 
+区间映射版render终态：原session3626退出0，38项通过、0失败/忽略，54.68秒，日志 `/tmp/rzpdf-coons-retained-domain-render.log`。当前源码对应模型87项、流程8项、render38项专项通过；全工作区复验已启动，原session39247、日志 `/tmp/rzpdf-coons-retained-domain-full-workspace.log`，Rust源码冻结至终态，最终结果待确认。此证据仍不代表任意边界/折叠及完整Type6交付，不沿用927项旧版全量结果。
+
+区间映射版流程终态：原session73555退出0，8项通过，日志 `/tmp/rzpdf-coons-retained-domain-workflow.log`；本结果覆盖当前三根分割线修订的导入和两保存严格重开。render全量原session3626仍运行，日志 `/tmp/rzpdf-coons-retained-domain-render.log`，终态待确认，不沿用前版38项结果。
+
+三根分割线模型修订终态：原session87069退出0，87项通过，日志 `/tmp/rzpdf-coons-retained-domain-mapping.log`；单轴遍历保留首轮较宽的全根存活域、递归携带区间仿射映射，新增v=0.6875三根覆盖与既有折叠排序回归通过。取代下方该样例失败状态，不代表任意折叠完整兼容。当前流程/render重测日志 `/tmp/rzpdf-coons-retained-domain-workflow.log`、`/tmp/rzpdf-coons-retained-domain-render.log`，终态待确认，全工作区仍未复验。
+
+最新多根分割线回归失败：原session63291退出101，shading86项通过、1项失败，日志 `/tmp/rzpdf-coons-contraction-fold-model.log`。扩展折叠三根样例至v=0.6875后完整遍历仍Unresolved；保留失败回归，需让未唯一认证的收缩域继续参与多根遍历。此前render全量原session24620退出0、38项通过（55.14秒），日志 `/tmp/rzpdf-coons-contraction-render.log`；此证据仅覆盖既有渲染样例，不覆盖新三根失败或完整Type6交付。
+
+格式整理与生产采样失败契约复验：原session7305退出0，shading87项通过，日志 `/tmp/rzpdf-coons-contraction-atomic-model.log`，含分割线采样全部额度前缀失败不改输出、足额恢复及参数包围；原session59180退出0，流程8项通过，日志 `/tmp/rzpdf-coons-contraction-workflow.log`。render全量原session24620运行中，日志 `/tmp/rzpdf-coons-contraction-render.log`，终态待确认；当前工作区全量仍未复验。
+
+候选域收缩模型终态：原session38303退出0，87项shading相关测试通过，日志 `/tmp/rzpdf-coons-contraction-margin-model.log`；分割线无细分认证、额度耗尽、域外无根和连续根退化回归通过，取代下方本专项待确认状态。当前修订流程和全工作区仍未复验。
+
+分割线修订的精确边界像素终态：原session54795退出0，专项1项通过、37项筛选，54.55秒，日志 `/tmp/rzpdf-coons-contraction-margin-pixels.log`。完整50×50采样和渲染通过，直接/PDF平方函数上下边灰度64/16、两种保存严格重开整页像素一致；本记录取代下方该固定样例失败状态。源码新增候选域收缩保留全部根，扩大包围留余量后仍严格认证存在/唯一性；不是任意曲面/折叠完整验收。新模型专项及当前全量/流程复验尚待确认，性能仍需改进。
+
+精确像素失败已定位：原session64723退出101，`/tmp/rzpdf-coons-boundary-location.log`，pixel(0,16)对应shading(4,1056)，参数v=0.6875为内部子域分割线。不是仅外边界证书失败，需完整根候选域收缩/分割线处理；新增逐像素坐标诊断保留完整50×50采样范围。当前该测试仍失败，不认定像素验收通过。
+
+最新精确边界像素回归尚未通过：原session79940退出101，日志 `/tmp/rzpdf-coons-boundary-precision-pixels.log`，新增`nonuniform_coons_boundary_pixels_survive_function_and_strict_save`在整片渲染阶段遇到Unresolved几何/覆盖错误，未到达u=1/4边界像素断言。工作区保留该失败用例；不能用下方既有矩形像素专项、86项模型或8项流程通过推断新样例可渲染，需继续完整根覆盖/边界唯一性实现。
+
+整数恒等Decode修订：1..32位正向/反向整数映射精确区间回归及shading整体86项通过，原session61452退出0，日志 `/tmp/rzpdf-coons-exact-decode-shading.log`；8项流程测试通过，原session27367退出0，日志 `/tmp/rzpdf-coons-exact-decode-workflow.log`。非均匀边界矩阵包含Decode内部整数1536及端点65535两尺度，真实平方函数/镜像/导入/两种严格保存读回均正确。取代此前恒等Decode内部整数边界无法认证的限制；一般非恒等Decode的不确定边界仍未完成，新解码修订尚未像素/全量复验。
+
+精度修订流程/像素终态：shading_workflow 8项通过，原session52735退出0，日志 `/tmp/rzpdf-coons-nonuniform-workflow-recheck.log`；新增非均匀边界使用Decode端点作为固定坐标，精确Bernstein权重计算目标，实际PDF平方函数、四镜像、导入和两保存策略严格重开全部通过。既有12组合Skia像素专项1项通过，原session1317退出0，日志 `/tmp/rzpdf-coons-precision-pixels.log`。不覆盖非端点不确定边界或新精确边界像素；当前精度源码仍未全量复验，不能沿用927项旧结果。
+
+非均匀直边精度修订的镜像/额度专项已确认：原session72968退出0，2项通过、624项筛选，日志 `/tmp/rzpdf-coons-edge-precision-budget.log`。上下两边×无/水平/垂直/双镜像共8组合，全部额度前缀耗尽保持输出、足额重试成功，直接及平方数值灰度64/16正确；平方检查是采样参数后的数值运算，不代替PDF Function流程验收。取代下方本专项镜像/失败契约待确认状态；当前修订尚需整体与流程/像素复验。
+
+927项全量之后发现并修复非均匀直边精度缺陷：专项首次退出101，灰度62而非64；直边唯一根改用八轮有工作额度的区间细化后，原session36551退出0，专项1项通过，上下边直接/平方灰度64/16正确，日志 `/tmp/rzpdf-coons-edge-precision-recheck.log`。本修改尚未全量复验，不能沿用下方927项结果；额度耗尽输出保持、镜像和重试仍需补齐。
+
+当前直边修订全量终态：原session19703退出0，共46组、927项通过、0失败、0忽略，含624项PDF单元与37项render测试，日志 `/tmp/rzpdf-coons-edge-full-workspace.log`。Rust源码在验收期间冻结；本结果取代下方该轮等待状态，不证明一般边界、折叠或完整Type6交付，也不覆盖后续精度修改。
+
+镜像专项之后的当前直边修订：既有Skia像素专项1项通过、36项筛选，原session36993退出0，日志 `/tmp/rzpdf-coons-edge-pixels.log`；覆盖Type4/5/6固定12组合和两种保存策略严格重开整页像素一致性，不是新增精确边界像素验收。全工作区复验已启动，原session19703，日志 `/tmp/rzpdf-coons-edge-full-workspace.log`，最终结果待确认。
+
+轴向直边修订：shading单元82项和导入/两种保存策略严格重开流程7项通过，日志分别为 `/tmp/rzpdf-coons-production-edges.log`、`/tmp/rzpdf-coons-edge-roundtrip.log`，对应提交fb4ff54。后续镜像方向与不确定控制区间拒绝专项2项通过，原session90190退出0，日志 `/tmp/rzpdf-coons-edge-direction.log`。当前修订尚未像素及全工作区复验，不能沿用角点版925项结果；任意方向直边、弯曲边界和折叠仍未完成。
+
 角点修订版全量终态：原session43908退出0，`cargo test --workspace --locked --quiet` 共46组结果、925项通过、0失败、0忽略，含622项PDF单元和37项render测试，日志 `/tmp/rzpdf-coons-corner-full-workspace.log`。此结果取代下方角点修订“尚未全工作区复验”的状态；仍不表示一般边界、连续根、任意折叠或完整Type6验收完成。
 
 提交ba4ac29之后的角点修订：张量转换直接保留边界控制点区间；精确角点见证结合覆盖整个原域的延拓唯一性证书，认证成功才用于生产采样，失败继续原完整搜索。shading单元81项（`/tmp/rzpdf-coons-production-corners.log`）、加入四角原文档/导入/两保存策略严格重开断言的流程7项（`/tmp/rzpdf-coons-corner-roundtrip.log`）及既有12组合Skia像素专项1项（`/tmp/rzpdf-coons-corners-pixels.log`）均退出0。仅证明可认证角点及固定样本无回归；一般边界、连续根、任意折叠和独立阅读器验收仍未完成，后续修订尚未全工作区复验，不能套用下方920项旧源码结果。

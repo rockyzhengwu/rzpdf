@@ -93,6 +93,44 @@ P0 的普通回归、错误处理、预算和真实样本登记贯穿上述工�
 
 ### 实施记录
 
+- 2026-10-08 区间映射版render终态/新全量启动：原session3626退出0，render38项通过、0失败/忽略，54.68秒，日志 `/tmp/rzpdf-coons-retained-domain-render.log`，覆盖当前三根分割线修订及精确边界整页像素回归。此前模型87项、流程8项也退出0；完整Type6及整个TODO仍未完成。差异检查通过后启动`cargo test --workspace --locked --quiet`，原session39247、Cargo PID742，日志 `/tmp/rzpdf-coons-retained-domain-full-workspace.log`，最终退出码待确认。Rust源码冻结至终态，不套用927项旧版结果，不重启等待超时的进程；未运行fuzz、未提交。
+
+- 2026-10-08 区间映射版流程终态及架构同步：原session73555退出0，shading_workflow8项通过，日志 `/tmp/rzpdf-coons-retained-domain-workflow.log`，当前三根分割线修订的导入/两保存严格重开无回归。docs/architecture补候选域全根保留、首轮较宽域单轴覆盖、区间仿射递归与证书/额度不变量，明确固定样例不等于完整折叠支持。render全量原session3626仍运行，Cargo98106/测试98785存活，日志 `/tmp/rzpdf-coons-retained-domain-render.log`，已有38项测试进度但无终态；未重启/修改Rust源码，当前全工作区仍未复验，未运行fuzz、未提交。
+
+- 2026-10-08 三根分割线修订模型终态：原session87069退出0，shading87项通过、541项筛选，日志 `/tmp/rzpdf-coons-retained-domain-mapping.log`；首轮较宽候选域供单轴遍历、区间仿射映射保留误差后，三根v=0.6875完整覆盖和既有折叠/排序回归通过。取代前两版1/3项失败状态，但不表示任意折叠、连续根及整个Type6交付完成。当前流程与render全量已重测，日志 `/tmp/rzpdf-coons-retained-domain-workflow.log`、`/tmp/rzpdf-coons-retained-domain-render.log`，终态待确认；全工作区尚未复验。未运行fuzz、未提交。
+
+- 2026-10-08 保留候选域/单轴遍历修订：未唯一认证时将收缩域保留给细分，按较宽参数轴分成覆盖所有存活根的两个子域，递减深度并共享工作额度。初版session92509退出101，84项通过、3失败，日志 `/tmp/rzpdf-coons-retained-domain-model.log`，过窄域影响既有折叠认证；未宣称修复。进一步保留首轮较宽存活域供遍历，并携带区间仿射原点/尺度，而非把浮点端点外包围当作精确映射，避免深层参数映射丢失舍入误差；修订session87069运行中，日志 `/tmp/rzpdf-coons-retained-domain-mapping.log`。三根分割线与既有折叠回归需全部通过才能继续验收；未运行fuzz、未提交。
+
+- 2026-10-08 render全量及多根分割线新缺口：原session24620退出0，render38项通过，日志 `/tmp/rzpdf-coons-contraction-render.log`，55.14秒。随后扩展三根折叠回归至v=0.6875并断言全域收缩不误判唯一；原session63291退出101，86通过、1失败，日志 `/tmp/rzpdf-coons-contraction-fold-model.log`，完整遍历返回Unresolved。现有收缩在没有唯一证书时丢弃已收缩候选域，继续对原域细分，仍会把多根置于划分边界。下一步需将未解决但保留全根的收缩域交还遍历，并明确参数映射区间、递归深度/工作预算及全域去重，不能仅更换split常数或删除此回归。当前工作区有已知失败模型测试；已通过的38项render不代表完整Type6。未运行fuzz、未提交。
+
+- 2026-10-08 分割线生产采样原子性复验：补ColoredPatch.sample的完整额度前缀失败输出保持与足额恢复，验证无细分时分割线参数包围及颜色精度；格式整理shading_patch和shading_workflow（未格式化整个render文件）。原session7305退出0，shading87项通过，日志 `/tmp/rzpdf-coons-contraction-atomic-model.log`；原session59180退出0，流程8项通过，日志 `/tmp/rzpdf-coons-contraction-workflow.log`。render全量原session24620运行中，Cargo PID91855、测试PID92661存活，日志 `/tmp/rzpdf-coons-contraction-render.log`；尚无终态，不宣称全render/工作区通过。未运行fuzz、未提交。
+
+- 2026-10-08 候选域收缩模型专项终态：原session38303退出0，shading87项通过、541项筛选，日志 `/tmp/rzpdf-coons-contraction-margin-model.log`，含新增分割线根无细分唯一认证、全部额度前缀耗尽、域外无根及退化连续根不误判。取代下方该专项运行状态；当前流程/全量及更广曲面兼容性仍需复验，完整Type6保持未完成。未运行fuzz、未提交。
+
+- 2026-10-08 分割线像素修复终态：带1/16包围余量的候选域收缩修订，原session54795退出0，精确边界整页像素专项1项通过、37项筛选，日志 `/tmp/rzpdf-coons-contraction-margin-pixels.log`，54.55秒。完整50×50着色域预检及实际渲染、上下边灰度64/16、两种保存严格重开整页像素一致性通过；取代此前该样例已知失败状态，不表示任意折叠/一般边界完整交付。新增分割线无细分认证、全部额度前缀、域外无根及退化连续根拒绝模型专项原session38303运行中，日志 `/tmp/rzpdf-coons-contraction-margin-model.log`。性能仍需改进，当前修订全量及流程复验未完成；未运行fuzz、未提交。
+
+- 2026-10-08 全根候选域收缩初版：完整搜索在子域细分前尝试最多8轮Krawczyk交集，交集保留全部候选根，仅受限域严格证书成功才返回；计入共享工作额度。原session69900退出0，shading86项通过，日志 `/tmp/rzpdf-coons-candidate-contraction-model.log`；像素session34845退出101，仍失败pixel(0,16)/shading(4,1056)，日志 `/tmp/rzpdf-coons-candidate-contraction-pixels.log`。修订为交集前扩大Krawczyk包围各侧当前域宽的1/16，保留严格存在认证所需余量；扩大只保留根而不充当存在容差。修订像素原session54795待终态，日志 `/tmp/rzpdf-coons-contraction-margin-pixels.log`；当前仍不宣称修复完成，未运行fuzz、未提交。
+
+- 2026-10-08 精确像素失败定位：新增整页50×50着色坐标预检诊断，原session64723退出101，日志 `/tmp/rzpdf-coons-boundary-location.log`；首失败pixel(0,16)映射到shading(4,1056)，原参数v=1056/1536=0.6875，属于内部子域分割线，不是外边界。此前“优先修边界存在/唯一性”的诊断不足以解释本例，应先实现全根候选域的Krawczyk交集收缩：每轮交集保留原域全部根，受限域认证成功后才可返回，空交集证明无根；需计费、错误原子性和分割线回归。保留完整画面测试和失败诊断，不更换split常数绕过；未运行fuzz、未提交。
+
+- 2026-10-08 新精确边界像素暴露覆盖缺口：新增非均匀Coons的精确dyadic矩阵，使上下边像素中心对应u=1/4，预期直接/平方灰度64/16并严格保存后整页像素一致。原session79940退出101，日志 `/tmp/rzpdf-coons-boundary-precision-pixels.log`，渲染display时遇到其他采样点的Unresolved，尚未到颜色断言；保留失败回归，不缩窄BBox绕过。下一步需将已有边界存在证明与全域至多一个根的收缩证明结合：严格Krawczyk内部包含是充分存在条件，已有原域边根见证时不应重复要求延拓内部存在，但必须仍证明原域唯一性并保留根包围和额度。当前工作区含已知失败测试，不宣称像素/完整Type6通过；未运行fuzz、未提交。
+
+- 2026-10-08 精确整数Decode及非端点边界：恒等`[0,2^bits-1]`/反向映射在1..32位原始整数上直接返回精确区间，避免先除后乘引入可消除的舍入包围；非恒等相邻范围仍保留不确定区间。新增全位宽/端点/内部整数及反向回归，原session61452退出0，shading相关86项通过，日志 `/tmp/rzpdf-coons-exact-decode-shading.log`。流程矩阵加入1536内部整数边界及65535端点两尺度，原session27367退出0，8项通过，日志 `/tmp/rzpdf-coons-exact-decode-workflow.log`，真实函数/镜像/导入/两保存严格重开通过。此前内部整数边界无法认证的样例已覆盖，不表示一般非恒等Decode、任意方向或弯曲边界完成；当前新增解码修订仍需像素及全量复验。未运行fuzz、未提交。
+
+- 2026-10-08 非均匀直边流程修订与像素终态：原session52735退出0，shading_workflow 8项通过，日志 `/tmp/rzpdf-coons-nonuniform-workflow-recheck.log`；新增样例覆盖直接/PDF平方函数×四镜像×两边，原文档、导入及两保存策略严格重开颜色64/16正确。原session1317退出0，既有Skia像素专项1项通过、36项筛选，日志 `/tmp/rzpdf-coons-precision-pixels.log`，12组合和整页保存读回像素无回归，不是新增精确边界像素验收。取代本轮等待状态；当前精度源码仍未全量复验，非端点解码不确定边界、一般边界与折叠仍未完成。未运行fuzz、未提交。
+
+- 2026-10-08 精度修订整体与新流程：原session72808退出0，shading相关85项通过，日志 `/tmp/rzpdf-coons-edge-precision-shading.log`。新增16位非均匀边界的直接/PDF平方函数×四镜像、导入和两保存策略严格重开测试；首次session92350退出101，7项通过、1项失败，非Decode端点的常边坐标产生非零解码区间而无法认证。样例改用0/65535端点保持精确常坐标，并从编码控制点的精确Bernstein权重计算u=1/4目标；修订重测日志 `/tmp/rzpdf-coons-nonuniform-workflow-recheck.log`，终态待确认。不放宽区间证书，非端点不确定边界仍属未完成范围；未运行fuzz、未提交。
+
+- 2026-10-08 非均匀直边镜像/额度失败契约：新增水平、垂直、双镜像及两边共8组合；测得实际工作量后逐一耗尽所有额度前缀，均返回WorkLimit且分量/包围输出保持原值，恰好足额重试成功；直接/平方灰度64/16及精确参数包围通过。原session72968退出0，nonuniform专项2项通过、624项筛选，日志 `/tmp/rzpdf-coons-edge-precision-budget.log`；此终态取代该专项镜像/耗尽待验证状态，不代表实际PDF函数、导入/保存或像素验收。当前精度修订仍需shading整体及流程/像素复验，不能沿用前版927项；未运行fuzz、未提交。
+
+- 2026-10-08 非均匀直边精度缺陷修复：新增上下边`x(u)=3u+(3/8)u(1-u)`回归，精确u=1/4；原session38502退出101，直接灰度实际62而非64，日志 `/tmp/rzpdf-coons-edge-precision.log`。直边延拓唯一根改用既有`tighten_unique_cell`八轮、共享工作额度细化；原session36551退出0，专项1项通过，直接/平方灰度64/16且参数包围通过，日志 `/tmp/rzpdf-coons-edge-precision-recheck.log`。本修订不在前版927项全量范围内；镜像、细化耗尽不改输出/重试及完整复验仍待完成，任务不勾选。未运行fuzz、未提交。
+
+- 2026-10-08 当前直边修订全量终态：原session19703退出0，`cargo test --workspace --locked --quiet` 共46组、927项通过、0失败、0忽略，含624项PDF单元和37项render测试，日志 `/tmp/rzpdf-coons-edge-full-workspace.log`。验收期间Rust源码冻结，取代下方本轮等待状态；结果覆盖镜像/不确定性修订，不涵盖之后的精度修改。完整Type6及整体TODO仍未完成；未运行fuzz、未自动提交。
+
+- 2026-10-08 当前直边修订验收：像素专项原session36993退出0，日志 `/tmp/rzpdf-coons-edge-pixels.log`，既有Type4/5/6的12组合及两种保存策略整页像素一致性复验通过；不代表精确边界像素或独立阅读器验收。随后启动全工作区 `cargo test --workspace --locked --quiet`，原session19703、Cargo PID43287，日志 `/tmp/rzpdf-coons-edge-full-workspace.log`，终态待确认；Rust源码冻结至该轮终态，不沿用角点版925项结果。未运行fuzz、未自动提交。
+
+- 2026-10-08 直边方向与不确定性专项：提交fb4ff54后新增水平/垂直镜像四边参数方向验证，以及边界控制区间仅包含目标而非精确常坐标时拒绝认证；修正根排序文档注释归属。`cargo test -p pdf --lib straight_edge_certificate --locked --quiet` 原session90190退出0，2项通过、622项筛选，日志 `/tmp/rzpdf-coons-edge-direction.log`。仅覆盖轴向直边证书，任意方向/弯曲边界及折叠仍未完成；本轮修改未提交、未运行fuzz，当前版本全量与像素复验仍待完成。
+
 - 2026-10-08 直边流程断言确认：原session35593退出0，shading_workflow 7项通过，日志 `/tmp/rzpdf-coons-edge-roundtrip.log`；Type6矩阵四边非角点新增直接/平方函数颜色断言，覆盖原文档、导入及两个文档Preserve/FlateUnencoded严格重开。证据限定固定轴向矩形，任意方向/弯曲边界与折叠仍未完成；当前直边修订像素和全量复验仍待验证，未自动提交、未运行fuzz。
 
 - 2026-10-08 直边证书生产接入确认：角点分支之后尝试常坐标直边IVT存在及全域唯一根认证，失败继续完整搜索，不将失败当域外。矩形四边中点现在验证正确颜色和包围区间。shading专项原session34705退出0，82项通过、541项筛选，日志 `/tmp/rzpdf-coons-production-edges.log`；当前直边修订尚需流程/像素/全量复验，不能沿用前版925项结果。任意方向直边、弯曲边界、连续根及折叠仍未完成，未自动提交、未运行fuzz。
@@ -1992,6 +2030,9 @@ P0 的普通回归、错误处理、预算和真实样本登记贯穿上述工�
 - [ ] P4-02 完成 Type3、字体编码回退、复杂 CJK/竖排和更多 TrueType cmap 格式。
 - [ ] P4-03 完成 Pattern、Shading、Lab/ICC 等颜色和 PDF 函数实现。
   - [ ] Type6 Coons 曲面：解析12个边界控制点与4角颜色、共享边标志及输入/保留预算；实现参数曲面与参数颜色插值后求函数，不以控制点多边形替代曲面。先验收四条边界和角点、直边退化矩形、非线性函数与共享边方向，再接入绘制。
+    - [ ] 已认证边界根精度：按docs/architecture.md的非均匀直边样例验证原参数1/4及直接/平方函数颜色，复用有工作额度的区间细化；镜像、细化失败不修改输出和重试恢复均需通过，不能只验证唯一性或区间包含。
+    - [ ] 一般边界根与域成员：扩展任意方向直边和弯曲边界存在证明，明确延拓根是否位于原参数域；保留控制区间不确定性，不能用epsilon或Newton候选代替证书。
+    - [ ] 完整根覆盖与分割线去重：各子域全部证明有根或无根后才选择结果，处理根落在内部划分边界及重复证书，验证遗漏竞争根不会误选颜色；未解决时明确错误而非当域外。
   - [ ] Type6 折叠与重叠：曲面可折叠，投影绘制区域不一定等于补丁边界；同像素多个参数映射选择最大v，再最大u，后出现补丁覆盖前补丁。验证曲面内部折叠、重复映射与补丁叠加，采用有误差/工作量上限的策略，不以固定粗网格或单根反解冒充完整实现。
   - [ ] Type6完整交付：资源scope/矩阵/裁剪/透明度、显示来源、注册失败恢复、导入、两种保存策略严格重开及独立阅读器对照；保留Type4/5回归，之后实现Type7张量积补丁和Pattern，不把Type6单项当作整个P4完成。规范：[Adobe PDF Reference 1.5](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/pdfreference1.5_v6.pdf)、[1.6控制点/共享边说明](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/pdfreference1.6.pdf)。
   - [ ] Shading Type2/3 交付验收：已有参数/点采样、资源与显示事件、Skia 实际函数求值像素以及保存版本检查；补 Form 局部资源/来源、旋转与非均匀 DPI、Extend 与 Background 页面样本、独立阅读器对比和性能/临时分配预算，不能以现有专项代替完整验收。
