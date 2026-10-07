@@ -30,6 +30,28 @@ mod tests {
     use std::{collections::HashMap, io::Cursor};
 
     #[test]
+    fn direct_constructor_rejects_wrong_family_even_with_valid_parameters() {
+        let doc = crate::document::PdfDocument::new().unwrap();
+        for family in ["/Lab", "/DeviceN", "null", "1", "(Separation)"] {
+            let object = SyntaxParser::new(
+                StreamReader::try_new(Cursor::new(
+                    format!(
+                        "[{family} /Spot /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 >>]"
+                    )
+                    .into_bytes(),
+                ))
+                .unwrap(),
+            )
+            .get_object()
+            .unwrap();
+            assert!(matches!(
+                Separation::try_new(object.as_array().unwrap(), doc.ctx()),
+                Err(PdfError::ColorError(_))
+            ));
+        }
+    }
+
+    #[test]
     fn separation_stitching_tint_transform_survives_save_and_reopen() {
         use crate::{document::PdfDocument, parser::syntax::ParseMode};
         let doc = PdfDocument::new().unwrap();
@@ -100,10 +122,25 @@ mod tests {
 }
 
 impl Separation {
+    pub fn is_nonpainting(&self) -> bool {
+        self.name == "None"
+    }
     pub fn try_new<R: Seek + Read>(arr: &PdfArray, ctx: &PDFContext<R>) -> PdfResult<Self> {
         if arr.len() != 4 {
             return Err(PdfError::ColorError(
                 "Separation requires four array entries".into(),
+            ));
+        }
+        let family = ctx.resolve(
+            arr.get(0)
+                .ok_or_else(|| PdfError::ColorError("missing Separation family".into()))?,
+        )?;
+        if family
+            .as_name()
+            .is_none_or(|name| name.name() != "Separation")
+        {
+            return Err(PdfError::ColorError(
+                "Separation array must start with /Separation".into(),
             ));
         }
         let name_obj = ctx.resolve(arr.get(1).ok_or(PdfError::ColorError(
@@ -135,6 +172,11 @@ impl Separation {
         ))?;
         let ts = ctx.resolve(tint_transform)?;
         let tint_transform = create_function(&ts, ctx)?;
+        if tint_transform.dimensions() != (1, alternate.number_of_components()?) {
+            return Err(PdfError::ColorError(
+                "Separation tint-transform dimensions do not match".into(),
+            ));
+        }
         Ok(Self {
             name: name.to_string(),
             alternate_space: Box::new(alternate),
@@ -152,9 +194,20 @@ impl Separation {
                 "Separation requires one finite tint".into(),
             ));
         }
-        let values = self
-            .tint_transform
-            .eval(&[value.values()[0].clamp(0.0, 1.0)])?;
+        let tint = value.values()[0].clamp(0.0, 1.0);
+        match self.name.as_str() {
+            "All" => {
+                let gray = 1.0 - tint;
+                return Ok(ColorRgb::new(gray, gray, gray));
+            }
+            "None" => {
+                return Err(PdfError::UnsupportedFeature(
+                    "None Separation requires paint suppression, not an RGB color".into(),
+                ));
+            }
+            _ => {}
+        }
+        let values = self.tint_transform.eval(&[tint])?;
         self.alternate_space.rgb(&ColorValue::new(values))
     }
 

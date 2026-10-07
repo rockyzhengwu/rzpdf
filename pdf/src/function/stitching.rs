@@ -165,8 +165,8 @@ mod tests {
 
     #[test]
     fn stitching_propagates_child_evaluation_errors() {
-        let f = parse("<< /Domain [0 1] /Bounds [] /Encode [0 1] /Functions [<< /FunctionType 2 /Domain [0 1] /N 1 /C0 [-300000000000000000000000000000000000000] /C1 [300000000000000000000000000000000000000] >>] >>").unwrap();
-        assert!(matches!(f.eval(&[0.5]), Err(PdfError::FunctionError(_))));
+        let f = parse("<< /Domain [0 1] /Bounds [] /Encode [0 2] /Functions [<< /FunctionType 2 /Domain [0 2] /N 1 /C0 [0] /C1 [300000000000000000000000000000000000000] >>] >>").unwrap();
+        assert!(matches!(f.eval(&[1.0]), Err(PdfError::FunctionError(_))));
     }
 }
 

@@ -423,6 +423,8 @@ Skia 保持独立后端；字体和图像解码的原生依赖可逐步通过 tr
 
 ## 校准颜色显示策略（2026-10-07）
 
+None 绘制控制与颜色转换分离：ColorSpace::is_nonpainting 识别 Separation /None 和全 None DeviceN；统一 PaintingDevice 适配层用于 Interpreter::run 与 DisplayList::replay，分别抑制填充/描边、保留组合绘制的可见侧，并调整文字有效绘制模式而保留裁剪位。普通图像判断自身颜色空间，stencil 模型判断当前填充色，但 stencil 的文件解析/像素绘制仍明确不支持。run_to_display_list 使用未过滤采集路径，保留原始模式、对象及来源，避免视觉不可见内容从编辑/提取结果中消失。低层直接 RGB 查询对 None 仍报不支持；适配层不改变 Device 公共回调签名，也不使 RenderDevice 尚未支持的文字裁剪成为已实现能力。
+
 颜色空间资源现在纳入ResourceKind::ColorSpace，注册使用既有页资源事务、继承读取、同对象绑定复用及类别表复制后修改，CS名称在页作用域内避让。导入沿用对象图Importer，颜色空间根可为名称/数组，不再强制所有资源根均为字典/流；Font/Image/Form原约束仍保留。跨文档必须先导入，再注册目标句柄；直接修改共享颜色对象仍影响所有引用页，不等于单页隔离编辑。解析校验与渲染能力保持分离，操作级聚合预算仍未贯通此路径。
 
 Lab::rgb目前接入零BlackPoint的固定sRGB转换：定义域裁剪后以字典白点计算XYZ，采用Bradford适配到D65，应用sRGB传递函数并按通道裁剪。中间计算用f64固定栈数组，不另建堆工作表；非有限/错误组件与不可适配白点返回ColorError，非零BlackPoint补偿仍明确UnsupportedFeature。此为低层显示默认策略，不是完整ICC或印刷颜色管理。

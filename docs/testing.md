@@ -163,3 +163,40 @@ mutool draw -r 72 -o output/pdf/edit-validation.Udmdci/page-%d.png output/pdf/ed
 产物：[PDF](../output/pdf/edit-validation.Udmdci/edited-comparison.pdf)、[原页](../output/pdf/edit-validation.Udmdci/page-1.png)、[编辑页](../output/pdf/edit-validation.Udmdci/page-2.png)。复现时使用新目录；示例拒绝覆盖已有PDF。
 
 Poppler仍因缺少 `libtiff.5.dylib` 无法启动，不计为通过；使用已安装MuPDF作为PDF技能渲染回退，未修改系统依赖。此验证覆盖固定Helvetica英文、顶层图片/路径与复制页隔离，不覆盖真实复杂字体、Form/内联图片、裁剪透明或完整P3验收。fuzz未运行。
+# 函数最低版本定向回归（2026-10-07）
+
+None 直接执行与像素回归：`cargo test -p pdf --lib none_path_dispatch_matches_direct_interpretation_without_losing_objects --locked --quiet` 退出 0，1 通过/523 filtered；直接解释与回放 callback 相同、原对象不丢失。`cargo test -p render --lib none_colorants_do_not_paint_text_or_paths_and_preserve_visible_combined_sides --locked --quiet` 退出 0，1 通过/30 filtered。随后完整 `cargo test -p render --lib --locked --quiet` 退出 0，31 全通过，0 失败/忽略。日志依次 `/tmp/rzpdf-none-direct-dispatch.log`、`/tmp/rzpdf-none-render-pixels.log`、`/tmp/rzpdf-none-render-all.log`。
+
+Separation None/全 None DeviceN 的 Skia RGBA 像素确认隐藏路径和文字不绘制、文字仍可提取，混合填描保留可见侧和白色内部；两种保存策略严格读回的像素逐字节一致。此为内部后端像素验收，不替代独立阅读器/真实样本对照，也不覆盖 stencil、全部图像空间或文字裁剪后端。仅新增测试，未全 pdf 单元或全工作区重跑；渲染测试通过后仅局部格式整理。未运行 fuzz。
+
+None 绘制分派：`cargo test -p pdf --lib --test color_workflow --test resources --locked --quiet` 最终退出 0，523 单元、15 颜色流程、14 资源通过，0 失败/忽略；日志 `/tmp/rzpdf-none-paint-dispatch.log`。原对象 13 个/文字 A×8 保留、None 填描组合可见侧、文字八模式保留裁剪位、普通图像不受 None 填充色影响及两种保存策略严格读回覆盖。旧 None 错误回放用例现验证成功跳过与后续绘制。首轮 stencil fixture 因既有解析不支持而失败，保留该限制并改用普通图像；不据此宣称 stencil 文件/像素支持。直接 RGB None 仍 UnsupportedFeature；真实渲染像素、None 专项直接解释一致性和文字裁剪后端尚未验收，未全工作区重跑或 fuzz。
+
+Separation 特殊色名显示：`cargo test -p pdf --lib --test color_workflow --locked --quiet` 退出 0，523 单元、14 颜色流程通过，0 失败/忽略；日志 `/tmp/rzpdf-separation-special-colorants.log`。All 使用 Type4 fixture（执行仍不支持）证明绕过 tint-transform，覆盖灰度填充/描边、tint 裁剪、严格保存读回；None 直接 RGB 错误在颜色记录前传播。此测试不证明 None 的设备级不绘制、原生分色或叠印；这些仍待跨路径/文字/图像处理。未重跑全工作区或 fuzz。
+
+Separation 构造一致性：`cargo test -p pdf --lib --test color_workflow --test resources --locked --quiet` 退出 0：523 单元、13 颜色流程、14 资源测试通过，0 失败/忽略；日志 `/tmp/rzpdf-separation-dimensions.log`。低层错误家族、tint-transform 输入/输出维度不匹配、注册失败字节级不变及名称重试、合法灰度页面严格读回覆盖。Type4 双输入 fixture 仅用于构造维度校验；不表示 Type4 求值、All/None 绘制语义或原生专色支持。未全工作区重跑或 fuzz。
+
+Type2 宽系数求值：依据 [Adobe Reference 1.3 §3.9.2](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/pdfreference1.3.pdf)，f64 计算中间值、按可选 Range 裁剪后返回 f32。常量输出不依赖溢出的幂；NaN/最终非有限输出仍报错。`cargo test -p pdf --lib --test color_workflow --locked --quiet` 退出 0，522 单元、12 颜色流程通过，0 失败/忽略，日志 `/tmp/rzpdf-type2-wide-evaluation.log`。宽有限系数端点/中点、大幂裁剪/常量、真正超范围错误及 Type3 错误传播覆盖；旧 Type3 误把中间精度溢出当作错误的 fixture 已替换为真正不可表示结果。未全工作区重跑、独立视觉验证或 fuzz；仍不是任意精度函数计算。
+
+Type2 参数局部限额：`cargo test -p pdf --lib --test color_workflow --locked --quiet` 退出 0，521 单元、12 颜色流程通过，0 失败/忽略；日志 `/tmp/rzpdf-type2-parameter-limits.log`。数值数组在分配前检查节点数/字节上限、Domain 长度，参数及输出使用可失败预分配。覆盖 8/7 字节边界、C0/C1/Range 超限与恢复。对象/数组的普通 resolver 副本仍先于这些检查，局部上限不代表 OperationBudget 共存峰值。此前全工作区 792 项终态早于本次修改；未重跑全工作区或 fuzz。
+
+DeviceN 构造入口与额度精确边界：`cargo test -p pdf --lib --test color_workflow --locked --quiet` 退出 0，520 单元、12 颜色流程通过，0 失败/忽略，日志 `/tmp/rzpdf-devicen-constructor-limits.log`。首项错误家族/类型拒绝、间接家族修改、名称槽位和名称字节精确边界、组件超限及反复失败恢复均覆盖。生产新增家族校验，因此下面 792 项门禁代表此前代码状态，不代表这一新增修改已全工作区重跑；局部字节上限也不代表共存峰值或 OperationBudget 验收。
+
+## 本批改动的全工作区门禁
+
+`cargo test --workspace --locked --quiet` 同一进程终态退出 0。完整日志 `/tmp/rzpdf-workspace-colors-functions.log`：518 个 PDF 单元、39 个 PDF 集成目标共 244 项、30 个 render 单元，总计 **792 通过，0 失败，0 忽略**。45 条结果包含四个零测试目标。最终计数来自全部结果行求和，取代过程更新中的手工累计数。
+
+工具链：rustc 1.96.0 (ac68faa20 2026-05-25)、cargo 1.96.0 (30a34c682 2026-05-25)，现有 macOS 本地环境。包含本批 DeviceN、函数/颜色版本检查及已有资源/编辑/保存/渲染测试；测试期间未继续修改源码。仍有既有 unused/deprecated-config 警告。没有运行独立 fuzz 工程、远端 CI 或独立阅读器视觉对照；本地绿色不等于完整 PDF 支持或跨平台验收完成。
+
+DeviceN 间接字段与恢复：`cargo test -p pdf --lib --test color_workflow --locked --quiet` 最终退出 0，518 单元、12 颜色流程测试通过，0 失败/忽略；日志 `/tmp/rzpdf-devicen-indirect.log`。间接名称数组/名称/替代空间/函数/属性/Subtype、连续失败后修复恢复、旧模型隔离及严格保存读回覆盖。普通 resolver 只跟随一层引用：alias 为 ColorError，实际颜色数组循环为 ResourceLimit；首次错误期望已修正，失败结果不计入通过。未重跑版本集成或全工作区，未运行 fuzz。
+
+DeviceN 实现回归：依据 [Adobe PDF Reference 1.6 §4.5.5](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/pdfreference1.6.pdf)，实现 tint-transform 替代颜色空间显示近似。`cargo test -p pdf --lib --test color_workflow --test feature_versions --locked --quiet` 最终退出 0：517 单元、12 颜色流程、15 版本测试通过，0 失败/忽略，日志 `/tmp/rzpdf-devicen-workflow.log`。单分量默认/组件数/裁剪/非有限拒绝，双分量采样函数到 RGB 的默认蓝色及白/青/品红结果、Preserve/FlateUnencoded 严格读回，非法名称/维度/替代空间/属性注册回滚及全 None UnsupportedFeature 传播均通过。未证明独立像素一致性、原生专色/叠印/NChannel 混色、聚合操作预算或最新全工作区门禁；未运行 fuzz。初次编译失败已修正，不计入通过结果。
+
+嵌套基空间补充：迭代解析 Indexed/I、Pattern、Separation、DeviceN 基空间，限制 max_depth/max_objects；Indexed 使用 Separation 基空间要求 PDF 1.3，依据 Adobe Reference 1.3 §4.5.5。`cargo test -p pdf --lib --test feature_versions --test color_workflow --locked --quiet` 退出 0：516 单元、15 版本、10 颜色流程测试通过，0 失败/忽略；日志 `/tmp/rzpdf-nested-colorspace-version.log`。新增 Indexed→ICCBased/Separation/DeviceN 版本组合及引用自循环错误后恢复保存回归。高版本仍跳过该定向预检；它不是颜色合法性/循环全面验证，也未覆盖 ICC Alternate、DeviceN 属性、全部默认替代空间或内容操作符。未重跑全工作区或 fuzz。
+
+颜色空间版本补充：依据 [Adobe PDF Reference 1.3，Table 4.12](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/pdfreference1.3.pdf)，ColorSpace 字段及命名资源表项中的 Pattern/Separation 要求 1.2，ICCBased/DeviceN 要求 1.3。`cargo test -p pdf --lib --test feature_versions --test color_workflow --locked --quiet` 退出 0：516 单元、14 版本、10 颜色流程测试通过，0 失败/忽略，日志 `/tmp/rzpdf-colorspace-version.log`。四家族、资源表/单值字段和直接/间接引用组合覆盖拒绝前输出/revision 不变及显式升级严格读回。用例采用版本识别字段而非完整有效颜色空间；不证明渲染能力、嵌套基空间/替代空间/操作符审计或最新全工作区门禁。
+
+边界补充：`cargo test -p pdf --test feature_versions --locked --quiet` 终态退出 0，13 测试通过，0 失败/忽略；日志 `/tmp/rzpdf-function-version-boundaries.log`。间接 Catalog /Version 1.4 可满足函数最低版本，默认保存保留 1.2 Header，严格读回后再次保存成功，revision 不变。未知、负数、超 u64、实数 token（包括 f32 舍入为 2 的长小数）不会被定向检查误判成已知整数类型；直接和间接字段均覆盖。允许保留不等于函数合法性通过。本次仅新增两项回归，未重跑全工作区。
+
+依据 [Adobe PDF Reference 1.3，§3.9](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/pdfreference1.3.pdf)，Type0 引入于 PDF 1.2，Type2/3/4 引入于 PDF 1.3。保存预检在输出前检查已知 FunctionType，包括间接字段；未知类型不由该版本检查判定合法性。
+
+验证命令：`cargo test -p pdf --lib --test feature_versions --test color_workflow --locked --quiet`。终态退出 0；516 单元、11 版本集成、10 颜色流程测试通过，0 失败/忽略。日志：`/tmp/rzpdf-function-version.log`。新增测试使用保留对象验证版本拒绝、原输出/revision 不变和显式升级后严格读回，不将这些对象视为合法可执行函数。不涵盖完整符合性、Type4 执行、预算峰值或最新全工作区门禁；未运行 fuzz。

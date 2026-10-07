@@ -30,6 +30,14 @@ pub enum ColorSpace {
 }
 
 impl ColorSpace {
+    /// Whether this colorant suppresses paint without suppressing clipping.
+    pub fn is_nonpainting(&self) -> bool {
+        match self {
+            Self::Separation(space) => space.is_nonpainting(),
+            Self::DeviceN(space) => space.is_nonpainting(),
+            _ => false,
+        }
+    }
     pub fn rgb(&self, value: &ColorValue) -> PdfResult<ColorRgb> {
         match self {
             ColorSpace::DeviceGray(gray) => gray.rgb(value),
@@ -41,6 +49,7 @@ impl ColorSpace {
             ColorSpace::CalRgb(cr) => cr.rgb(value),
             ColorSpace::Indexed(indexed) => indexed.rgb(value),
             ColorSpace::Separation(sep) => sep.rgb(value),
+            ColorSpace::DeviceN(space) => space.rgb(value),
             _ => Err(PdfError::UnsupportedFeature(format!(
                 "RGB conversion for {self}"
             ))),
@@ -58,11 +67,7 @@ impl ColorSpace {
             ColorSpace::Indexed(indexed) => indexed.default_value(),
             ColorSpace::Separation(sep) => sep.default_value(),
             ColorSpace::Pattern(p) => p.default_value(),
-            _ => {
-                return Err(PdfError::UnsupportedFeature(format!(
-                    "Default value for {self}"
-                )));
-            }
+            ColorSpace::DeviceN(space) => space.default_value()?,
         })
     }
 
@@ -77,6 +82,7 @@ impl ColorSpace {
             ColorSpace::CalRgb(cr) => cr.number_of_components(),
             ColorSpace::Indexed(indexed) => indexed.number_of_components(),
             ColorSpace::Separation(sep) => sep.number_of_components(),
+            ColorSpace::DeviceN(space) => space.number_of_components(),
             _ => {
                 return Err(PdfError::UnsupportedFeature(format!(
                     "Component count for {self}"
@@ -122,6 +128,7 @@ impl ColorSpace {
                     "Pattern" => Ok(ColorSpace::Pattern(PatternColorSpace::default())),
                     "Indexed" => Ok(ColorSpace::Indexed(Indexed::try_new(array, ctx)?)),
                     "Separation" => Ok(ColorSpace::Separation(Separation::try_new(array, ctx)?)),
+                    "DeviceN" => Ok(ColorSpace::DeviceN(DeviceN::try_new(array, ctx)?)),
                     "ICCBased" => Ok(ColorSpace::IccBased(IccBased::try_new(&obj, ctx)?)),
                     "Lab" => Ok(ColorSpace::Lab(Lab::try_new_with_context(&obj, ctx)?)),
                     _ => Err(PdfError::UnsupportedFeature(format!(
@@ -164,10 +171,6 @@ mod tests {
 
     #[test]
     fn unsupported_color_queries_return_errors() {
-        let devicen = ColorSpace::DeviceN(DeviceN {});
-        assert!(devicen.default_value().is_err());
-        assert!(devicen.number_of_components().is_err());
-        assert!(devicen.rgb(&ColorValue::new(vec![])).is_err());
         let pattern = ColorSpace::Pattern(PatternColorSpace::default());
         assert!(pattern.number_of_components().is_err());
         assert!(pattern.rgb(&ColorValue::new(vec![])).is_err());

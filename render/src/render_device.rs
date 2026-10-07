@@ -3026,6 +3026,109 @@ mod tests {
     }
 
     #[test]
+    fn none_colorants_do_not_paint_text_or_paths_and_preserve_visible_combined_sides() {
+        use pdf::{
+            document::{
+                PdfDocument,
+                resource_manager::StandardFont,
+                save_options::{SaveOptions, StreamCompression},
+            },
+            io::stream_reader::StreamReader,
+            page::page_builder::PageBuilder,
+            parser::syntax::{ParseMode, SyntaxParser},
+        };
+        let pixels = |renderer: &mut SkiaRender| {
+            let info = skia_safe::ImageInfo::new(
+                (40, 40),
+                skia_safe::ColorType::RGBA8888,
+                skia_safe::AlphaType::Unpremul,
+                None,
+            );
+            let mut bytes = vec![0; 40 * 40 * 4];
+            assert!(
+                renderer
+                    .surface
+                    .read_pixels(&info, &mut bytes, 40 * 4, (0, 0))
+            );
+            bytes
+        };
+        for source in [
+            "[/Separation /None /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 /C0 [0] /C1 [0] >>]",
+            "[/DeviceN [/None] /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 /C0 [0] /C1 [0] >>]",
+        ] {
+            let doc = PdfDocument::new().unwrap();
+            doc.add_page_with_builder(0, PageBuilder::new().size(40.0, 40.0))
+                .unwrap();
+            let color = SyntaxParser::new(
+                StreamReader::try_new(std::io::Cursor::new(source.as_bytes().to_vec())).unwrap(),
+            )
+            .get_object()
+            .unwrap();
+            let name = doc.resources().register_color_space(0, color).unwrap();
+            let font = doc
+                .resources()
+                .register_standard_font(0, StandardFont::Helvetica)
+                .unwrap();
+            doc.replace_page_contents(0, format!("/{name} cs /{name} CS 0 0 40 40 re B BT /{font} 10 Tf 1 0 0 1 5 15 Tm (Hidden) Tj ET").into_bytes()).unwrap();
+            assert_eq!(
+                doc.get_page(0)
+                    .unwrap()
+                    .extract_characters_paint_order()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|ch| ch.unicode.as_deref())
+                    .collect::<String>(),
+                "Hidden"
+            );
+            let mut renderer = SkiaRender::new(72.0, 72.0).unwrap();
+            doc.get_page(0).unwrap().display(&mut renderer).unwrap();
+            assert!(pixels(&mut renderer).iter().all(|byte| *byte == 255));
+            doc.replace_page_contents(
+                0,
+                format!(
+                    "/{name} cs 1 0 0 RG 2 w 5 5 10 10 re B 0 1 0 rg /{name} CS 25 5 10 10 re B"
+                )
+                .into_bytes(),
+            )
+            .unwrap();
+            doc.get_page(0).unwrap().display(&mut renderer).unwrap();
+            let expected = pixels(&mut renderer);
+            assert!(
+                expected
+                    .chunks_exact(4)
+                    .any(|p| p[0] > 240 && p[1] < 15 && p[2] < 15)
+            );
+            assert!(
+                expected
+                    .chunks_exact(4)
+                    .any(|p| p[0] < 15 && p[1] > 240 && p[2] < 15)
+            );
+            let center = &expected[(30 * 40 + 10) * 4..(30 * 40 + 10) * 4 + 4];
+            assert_eq!(center, &[255, 255, 255, 255]);
+            for compression in [
+                StreamCompression::Preserve,
+                StreamCompression::FlateUnencoded,
+            ] {
+                let reopened = PdfDocument::from_bytes_with_mode(
+                    doc.save_to_bytes_with_options(SaveOptions {
+                        compression,
+                        ..Default::default()
+                    })
+                    .unwrap(),
+                    ParseMode::Strict,
+                )
+                .unwrap();
+                reopened
+                    .get_page(0)
+                    .unwrap()
+                    .display(&mut renderer)
+                    .unwrap();
+                assert_eq!(pixels(&mut renderer), expected);
+            }
+        }
+    }
+
+    #[test]
     fn invisible_text_is_extractable_but_does_not_paint() {
         use pdf::{
             document::{resource_manager::StandardFont, PdfDocument},

@@ -17,6 +17,8 @@ use std::io::Cursor;
 #[derive(Default)]
 struct ColorDevice {
     colors: Vec<[u8; 3]>,
+    text_modes: Vec<pdf::page::text_state::TextRenderingMode>,
+    images: usize,
 }
 
 impl ColorDevice {
@@ -40,9 +42,12 @@ impl Device for ColorDevice {
         Ok(())
     }
     fn do_image(&mut self, _: ImageObject) -> PdfResult<()> {
+        self.images += 1;
         Ok(())
     }
-    fn show_text(&mut self, _: TextObject) -> PdfResult<()> {
+    fn show_text(&mut self, text: TextObject) -> PdfResult<()> {
+        self.text_modes
+            .push(text.state.text_state.text_rendering_mode);
         Ok(())
     }
     fn clip_path(&mut self, _: PathObject) -> PdfResult<()> {
@@ -194,6 +199,280 @@ fn parse_object(source: &str) -> pdf::objects::PdfObject {
     SyntaxParser::new(StreamReader::try_new(Cursor::new(source.as_bytes().to_vec())).unwrap())
         .get_object()
         .unwrap()
+}
+
+#[test]
+fn none_dispatch_preserves_objects_text_clipping_and_visible_sides_of_combined_paths() {
+    use pdf::{
+        document::resource_manager::{ResourceKind, StandardFont},
+        objects::{PdfObject, pdf_stream::PdfStream},
+        page::text_state::TextRenderingMode::*,
+    };
+    let doc = PdfDocument::new().unwrap();
+    doc.add_page(0).unwrap();
+    let none = doc
+        .resources()
+        .register_color_space(
+            0,
+            parse_object(
+                "[/Separation /None /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 >>]",
+            ),
+        )
+        .unwrap();
+    let font = doc
+        .resources()
+        .register_standard_font(0, StandardFont::Helvetica)
+        .unwrap();
+    let image_dict = parse_object("<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 >>").into_dict().unwrap();
+    let mask = doc
+        .try_insert_object(PdfObject::PdfStream(PdfStream::new(image_dict, vec![0])))
+        .unwrap();
+    let mask = doc
+        .resources()
+        .register_existing(0, ResourceKind::Image, mask)
+        .unwrap();
+    let content = format!(
+        "/{none} cs 1 0 0 RG 0 0 20 20 re B 0 1 0 rg /{none} CS 20 0 20 20 re B /{none} cs 40 0 20 20 re B /{mask} Do 0 0 1 rg /{mask} Do /{none} cs 1 0 0 RG BT /{font} 10 Tf 1 0 0 1 0 50 Tm {} ET",
+        (0..8)
+            .map(|mode| format!("{mode} Tr (A) Tj"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    doc.replace_page_contents(0, content.into_bytes()).unwrap();
+    let mut page = doc.get_page(0).unwrap();
+    let list = page.display_list().unwrap();
+    assert_eq!(list.objects().len(), 13);
+    assert_eq!(
+        page.extract_characters_paint_order()
+            .unwrap()
+            .iter()
+            .filter_map(|ch| ch.unicode.as_deref())
+            .collect::<String>(),
+        "AAAAAAAA"
+    );
+    let mut device = ColorDevice::default();
+    list.replay(&mut device).unwrap();
+    assert_eq!(device.colors, vec![[255, 0, 0], [0, 255, 0]]);
+    // Non-stencil images use their own color space, not the current fill color.
+    assert_eq!(device.images, 2);
+    assert_eq!(
+        device.text_modes,
+        vec![
+            INVisible, Stroke, Stroke, INVisible, Clip, StrokeClip, StrokeClip, Clip
+        ]
+    );
+    for compression in [
+        StreamCompression::Preserve,
+        StreamCompression::FlateUnencoded,
+    ] {
+        let reopened = PdfDocument::from_bytes_with_mode(
+            doc.save_to_bytes_with_options(SaveOptions {
+                compression,
+                ..Default::default()
+            })
+            .unwrap(),
+            ParseMode::Strict,
+        )
+        .unwrap();
+        let mut replayed = ColorDevice::default();
+        reopened
+            .get_page(0)
+            .unwrap()
+            .display_list()
+            .unwrap()
+            .replay(&mut replayed)
+            .unwrap();
+        assert_eq!(replayed.colors, device.colors);
+        assert_eq!(replayed.images, device.images);
+        assert_eq!(replayed.text_modes, device.text_modes);
+    }
+}
+
+#[test]
+fn separation_all_ignores_transform_and_none_does_not_paint_an_alternate_color() {
+    use pdf::objects::{PdfObject, pdf_stream::PdfStream};
+    let doc = PdfDocument::new().unwrap();
+    doc.add_page(0).unwrap();
+    let dict = parse_object("<< /FunctionType 4 /Domain [0 1] /Range [0 1 0 1 0 1] >>")
+        .into_dict()
+        .unwrap();
+    let transform = doc
+        .try_insert_object(PdfObject::PdfStream(PdfStream::new(dict, b"{}".to_vec())))
+        .unwrap();
+    let space = |name| {
+        parse_object(&format!(
+            "[/Separation /{name} /DeviceRGB {} {} R]",
+            transform.obj_num(),
+            transform.gen_num()
+        ))
+    };
+    let all = doc
+        .resources()
+        .register_color_space(0, space("All"))
+        .unwrap();
+    let none = doc
+        .resources()
+        .register_color_space(0, space("None"))
+        .unwrap();
+    doc.replace_page_contents(0, format!("/{all} cs 0 scn 0 0 20 20 re f 0.5 scn 20 0 20 20 re f 1 scn 40 0 20 20 re f -1 scn 60 0 20 20 re f /{all} CS 2 SCN 0 30 20 20 re S").into_bytes()).unwrap();
+    let expected = vec![[255; 3], [128; 3], [0; 3], [255; 3], [0; 3]];
+    assert_eq!(colors(&doc, 0), expected);
+    let reopened =
+        PdfDocument::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict).unwrap();
+    assert_eq!(colors(&reopened, 0), expected);
+    doc.replace_page_contents(
+        0,
+        format!("/{none} cs 0.5 scn 0 0 20 20 re f 1 0 0 rg 20 0 20 20 re f").into_bytes(),
+    )
+    .unwrap();
+    let mut device = ColorDevice::default();
+    doc.get_page(0)
+        .unwrap()
+        .display_list()
+        .unwrap()
+        .replay(&mut device)
+        .unwrap();
+    assert_eq!(device.colors, vec![[255, 0, 0]]);
+}
+
+#[test]
+fn separation_registration_rejects_input_and_output_mismatch_without_partial_binding() {
+    use pdf::objects::{PdfObject, pdf_stream::PdfStream};
+    let doc = PdfDocument::new().unwrap();
+    doc.add_page(0).unwrap();
+    let dict = parse_object("<< /FunctionType 4 /Domain [0 1 0 1] /Range [0 1] >>")
+        .into_dict()
+        .unwrap();
+    let transform = doc
+        .try_insert_object(PdfObject::PdfStream(PdfStream::new(dict, b"{}".to_vec())))
+        .unwrap();
+    let before = doc.save_to_bytes().unwrap();
+    for source in [
+        "[/Separation /Spot /DeviceRGB << /FunctionType 2 /Domain [0 1] /N 1 >>]".to_string(),
+        "[/Separation /Spot /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 /C0 [0 0 0] /C1 [1 1 1] >>]".to_string(),
+        format!("[/Separation /Spot /DeviceGray {} {} R]", transform.obj_num(), transform.gen_num()),
+    ] {
+        for _ in 0..2 {
+            assert!(matches!(doc.resources().register_color_space(0, parse_object(&source)), Err(PdfError::ColorError(_))));
+            assert_eq!(doc.save_to_bytes().unwrap(), before);
+        }
+    }
+    let name = doc
+        .resources()
+        .register_color_space(
+            0,
+            parse_object(
+                "[/Separation /Spot /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 >>]",
+            ),
+        )
+        .unwrap();
+    assert_eq!(name, "CS1");
+    doc.replace_page_contents(0, format!("/{name} cs 0.5 scn 0 0 20 20 re f").into_bytes())
+        .unwrap();
+    assert_eq!(colors(&doc, 0), vec![[128; 3]]);
+    let reopened =
+        PdfDocument::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict).unwrap();
+    assert_eq!(colors(&reopened, 0), vec![[128; 3]]);
+}
+
+#[test]
+fn devicen_two_tints_render_via_sampled_alternate_and_survive_both_save_modes() {
+    use pdf::objects::{PdfObject, pdf_stream::PdfStream};
+    let doc = PdfDocument::new().unwrap();
+    doc.add_page(0).unwrap();
+    let dict = parse_object(
+        "<< /FunctionType 0 /Domain [0 1 0 1] /Range [0 1 0 1 0 1] /Size [2 2] /BitsPerSample 8 >>",
+    )
+    .into_dict()
+    .unwrap();
+    let transform = doc
+        .try_insert_object(PdfObject::PdfStream(PdfStream::new(
+            dict,
+            vec![255, 255, 255, 0, 255, 255, 255, 0, 255, 0, 0, 255],
+        )))
+        .unwrap();
+    let space = parse_object(&format!(
+        "[/DeviceN [/Cyan /Magenta] /DeviceRGB {} {} R]",
+        transform.obj_num(),
+        transform.gen_num()
+    ));
+    let name = doc.resources().register_color_space(0, space).unwrap();
+    doc.replace_page_contents(0, format!("/{name} cs 0 30 20 20 re f 0 0 scn 0 0 20 20 re f 1 0 scn 20 0 20 20 re f 0 1 scn 40 0 20 20 re f -1 2 scn 60 0 20 20 re f").into_bytes()).unwrap();
+    let expected = vec![
+        [0, 0, 255],
+        [255, 255, 255],
+        [0, 255, 255],
+        [255, 0, 255],
+        [255, 0, 255],
+    ];
+    assert_eq!(colors(&doc, 0), expected);
+    for compression in [
+        StreamCompression::Preserve,
+        StreamCompression::FlateUnencoded,
+    ] {
+        let bytes = doc
+            .save_to_bytes_with_options(SaveOptions {
+                compression,
+                ..Default::default()
+            })
+            .unwrap();
+        let reopened = PdfDocument::from_bytes_with_mode(bytes, ParseMode::Strict).unwrap();
+        assert_eq!(colors(&reopened, 0), expected);
+    }
+}
+
+#[test]
+fn devicen_registration_rejects_invalid_names_alternates_and_dimensions_atomically() {
+    let doc = PdfDocument::new().unwrap();
+    doc.add_page(0).unwrap();
+    let before = doc.save_to_bytes().unwrap();
+    for source in [
+        "[/DeviceN [] /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 >>]",
+        "[/DeviceN [/All] /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 >>]",
+        "[/DeviceN [/Spot /Spot] /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 >>]",
+        "[/DeviceN [1] /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 >>]",
+        "[/DeviceN [/A /B] /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 >>]",
+        "[/DeviceN [/A] /DeviceRGB << /FunctionType 2 /Domain [0 1] /N 1 >>]",
+        "[/DeviceN [/A] /Pattern << /FunctionType 2 /Domain [0 1] /N 1 >>]",
+        "[/DeviceN [/None] /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 >> << /Subtype /NChannel >>]",
+        "[/DeviceN [/A] /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 >> 1]",
+    ] {
+        assert!(
+            doc.resources()
+                .register_color_space(0, parse_object(source))
+                .is_err(),
+            "{source}"
+        );
+        assert_eq!(doc.save_to_bytes().unwrap(), before);
+    }
+    let name = doc
+        .resources()
+        .register_color_space(
+            0,
+            parse_object("[/DeviceN [/None] /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 >>]"),
+        )
+        .unwrap();
+    doc.replace_page_contents(0, format!("/{name} cs 0.5 scn 0 0 20 20 re f").into_bytes())
+        .unwrap();
+    let mut device = ColorDevice::default();
+    doc.get_page(0)
+        .unwrap()
+        .display_list()
+        .unwrap()
+        .replay(&mut device)
+        .unwrap();
+    assert!(device.colors.is_empty());
+    assert_eq!(
+        doc.resources()
+            .register_color_space(
+                0,
+                parse_object(
+                    "[/DeviceN [/Spot] /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 >>]"
+                )
+            )
+            .unwrap(),
+        "CS2"
+    );
 }
 
 #[test]

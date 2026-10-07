@@ -29,6 +29,104 @@ mod tests {
     use std::{collections::HashMap, io::Cursor};
 
     #[test]
+    fn wide_finite_coefficients_and_range_clipping_do_not_overflow_early() {
+        let doc = crate::document::PdfDocument::new().unwrap();
+        let parse = |source: &str| {
+            let object = SyntaxParser::new(
+                StreamReader::try_new(Cursor::new(source.as_bytes().to_vec())).unwrap(),
+            )
+            .get_object()
+            .unwrap();
+            Exponential::try_new(&object, doc.ctx()).unwrap()
+        };
+        let f = parse(
+            "<< /Domain [0 1] /N 1 /C0 [-300000000000000000000000000000000000000] /C1 [300000000000000000000000000000000000000] >>",
+        );
+        assert_eq!(f.eval(&[0.5]).unwrap(), vec![0.0]);
+        assert_eq!(f.eval(&[0.0]).unwrap(), f.c0);
+        assert_eq!(f.eval(&[1.0]).unwrap(), f.c1);
+        let clipped = parse("<< /Domain [0 2] /N 128 /Range [0 1] >>");
+        assert_eq!(clipped.eval(&[2.0]).unwrap(), vec![1.0]);
+        let huge = parse("<< /Domain [0 2] /N 2000 /Range [0 1] >>");
+        assert_eq!(huge.eval(&[2.0]).unwrap(), vec![1.0]);
+        let constant = parse("<< /Domain [0 2] /N 2000 /C0 [0.5] /C1 [0.5] >>");
+        assert_eq!(constant.eval(&[2.0]).unwrap(), vec![0.5]);
+        let unbounded = parse("<< /Domain [0 2] /N 128 >>");
+        assert!(matches!(
+            unbounded.eval(&[2.0]),
+            Err(PdfError::FunctionError(_))
+        ));
+        assert_eq!(unbounded.eval(&[1.0]).unwrap(), vec![1.0]);
+    }
+
+    #[test]
+    fn parameter_arrays_have_exact_limits_and_reject_before_member_resolution() {
+        use crate::{
+            document::PdfDocument,
+            objects::pdf_reference::PdfReference,
+            parser::options::{Limits, ParseOptions},
+        };
+        let parse = |source: &str| {
+            SyntaxParser::new(
+                StreamReader::try_new(Cursor::new(source.as_bytes().to_vec())).unwrap(),
+            )
+            .get_object()
+            .unwrap()
+        };
+        let make = |bytes| {
+            PdfDocument::new_with_options(ParseOptions {
+                limits: Limits {
+                    max_objects: 2,
+                    max_decoded_bytes: bytes,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .unwrap()
+        };
+        let good = parse("<< /Domain [0 1] /N 1 /C0 [0] /C1 [1] /Range [0 1] >>");
+        let exact = make(8);
+        assert_eq!(
+            Exponential::try_new(&good, exact.ctx())
+                .unwrap()
+                .eval(&[0.5])
+                .unwrap(),
+            vec![0.5]
+        );
+        assert!(matches!(
+            Exponential::try_new(&good, make(7).ctx()),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        for key in ["C0", "C1", "Range"] {
+            let object = parse(&format!("<< /Domain [0 1] /N 1 /{key} [0 1 2] >>"));
+            for _ in 0..2 {
+                assert!(
+                    matches!(
+                        Exponential::try_new(&object, exact.ctx()),
+                        Err(PdfError::ResourceLimit(_))
+                    ),
+                    "{key}"
+                );
+            }
+            assert!(Exponential::try_new(&good, exact.ctx()).is_ok());
+        }
+        let doc = PdfDocument::new().unwrap();
+        let cycle = doc.try_insert_object(PdfObject::PdfNull).unwrap();
+        doc.update_object(cycle, PdfObject::PdfReference(PdfReference::from_id(cycle)))
+            .unwrap();
+        let bad = parse(&format!(
+            "<< /Domain [0 1 {} {} R] /N 1 >>",
+            cycle.obj_num(),
+            cycle.gen_num()
+        ));
+        assert!(matches!(
+            Exponential::try_new(&bad, doc.ctx()),
+            Err(PdfError::FunctionError(_))
+        ));
+        assert!(Exponential::try_new(&good, doc.ctx()).is_ok());
+    }
+
+    #[test]
     fn type2_defaults_dimensions_and_invalid_inputs() {
         let syntax =
             SyntaxParser::new(StreamReader::try_new(Cursor::new(Vec::<u8>::new())).unwrap());
@@ -89,7 +187,23 @@ impl Exponential {
             let array = value
                 .as_array()
                 .ok_or_else(|| PdfError::FunctionError(format!("{key} requires an array")))?;
+            if key == "Domain" && array.len() != 2 {
+                return Err(PdfError::FunctionError(
+                    "Type2 requires one ordered Domain pair".into(),
+                ));
+            }
+            if array.len() > ctx.limits().max_objects
+                || array
+                    .len()
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .is_none_or(|bytes| bytes > ctx.limits().max_decoded_bytes)
+            {
+                return Err(PdfError::ResourceLimit(format!("Type2 {key} parameters")));
+            }
             let mut result = Vec::new();
+            result
+                .try_reserve_exact(array.len())
+                .map_err(|_| PdfError::ResourceLimit(format!("Type2 {key} allocation")))?;
             for value in array {
                 let value = ctx.resolve(value)?;
                 result.push(value.as_f32().filter(|v| v.is_finite()).ok_or_else(|| {
@@ -159,27 +273,38 @@ impl Exponential {
             ));
         }
         let mut out = Vec::new();
+        out.try_reserve_exact(self.n)
+            .map_err(|_| PdfError::ResourceLimit("Type2 output allocation".into()))?;
         let mut x = inputs[0];
         if x < self.domain[0] {
             x = self.domain[0]
         } else if x > self.domain[1] {
             x = self.domain[1];
         }
+        let power = f64::from(x).powf(f64::from(self.en));
         for i in 0..self.n {
-            let mut v = self.c0[i] + x.powf(self.en) * (self.c1[i] - self.c0[i]);
-            if !v.is_finite() {
+            let c0 = f64::from(self.c0[i]);
+            let c1 = f64::from(self.c1[i]);
+            // Finite f32 endpoints can overflow when subtracted in f32.
+            // Constant outputs do not depend on even an overflowing power.
+            let mut v = if c0 == c1 { c0 } else { c0 + power * (c1 - c0) };
+            if v.is_nan() {
                 return Err(PdfError::FunctionError(
                     "Type2 result is non-finite".to_string(),
                 ));
             }
             if !self.range.is_empty() {
-                let l = self.range[2 * i];
-                let m = self.range[2 * i + 1];
+                let l = f64::from(self.range[2 * i]);
+                let m = f64::from(self.range[2 * i + 1]);
                 if v > m {
                     v = m;
                 } else if v < l {
                     v = l;
                 }
+            }
+            let v = v as f32;
+            if !v.is_finite() {
+                return Err(PdfError::FunctionError("Type2 result is non-finite".into()));
             }
             out.push(v)
         }

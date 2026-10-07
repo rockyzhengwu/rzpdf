@@ -10,6 +10,248 @@ use pdf::{
 };
 
 #[test]
+fn function_types_require_their_introduction_version_before_writer_output() {
+    for (kind, old, minimum) in [
+        (0, PdfVersion::V1_1, PdfVersion::V1_2),
+        (2, PdfVersion::V1_2, PdfVersion::V1_3),
+        (3, PdfVersion::V1_2, PdfVersion::V1_3),
+        (4, PdfVersion::V1_2, PdfVersion::V1_3),
+    ] {
+        for indirect in [false, true] {
+            let doc = Document::new_with_version(old).unwrap();
+            doc.add_page(0).unwrap();
+            let value = PdfObject::PdfNumber(PdfNumber::new(kind as f32));
+            let value = if indirect {
+                PdfObject::PdfReference(PdfReference::from_id(
+                    doc.try_insert_object(value).unwrap(),
+                ))
+            } else {
+                value
+            };
+            // Retained objects exercise feature detection, not function validity
+            // or execution; those have separate constructor/evaluation tests.
+            let mut dict = PdfDict::default();
+            dict.insert("FunctionType".into(), value);
+            let object = if matches!(kind, 0 | 4) {
+                PdfObject::PdfStream(pdf::objects::pdf_stream::PdfStream::new(dict, Vec::new()))
+            } else {
+                PdfObject::PdfDict(dict)
+            };
+            let id = doc.try_insert_object(object).unwrap();
+            let revision = doc.revision();
+            let mut destination = b"original".to_vec();
+            assert!(matches!(
+                doc.save_to_writer_with_options(&mut destination, SaveOptions::default()),
+                Err(PdfError::UnsupportedFeature(_))
+            ));
+            assert_eq!(destination, b"original");
+            assert_eq!(doc.revision(), revision);
+            let bytes = doc
+                .save_to_bytes_with_options(SaveOptions {
+                    version: Some(minimum),
+                    ..Default::default()
+                })
+                .unwrap();
+            let reopened = Document::from_bytes_with_mode(bytes, ParseMode::Strict).unwrap();
+            assert_eq!(reopened.effective_version().unwrap(), minimum);
+            assert!(reopened.resolve_object(id).is_ok());
+            assert_eq!(doc.revision(), revision);
+        }
+    }
+}
+
+#[test]
+fn function_preflight_uses_effective_catalog_version_without_rewriting_header() {
+    use pdf::objects::{object_id::ObjectId, pdf_name::PdfName};
+    let doc = Document::new_with_version(PdfVersion::V1_2).unwrap();
+    doc.add_page(0).unwrap();
+    let mut function = PdfDict::default();
+    function.insert(
+        "FunctionType".into(),
+        PdfObject::PdfNumber(PdfNumber::new(3.0)),
+    );
+    doc.try_insert_object(PdfObject::PdfDict(function)).unwrap();
+    assert!(matches!(
+        doc.save_to_bytes(),
+        Err(PdfError::UnsupportedFeature(_))
+    ));
+    // New documents create the catalog at 2 0; this fixture does not assume
+    // arbitrary parsed documents have the same catalog address.
+    let root_id = ObjectId::new(2, 0);
+    let mut root = doc.resolve_object(root_id).unwrap().into_dict().unwrap();
+    let version_id = doc
+        .try_insert_object(PdfObject::PdfName(PdfName::new("1.4".into())))
+        .unwrap();
+    root.insert(
+        "Version".into(),
+        PdfObject::PdfReference(PdfReference::from_id(version_id)),
+    );
+    doc.update_object(root_id, PdfObject::PdfDict(root))
+        .unwrap();
+    let revision = doc.revision();
+    let bytes = doc.save_to_bytes().unwrap();
+    assert!(bytes.starts_with(b"%PDF-1.2"));
+    assert_eq!(doc.revision(), revision);
+    let reopened = Document::from_bytes_with_mode(bytes, ParseMode::Strict).unwrap();
+    assert_eq!(reopened.effective_version().unwrap(), PdfVersion::V1_4);
+    assert!(reopened.save_to_bytes().is_ok());
+}
+
+#[test]
+fn function_preflight_does_not_round_or_validate_unknown_types() {
+    for value in [
+        PdfObject::PdfNumber(PdfNumber::new_from_lexeme(b"2.00000000001").unwrap()),
+        PdfObject::PdfNumber(PdfNumber::new_from_lexeme(b"2.0").unwrap()),
+        PdfObject::PdfNumber(PdfNumber::new_from_lexeme(b"18446744073709551616").unwrap()),
+        PdfObject::PdfNumber(PdfNumber::new(-2.0)),
+        PdfObject::PdfNumber(PdfNumber::new(1.0)),
+        PdfObject::PdfNull,
+    ] {
+        for indirect in [false, true] {
+            let doc = Document::new_with_version(PdfVersion::V1_1).unwrap();
+            doc.add_page(0).unwrap();
+            let value = if indirect {
+                PdfObject::PdfReference(PdfReference::from_id(
+                    doc.try_insert_object(value.clone()).unwrap(),
+                ))
+            } else {
+                value.clone()
+            };
+            let mut dict = PdfDict::default();
+            dict.insert("FunctionType".into(), value);
+            let id = doc.try_insert_object(PdfObject::PdfDict(dict)).unwrap();
+            let revision = doc.revision();
+            let bytes = doc.save_to_bytes().unwrap();
+            assert_eq!(doc.revision(), revision);
+            let reopened = Document::from_bytes_with_mode(bytes, ParseMode::Strict).unwrap();
+            assert_eq!(reopened.effective_version().unwrap(), PdfVersion::V1_1);
+            assert!(reopened.resolve_object(id).is_ok());
+        }
+    }
+}
+
+#[test]
+fn named_and_image_color_spaces_require_their_introduction_versions() {
+    use pdf::objects::{pdf_array::PdfArray, pdf_name::PdfName};
+    for (family, old, minimum) in [
+        ("Pattern", PdfVersion::V1_1, PdfVersion::V1_2),
+        ("Separation", PdfVersion::V1_1, PdfVersion::V1_2),
+        ("ICCBased", PdfVersion::V1_2, PdfVersion::V1_3),
+        ("DeviceN", PdfVersion::V1_2, PdfVersion::V1_3),
+    ] {
+        for resource_table in [false, true] {
+            for indirect in [false, true] {
+                let doc = Document::new_with_version(old).unwrap();
+                doc.add_page(0).unwrap();
+                let name = PdfObject::PdfName(PdfName::new(family.into()));
+                let mut array = PdfArray::default();
+                array.add_obj(name);
+                // Version fixtures only; these deliberately do not claim valid
+                // profile/tint-transform parameters or rendering support.
+                let space = if family == "Pattern" {
+                    PdfObject::PdfName(PdfName::new(family.into()))
+                } else {
+                    PdfObject::PdfArray(array)
+                };
+                let space = if indirect {
+                    PdfObject::PdfReference(PdfReference::from_id(
+                        doc.try_insert_object(space).unwrap(),
+                    ))
+                } else {
+                    space
+                };
+                let value = if resource_table {
+                    let mut resources = PdfDict::default();
+                    resources.insert("CS1".into(), space);
+                    PdfObject::PdfDict(resources)
+                } else {
+                    space
+                };
+                let value = if indirect {
+                    PdfObject::PdfReference(PdfReference::from_id(
+                        doc.try_insert_object(value).unwrap(),
+                    ))
+                } else {
+                    value
+                };
+                let mut dict = PdfDict::default();
+                dict.insert("ColorSpace".into(), value);
+                doc.try_insert_object(PdfObject::PdfDict(dict)).unwrap();
+                let revision = doc.revision();
+                let mut output = b"unchanged".to_vec();
+                assert!(matches!(
+                    doc.save_to_writer_with_options(&mut output, SaveOptions::default()),
+                    Err(PdfError::UnsupportedFeature(_))
+                ));
+                assert_eq!(output, b"unchanged");
+                assert_eq!(doc.revision(), revision);
+                let bytes = doc
+                    .save_to_bytes_with_options(SaveOptions {
+                        version: Some(minimum),
+                        ..Default::default()
+                    })
+                    .unwrap();
+                let reopened = Document::from_bytes_with_mode(bytes, ParseMode::Strict).unwrap();
+                assert_eq!(reopened.effective_version().unwrap(), minimum);
+            }
+        }
+    }
+}
+
+#[test]
+fn indexed_color_base_versions_and_cycles_are_checked_before_output() {
+    use pdf::objects::{pdf_array::PdfArray, pdf_name::PdfName};
+    for family in ["ICCBased", "Separation", "DeviceN"] {
+        let doc = Document::new_with_version(PdfVersion::V1_2).unwrap();
+        doc.add_page(0).unwrap();
+        let mut base = PdfArray::default();
+        base.add_obj(PdfObject::PdfName(PdfName::new(family.into())));
+        let base_id = doc.try_insert_object(PdfObject::PdfArray(base)).unwrap();
+        let mut indexed = PdfArray::default();
+        indexed.add_obj(PdfObject::PdfName(PdfName::new("Indexed".into())));
+        indexed.add_obj(PdfObject::PdfReference(PdfReference::from_id(base_id)));
+        let mut dict = PdfDict::default();
+        dict.insert("ColorSpace".into(), PdfObject::PdfArray(indexed));
+        doc.try_insert_object(PdfObject::PdfDict(dict)).unwrap();
+        assert!(matches!(
+            doc.save_to_bytes(),
+            Err(PdfError::UnsupportedFeature(_))
+        ));
+        let bytes = doc
+            .save_to_bytes_with_options(SaveOptions {
+                version: Some(PdfVersion::V1_3),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(Document::from_bytes_with_mode(bytes, ParseMode::Strict).is_ok());
+    }
+    let doc = Document::new_with_version(PdfVersion::V1_2).unwrap();
+    doc.add_page(0).unwrap();
+    let id = doc.try_insert_object(PdfObject::PdfNull).unwrap();
+    let mut array = PdfArray::default();
+    array.add_obj(PdfObject::PdfName(PdfName::new("Indexed".into())));
+    array.add_obj(PdfObject::PdfReference(PdfReference::from_id(id)));
+    doc.update_object(id, PdfObject::PdfArray(array)).unwrap();
+    let mut dict = PdfDict::default();
+    dict.insert(
+        "ColorSpace".into(),
+        PdfObject::PdfReference(PdfReference::from_id(id)),
+    );
+    doc.try_insert_object(PdfObject::PdfDict(dict)).unwrap();
+    let revision = doc.revision();
+    let mut output = b"original".to_vec();
+    assert!(matches!(
+        doc.save_to_writer_with_options(&mut output, SaveOptions::default()),
+        Err(PdfError::ResourceLimit(_))
+    ));
+    assert_eq!(output, b"original");
+    assert_eq!(doc.revision(), revision);
+    doc.update_object(id, PdfObject::PdfName(PdfName::new("DeviceRGB".into())))
+        .unwrap();
+    assert!(doc.save_to_bytes().is_ok());
+}
+
+#[test]
 fn external_stream_settings_require_1_2_even_without_newer_filter() {
     use pdf::objects::{pdf_name::PdfName, pdf_stream::PdfStream};
     for key in ["F", "FFilter", "FDecodeParms"] {

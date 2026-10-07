@@ -5,12 +5,13 @@ use crate::{
         colorspace::ColorSpace, device_cmyk::DeviceCmyk, device_gray::DeviceGray,
         device_rgb::DeviceRgb, value::ColorValue,
     },
-    device::{trace::TraceDevice, Device},
+    device::{Device, trace::TraceDevice},
     error::{PdfError, PdfResult},
-    font::{pdf_font::Font, WritingMode},
+    font::{WritingMode, pdf_font::Font},
     geom::{matrix::Matrix, point::Point},
     objects::PdfObject,
     page::{
+        PdfPage,
         all_state::AllState,
         content_parser::ContentParser,
         display_list::DisplayList,
@@ -21,7 +22,6 @@ use crate::{
         path_object::{PathDrawSource, PathObject},
         pdf_image::PdfImage,
         text_object::{CharItem, TextDrawSource, TextObject},
-        PdfPage,
     },
     path::pdf_path::{Bezier, PdfPath, Segment, SubPath},
     pdf_context::PDFContext,
@@ -60,7 +60,7 @@ mod resource_scope_tests {
     #[test]
     fn direct_inner_form_is_located_through_parent_resource_scope() {
         use crate::{
-            document::{resource_manager::ResourceKind, PdfDocument},
+            document::{PdfDocument, resource_manager::ResourceKind},
             io::stream_reader::StreamReader,
             objects::{pdf_dict::PdfDict, pdf_stream::PdfStream},
             page::page_object::PageObject,
@@ -125,7 +125,7 @@ mod resource_scope_tests {
     #[test]
     fn actual_nine_form_chain_checks_configured_depth_and_accumulates_geometry() {
         use crate::{
-            document::{resource_manager::ResourceKind, PdfDocument},
+            document::{PdfDocument, resource_manager::ResourceKind},
             io::stream_reader::StreamReader,
             objects::pdf_stream::PdfStream,
             page::page_object::PageObject,
@@ -255,12 +255,13 @@ mod resource_scope_tests {
             } else {
                 &doc
             };
-            assert!(page
-                .nested_content_program(
+            assert!(
+                page.nested_content_program(
                     &other.get_page(0).unwrap().content_program().unwrap(),
                     nested
                 )
-                .is_err());
+                .is_err()
+            );
         }
         for (maximum, allowed) in [(8, false), (9, true)] {
             let document = PdfDocument::from_bytes_with_options(
@@ -288,7 +289,7 @@ mod resource_scope_tests {
     #[test]
     fn form_execution_isolates_path_color_clip_and_bounds_repeated_work() {
         use crate::{
-            document::{resource_manager::ResourceKind, PdfDocument},
+            document::{PdfDocument, resource_manager::ResourceKind},
             io::stream_reader::StreamReader,
             objects::pdf_stream::PdfStream,
             page::page_object::PageObject,
@@ -534,7 +535,9 @@ mod resource_scope_tests {
             } else {
                 &doc
             };
-            assert!(!report.matches_program(&other.get_page(0).unwrap().content_program().unwrap()));
+            assert!(
+                !report.matches_program(&other.get_page(0).unwrap().content_program().unwrap())
+            );
             for (index, character) in report.characters.iter().enumerate() {
                 assert!(character.source.is_none());
                 let nested = character.nested_source.as_ref().unwrap();
@@ -631,8 +634,10 @@ mod resource_scope_tests {
             leaf.operations()[location.operation_index].operator.name(),
             "Do"
         );
-        assert!(!old_report
-            .matches_program(&image_saved.get_page(0).unwrap().content_program().unwrap()));
+        assert!(
+            !old_report
+                .matches_program(&image_saved.get_page(0).unwrap().content_program().unwrap())
+        );
         // Change only the Form stream, leaving the page Contents unchanged.
         let changed = dict("<< /Type /XObject /Subtype /Form /BBox [0 0 100 100] >>");
         doc.update_object(
@@ -648,11 +653,12 @@ mod resource_scope_tests {
         .unwrap();
         let current_program = doc.get_page(0).unwrap().content_program().unwrap();
         assert!(!old_report.matches_program(&current_program));
-        assert!(doc
-            .get_page(0)
-            .unwrap()
-            .nested_content_program(&old_program, location)
-            .is_err());
+        assert!(
+            doc.get_page(0)
+                .unwrap()
+                .nested_content_program(&old_program, location)
+                .is_err()
+        );
         assert!(old_report.matches_program(&old_program)); // historical snapshots still pair
         doc.copy_page(0, 1).unwrap();
         let current_report = doc
@@ -704,18 +710,22 @@ mod resource_scope_tests {
                 .name(),
             "DeviceRGB"
         );
-        assert!(interpreter
-            .named_resource("ExtGState", "G")
-            .unwrap()
-            .as_dict()
-            .is_some());
+        assert!(
+            interpreter
+                .named_resource("ExtGState", "G")
+                .unwrap()
+                .as_dict()
+                .is_some()
+        );
         assert!(interpreter.named_resource("Font", "Missing").is_err());
         assert!(interpreter.named_resource("XObject", "Null").is_err());
         let empty = Interpreter::new(&page, doc.ctx(), parser())
             .with_resource_scope(crate::objects::pdf_dict::PdfDict::default());
-        assert!(Interpreter::new(&page, doc.ctx(), parser())
-            .named_resource("Font", &page_font)
-            .is_ok());
+        assert!(
+            Interpreter::new(&page, doc.ctx(), parser())
+                .named_resource("Font", &page_font)
+                .is_ok()
+        );
         assert!(empty.named_resource("Font", &page_font).is_err());
     }
 }
@@ -750,6 +760,10 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
     }
 
     pub fn run(&mut self, device: &mut dyn Device) -> PdfResult<()> {
+        self.run_unfiltered(&mut crate::device::painting::PaintingDevice(device))
+    }
+
+    fn run_unfiltered(&mut self, device: &mut dyn Device) -> PdfResult<()> {
         device.start_page(self.page.page_width, self.page.page_height)?;
         self.run_content(device)?;
         device.end_page()?;
@@ -825,7 +839,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
 
     pub fn run_to_display_list(&mut self) -> PdfResult<DisplayList> {
         let mut device = TraceDevice::for_display_list(self.ctx.limits());
-        self.run(&mut device)?;
+        self.run_unfiltered(&mut device)?;
         let mut list = device.into_display_list();
         list.set_provenance(self.page.source_provenance());
         list.set_diagnostics(self.diagnostics.clone());

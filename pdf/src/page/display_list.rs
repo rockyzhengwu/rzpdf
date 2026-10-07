@@ -67,6 +67,51 @@ mod tests {
     }
 
     #[test]
+    fn none_path_dispatch_matches_direct_interpretation_without_losing_objects() {
+        use crate::{
+            document::PdfDocument,
+            io::stream_reader::StreamReader,
+            page::{content_interpreter::Interpreter, content_parser::ContentParser},
+            parser::syntax::SyntaxParser,
+        };
+        let doc = PdfDocument::new().unwrap();
+        doc.add_page(0).unwrap();
+        let object = SyntaxParser::new(
+            StreamReader::try_new(std::io::Cursor::new(
+                b"[/Separation /None /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 >>]"
+                    .to_vec(),
+            ))
+            .unwrap(),
+        )
+        .get_object()
+        .unwrap();
+        let name = doc.resources().register_color_space(0, object).unwrap();
+        let content = format!("/{name} cs 1 0 0 RG 0 0 10 10 re B 0 1 0 rg /{name} CS 10 0 10 10 re B /{name} cs 20 0 10 10 re B 0 0 1 rg 30 0 10 10 re f").into_bytes();
+        doc.replace_page_contents(0, content.clone()).unwrap();
+        let mut page = doc.get_page(0).unwrap();
+        let list = page.display_list().unwrap();
+        assert_eq!(list.objects().len(), 4);
+        let device = || FailingDevice {
+            fail_on: "none",
+            calls: Vec::new(),
+            path_styles: Vec::new(),
+        };
+        let mut replayed = device();
+        list.replay(&mut replayed).unwrap();
+        assert_eq!(replayed.path_styles, ["stroke", "fill", "fill"]);
+        let parser = ContentParser::new(SyntaxParser::new(
+            StreamReader::try_new(std::io::Cursor::new(content)).unwrap(),
+        ));
+        let mut direct = device();
+        Interpreter::new(&page, doc.ctx(), parser)
+            .run(&mut direct)
+            .unwrap();
+        assert_eq!(direct.path_styles, replayed.path_styles);
+        assert_eq!(direct.calls, replayed.calls);
+        assert_eq!(list.objects().len(), 4);
+    }
+
+    #[test]
     fn replay_preserves_all_path_painting_modes_and_stops_on_draw_error() {
         use crate::{
             document::PdfDocument,
@@ -281,6 +326,7 @@ impl DisplayList {
     }
 
     pub fn replay(&self, device: &mut dyn Device) -> PdfResult<()> {
+        let mut device = crate::device::painting::PaintingDevice(device);
         device.start_page(self.page_width, self.page_height)?;
         for object in &self.objects {
             match object {

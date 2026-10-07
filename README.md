@@ -176,11 +176,15 @@ SaveOptions 位于 `pdf::document::save_options`；`save_to_bytes/writer/file_wi
 
 > **Note:** This library is currently under active development. Several features, such as Pattern colorspaces and Type3 fonts, are not yet implemented.
 
+Separation 的普通专色通过替代空间/tint-transform 作显示近似；`/All` 忽略该函数并用 `1 - tint` 显示灰度（不是原生分色输出）。`/None` 直接 RGB 转换明确返回 UnsupportedFeature；直接解释/DisplayList 回放会抑制对应路径填充/描边，文字转换为有效绘制模式但保留裁剪，普通图像仍使用自身颜色空间。DisplayList 保留原对象以支持编辑与文本提取。Stencil image mask 的解析和像素绘制仍不支持；None 的独立像素与完整图像验收未完成。
+
 PDF Type 3 **Stitching functions**（不同于 Type3 字体）已支持单输入分段求值、Domain 裁剪、正向/反向 Encode、可选 Range 输出裁剪及嵌套函数；构造时校验子函数输入/输出维度，并保留深度和总节点限额。Type 4 PostScript 函数求值仍明确返回不支持。此功能不代表 Shading/Pattern 或操作级聚合内存预算已经完成。
 
 Type 4 构造支持间接 Domain/Range 及数组内间接数值，先检查非空成对、有限有序参数和每数组条目/字节上限，再解码函数流；构造成功不代表代码已解析或可执行。数组检查仍是单项 Limits，不是两个参数数组与流解码的聚合内存预算。
 
 Lab 已支持零 BlackPoint 的颜色转换：L/a/b 按定义域裁剪，经 XYZ 与 Bradford 白点适配到 D65，再使用 sRGB 传递函数和通道裁剪。非零 BlackPoint 补偿仍返回 UnsupportedFeature；不能适配的白点返回 ColorError。当前是固定 sRGB 显示策略，不包含 OutputIntent/ICC 渲染意图或感知色域映射，也未统一 CalRGB/CalGray 的现有转换策略。
+
+DeviceN 已接入颜色空间解析、资源注册及显示用替代空间转换：验证非空/不同名组件（None 可重复、All 禁止）、函数输入输出维度，默认 tint 为 1，转换前裁剪有限 tint 至 0..1。支持现有函数求值器；Type4 仍返回不支持。NChannel 按 required tint-transform 作显示近似，不提供原生专色版、叠印或自定义混色；全 None 的直接 RGB 转换返回 UnsupportedFeature，绘制回放通过统一适配层抑制对应绘制，不丢弃原对象。组件及名称有数量/字节检查，但尚未贯通 OperationBudget。原空 `DeviceN {}` 占位结构已改为通过 `DeviceN::try_new`/`ColorSpace::try_new` 构造。
 
 ---
 

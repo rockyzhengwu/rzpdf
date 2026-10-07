@@ -1,7 +1,7 @@
 use crate::{
-    document::{save_options::PdfVersion, PdfDocument},
+    document::{PdfDocument, save_options::PdfVersion},
     error::{PdfError, PdfResult},
-    objects::{pdf_dict::PdfDict, PdfObject},
+    objects::{PdfObject, pdf_dict::PdfDict},
 };
 use std::io::{Read, Seek};
 
@@ -83,6 +83,39 @@ pub(super) fn validate_feature_versions_with_budget<R: Read + Seek>(
             _ => None,
         };
         if let Some((dict, stream)) = dict {
+            if version < PdfVersion::V1_3 {
+                if let Some(value) = dict.get("ColorSpace") {
+                    let value = doc.resolve(value)?;
+                    if let PdfObject::PdfDict(resources) = &*value {
+                        for (_, space) in resources {
+                            check_color_space_version(doc, space, version)?;
+                        }
+                    } else {
+                        check_color_space_version(doc, &value, version)?;
+                    }
+                }
+            }
+            if version < PdfVersion::V1_3 {
+                if let Some(value) = dict.get("FunctionType") {
+                    let value = doc.resolve(value)?;
+                    let minimum = match value
+                        .as_number()
+                        .and_then(|number| number.as_u64_checked().ok())
+                    {
+                        Some(0) => Some(PdfVersion::V1_2),
+                        Some(2 | 3 | 4) => Some(PdfVersion::V1_3),
+                        _ => None,
+                    };
+                    if let Some(minimum) = minimum {
+                        if version < minimum {
+                            return Err(PdfError::UnsupportedFeature(format!(
+                                "PDF function requires PDF {} or later; select an explicit version upgrade",
+                                minimum.as_str()
+                            )));
+                        }
+                    }
+                }
+            }
             if version < PdfVersion::V1_6 && !stream && name(doc, dict, "Type", "Page")? {
                 if let Some(value) = dict.get("UserUnit") {
                     if !matches!(&*doc.resolve(value)?, PdfObject::PdfNull) {
@@ -143,6 +176,62 @@ pub(super) fn validate_feature_versions_with_budget<R: Read + Seek>(
         }
     }
     Ok(())
+}
+
+fn check_color_space_version<R: Read + Seek>(
+    doc: &FeatureDocument<'_, R>,
+    value: &PdfObject,
+    version: PdfVersion,
+) -> PdfResult<()> {
+    let mut value = doc.resolve(value)?;
+    let mut indexed_base = false;
+    let limits = doc.ctx().limits();
+    for depth in 0..limits.max_depth {
+        if depth >= limits.max_objects {
+            return Err(PdfError::ResourceLimit("color feature nodes".into()));
+        }
+        let array = value.as_array();
+        let family_object = if let Some(array) = array {
+            let Some(first) = array.get(0) else {
+                return Ok(());
+            };
+            Some(doc.resolve(first)?)
+        } else {
+            None
+        };
+        let family = family_object.as_deref().unwrap_or(&value);
+        let Some(family) = family.as_name() else {
+            return Ok(());
+        };
+        let minimum = match family.name() {
+            "Separation" if indexed_base => Some(PdfVersion::V1_3),
+            "Pattern" | "Separation" => Some(PdfVersion::V1_2),
+            "ICCBased" | "DeviceN" => Some(PdfVersion::V1_3),
+            _ => None,
+        };
+        if let Some(minimum) = minimum {
+            if version < minimum {
+                return Err(PdfError::UnsupportedFeature(format!(
+                    "{} color space requires PDF {} or later; select an explicit version upgrade",
+                    family.name(),
+                    minimum.as_str()
+                )));
+            }
+        }
+        let base_index = match family.name() {
+            "Indexed" | "I" | "Pattern" => 1,
+            "Separation" | "DeviceN" => 2,
+            _ => return Ok(()),
+        };
+        let Some(base) = array.and_then(|array| array.get(base_index)) else {
+            return Ok(());
+        };
+        let next = doc.resolve(base)?;
+        indexed_base = matches!(family.name(), "Indexed" | "I");
+        drop(family_object);
+        value = next;
+    }
+    Err(PdfError::ResourceLimit("color feature depth".into()))
 }
 
 fn check_filters<R: Read + Seek>(
