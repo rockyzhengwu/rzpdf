@@ -423,6 +423,14 @@ Skia 保持独立后端；字体和图像解码的原生依赖可逐步通过 tr
 
 ## 校准颜色显示策略（2026-10-07）
 
+Type4 函数现在编译为扁平只读指令，过程仅引用指令区间，不复制过程体。解析与执行使用独立显式帧；执行不依赖原生递归、不调用外部 PostScript 引擎。每次 eval 拥有独立操作数/执行栈，类型检查与有限运算错误返回 FunctionError，步骤/深度/存储耗尽返回 ResourceLimit；copy/roll 消耗额外工作量。整数计算超出 i32 时提升 f64，bitshift 采用 32 位逻辑语义；输入 Domain 与输出 Range 裁剪在公共函数入口统一执行。各缓冲有限额但未接入共享 OperationBudget，不能声称聚合峰值验收；Pattern/Shading 不因 Type4 可求值而完成。
+
+补充：普通 Separation/DeviceN 也接入 packed 浮点转换，Decode 端点改为按分量数分配的 Vec，预留前校验端点字节限额，容量纳入 retained_sample_bytes。六分量图像已有逐行采样/末分量反转/严格保存回归；混合 None 仍传完整 tint 数组，全 None 由 PaintingDevice 抑制。不实现原生色版与叠印；本节下方早期四分量端点和专色尚未接入的描述由本段更新。
+
+普通 CalGray/CalRGB/Lab/ICCBased 图像保留解码流的 packed 采样和 `(位深, Decode端点)`，不提前归一化到设备字节。RGBA 转换逐行处理填充位与 16 位大端样本，f64 插值后将浮点空间分量交给既有颜色转换；Lab 默认端点来自 L/a/b 范围，ICC 来自 Range。分量工作数组仅分配一次并复用，输出沿用可失败预留和 RGBA 限额，保留载荷仍由 display payload 字节计数统计；这不是 OperationBudget 全链路验收。
+
+`PdfImage::data()` 的表示随采样路径而异：设备空间返回显示用 8 位分量，Indexed 返回解码后的索引，校准/ICC 空间返回保留精度的 packed 载荷。消费者应通过 `rgba_buffer()` 获取统一显示格式，不能把全部 data() 当作 RGB 字节。提取原始编码、图像字典与位深仍使用文档图像提取服务。ICC 仍按 Alternate 近似，独立 profile/OutputIntent 未实现；普通 Separation/DeviceN 尚未接入此路径。
+
 Indexed 不再额外拒绝合法 DeviceN 基空间，调色板所有分量都先按 0..1 转为 tint，再经现有 transform 求显示近似；混合 None 分量可携带替代颜色数据，不能在求值前删除。Indexed::is_nonpainting 转发基空间判定，ColorSpace::is_nonpainting 纳入 Indexed，因此已共用的 PaintingDevice 同时覆盖路径/文字/图像，不在采集层丢对象。不新增原生色版、叠印或 Type4 求值能力。
 
 Indexed 图像的 PdfImage.data 保存 Decode 后的索引字节，而不是归一化灰度：默认端点为 [0, 2^bits-1]；显式端点按索引单位计算后取整，超出 8 位索引范围裁剪，最终 Indexed::rgb 再裁剪到 hival。与设备颜色共用逐行采样/长度/可失败分配检查，RGBA 转换走调色板，不把索引当作亮度。DeviceRGB 调色板已有回归；Lab/ICC 基空间映射精度、全色彩管理与操作级聚合预算仍待完成。
@@ -436,3 +444,6 @@ None 绘制控制与颜色转换分离：ColorSpace::is_nonpainting 识别 Separ
 Lab::rgb目前接入零BlackPoint的固定sRGB转换：定义域裁剪后以字典白点计算XYZ，采用Bradford适配到D65，应用sRGB传递函数并按通道裁剪。中间计算用f64固定栈数组，不另建堆工作表；非有限/错误组件与不可适配白点返回ColorError，非零BlackPoint补偿仍明确UnsupportedFeature。此为低层显示默认策略，不是完整ICC或印刷颜色管理。
 
 后续应抽取共享颜色转换策略，并由解释/渲染入口明确传入目标色域、OutputIntent/渲染意图及黑点补偿选择；CalRGB/CalGray尚保留既有转换，不因本次Lab实现视作统一完成。不要把简单通道裁剪宣称为感知色域映射，也不要在未实现时忽略非零BlackPoint。P4-03仍按完整要求继续验收。
+# Shading 显示事件检查点（2026-10-07）
+
+Type2/3 Shading 已具备参数、函数和点采样模型，并进入资源注册、内容解释与显示列表回放。`PageObject::Shading` 从无载荷占位改为携带 `ShadingObject`；后者通过 Arc 共享模型，保留矩阵、图形状态及来源。`Device::do_shading` 默认明确返回不支持，Skia 实际绘制尚未接入。Trace 按每次绘制保守计入函数保留容量及资源名；这不是包含颜色空间、原生分配和临时峰值的完整共享预算。Type1/4–7、Pattern 与独立阅读器验证仍待实现。

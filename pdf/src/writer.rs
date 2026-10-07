@@ -3524,6 +3524,13 @@ mod tests {
         states.insert("G".into(), PdfObject::PdfDict(state));
         let mut resources = PdfDict::default();
         resources.insert("ExtGState".into(), PdfObject::PdfDict(states));
+        // sh is now implemented for types 2/3; keep this diagnostic fixture
+        // genuinely unsupported rather than referencing a missing resource.
+        let mut shading = PdfDict::default();
+        shading.insert("ShadingType".into(), PdfObject::PdfNumber(crate::objects::pdf_number::PdfNumber::new(1.0)));
+        let mut shadings = PdfDict::default();
+        shadings.insert("S".into(), PdfObject::PdfDict(shading));
+        resources.insert("Shading".into(), PdfObject::PdfDict(shadings));
         doc.add_page_with_builder(
             index,
             crate::page::page_builder::PageBuilder::new().resources(resources),

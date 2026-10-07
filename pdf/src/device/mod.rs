@@ -4,6 +4,15 @@ use crate::error::PdfResult;
 use crate::page::{image_object::ImageObject, path_object::PathObject, text_object::TextObject};
 
 pub trait Device {
+    /// Backends must opt in; silently dropping a shading would corrupt display.
+    fn do_shading(
+        &mut self,
+        _shading: crate::page::shading_object::ShadingObject,
+    ) -> PdfResult<()> {
+        Err(crate::error::PdfError::UnsupportedFeature(
+            "device shading rendering".into(),
+        ))
+    }
     /// Optional read-only check before cloning a draw's path/graphics state.
     /// Payload-specific limits still require validation when the event arrives.
     fn preflight_draw(

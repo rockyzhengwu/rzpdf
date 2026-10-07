@@ -98,6 +98,10 @@ DeviceGray/RGB/CMYK 图像和灰度 SMask 已支持显式 Decode 数组，包括
 
 Indexed XObject 已增加专用索引采样路径：默认 Decode 保留原始索引，显式 Decode 按索引单位映射、取整，再经调色板范围裁剪转换为 RGBA；低位深样本逐行重置。调色板字节按基空间范围映射，Lab 使用 L=0..100 与声明的 a/b Range，ICCBased 使用声明 Range 后沿用 Alternate 显示近似。DeviceRGB 调色板已覆盖多位深及两种保存策略严格读回；Lab/ICC 范围专项及两保存策略严格读回已通过。ICC profile 色彩管理、Skia 专项像素和独立阅读器对照仍待完成，不代表全部 Indexed 组合已验收。
 
+Type4 计算函数已支持规定的数值/逻辑/栈/条件运算符和 Domain/Range 裁剪，按现有 Limits 约束程序存储、执行步数与过程深度。Separation/DeviceN 条件颜色及图像的两保存策略严格读回已验证；不是通用 PostScript 执行器，Pattern/Shading、独立阅读器及共享聚合预算仍未完成。本文历史 Type4 不支持说明由此更新。
+
+普通 CalGray/CalRGB/Lab/ICCBased/Separation/DeviceN XObject 也支持 1/2/4/8/16 位采样和 Decode：保留 packed 精度，RGBA 转换时应用空间端点；Lab/ICC 16 位默认/反转、六分量 DeviceN 低位深/行填充/末分量反转及两保存策略严格读回已验证。动态 Decode 不限于设备颜色的四分量。ICC 仅使用 Alternate，专色仅使用 tint-transform；非零 Lab BlackPoint、原生色版/叠印、完整颜色管理与独立阅读器对照未完成。
+
 Indexed 的 DeviceN 基空间通过现有 tint-transform/替代空间转换，不再一概拒绝；混合 None 分量仍保留并传给显示转换，不将其当作整体不绘制。Indexed 基空间为 Separation /None 或全 None DeviceN 时，绘制适配层会抑制路径、文字和普通图像，DisplayList 仍保留对象。原生专色版、叠印、Type4 函数执行与完整 DeviceN 兼容性仍未实现。
 
 `document.resources().embed_png_image(page, encoded)` 使用 png 0.18.1 解码 PNG，展开调色板/透明信息并复用 RGB/RGBA 注册；RGB、RGBA、灰度、灰度 alpha 和调色板+tRNS 已有保存/解释回归。检查原始文件字节、像素、转换输出大小及解码内部限额；校验 CRC 和结束数据，无效页号在解码前拒绝。APNG、16 位和 ICC 转换暂不支持，gamma/色彩管理未实现；多缓冲聚合峰值不在单项限额内。`create_transparency` 示例增加 `--png` 模式，基础 RGBA 导入已通过 MuPDF 中心像素对照，其他变体仍需独立验收。

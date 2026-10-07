@@ -3231,6 +3231,190 @@ mod tests {
     }
 
     #[test]
+    fn calibrated_image_pixels_and_reverse_decode_survive_save() {
+        use pdf::{
+            document::{
+                PdfDocument,
+                resource_manager::ResourceKind,
+                save_options::{SaveOptions, StreamCompression},
+            },
+            io::stream_reader::StreamReader,
+            objects::{PdfObject, pdf_stream::PdfStream},
+            page::page_builder::PageBuilder,
+            parser::syntax::{ParseMode, SyntaxParser},
+        };
+        let parse = |source: &str| {
+            SyntaxParser::new(
+                StreamReader::try_new(std::io::Cursor::new(source.as_bytes().to_vec())).unwrap(),
+            )
+            .get_object()
+            .unwrap()
+        };
+        for kind in 0..8 {
+            let icc = kind == 1;
+            for reversed in [false, true] {
+                let doc = PdfDocument::new().unwrap();
+                doc.add_page_with_builder(0, PageBuilder::new().size(40.0, 20.0))
+                    .unwrap();
+                let (space, samples, low, high) = if icc {
+                    let dict = parse("<< /N 1 /Range [0.25 0.75] /Alternate /DeviceGray >>")
+                        .into_dict()
+                        .unwrap();
+                    let id = doc
+                        .try_insert_object(PdfObject::PdfStream(PdfStream::new(dict, vec![])))
+                        .unwrap();
+                    (
+                        format!("[/ICCBased {} {} R]", id.obj_num(), id.gen_num()),
+                        vec![0, 0, 255, 255],
+                        64,
+                        191,
+                    )
+                } else if kind == 2 || kind == 5 || kind == 6 {
+                    let colorant = if kind == 5 { "None" } else { "Spot" };
+                    let space = if kind == 6 {
+                        let dict = parse("<< /FunctionType 4 /Domain [0 1] /Range [0 1] >>")
+                            .into_dict()
+                            .unwrap();
+                        let id = doc
+                            .try_insert_object(PdfObject::PdfStream(PdfStream::new(
+                                dict,
+                                b"{.5 gt {1} {0} ifelse}".to_vec(),
+                            )))
+                            .unwrap();
+                        format!(
+                            "[/Separation /Spot /DeviceGray {} {} R]",
+                            id.obj_num(),
+                            id.gen_num()
+                        )
+                    } else {
+                        format!(
+                            "[/Separation /{colorant} /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 >>]"
+                        )
+                    };
+                    (
+                        space,
+                        vec![0, 0, 255, 255],
+                        if kind == 5 { 255 } else { 0 },
+                        255,
+                    )
+                } else if kind == 3 || kind == 4 || kind == 7 {
+                    let (function, bytes) = if kind == 7 {
+                        (
+                            parse(
+                                "<< /FunctionType 4 /Domain [0 1 0 1 0 1 0 1 0 1 0 1] /Range [0 1] >>",
+                            )
+                            .into_dict()
+                            .unwrap(),
+                            b"{pop pop pop pop pop .5 gt {1} {0} ifelse}".to_vec(),
+                        )
+                    } else {
+                        (parse("<< /FunctionType 0 /Domain [0 1 0 1 0 1 0 1 0 1 0 1] /Range [0 1] /Size [2 1 1 1 1 1] /BitsPerSample 8 >>").into_dict().unwrap(), vec![0, 255])
+                    };
+                    let id = doc
+                        .try_insert_object(PdfObject::PdfStream(PdfStream::new(function, bytes)))
+                        .unwrap();
+                    let names = if kind == 4 {
+                        "/None /None /None /None /None /None"
+                    } else {
+                        "/A /B /None /C /D /E"
+                    };
+                    let mut samples = vec![0; 24];
+                    samples[12] = 255;
+                    samples[13] = 255;
+                    (
+                        format!(
+                            "[/DeviceN [{names}] /DeviceGray {} {} R]",
+                            id.obj_num(),
+                            id.gen_num()
+                        ),
+                        samples,
+                        if kind == 4 { 255 } else { 0 },
+                        255,
+                    )
+                } else {
+                    (
+                        "[/Lab << /WhitePoint [0.95047 1 1.08883] /Range [0 0 0 0] >>]".into(),
+                        vec![0, 0, 0, 0, 0, 0, 255, 255, 0, 0, 0, 0],
+                        0,
+                        255,
+                    )
+                };
+                let decode = if reversed {
+                    if icc {
+                        "/Decode [0.75 0.25]"
+                    } else if kind == 2 || kind == 5 || kind == 6 {
+                        "/Decode [1 0]"
+                    } else if kind == 3 || kind == 4 || kind == 7 {
+                        "/Decode [1 0 0 1 0 1 0 1 0 1 0 1]"
+                    } else {
+                        "/Decode [100 0 0 0 0 0]"
+                    }
+                } else {
+                    ""
+                };
+                let dict = parse(&format!("<< /Type /XObject /Subtype /Image /Width 2 /Height 1 /BitsPerComponent 16 /ColorSpace {space} {decode} >>")).into_dict().unwrap();
+                let id = doc
+                    .try_insert_object(PdfObject::PdfStream(PdfStream::new(dict, samples)))
+                    .unwrap();
+                let name = doc
+                    .resources()
+                    .register_existing(0, ResourceKind::Image, id)
+                    .unwrap();
+                doc.replace_page_contents(0, format!("q 40 0 0 20 0 0 cm /{name} Do Q").into_bytes())
+                    .unwrap();
+                let render = |doc: &PdfDocument<std::io::Cursor<Vec<u8>>>| {
+                    assert_eq!(
+                        doc.get_page(0)
+                            .unwrap()
+                            .display_list()
+                            .unwrap()
+                            .objects()
+                            .len(),
+                        1
+                    );
+                    let mut renderer = SkiaRender::new(72.0, 72.0).unwrap();
+                    doc.get_page(0).unwrap().display(&mut renderer).unwrap();
+                    let info = skia_safe::ImageInfo::new(
+                        (40, 20),
+                        skia_safe::ColorType::RGBA8888,
+                        skia_safe::AlphaType::Unpremul,
+                        None,
+                    );
+                    let mut pixels = vec![0; 40 * 20 * 4];
+                    assert!(
+                        renderer
+                            .surface
+                            .read_pixels(&info, &mut pixels, 40 * 4, (0, 0))
+                    );
+                    pixels
+                };
+                let expected = render(&doc);
+                if kind == 4 || kind == 5 {
+                    assert!(expected.iter().all(|byte| *byte == 255));
+                }
+                for (x, left) in [(5, true), (35, false)] {
+                    let gray = if left != reversed { low } else { high };
+                    let offset = (10 * 40 + x) * 4;
+                    assert_eq!(&expected[offset..offset + 4], &[gray, gray, gray, 255]);
+                }
+                for compression in [
+                    StreamCompression::Preserve,
+                    StreamCompression::FlateUnencoded,
+                ] {
+                    let bytes = doc
+                        .save_to_bytes_with_options(SaveOptions {
+                            compression,
+                            ..Default::default()
+                        })
+                        .unwrap();
+                    let reopened = PdfDocument::from_bytes_with_mode(bytes, ParseMode::Strict).unwrap();
+                    assert_eq!(render(&reopened), expected);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn invisible_text_is_extractable_but_does_not_paint() {
         use pdf::{
             document::{resource_manager::StandardFont, PdfDocument},

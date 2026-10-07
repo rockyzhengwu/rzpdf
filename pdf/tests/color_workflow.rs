@@ -20,6 +20,243 @@ struct ColorDevice {
     text_modes: Vec<pdf::page::text_state::TextRenderingMode>,
     images: usize,
     indexed_pixels: Vec<Vec<u8>>,
+    shadings: Vec<pdf::page::shading_object::ShadingObject>,
+}
+
+#[test]
+fn shading_resource_alias_state_and_replay_survive_strict_save() {
+    use pdf::{document::resource_manager::ResourceKind, page::page_object::PageObject};
+    let doc = PdfDocument::new().unwrap();
+    doc.add_page(0).unwrap();
+    let gray = doc
+        .resources()
+        .register_color_space(0, parse_object("/DeviceGray"))
+        .unwrap();
+    let none = doc
+        .resources()
+        .register_color_space(
+            0,
+            parse_object(
+                "[/Separation /None /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 >>]",
+            ),
+        )
+        .unwrap();
+    let object = parse_object(&format!(
+        "<< /ShadingType 2 /ColorSpace /{gray} /Coords [0 0 10 0] /Extend [true true] /Function << /FunctionType 2 /Domain [0 1] /N 1 >> >>"
+    ));
+    let id = doc.try_insert_object(object).unwrap();
+    let name = doc
+        .resources()
+        .register_existing(0, ResourceKind::Shading, id)
+        .unwrap();
+    assert_eq!(
+        doc.resources()
+            .register_existing(0, ResourceKind::Shading, id)
+            .unwrap(),
+        name
+    );
+    doc.replace_page_contents(
+        0,
+        format!("/{none} cs q 2 0 0 3 5 7 cm /{name} sh Q").into_bytes(),
+    )
+    .unwrap();
+    let verify = |doc: &PdfDocument<Cursor<Vec<u8>>>| {
+        let mut page = doc.get_page(0).unwrap();
+        let list = page.display_list().unwrap();
+        assert!(list.diagnostics().is_empty());
+        assert_eq!(list.objects().len(), 1);
+        let PageObject::Shading(object) = &list.objects()[0] else {
+            panic!("expected shading")
+        };
+        assert!(object.source().is_some());
+        assert_eq!(object.resource_name, name);
+        assert_eq!(object.shading.color_at(0.5).unwrap().r(), 128);
+        assert!(
+            object
+                .graphic_state
+                .color_state
+                .fill_color_space
+                .is_nonpainting()
+        );
+        let mut direct = ColorDevice::default();
+        page.display(&mut direct).unwrap();
+        let mut replay = ColorDevice::default();
+        list.replay(&mut replay).unwrap();
+        assert_eq!(direct.shadings.len(), 1);
+        assert_eq!(replay.shadings.len(), 1);
+        let components = |matrix: &pdf::geom::matrix::Matrix| {
+            [
+                matrix.a(),
+                matrix.b(),
+                matrix.c(),
+                matrix.d(),
+                matrix.e(),
+                matrix.f(),
+            ]
+        };
+        assert_eq!(
+            components(&direct.shadings[0].matrix),
+            components(&replay.shadings[0].matrix)
+        );
+    };
+    verify(&doc);
+    for compression in [
+        StreamCompression::Preserve,
+        StreamCompression::FlateUnencoded,
+    ] {
+        let bytes = doc
+            .save_to_bytes_with_options(SaveOptions {
+                compression,
+                ..Default::default()
+            })
+            .unwrap();
+        verify(&PdfDocument::from_bytes_with_mode(bytes, ParseMode::Strict).unwrap());
+    }
+}
+
+#[test]
+fn type4_conditional_colors_and_images_survive_strict_save() {
+    use pdf::{
+        document::resource_manager::ResourceKind,
+        objects::{PdfObject, pdf_stream::PdfStream},
+    };
+    for devicen in [false, true] {
+        let doc = PdfDocument::new().unwrap();
+        doc.add_page(0).unwrap();
+        let domain = if devicen { "0 1 0 1" } else { "0 1" };
+        let dict = parse_object(&format!(
+            "<< /FunctionType 4 /Domain [{domain}] /Range [0 1 0 1 0 1] >>"
+        ))
+        .into_dict()
+        .unwrap();
+        let program = if devicen {
+            b"{add .5 gt {1 0 0} {0 1 0} ifelse}".as_slice()
+        } else {
+            b"{.5 gt {1 0 0} {0 1 0} ifelse}"
+        };
+        let function = doc
+            .try_insert_object(PdfObject::PdfStream(PdfStream::new(dict, program.to_vec())))
+            .unwrap();
+        let family = if devicen {
+            "/DeviceN [/A /B]"
+        } else {
+            "/Separation /Spot"
+        };
+        let space = format!(
+            "[{family} /DeviceRGB {} {} R]",
+            function.obj_num(),
+            function.gen_num()
+        );
+        let color = doc
+            .resources()
+            .register_color_space(0, parse_object(&space))
+            .unwrap();
+        let samples = if devicen {
+            vec![32, 32, 128, 128]
+        } else {
+            vec![64, 191]
+        };
+        let dict = parse_object(&format!("<< /Type /XObject /Subtype /Image /Width 2 /Height 1 /BitsPerComponent 8 /ColorSpace {space} >>")).into_dict().unwrap();
+        let id = doc
+            .try_insert_object(PdfObject::PdfStream(PdfStream::new(dict, samples)))
+            .unwrap();
+        let image = doc
+            .resources()
+            .register_existing(0, ResourceKind::Image, id)
+            .unwrap();
+        let low = if devicen { "0.125 0.125" } else { "0.25" };
+        let high = if devicen { "0.5 0.5" } else { "0.75" };
+        doc.replace_page_contents(
+            0,
+            format!("/{color} cs {low} scn 0 0 10 10 re f {high} scn 10 0 10 10 re f /{image} Do")
+                .into_bytes(),
+        )
+        .unwrap();
+        let verify = |doc: &PdfDocument<Cursor<Vec<u8>>>| {
+            let mut device = ColorDevice::default();
+            doc.get_page(0).unwrap().display(&mut device).unwrap();
+            assert_eq!(device.colors, vec![[0, 255, 0], [255, 0, 0]]);
+            assert_eq!(
+                device.indexed_pixels,
+                vec![vec![0, 255, 0, 255, 255, 0, 0, 255]]
+            );
+        };
+        verify(&doc);
+        for compression in [
+            StreamCompression::Preserve,
+            StreamCompression::FlateUnencoded,
+        ] {
+            let bytes = doc
+                .save_to_bytes_with_options(SaveOptions {
+                    compression,
+                    ..Default::default()
+                })
+                .unwrap();
+            verify(&PdfDocument::from_bytes_with_mode(bytes, ParseMode::Strict).unwrap());
+        }
+    }
+}
+
+#[test]
+fn six_component_devicen_images_preserve_rows_decode_and_save() {
+    use pdf::{
+        document::resource_manager::ResourceKind,
+        objects::{PdfObject, pdf_stream::PdfStream},
+    };
+    for reverse in [false, true] {
+        let doc = PdfDocument::new().unwrap();
+        doc.add_page(0).unwrap();
+        let function = parse_object("<< /FunctionType 0 /Domain [0 1 0 1 0 1 0 1 0 1 0 1] /Range [0 1 0 1 0 1] /Size [2 1 1 1 1 2] /BitsPerSample 8 >>").into_dict().unwrap();
+        let id = doc
+            .try_insert_object(PdfObject::PdfStream(PdfStream::new(
+                function,
+                vec![0, 0, 0, 255, 0, 0, 0, 255, 0, 255, 255, 0],
+            )))
+            .unwrap();
+        let decode = if reverse {
+            "/Decode [0 1 0 1 0 1 0 1 0 1 1 0]"
+        } else {
+            ""
+        };
+        let dict = parse_object(&format!("<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /BitsPerComponent 1 /ColorSpace [/DeviceN [/A /B /None /C /D /E] /DeviceRGB {} {} R] {decode} >>", id.obj_num(), id.gen_num())).into_dict().unwrap();
+        let id = doc
+            .try_insert_object(PdfObject::PdfStream(PdfStream::new(
+                dict,
+                vec![0x02, 0x00, 0x06, 0x10],
+            )))
+            .unwrap();
+        let name = doc
+            .resources()
+            .register_existing(0, ResourceKind::Image, id)
+            .unwrap();
+        doc.replace_page_contents(0, format!("/{name} Do").into_bytes())
+            .unwrap();
+        let mut expected = vec![
+            0, 0, 0, 255, 255, 0, 0, 255, 0, 255, 0, 255, 255, 255, 0, 255,
+        ];
+        if reverse {
+            expected.rotate_left(8);
+        }
+        let verify = |doc: &PdfDocument<Cursor<Vec<u8>>>| {
+            let mut device = ColorDevice::default();
+            doc.get_page(0).unwrap().display(&mut device).unwrap();
+            assert_eq!(device.images, 1);
+            assert_eq!(device.indexed_pixels, vec![expected.clone()]);
+        };
+        verify(&doc);
+        for compression in [
+            StreamCompression::Preserve,
+            StreamCompression::FlateUnencoded,
+        ] {
+            let bytes = doc
+                .save_to_bytes_with_options(SaveOptions {
+                    compression,
+                    ..Default::default()
+                })
+                .unwrap();
+            verify(&PdfDocument::from_bytes_with_mode(bytes, ParseMode::Strict).unwrap());
+        }
+    }
 }
 
 #[test]
@@ -125,7 +362,14 @@ fn indexed_lab_and_icc_ranges_survive_resource_registration_and_save() {
         document::resource_manager::ResourceKind,
         objects::{PdfObject, pdf_stream::PdfStream},
     };
-    for icc in [false, true] {
+    for (icc, indexed, reverse) in [
+        (false, true, false),
+        (true, true, false),
+        (false, false, false),
+        (true, false, false),
+        (false, false, true),
+        (true, false, true),
+    ] {
         let doc = PdfDocument::new().unwrap();
         doc.add_page(0).unwrap();
         let base = if icc {
@@ -140,9 +384,25 @@ fn indexed_lab_and_icc_ranges_survive_resource_registration_and_save() {
             "[/Lab << /WhitePoint [0.95047 1 1.08883] /Range [0 0 0 0] >>]".into()
         };
         let palette = if icc { "00FF" } else { "000000FFFFFF" };
-        let dict = parse_object(&format!("<< /Type /XObject /Subtype /Image /Width 2 /Height 1 /BitsPerComponent 8 /ColorSpace [/Indexed {base} 1 <{palette}>] >>")).into_dict().unwrap();
+        let (space, bits, samples) = if indexed {
+            (format!("[/Indexed {base} 1 <{palette}>]"), 8, vec![0, 1])
+        } else if icc {
+            (base, 16, vec![0, 0, 255, 255])
+        } else {
+            (base, 16, vec![0, 0, 0, 0, 0, 0, 255, 255, 0, 0, 0, 0])
+        };
+        let decode = if reverse {
+            if icc {
+                "/Decode [0.75 0.25]"
+            } else {
+                "/Decode [100 0 0 0 0 0]"
+            }
+        } else {
+            ""
+        };
+        let dict = parse_object(&format!("<< /Type /XObject /Subtype /Image /Width 2 /Height 1 /BitsPerComponent {bits} /ColorSpace {space} {decode} >>")).into_dict().unwrap();
         let id = doc
-            .try_insert_object(PdfObject::PdfStream(PdfStream::new(dict, vec![0, 1])))
+            .try_insert_object(PdfObject::PdfStream(PdfStream::new(dict, samples)))
             .unwrap();
         let name = doc
             .resources()
@@ -150,11 +410,14 @@ fn indexed_lab_and_icc_ranges_survive_resource_registration_and_save() {
             .unwrap();
         doc.replace_page_contents(0, format!("/{name} Do").into_bytes())
             .unwrap();
-        let expected = if icc {
+        let mut expected = if icc {
             vec![vec![64, 64, 64, 255, 191, 191, 191, 255]]
         } else {
             vec![vec![0, 0, 0, 255, 255, 255, 255, 255]]
         };
+        if reverse {
+            expected[0].rotate_left(4);
+        }
         let verify = |doc: &PdfDocument<Cursor<Vec<u8>>>| {
             let mut device = ColorDevice::default();
             doc.get_page(0).unwrap().display(&mut device).unwrap();
@@ -193,6 +456,10 @@ impl ColorDevice {
 }
 
 impl Device for ColorDevice {
+    fn do_shading(&mut self, shading: pdf::page::shading_object::ShadingObject) -> PdfResult<()> {
+        self.shadings.push(shading);
+        Ok(())
+    }
     fn start_page(&mut self, _: f32, _: f32) -> PdfResult<()> {
         Ok(())
     }
@@ -204,6 +471,12 @@ impl Device for ColorDevice {
         if matches!(
             image.image.colorspace(),
             pdf::color::colorspace::ColorSpace::Indexed(_)
+                | pdf::color::colorspace::ColorSpace::CalGray(_)
+                | pdf::color::colorspace::ColorSpace::CalRgb(_)
+                | pdf::color::colorspace::ColorSpace::Lab(_)
+                | pdf::color::colorspace::ColorSpace::IccBased(_)
+                | pdf::color::colorspace::ColorSpace::Separation(_)
+                | pdf::color::colorspace::ColorSpace::DeviceN(_)
         ) {
             self.indexed_pixels.push(image.image.rgba_buffer()?);
         }

@@ -11,10 +11,26 @@ use crate::{
     pdf_context::PDFContext,
 };
 
+mod calculator;
 pub mod exponential;
 pub mod postscript;
 pub mod sampled;
 pub mod stitching;
+
+fn retained_vector_bytes<T>(values: &Vec<T>) -> PdfResult<usize> {
+    values
+        .capacity()
+        .checked_mul(std::mem::size_of::<T>())
+        .ok_or_else(|| PdfError::ResourceLimit("function retained capacity overflow".into()))
+}
+
+fn retained_total(values: &[usize]) -> PdfResult<usize> {
+    values.iter().try_fold(0usize, |total, value| {
+        total
+            .checked_add(*value)
+            .ok_or_else(|| PdfError::ResourceLimit("function retained payload overflow".into()))
+    })
+}
 
 #[derive(Debug, Clone)]
 pub enum Function {
@@ -80,6 +96,52 @@ pub(crate) fn create_function_at_depth<R: Seek + Read>(
 }
 
 impl Function {
+    pub(crate) fn retained_payload_bytes(
+        &self,
+        limits: &crate::parser::options::Limits,
+    ) -> PdfResult<usize> {
+        let mut work = Vec::new();
+        work.try_reserve_exact(1)
+            .map_err(|_| PdfError::ResourceLimit("function accounting allocation".into()))?;
+        work.push(self);
+        let mut nodes = limits.max_objects;
+        let mut total = 0usize;
+        while let Some(function) = work.pop() {
+            nodes = nodes
+                .checked_sub(1)
+                .ok_or_else(|| PdfError::ResourceLimit("function accounting nodes".into()))?;
+            let bytes = match function {
+                Self::Type0(f) => f.retained_own_bytes()?,
+                Self::Type2(f) => f.retained_own_bytes()?,
+                Self::Type3(f) => f.retained_own_bytes()?,
+                Self::Type4(f) => f.retained_own_bytes()?,
+            };
+            total = total
+                .checked_add(bytes)
+                .filter(|total| *total <= limits.max_decoded_bytes)
+                .ok_or_else(|| PdfError::ResourceLimit("function retained payload".into()))?;
+            if let Self::Type3(f) = function {
+                let children = f.children();
+                let needed = work
+                    .len()
+                    .checked_add(children.len())
+                    .filter(|needed| {
+                        *needed <= nodes
+                            && needed
+                                .checked_mul(std::mem::size_of::<&Function>())
+                                .is_some_and(|bytes| bytes <= limits.max_decoded_bytes)
+                    })
+                    .ok_or_else(|| {
+                        PdfError::ResourceLimit("function accounting worklist".into())
+                    })?;
+                work.try_reserve_exact(needed - work.len()).map_err(|_| {
+                    PdfError::ResourceLimit("function accounting allocation".into())
+                })?;
+                work.extend(children);
+            }
+        }
+        Ok(total)
+    }
     pub(crate) fn dimensions(&self) -> (usize, usize) {
         match self {
             Self::Type0(f) => f.dimensions(),

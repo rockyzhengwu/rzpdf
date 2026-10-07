@@ -5,7 +5,7 @@ use crate::{
     error::{PdfError, PdfResult},
     geom::{matrix::Matrix, point::Point, rectangle::Rectangle},
     io::stream_reader::StreamReader,
-    objects::{pdf_dict::PdfDict, PdfObject},
+    objects::{PdfObject, pdf_dict::PdfDict},
     page::{content_interpreter::Interpreter, content_parser::ContentParser},
     parser::syntax::SyntaxParser,
     pdf_context::PDFContext,
@@ -35,6 +35,7 @@ pub mod page_object;
 pub mod path_object;
 pub mod pdf_form;
 pub mod pdf_image;
+pub mod shading_object;
 pub mod source_provenance;
 pub mod text_extraction;
 pub mod text_object;
@@ -442,10 +443,12 @@ mod geometry_tests {
         ] {
             let mut dict = PdfDict::default();
             dict.insert("Contents".into(), contents);
-            assert!(PdfPage::new(PdfObject::PdfDict(dict), &ctx)
-                .content_bytes()
-                .unwrap()
-                .is_empty());
+            assert!(
+                PdfPage::new(PdfObject::PdfDict(dict), &ctx)
+                    .content_bytes()
+                    .unwrap()
+                    .is_empty()
+            );
         }
         let mut dict = PdfDict::default();
         dict.insert(

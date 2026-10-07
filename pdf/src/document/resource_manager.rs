@@ -11,6 +11,7 @@ pub enum ResourceKind {
     Image,
     Form,
     ColorSpace,
+    Shading,
 }
 
 /// Unembedded standard Latin fonts. Unicode text still needs font-specific encoding.
@@ -668,6 +669,30 @@ impl<R: Read + Seek> ResourceManager<'_, R> {
         doc.edit_transaction(|doc| {
             let object = doc.resolve_object(id)?;
             let (category, prefix) = match kind {
+                ResourceKind::Shading => {
+                    let object = crate::color::shading::Shading::resolve_resource_colorspace(
+                        &object,
+                        &doc.ctx,
+                        |name| {
+                            let resources = doc.get_page(page_index)?.resource()?;
+                            let table = resources.get("ColorSpace").ok_or_else(|| {
+                                PdfError::PageResourceError("ColorSpace resources missing".into())
+                            })?;
+                            let table = doc.ctx.resolve(table)?;
+                            table
+                                .as_dict()
+                                .and_then(|dict| dict.get(name))
+                                .cloned()
+                                .ok_or_else(|| {
+                                    PdfError::PageResourceError(format!(
+                                        "ColorSpace/{name} missing"
+                                    ))
+                                })
+                        },
+                    )?;
+                    crate::color::shading::Shading::try_new(&object, &doc.ctx)?;
+                    ("Shading", "Sh")
+                }
                 ResourceKind::ColorSpace => {
                     crate::color::colorspace::ColorSpace::try_new(&object, &doc.ctx)?;
                     ("ColorSpace", "CS")

@@ -24,6 +24,17 @@ pub struct Sampled {
 }
 
 impl Sampled {
+    pub(super) fn retained_own_bytes(&self) -> PdfResult<usize> {
+        super::retained_total(&[
+            super::retained_vector_bytes(&self.domain)?,
+            super::retained_vector_bytes(&self.range)?,
+            super::retained_vector_bytes(&self.size)?,
+            super::retained_vector_bytes(&self.encode)?,
+            super::retained_vector_bytes(&self.decode)?,
+            super::retained_vector_bytes(&self.samples)?,
+            super::retained_vector_bytes(&self.idx_offset)?,
+        ])
+    }
     pub(super) fn dimensions(&self) -> (usize, usize) {
         (self.m, self.n)
     }

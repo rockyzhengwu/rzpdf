@@ -170,6 +170,14 @@ mod tests {
 }
 
 impl Exponential {
+    pub(super) fn retained_own_bytes(&self) -> PdfResult<usize> {
+        super::retained_total(&[
+            super::retained_vector_bytes(&self.domain)?,
+            super::retained_vector_bytes(&self.range)?,
+            super::retained_vector_bytes(&self.c0)?,
+            super::retained_vector_bytes(&self.c1)?,
+        ])
+    }
     pub(super) fn dimensions(&self) -> (usize, usize) {
         (self.m, self.n)
     }

@@ -13,4 +13,5 @@ pub mod indexed;
 pub mod lab;
 pub mod pattern;
 pub mod separation;
+pub mod shading;
 pub mod value;

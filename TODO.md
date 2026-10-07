@@ -93,6 +93,40 @@ P0 的普通回归、错误处理、预算和真实样本登记贯穿上述工�
 
 ### 实施记录
 
+- 2026-10-07 本地提交检查点：Shading Type2/3 已接入命名颜色资源解析、注册复用、sh 显示事件、状态/来源记录及回放；新增轴向投影和径向求根的点采样。最终 session 89144 退出 0：544 单元、23 颜色流程、14 资源测试全部通过，日志 `/tmp/rzpdf-shading-geometry-final.log`。Type4 扩展后的 render 全量此前 33 测试通过；当前尚未重新跑完整工作区。PageObject::Shading 从占位变为携带 ShadingObject，Device 新回调默认返回不支持；Skia 实际渐变绘制仍未实现。函数保留容量及每次绘制载荷已有保守计数，但不等于完整操作级聚合预算。未运行 fuzz，未推送远程，P4 仍未完成。
+
+- 2026-10-07 Shading 参数模型阶段：新增 color::shading 的 Type2 轴向/Type3 径向参数，校验有限坐标、非负半径、Domain/Extend/BBox/Background/AntiAlias，拒绝 Pattern/Indexed 基空间。单函数必须 1→颜色分量，组件函数数组各 1→1，函数树节点额度跨组件共用；color_at 按 Domain 插值后调用已有函数/颜色转换。参数错误与总节点失败后重试/修订号不变已覆盖。session 67163 退出 0：541 单元、22 流程通过，0 失败/忽略，日志 `/tmp/rzpdf-shading-model-final.log`。当前仅模型/数值，sh 资源解释、带状态显示事件、显示载荷计数及实际后端尚未接入，不能声称渐变可显示；Type1/4–7、Pattern 和独立阅读器另待推进。未运行 fuzz/自动提交，P4 未完成。
+
+- 2026-10-07 Type4 像素扩展后的 render 全量完成：session 75585 终态退出 0，33 通过、0 失败/忽略（52.73 秒），日志 `/tmp/rzpdf-type4-render-final.log`。当前 PDF 最终回归为 539 单元、22 颜色流程，Skia 覆盖 Type4 Separation/六分量 DeviceN 默认/反转及两保存策略严格读回。独立阅读器、新全工作区、Pattern/Shading 与共享预算尚未完成；Type4 已有选定范围实际求值证据，不等于完整 P4，未运行 fuzz/自动提交。
+
+- 2026-10-07 Type4 Skia 像素专项：既有校准/专色图像测试增加 Type4 驱动的 Separation 与六分量 DeviceN，默认/反转和两保存策略严格重开逐像素一致；现有测试共 16 个参数组合但仍一个测试函数。session 58096 退出 0：1 通过、32 filtered，日志 `/tmp/rzpdf-type4-pixels.log`。此前既有 render session 16781 也已退出 0：33 通过、0 失败/忽略（53.10 秒），日志 `/tmp/rzpdf-type4-render.log`；早于像素组合扩展，不能替代包含新组合的全量。独立阅读器、全工作区与共享预算未完成；未运行 fuzz/自动提交。
+
+- 2026-10-07 Type4 字面量/栈边界：文字实数限制为有限 f32 范围，与现有 PDF 数字实现保持一致；中间运算仍使用 f64。补 100 项操作数栈接受、99 项容量拒绝、过大字面量拒绝。session 52277 终态退出 0：539 单元、22 流程通过，0 失败/忽略，日志 `/tmp/rzpdf-type4-boundaries-final.log`。结果更新前述 Type4 边界待完成状态；Skia Type4 专项、独立阅读器、全工作区和完整操作级聚合预算仍未完成，P4 不勾选；未运行 fuzz/自动提交。
+
+- 2026-10-07 Type4 求值与颜色流程：接入 40 个运算符及 true/false，支持显式执行帧、整数/实数/布尔/过程类型，整数溢出提升实数、零除/未定义计算拒绝、copy/roll 工作量计费、每次执行独立栈及深度/步骤/存储限额。公共 eval 校验有限输入、Domain 裁剪、精确输出数量/数字类型与 Range 裁剪后转 f32；f64 中间值允许超过 f32 范围。间接参数严格重开从旧 UnsupportedFeature 预期升级为 add 实际求值。新增运算符/错误/额度与公共裁剪单元、Separation/DeviceN 条件函数路径/图像绿红及两保存策略严格读回。session 71459 退出 0：538 单元、22 流程通过，0 失败/忽略，日志 `/tmp/rzpdf-type4-color-final.log`。字面量/100 项栈边界、Skia Type4 专项、新全工作区及聚合预算仍待完成；未运行 fuzz/自动提交，P4 未完成。
+
+- 2026-10-07 Type4 程序模型阶段：新增 calculator 私有模块，按 PDF 数字/布尔/注释/花括号语法编译为扁平指令和过程区间，以显式帧限制嵌套，限定规定运算符并拒绝一般 PostScript 语法。构造保留程序及额度配置；session 17097 退出 0：533 单元、21 颜色流程通过，日志 `/tmp/rzpdf-type4-compiler.log`。后续已编写有界显式执行帧、数值/逻辑/栈/条件运算代码，编译检查仍进行中，尚未接入公共 eval 或完成求值测试；Type4/P4 不勾选，未运行 fuzz/自动提交。
+
+- 2026-10-07 扩展专色像素后的 render 全量完成：session 67031 终态退出 0，33 通过、0 失败/忽略（53.78 秒），日志 `/tmp/rzpdf-spot-image-render-final.log`。包含普通专色/None 扩展，PDF 最终为 530 单元、21 流程通过。没有新增函数数目，不把 12 个参数组合重复计为 12 个测试；独立阅读器及新全工作区门禁仍待完成，完整 P4 未完成；未运行 fuzz/自动提交。
+
+- 2026-10-07 普通专色/None 图像像素专项通过：扩展已有校准图像 Skia 测试为 Lab、ICC、Separation Spot、六分量混合 None DeviceN、六分量全 None DeviceN、Separation None，共 12 个默认/反转组合。检查明确灰度、None 全白、原 Image 对象保留及两保存策略严格读回全页一致。session 9040 终态退出 0：1 通过、32 filtered，日志 `/tmp/rzpdf-spot-image-pixels.log`。仅局部格式整理，测试函数总数仍 33；更新此前专色像素待补齐记录。独立阅读器、原生色版/叠印与完整 P4 未完成；未运行 fuzz/自动提交。
+
+- 2026-10-07 非设备图像错误/预算验收：新增 Decode 类型/数量/非数值拒绝、null 默认、空/超长采样拒绝、端点 15 字节拒绝/16 字节接受、保留端点容量计数与 RGBA 限额用例。session 22664 终态退出 0：530 单元、21 流程通过，0 失败/忽略，日志 `/tmp/rzpdf-spot-image-budget-final.log`。此前专色改动的 render session 41069 也已退出 0：33 通过（52.16 秒），日志 `/tmp/rzpdf-spot-image-render.log`；无新专色像素专项。本条更新下方待验收状态，完整 OperationBudget、专色像素与新全工作区仍待完成；未运行 fuzz/自动提交。
+
+- 2026-10-07 普通 Separation/DeviceN 图像：接入高精度 packed 采样路径，Decode 端点改为可失败预留的动态数组，按分量数和 decoded-byte 限额检查，保留数组容量计入 display payload；设备/Indexed/SMask 固定端点辅助入口显式拒绝超过四分量。新增六分量 DeviceN（一位、两行填充、混合 None 名称、第六分量反转、两保存策略严格读回）与 16 位 Separation 反转用例。session 81024 终态退出 0：529 单元、21 颜色流程通过，0 失败/忽略，日志 `/tmp/rzpdf-spot-image-regressions.log`。仍仅 tint-transform/Alternate 显示近似，专色色版/叠印、额外错误/额度验收、Skia 新专项及新全工作区尚未完成；未运行 fuzz/自动提交，P4 保持未完成。
+
+- 2026-10-07 普通 Lab/ICC 像素专项后的 render 全量完成：session 99155 终态退出 0，33 测试通过、0 失败/忽略（48.66 秒），日志 `/tmp/rzpdf-calibrated-image-render-final.log`。本条取代下方该 session 待终态说明，包含新像素专项；当前 PDF 最终回归为 529 单元、20 颜色流程通过。新全工作区、独立阅读器、CalGray/CalRGB 专项及完整 P4 仍未完成；未运行 fuzz/自动提交。
+
+- 2026-10-07 普通 Lab/ICC 图像像素专项：新增 Skia `calibrated_image_pixels_and_reverse_decode_survive_save`，四组合覆盖 Lab 黑白、ICC 64/191 灰度的 16 位默认/反转，明确内部像素值及两保存策略严格读回全页逐字节一致。专项 session 42740 退出 0：1 通过、32 filtered，日志 `/tmp/rzpdf-calibrated-image-pixels.log`。仅局部格式整理新增测试，未整文件重排；包含新增测试的 render 全量 session 99155 已启动，日志 `/tmp/rzpdf-calibrated-image-render-final.log`，待终态。不是独立阅读器对照，CalGray/CalRGB 专项和完整 ICC 尚未验收；未运行 fuzz/自动提交。
+
+- 2026-10-07 校准颜色图像的 Skia 既有回归完成：session 28900 终态退出 0，32 测试通过、0 失败/忽略（47.28 秒），日志 `/tmp/rzpdf-calibrated-image-render.log`。本条更新下方对应实现记录的“Skia 回归待完成”；仅验证既有用例没有回退，未新增普通校准图像的 Skia 像素专项，不能冒充新空间视觉验收。架构文档补充 packed 保留与 data()/RGBA 表示边界；仍需新增像素专项、独立阅读器及全工作区验证。
+
+- 2026-10-07 普通 CalGray/CalRGB/Lab/ICCBased 图像：保留 packed 载荷及位深/Decode，RGBA 转换逐行读取 1/2/4/8/16 位并以 f64 插值后进入颜色转换。Lab 默认 Decode 使用 L/a/b 范围，ICC 使用 Range，仍走 Alternate 近似。新增 Lab 默认范围、16 位 CalGray 反转、CalRGB 行填充单元；真实 Lab/ICC 图像资源增加 16 位默认/反转及两保存策略严格读回。最终 session 6230 退出 0：529 单元、20 流程通过，0 失败/忽略，日志 `/tmp/rzpdf-calibrated-image-final.log`。Skia 回归、独立阅读器、完整 ICC、Separation/DeviceN 普通图像和新全工作区仍待完成；未运行 fuzz/自动提交，P4 未完成。
+
+- 2026-10-07 Indexed 图像转换缓存：RGBA 转换使用单次调用局部的 256 槽固定栈数组，仅对出现过的采样索引求值；重复索引不再逐像素分配分量数组、求值 tint-transform，未用表项不提前转换，缓存不跨图像/调用持久化。既有低位深/Decode 单元追加跨行重复索引用例。`cargo test -p pdf --lib --test color_workflow --locked --quiet` 终态退出 0：528 单元、20 流程通过，0 失败/忽略，日志 `/tmp/rzpdf-indexed-palette-cache.log`；差异检查通过。未建立性能基准或全链路预算验收，不能勾选 P5-06/AR-03；此前 812 全工作区结果早于本缓存修改，未运行 fuzz，未自动提交。
+
+- 2026-10-07 颜色/图像阶段全工作区门禁完成：下方 session 3702 已终态退出 0，`cargo test --workspace --locked --quiet` 日志 `/tmp/rzpdf-workspace-image-colors.log` 共 45 条结果，812 测试通过、0 失败/忽略，包含 pdf 单元 528、39 个集成目标及 render 32；文档测试正常结束。源差异指纹在提交前保持一致，随后本地提交为 `853ae38`，提交动作未修改被测代码。启动记录的“尚待终态”由本条结果取代；历史专项记录的未运行全量仅描述各自当时状态。未运行 fuzz，远端 CI 未验证，P0-01/P4/整体目标仍未完成；未推送，未知 `test.png` 保持未跟踪。
+
 - 2026-10-07 颜色/图像阶段全工作区门禁启动：此前工作区 792 测试记录早于后续 DeviceN/None/stencil/Indexed 改动，不能替代当前版本全量结果。启动 `cargo test --workspace --locked --quiet`，进程 session 3702，日志 `/tmp/rzpdf-workspace-image-colors.log`，尚待终态；期间冻结生产代码，不重复启动。workspace 仅 pdf/render/font-data，fuzz 项目不在成员内，不运行 cargo-fuzz。当前 HEAD `5fd7f56`，pdf/src/render/src/pdf/tests 的工作区差异 SHA-256 `732f29e15d894cba31f088155e5c9f42604e2542e3c5b212a4c66466652596dd`；Darwin x86_64，rustc/cargo 1.96.0，39 个 pdf 集成目标。差异检查通过；现有未使用项和 cargo/config 弃用警告保留。本次启动不是通过声明，远端 CI 仍未验证，P0-01/P4/整体目标保持未完成，未自动提交。
 
 - 2026-10-07 Indexed DeviceN/None 绘制：移除 Indexed RGB 转换对 DeviceN 基空间的旧一概拒绝，完整调色板分量经现有 tint-transform/替代空间显示近似；混合 None 分量仍传入函数，不误判为整体不绘制。Indexed::is_nonpainting 转发基空间，ColorSpace 纳入 Indexed，复用统一 PaintingDevice 抑制对应路径/文字/普通图像而不丢采集对象。新增双输入 Sampled 调色板的路径颜色与两位图像 RGBA（白/青/品红/蓝）、Cyan/Magenta 与 Cyan/None 两组合、两保存严格读回；新增 Separation None/全 None DeviceN 基空间三对象保留、路径/图像抑制和后续红色路径。已有 Skia None 像素测试追加两种 Indexed 包装，仍为同一测试函数，覆盖文字保留与组合绘制可见侧。最终 pdf 单元 528、color_workflow 20 全部通过（退出 0，0 失败/忽略），render 全量 32 通过（退出 0，0 失败/忽略，48.47 秒）；日志 `/tmp/rzpdf-indexed-devicen-none.log`、`/tmp/rzpdf-indexed-none-render.log`。README/架构/测试同步，差异检查通过；新 Indexed 图像独立像素/阅读器、原生专色/叠印、Type4 及完整 P4/聚合预算仍未完成；未运行全工作区/fuzz、未自动提交。

@@ -67,6 +67,57 @@ mod tests {
     }
 
     #[test]
+    fn shading_replay_requires_backend_support_but_keeps_none_objects() {
+        use crate::{
+            color::shading::Shading,
+            device::trace::TraceDevice,
+            document::PdfDocument,
+            geom::matrix::Matrix,
+            io::stream_reader::StreamReader,
+            page::{graphic_state::GraphicState, shading_object::ShadingObject},
+            parser::syntax::SyntaxParser,
+        };
+        let doc = PdfDocument::new().unwrap();
+        for none in [false, true] {
+            let space = if none {
+                "[/Separation /None /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 >>]"
+            } else {
+                "/DeviceGray"
+            };
+            let source = format!(
+                "<< /ShadingType 2 /ColorSpace {space} /Coords [0 0 10 0] /Function << /FunctionType 2 /Domain [0 1] /N 1 >> >>"
+            );
+            let object = SyntaxParser::new(
+                StreamReader::try_new(std::io::Cursor::new(source.into_bytes())).unwrap(),
+            )
+            .get_object()
+            .unwrap();
+            let shading = ShadingObject::new(
+                "S".into(),
+                Matrix::default(),
+                Shading::try_new(&object, doc.ctx()).unwrap(),
+                GraphicState::default(),
+            );
+            let list = DisplayList::new(10.0, 10.0, vec![PageObject::Shading(shading)]);
+            assert_eq!(list.objects().len(), 1);
+            let mut unsupported = FailingDevice {
+                fail_on: "",
+                calls: Vec::new(),
+                path_styles: Vec::new(),
+            };
+            let result = list.replay(&mut unsupported);
+            if none {
+                result.unwrap();
+            } else {
+                assert!(matches!(result, Err(PdfError::UnsupportedFeature(_))));
+            }
+            let mut trace = TraceDevice::new();
+            list.replay(&mut trace).unwrap();
+            assert_eq!(trace.objects().len(), usize::from(!none));
+        }
+    }
+
+    #[test]
     fn none_path_dispatch_matches_direct_interpretation_without_losing_objects() {
         use crate::{
             document::PdfDocument,
@@ -337,7 +388,8 @@ impl DisplayList {
                     (false, _) => device.fill_path(path.clone())?,
                     _ => device.fill_and_stroke_path(path.clone())?,
                 },
-                PageObject::Form | PageObject::Shading => {}
+                PageObject::Shading(shading) => device.do_shading(shading.clone())?,
+                PageObject::Form => {}
             }
         }
         device.end_page()?;

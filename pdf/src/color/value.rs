@@ -4,11 +4,22 @@ pub struct ColorValue {
 }
 
 impl ColorValue {
+    pub(crate) fn retained_bytes(&self) -> crate::error::PdfResult<usize> {
+        self.values
+            .capacity()
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| {
+                crate::error::PdfError::ResourceLimit("color value retained capacity".into())
+            })
+    }
     pub fn new(values: Vec<f32>) -> Self {
         Self { values }
     }
     pub fn values(&self) -> &[f32] {
         self.values.as_slice()
+    }
+    pub(crate) fn values_mut(&mut self) -> &mut [f32] {
+        self.values.as_mut_slice()
     }
     pub fn value_size(&self) -> usize {
         self.values.len()

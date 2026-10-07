@@ -19,12 +19,161 @@ pub struct PdfImage {
     pixel_count: usize,
     max_rgba_bytes: usize,
     soft_mask: Option<Vec<u8>>,
+    // Non-device samples retain packed precision until color conversion.
+    color_sample_decode: Option<(usize, Vec<f64>)>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::color::device_rgb::DeviceRgb;
+
+    #[test]
+    fn nondevice_image_decode_and_retained_budget_boundaries() {
+        use crate::{
+            io::stream_reader::StreamReader,
+            objects::{pdf_dict::PdfDict, pdf_stream::PdfStream},
+            parser::{
+                options::{Limits, ParseOptions},
+                syntax::SyntaxParser,
+            },
+        };
+        use std::io::Cursor;
+        let make_context = |limit| {
+            PDFContext::<Cursor<Vec<u8>>>::new_without_source(
+                PdfDict::default(),
+                ParseOptions {
+                    limits: Limits {
+                        max_decoded_bytes: limit,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+        };
+        let image = |decode: &str, bytes: Vec<u8>| {
+            let source = format!(
+                "<< /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace [/CalGray << /WhitePoint [0.95047 1 1.08883] >>] {decode} >>"
+            );
+            let dict =
+                SyntaxParser::new(StreamReader::try_new(Cursor::new(source.into_bytes())).unwrap())
+                    .get_object()
+                    .unwrap()
+                    .into_dict()
+                    .unwrap();
+            PdfObject::PdfStream(PdfStream::new(dict, bytes))
+        };
+        let ctx = make_context(1024);
+        for decode in [
+            "/Decode [0]",
+            "/Decode [0 1 0 1]",
+            "/Decode /Bad",
+            "/Decode [0 /Bad]",
+        ] {
+            assert!(
+                matches!(
+                    PdfImage::try_new("invalid".into(), &image(decode, vec![128]), &ctx),
+                    Err(PdfError::ObjectError(_))
+                ),
+                "{decode}"
+            );
+        }
+        for bytes in [vec![], vec![0, 1]] {
+            assert!(matches!(
+                PdfImage::try_new("invalid".into(), &image("", bytes), &ctx),
+                Err(PdfError::ObjectError(_))
+            ));
+        }
+        let mut valid =
+            PdfImage::try_new("valid".into(), &image("/Decode null", vec![128]), &ctx).unwrap();
+        let endpoint_capacity = valid.color_sample_decode.as_ref().unwrap().1.capacity();
+        assert_eq!(
+            valid.retained_sample_bytes().unwrap(),
+            1 + endpoint_capacity * std::mem::size_of::<f64>()
+        );
+        assert_eq!(valid.rgba_buffer().unwrap().len(), 4);
+        valid.max_rgba_bytes = 3;
+        assert!(matches!(
+            valid.rgba_buffer(),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        let constrained = make_context(15);
+        assert!(
+            matches!(PdfImage::try_new("endpoint-budget".into(), &image("", vec![128]), &constrained), Err(PdfError::ResourceLimit(message)) if message == "image Decode endpoint budget")
+        );
+        let exact = make_context(16);
+        assert!(PdfImage::try_new("endpoint-budget".into(), &image("", vec![128]), &exact).is_ok());
+    }
+
+    #[test]
+    fn calibrated_images_keep_packed_samples_and_lab_decode_ranges() {
+        use crate::{
+            io::stream_reader::StreamReader,
+            objects::{pdf_dict::PdfDict, pdf_stream::PdfStream},
+            parser::{options::ParseOptions, syntax::SyntaxParser},
+        };
+        use std::io::Cursor;
+        let ctx = PDFContext::<Cursor<Vec<u8>>>::new_without_source(
+            PdfDict::default(),
+            ParseOptions::default(),
+        );
+        for (space, bits, bytes, decode, expected_values) in [
+            (
+                "[/Separation /Spot /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 >>]",
+                16,
+                vec![0, 0, 255, 255],
+                "/Decode [1 0]",
+                vec![vec![1.0], vec![0.0]],
+            ),
+            (
+                "[/Lab << /WhitePoint [0.95047 1 1.08883] /Range [0 0 0 0] >>]",
+                8,
+                vec![0, 0, 0, 255, 0, 0],
+                "",
+                vec![vec![0.0, 0.0, 0.0], vec![100.0, 0.0, 0.0]],
+            ),
+            (
+                "[/CalGray << /WhitePoint [0.95047 1 1.08883] >>]",
+                16,
+                vec![0x80, 0, 255, 255],
+                "/Decode [1 0]",
+                vec![vec![1.0 - 32768.0 / 65535.0], vec![0.0]],
+            ),
+            (
+                "[/CalRGB << /WhitePoint [0.95047 1 1.08883] >>]",
+                2,
+                vec![0x1c, 0xe0],
+                "",
+                vec![vec![0.0, 1.0 / 3.0, 1.0], vec![1.0, 2.0 / 3.0, 0.0]],
+            ),
+        ] {
+            let height = if bits == 2 { 2 } else { 1 };
+            let width = if bits == 2 { 1 } else { 2 };
+            let source = format!(
+                "<< /Width {width} /Height {height} /BitsPerComponent {bits} /ColorSpace {space} {decode} >>"
+            );
+            let dict =
+                SyntaxParser::new(StreamReader::try_new(Cursor::new(source.into_bytes())).unwrap())
+                    .get_object()
+                    .unwrap()
+                    .into_dict()
+                    .unwrap();
+            let object = PdfObject::PdfStream(PdfStream::new(dict, bytes.clone()));
+            let image = PdfImage::try_new("calibrated".into(), &object, &ctx).unwrap();
+            assert_eq!(image.data(), bytes);
+            let expected = expected_values
+                .into_iter()
+                .flat_map(|values| {
+                    let rgb = image
+                        .colorspace
+                        .rgb(&crate::color::value::ColorValue::new(values))
+                        .unwrap();
+                    [rgb.r(), rgb.g(), rgb.b(), 255]
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(image.rgba_buffer().unwrap(), expected, "{space}");
+        }
+    }
 
     #[test]
     fn indexed_images_preserve_indices_across_depths_rows_and_decode() {
@@ -56,6 +205,15 @@ mod tests {
             (2, 4, 1, vec![0x1b], "", vec![0, 1, 2, 3]),
             (4, 4, 1, vec![0x01, 0x2f], "", vec![0, 1, 2, 15]),
             (8, 4, 1, vec![0, 1, 2, 255], "", vec![0, 1, 2, 255]),
+            // Repeated indices reuse the same converted palette entry across rows.
+            (
+                8,
+                3,
+                2,
+                vec![2, 2, 255, 2, 255, 255],
+                "",
+                vec![2, 2, 255, 2, 255, 255],
+            ),
             (
                 16,
                 4,
@@ -432,6 +590,7 @@ mod tests {
             pixel_count: 1,
             max_rgba_bytes: 4,
             soft_mask: None,
+            color_sample_decode: None,
         };
         assert_eq!(image.rgba_buffer().unwrap(), vec![10, 20, 30, 255]);
         image.soft_mask = Some(vec![128]);
@@ -571,6 +730,73 @@ impl PdfImage {
         } else {
             None
         };
+        let color_sample_decode = match &colorspace {
+            ColorSpace::CalGray(_)
+            | ColorSpace::CalRgb(_)
+            | ColorSpace::Lab(_)
+            | ColorSpace::IccBased(_)
+            | ColorSpace::Separation(_)
+            | ColorSpace::DeviceN(_) => {
+                let count = colorspace.number_of_components()?;
+                let slots = count
+                    .checked_mul(2)
+                    .filter(|n| {
+                        n.checked_mul(std::mem::size_of::<f64>())
+                            .is_some_and(|bytes| bytes <= ctx.limits().max_decoded_bytes)
+                    })
+                    .ok_or_else(|| {
+                        PdfError::ResourceLimit("image Decode endpoint budget".into())
+                    })?;
+                let mut defaults = Vec::new();
+                defaults.try_reserve_exact(slots).map_err(|_| {
+                    PdfError::ResourceLimit("image Decode endpoint allocation".into())
+                })?;
+                defaults.resize(slots, 0.0);
+                for pair in defaults.chunks_exact_mut(2) {
+                    pair[1] = 1.0;
+                }
+                match &colorspace {
+                    ColorSpace::Lab(space) => {
+                        for (target, value) in defaults.iter_mut().zip(space.component_ranges()) {
+                            *target = f64::from(value);
+                        }
+                    }
+                    ColorSpace::IccBased(space) => {
+                        for (target, value) in defaults.iter_mut().zip(space.range()) {
+                            *target = f64::from(*value);
+                        }
+                    }
+                    _ => {}
+                }
+                if let Some(decode) = image.get_attr("Decode") {
+                    let decode = ctx.resolve(decode)?;
+                    if !matches!(decode, PdfObject::PdfNull) {
+                        let array = decode
+                            .as_array()
+                            .filter(|array| array.len() == slots)
+                            .ok_or_else(|| {
+                                PdfError::ObjectError(
+                                    "image Decode component count mismatch".into(),
+                                )
+                            })?;
+                        for (target, value) in defaults.iter_mut().zip(array) {
+                            *target = f64::from(
+                                ctx.resolve(value)?
+                                    .as_f32()
+                                    .filter(|value| value.is_finite())
+                                    .ok_or_else(|| {
+                                        PdfError::ObjectError(
+                                            "image Decode requires finite numbers".into(),
+                                        )
+                                    })?,
+                            );
+                        }
+                    }
+                }
+                Some((bits, defaults))
+            }
+            _ => None,
+        };
         let mut data = stream.decode_data(ctx)?;
         let components = match &colorspace {
             ColorSpace::DeviceGray(_) => Some(1),
@@ -578,7 +804,20 @@ impl PdfImage {
             ColorSpace::DeviceCmyk(_) => Some(4),
             _ => None,
         };
-        if indexed {
+        if color_sample_decode.is_some() {
+            let count = colorspace.number_of_components()?;
+            let row_bytes = (width as usize)
+                .checked_mul(count)
+                .and_then(|n| n.checked_mul(bits))
+                .and_then(|n| n.checked_add(7))
+                .map(|n| n / 8)
+                .ok_or_else(|| PdfError::ResourceLimit("image sample size overflow".into()))?;
+            if row_bytes.checked_mul(height as usize) != Some(data.len()) {
+                return Err(PdfError::ObjectError(
+                    "packed image sample length mismatch".into(),
+                ));
+            }
+        } else if indexed {
             data = unpack_image_samples_inner(
                 &data,
                 width as usize,
@@ -716,6 +955,7 @@ impl PdfImage {
             pixel_count,
             max_rgba_bytes: ctx.limits().max_decoded_bytes,
             soft_mask,
+            color_sample_decode,
         })
     }
     pub fn name(&self) -> &str {
@@ -738,6 +978,16 @@ impl PdfImage {
         self.data
             .len()
             .checked_add(self.soft_mask.as_ref().map_or(0, Vec::len))
+            .and_then(|n| {
+                self.color_sample_decode
+                    .as_ref()
+                    .map_or(Some(n), |(_, endpoints)| {
+                        endpoints
+                            .capacity()
+                            .checked_mul(std::mem::size_of::<f64>())
+                            .and_then(|bytes| n.checked_add(bytes))
+                    })
+            })
             .ok_or_else(|| PdfError::ResourceLimit("image retained samples".into()))
     }
 
@@ -786,6 +1036,12 @@ impl PdfImage {
             ColorSpace::DeviceRgb(_) => 3,
             ColorSpace::DeviceCmyk(_) => 4,
             ColorSpace::Indexed(_) => 1,
+            ColorSpace::CalGray(_)
+            | ColorSpace::CalRgb(_)
+            | ColorSpace::Lab(_)
+            | ColorSpace::IccBased(_)
+            | ColorSpace::Separation(_)
+            | ColorSpace::DeviceN(_) => self.colorspace.number_of_components()?,
             _ => {
                 return Err(PdfError::UnsupportedFeature(
                     "image RGBA conversion for this color space".into(),
@@ -796,7 +1052,7 @@ impl PdfImage {
             .pixel_count
             .checked_mul(components)
             .ok_or_else(|| PdfError::ResourceLimit("image data size overflow".into()))?;
-        if self.data.len() != input_size {
+        if self.color_sample_decode.is_none() && self.data.len() != input_size {
             return Err(PdfError::ObjectError(
                 "image data length does not match dimensions/components".into(),
             ));
@@ -809,43 +1065,100 @@ impl PdfImage {
         let mut rgba = Vec::new();
         rgba.try_reserve_exact(output_size)
             .map_err(|_| PdfError::ResourceLimit("unable to allocate image RGBA buffer".into()))?;
-        match &self.colorspace {
-            ColorSpace::DeviceGray(g) => {
-                for &g in self.data.iter() {
-                    if let Some(color) = stencil_color {
-                        rgba.extend_from_slice(&[color.r(), color.g(), color.b(), 255 - g]);
-                    } else {
-                        rgba.extend_from_slice(&[g, g, g, 255]);
+        if let Some((bits, endpoints)) = &self.color_sample_decode {
+            let bits = *bits;
+            let row_samples = (self.width as usize)
+                .checked_mul(components)
+                .ok_or_else(|| PdfError::ResourceLimit("image sample size overflow".into()))?;
+            let row_bytes = row_samples
+                .checked_mul(bits)
+                .and_then(|n| n.checked_add(7))
+                .map(|n| n / 8)
+                .ok_or_else(|| PdfError::ResourceLimit("image sample size overflow".into()))?;
+            if row_bytes.checked_mul(self.height as usize) != Some(self.data.len()) {
+                return Err(PdfError::ObjectError(
+                    "packed image sample length mismatch".into(),
+                ));
+            }
+            let mut values = Vec::new();
+            values
+                .try_reserve_exact(components)
+                .map_err(|_| PdfError::ResourceLimit("image color component allocation".into()))?;
+            values.resize(components, 0.0);
+            let mut color = crate::color::value::ColorValue::new(values);
+            let maximum = ((1u32 << bits) - 1) as f64;
+            for row in self.data.chunks_exact(row_bytes) {
+                for pixel in 0..self.width as usize {
+                    for component in 0..components {
+                        let offset = (pixel * components + component) * bits;
+                        let sample = if bits == 16 {
+                            u16::from_be_bytes([row[offset / 8], row[offset / 8 + 1]]) as u32
+                        } else {
+                            (u32::from(row[offset / 8]) >> (8 - bits - offset % 8))
+                                & ((1 << bits) - 1)
+                        };
+                        color.values_mut()[component] = (endpoints[component * 2]
+                            + sample as f64 / maximum
+                                * (endpoints[component * 2 + 1] - endpoints[component * 2]))
+                            as f32;
                     }
-                }
-            }
-            ColorSpace::DeviceRgb(_) => {
-                for chunk in self.data.chunks_exact(3) {
-                    rgba.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
-                }
-            }
-            ColorSpace::DeviceCmyk(_) => {
-                for chunk in self.data.chunks_exact(4) {
-                    let (c, m, y, k) = (
-                        chunk[0] as f32 / 255.0,
-                        chunk[1] as f32 / 255.0,
-                        chunk[2] as f32 / 255.0,
-                        chunk[3] as f32 / 255.0,
-                    );
-                    let r = (255.0 * (1.0 - c) * (1.0 - k)) as u8;
-                    let g = (255.0 * (1.0 - m) * (1.0 - k)) as u8;
-                    let b = (255.0 * (1.0 - y) * (1.0 - k)) as u8;
-                    rgba.extend_from_slice(&[r, g, b, 255]);
-                }
-            }
-            ColorSpace::Indexed(space) => {
-                for &index in &self.data {
-                    let rgb =
-                        space.rgb(&crate::color::value::ColorValue::new(vec![index as f32]))?;
+                    let rgb = self.colorspace.rgb(&color)?;
                     rgba.extend_from_slice(&[rgb.r(), rgb.g(), rgb.b(), 255]);
                 }
             }
-            _ => {}
+        } else {
+            match &self.colorspace {
+                ColorSpace::DeviceGray(g) => {
+                    for &g in self.data.iter() {
+                        if let Some(color) = stencil_color {
+                            rgba.extend_from_slice(&[color.r(), color.g(), color.b(), 255 - g]);
+                        } else {
+                            rgba.extend_from_slice(&[g, g, g, 255]);
+                        }
+                    }
+                }
+                ColorSpace::DeviceRgb(_) => {
+                    for chunk in self.data.chunks_exact(3) {
+                        rgba.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
+                    }
+                }
+                ColorSpace::DeviceCmyk(_) => {
+                    for chunk in self.data.chunks_exact(4) {
+                        let (c, m, y, k) = (
+                            chunk[0] as f32 / 255.0,
+                            chunk[1] as f32 / 255.0,
+                            chunk[2] as f32 / 255.0,
+                            chunk[3] as f32 / 255.0,
+                        );
+                        let r = (255.0 * (1.0 - c) * (1.0 - k)) as u8;
+                        let g = (255.0 * (1.0 - m) * (1.0 - k)) as u8;
+                        let b = (255.0 * (1.0 - y) * (1.0 - k)) as u8;
+                        rgba.extend_from_slice(&[r, g, b, 255]);
+                    }
+                }
+                ColorSpace::Indexed(space) => {
+                    // Cache only entries actually encountered: eagerly converting the
+                    // entire table could fail on an unused tint-transform input.
+                    // Fixed stack storage bounds the cache independently of image size.
+                    let mut palette: [Option<[u8; 4]>; 256] = [None; 256];
+                    for &index in &self.data {
+                        let pixel = match palette[index as usize] {
+                            Some(pixel) => pixel,
+                            None => {
+                                let rgb =
+                                    space.rgb(&crate::color::value::ColorValue::new(vec![
+                                        index as f32,
+                                    ]))?;
+                                let pixel = [rgb.r(), rgb.g(), rgb.b(), 255];
+                                palette[index as usize] = Some(pixel);
+                                pixel
+                            }
+                        };
+                        rgba.extend_from_slice(&pixel);
+                    }
+                }
+                _ => {}
+            }
         }
         if let Some(alpha) = &self.soft_mask {
             if alpha.len() != self.pixel_count {
@@ -893,6 +1206,11 @@ fn image_decode_endpoints<R: Read + Seek>(
     }
     let components = components
         .ok_or_else(|| PdfError::UnsupportedFeature("image Decode for this color space".into()))?;
+    if components > 4 {
+        return Err(PdfError::UnsupportedFeature(
+            "fixed image Decode supports at most four components".into(),
+        ));
+    }
     let array = decode
         .as_array()
         .ok_or_else(|| PdfError::ObjectError("image Decode must be an array".into()))?;

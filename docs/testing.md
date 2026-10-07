@@ -1,5 +1,59 @@
 # 解析回归与异常输入验证
 
+## Shading 参数模型回归（2026-10-07）
+
+Type2 轴向/Type3 径向 Shading 现有独立参数模型和归一化位置颜色求值。单元检查单函数/组件函数数组、Domain 映射、Extend/BBox/背景/抗锯齿提示、非法参数、Pattern/Indexed 拒绝及跨组件函数树额度失败后重试；依据 [Adobe PDF Reference 1.4 的 Axial/Radial Shadings](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/pdfreference1.4.pdf)。
+
+`/tmp/rzpdf-shading-model-final.log` 退出 0：541 单元、22 颜色流程通过，0 失败/忽略。尚无 sh 资源解释、显示事件或实际渐变渲染；数值测试不是页面/像素验收，Type1/4–7 和 Pattern 尚未完成。
+
+## Type4 计算函数回归（2026-10-07）
+
+最终 render `/tmp/rzpdf-type4-render-final.log` 退出 0：33 通过、0 失败/忽略（52.73 秒），包含扩展后的 Type4 像素组合；取代本节下方早于扩展的全量记录。当前 PDF 最终为 539 单元、22 颜色流程通过；全工作区与独立阅读器仍未重跑。
+
+Skia 专项 `/tmp/rzpdf-type4-pixels.log` 退出 0：1 通过、32 filtered；既有图像像素测试增加 Type4 Separation 和六分量 DeviceN，检查明确黑白、默认/反转以及两保存策略严格重开全页一致。该测试与原校准/专色组合共 16 种参数情形，仍是一个测试函数。此前既有 render 全量 `/tmp/rzpdf-type4-render.log` 退出 0：33 通过（53.10 秒），早于本组合扩展。更新下方尚无 Skia Type4 像素验证的历史说明，独立阅读器和当前全工作区仍未完成。
+
+Type4 已接入 PDF 计算函数的 40 个运算符与 true/false：数值、比较/逻辑/位运算、条件过程和栈操作。程序必须符合 PDF 数字/注释/花括号语法，拒绝一般 PostScript 命令与 radix/exponent 数字；构造和执行均使用显式帧与存储/深度/步数限额，copy/roll 另计工作量。输入按 Domain 裁剪，结束时严格要求 Range 指定数量的数字输出，再裁剪为 f32。依据 [Adobe PDF Reference 1.4 的 PostScript Calculator Functions](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/pdfreference1.4.pdf)。
+
+单元覆盖所有运算符类别、整数溢出提升实数、逻辑右移、负数 round/roll、条件分支、错误类型/未定义计算、预算失败后重试、100 项栈、字面量上界以及超过 f32 的有限中间值裁剪。间接参数严格重开验证实际 add 求值；真实 Separation/DeviceN 条件函数路径和图像输出绿/红，两保存策略严格读回保持一致。
+
+最终 `/tmp/rzpdf-type4-boundaries-final.log` 终态退出 0：539 单元、22 流程通过，0 失败/忽略。不是 Skia Type4 像素、独立阅读器或全工作区验收；程序/参数/求值缓冲分别受现有限额，不代表同池 OperationBudget 的共存峰值已贯通。
+
+## 普通专色图像回归（2026-10-07）
+
+最终包含扩展像素组合的 render `/tmp/rzpdf-spot-image-render-final.log` 退出 0：33 通过、0 失败/忽略（53.78 秒）。PDF 最终为 530 单元、21 流程通过；不是新全工作区或独立阅读器门禁。
+
+像素专项已补齐选定范围：既有校准图像测试加入 Separation Spot、六分量混合 None DeviceN、全 None DeviceN、Separation None；与 Lab/ICC 合计 12 个默认/反转组合。检查明确像素、None 全白、对象仍保留及两保存策略重开后全页一致。`/tmp/rzpdf-spot-image-pixels.log` 退出 0：1 通过、32 filtered。此结果更新下方“无新专色像素专项”的历史状态，不是独立阅读器或原生色版验收。
+
+补充最终 PDF `/tmp/rzpdf-spot-image-budget-final.log` 退出 0：530 单元、21 流程通过，0 失败/忽略。新增错误/预算单元覆盖 Decode 参数、采样长度、端点预留临界值、保留容量及输出额度；此项取代下方额外错误/额度测试待补齐的历史状态，但不代表完整 OperationBudget。render `/tmp/rzpdf-spot-image-render.log` 退出 0：33 通过、0 失败/忽略（52.16 秒），仅既有回归，无新专色像素专项。
+
+Separation/DeviceN 现已复用 packed 高精度采样到 tint-transform 的显示转换，动态 Decode 数组支持超过四分量。`six_component_devicen_images_preserve_rows_decode_and_save` 使用六分量、混合 None 名称、Sampled tint-transform，验证一位采样的两行填充与第六分量反转，黑/红/绿/黄 RGBA，以及两保存策略严格读回。16 位 Separation 反转加入既有采样单元。
+
+`/tmp/rzpdf-spot-image-regressions.log` 终态退出 0：529 单元、21 流程通过，0 失败/忽略。额外错误/额度测试、专色图像 Skia 新专项与当前全工作区仍待补齐；不是原生色版/叠印或独立阅读器验收。下方校准图像历史记录中普通 Separation/DeviceN 尚未支持的状态由本节更新。
+
+## 普通校准颜色图像回归（2026-10-07）
+
+最终 render 全量 `/tmp/rzpdf-calibrated-image-render-final.log` 退出 0：33 通过、0 失败/忽略（48.66 秒），包含新增 Lab/ICC 像素专项；取代本节下方全量仍运行的历史说明。PDF 最终回归仍为 529 单元、20 流程通过；尚未重跑全工作区。
+
+新增 `calibrated_image_pixels_and_reverse_decode_survive_save`：普通 Lab/ICC 16 位图像的默认/反转共四组合，分别核对黑白与 64/191 灰度，Preserve/FlateUnencoded 严格重开后全页像素一致。专项 `/tmp/rzpdf-calibrated-image-pixels.log` 退出 0：1 通过、32 filtered。这是本库 Skia 后端专项，不是独立阅读器对照；包含新增测试的全量 render 回归仍在运行。
+
+补充：`/tmp/rzpdf-calibrated-image-render.log` 终态退出 0，既有 render 32 测试全部通过、0 失败/忽略（47.28 秒）。此结果取代本节下方的“Skia 回归仍待确认”，但没有新增普通校准图像像素专项，不能声称新颜色空间的视觉验收已完成。
+
+CalGray/CalRGB/Lab/ICCBased 图像保留 packed 采样，RGBA 转换直接应用 Decode 后进入颜色转换，支持 1/2/4/8/16 位逐行采样。Lab 与 ICC 默认 Decode 使用各自分量范围，依据 [Adobe PDF Reference 1.4 的 Default Decode arrays](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/pdfreference1.4.pdf)。ICC 仍走 Alternate，不是 profile 管理。
+
+新增单元覆盖 Lab 默认范围、16 位 CalGray 反转与 CalRGB 行填充；资源流程扩展普通 Lab/ICC 16 位默认/反转及两保存策略严格读回，ICC fixture 使用空 profile 专测 Alternate。最终 `/tmp/rzpdf-calibrated-image-final.log` 退出 0：529 单元、20 流程通过，0 失败/忽略。不是独立阅读器或全工作区验收；Skia 回归仍待确认。
+
+## Indexed 调色板缓存回归（2026-10-07）
+
+RGBA 转换新增局部固定 256 槽惰性缓存，重复索引复用已转换颜色，不提前求值未使用表项。既有索引采样单元增加跨行重复与 hival 外索引用例，颜色流程覆盖 Lab/ICC/DeviceN 基空间及严格保存读回。`cargo test -p pdf --lib --test color_workflow --locked --quiet` 终态退出 0：528 单元和 20 流程通过，0 失败/忽略；日志 `/tmp/rzpdf-indexed-palette-cache.log`。没有新增测试函数，测试数不增加；没有性能测量或独立阅读器验收。
+
+下方 812 全工作区结果对应缓存修改前的提交，不替代当前修改的全量验证。
+
+## 当前全工作区门禁（2026-10-07）
+
+本地提交 `853ae38` 的生产代码与测试已通过 `cargo test --workspace --locked --quiet`：进程终态退出 0，45 条测试结果合计 812 通过、0 失败/忽略，包含 PDF 单元 528、39 个集成测试目标与 render 32；文档测试正常结束。日志 `/tmp/rzpdf-workspace-image-colors.log`。提交前被测源差异 SHA-256 为 `732f29e15d894cba31f088155e5c9f42604e2542e3c5b212a4c66466652596dd`，提交未改变代码内容。
+
+此结果更新下方各专项当时尚未重跑全工作区的状态，不代表远端 CI、独立阅读器对照或全部 TODO 完成。fuzz 不在 workspace 成员内，未执行。
+
 ## Indexed DeviceN / None 回归（2026-10-07）
 
 Indexed 可使用 DeviceN 基空间，参考 [Adobe PDF Reference 1.6 的 Indexed/DeviceN 示例](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/pdfreference1.6.pdf)。混合 None 分量可能携带替代颜色数据，显示转换仍接收完整 tint 数组；本库只支持已有函数求值器和替代空间近似，不实现原生色版或 Type4 求值。

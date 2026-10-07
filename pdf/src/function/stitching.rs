@@ -171,6 +171,18 @@ mod tests {
 }
 
 impl Stitching {
+    pub(super) fn retained_own_bytes(&self) -> PdfResult<usize> {
+        super::retained_total(&[
+            super::retained_vector_bytes(&self.domain)?,
+            super::retained_vector_bytes(&self.functions)?,
+            super::retained_vector_bytes(&self.bounds)?,
+            super::retained_vector_bytes(&self.encode)?,
+            super::retained_vector_bytes(&self.range)?,
+        ])
+    }
+    pub(super) fn children(&self) -> &[super::Function] {
+        &self.functions
+    }
     pub(super) fn dimensions(&self) -> (usize, usize) {
         (self.m, self.n)
     }

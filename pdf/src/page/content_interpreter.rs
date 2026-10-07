@@ -916,6 +916,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             "M" => self.handle_miter_limit(op)?,
 
             "Do" => self.handle_do(op, device)?,
+            "sh" => self.handle_shading(op, device)?,
             "m" => self.move_to(op)?,
             "l" => self.line_to(op)?,
             "c" => self.curve_to_c(op)?,
@@ -2278,6 +2279,45 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
         let ctm = matrix.checked_mul(&self.current_state.ctm)?;
         self.current_state.ctm = ctm;
         Ok(())
+    }
+
+    fn handle_shading(&mut self, op: Operator, device: &mut dyn Device) -> PdfResult<()> {
+        if self.in_text_object {
+            return Err(PdfError::PageOperatorError(
+                "shading invocation inside BT/ET".into(),
+            ));
+        }
+        let name = op.get_as_name(0)?.name();
+        device.preflight_draw(&self.current_state.graphic_state, None)?;
+        let object = self.named_resource("Shading", name)?;
+        let object = crate::color::shading::Shading::resolve_resource_colorspace(
+            &object,
+            self.ctx,
+            |name| self.named_resource("ColorSpace", name),
+        )?;
+        let shading = match crate::color::shading::Shading::try_new(&object, self.ctx) {
+            Ok(shading) => shading,
+            Err(PdfError::UnsupportedFeature(_)) => return self.unsupported_operator(&op),
+            Err(error) => return Err(error),
+        };
+        let matrix = self
+            .current_state
+            .ctm()
+            .checked_mul(&self.page.page_matrix)?;
+        let object = crate::page::shading_object::ShadingObject::new(
+            name.to_string(),
+            matrix,
+            shading,
+            self.current_state.graphic_state.clone(),
+        )
+        .with_source(op.byte_offset().filter(|_| self.form_depth == 0).map(
+            |operator_byte_offset| crate::page::shading_object::ShadingDrawSource {
+                operation_index: self.operation_index,
+                operator_byte_offset,
+            },
+        ))
+        .with_nested_source(self.nested_draw_source()?);
+        device.do_shading(object)
     }
 
     fn handle_do(&mut self, op: Operator, device: &mut dyn Device) -> PdfResult<()> {

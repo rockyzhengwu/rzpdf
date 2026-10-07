@@ -10,6 +10,10 @@ use crate::{
 pub struct PostScriptFunction {
     domain: Vec<f32>,
     range: Vec<f32>,
+    program: Vec<super::calculator::Instruction>,
+    max_nodes: usize,
+    max_bytes: usize,
+    max_depth: usize,
 }
 
 #[cfg(test)]
@@ -38,6 +42,49 @@ mod tests {
             object(parameters).into_dict().unwrap(),
             data.to_vec(),
         ))
+    }
+
+    #[test]
+    fn type4_public_eval_clips_and_requires_exact_numeric_outputs() {
+        let doc = PdfDocument::new().unwrap();
+        let make = |code: &[u8]| {
+            PostScriptFunction::try_new(
+                &stream("<< /Domain [0 1] /Range [0.25 0.75] >>", code),
+                doc.ctx(),
+            )
+            .unwrap()
+        };
+        let identity = make(b"{}");
+        assert_eq!(identity.eval(&[-1.0]).unwrap(), vec![0.25]);
+        assert_eq!(identity.eval(&[2.0]).unwrap(), vec![0.75]);
+        assert_eq!(identity.eval(&[0.5]).unwrap(), vec![0.5]);
+        assert_eq!(
+            make(b"{pop 1000000000 dup mul dup mul 1000 mul}")
+                .eval(&[0.0])
+                .unwrap(),
+            vec![0.75]
+        );
+        for inputs in [vec![], vec![0.0, 1.0], vec![f32::NAN], vec![f32::INFINITY]] {
+            assert!(matches!(
+                identity.eval(&inputs),
+                Err(PdfError::FunctionError(_))
+            ));
+        }
+        for source in [
+            b"{pop}".as_slice(),
+            b"{pop 1 2}",
+            b"{pop true}",
+            b"{pop {1}}",
+        ] {
+            assert!(matches!(
+                make(source).eval(&[0.0]),
+                Err(PdfError::FunctionError(_))
+            ));
+        }
+        assert!(matches!(
+            PostScriptFunction::default().eval(&[]),
+            Err(PdfError::FunctionError(_))
+        ));
     }
 
     #[test]
@@ -77,10 +124,7 @@ mod tests {
         for doc in [&doc, &reopened] {
             let function = create_function(&reference, doc.ctx()).unwrap();
             assert_eq!(function.dimensions(), (2, 1));
-            assert!(matches!(
-                function.eval(&[0.2, 0.3]),
-                Err(PdfError::UnsupportedFeature(_))
-            ));
+            assert_eq!(function.eval(&[0.2, 0.3]).unwrap(), vec![0.5]);
         }
     }
 
@@ -228,6 +272,13 @@ mod tests {
 }
 
 impl PostScriptFunction {
+    pub(super) fn retained_own_bytes(&self) -> PdfResult<usize> {
+        super::retained_total(&[
+            super::retained_vector_bytes(&self.domain)?,
+            super::retained_vector_bytes(&self.range)?,
+            super::retained_vector_bytes(&self.program)?,
+        ])
+    }
     pub(super) fn dimensions(&self) -> (usize, usize) {
         (self.domain.len() / 2, self.range.len() / 2)
     }
@@ -284,13 +335,69 @@ impl PostScriptFunction {
         // Reject invalid parameters before doing any stream decoding.
         let domain = pairs("Domain")?;
         let range = pairs("Range")?;
-        let _data = stream.decode_data(ctx)?;
-        Ok(Self { domain, range })
+        let data = stream.decode_data(ctx)?;
+        let limits = ctx.limits();
+        let program = super::calculator::compile(
+            &data,
+            limits.max_objects,
+            limits.max_decoded_bytes,
+            limits.max_depth,
+        )?;
+        Ok(Self {
+            domain,
+            range,
+            program,
+            max_nodes: limits.max_objects,
+            max_bytes: limits.max_decoded_bytes,
+            max_depth: limits.max_depth,
+        })
     }
 
-    pub fn eval(&self, _inputs: &[f32]) -> PdfResult<Vec<f32>> {
-        Err(PdfError::UnsupportedFeature(
-            "PostScript function evaluation".into(),
-        ))
+    pub fn eval(&self, inputs: &[f32]) -> PdfResult<Vec<f32>> {
+        if self.domain.is_empty()
+            || self.range.is_empty()
+            || inputs.len() != self.domain.len() / 2
+            || inputs.iter().any(|value| !value.is_finite())
+        {
+            return Err(PdfError::FunctionError(
+                "Type4 invalid input dimensions or values".into(),
+            ));
+        }
+        let mut clipped = Vec::new();
+        clipped
+            .try_reserve_exact(inputs.len())
+            .map_err(|_| PdfError::ResourceLimit("Type4 input allocation".into()))?;
+        for (&input, bounds) in inputs.iter().zip(self.domain.chunks_exact(2)) {
+            clipped.push(input.clamp(bounds[0], bounds[1]));
+        }
+        let stack = super::calculator::evaluate(
+            &self.program,
+            &clipped,
+            self.max_nodes,
+            self.max_bytes,
+            self.max_depth,
+        )?;
+        if stack.len() != self.range.len() / 2 {
+            return Err(PdfError::FunctionError(
+                "Type4 output component count mismatch".into(),
+            ));
+        }
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(stack.len())
+            .map_err(|_| PdfError::ResourceLimit("Type4 output allocation".into()))?;
+        for (value, bounds) in stack.into_iter().zip(self.range.chunks_exact(2)) {
+            let number = match value {
+                super::calculator::Value::Integer(value) => f64::from(value),
+                super::calculator::Value::Real(value) => value,
+                _ => {
+                    return Err(PdfError::FunctionError(
+                        "Type4 output must be numeric".into(),
+                    ));
+                }
+            };
+            output.push(number.clamp(f64::from(bounds[0]), f64::from(bounds[1])) as f32);
+        }
+        Ok(output)
     }
 }

@@ -9,8 +9,8 @@ use crate::{
     path::pdf_path::Segment,
 };
 
-use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::Writer;
+use quick_xml::events::{BytesEnd, BytesStart, Event};
 use std::io::Cursor;
 
 pub struct TraceDevice {
@@ -27,6 +27,49 @@ pub struct TraceDevice {
 #[cfg(test)]
 mod collection_tests {
     use super::*;
+
+    #[test]
+    fn shading_collection_counts_shared_function_payload_per_draw() {
+        use crate::{
+            color::shading::Shading,
+            document::PdfDocument,
+            geom::matrix::Matrix,
+            io::stream_reader::StreamReader,
+            page::{graphic_state::GraphicState, shading_object::ShadingObject},
+            parser::syntax::SyntaxParser,
+        };
+        let doc = PdfDocument::new().unwrap();
+        let object = SyntaxParser::new(StreamReader::try_new(Cursor::new(b"<< /ShadingType 2 /ColorSpace /DeviceGray /Coords [0 0 10 0] /Function << /FunctionType 2 /Domain [0 1] /N 1 >> >>".to_vec())).unwrap()).get_object().unwrap();
+        let shading = ShadingObject::new(
+            "S".into(),
+            Matrix::default(),
+            Shading::try_new(&object, doc.ctx()).unwrap(),
+            GraphicState::default(),
+        );
+        let bytes = shading.retained_payload_bytes().unwrap();
+        assert!(bytes > 0);
+        let clone = shading.clone();
+        assert!(std::sync::Arc::ptr_eq(&clone.shading, &shading.shading));
+        let mut trace = TraceDevice::for_display_list(crate::parser::options::Limits {
+            max_decoded_bytes: bytes,
+            ..Default::default()
+        });
+        trace.start_page(10.0, 10.0).unwrap();
+        trace.do_shading(shading.clone()).unwrap();
+        assert!(
+            matches!(trace.do_shading(clone), Err(PdfError::ResourceLimit(message)) if message == "display retained payload bytes")
+        );
+        assert_eq!(trace.objects().len(), 1);
+        assert_eq!(trace.to_xml(), "");
+        let mut trace = TraceDevice::for_display_list(crate::parser::options::Limits {
+            max_objects: 1,
+            ..Default::default()
+        });
+        trace.do_shading(shading.clone()).unwrap();
+        assert!(
+            matches!(trace.do_shading(shading), Err(PdfError::ResourceLimit(message)) if message == "display object count")
+        );
+    }
 
     #[test]
     fn display_collection_is_bounded_and_does_not_duplicate_xml() {
@@ -56,6 +99,31 @@ mod collection_tests {
 }
 
 impl Device for TraceDevice {
+    fn do_shading(&mut self, shading: crate::page::shading_object::ShadingObject) -> PdfResult<()> {
+        self.reserve_object()?;
+        let segments = self.next_retained_segments(None, &shading.graphic_state)?;
+        let total = self
+            .next_nested_source_bytes(shading.nested_source())?
+            .checked_add(shading.retained_payload_bytes()?)
+            .ok_or_else(|| PdfError::ResourceLimit("display retained payload overflow".into()))?;
+        if self
+            .limits
+            .is_some_and(|limits| total > limits.max_decoded_bytes)
+        {
+            return Err(PdfError::ResourceLimit(
+                "display retained payload bytes".into(),
+            ));
+        }
+        if self.collect_xml {
+            let mut event = BytesStart::new("shading");
+            event.push_attribute(("resource", shading.resource_name.as_str()));
+            self.writer.write_event(Event::Empty(event))?;
+        }
+        self.retained_payload_bytes = total;
+        self.retained_path_segments = segments;
+        self.objects.push(PageObject::Shading(shading));
+        Ok(())
+    }
     fn preflight_draw(
         &self,
         state: &crate::page::graphic_state::GraphicState,

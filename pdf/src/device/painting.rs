@@ -12,6 +12,13 @@ use crate::{
 pub(crate) struct PaintingDevice<'a>(pub &'a mut dyn Device);
 
 impl Device for PaintingDevice<'_> {
+    fn do_shading(&mut self, shading: crate::page::shading_object::ShadingObject) -> PdfResult<()> {
+        if shading.shading.colorspace().is_nonpainting() {
+            Ok(())
+        } else {
+            self.0.do_shading(shading)
+        }
+    }
     fn preflight_draw(&self, state: &GraphicState, path: Option<&PdfPath>) -> PdfResult<()> {
         self.0.preflight_draw(state, path)
     }
