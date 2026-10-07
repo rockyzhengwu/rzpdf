@@ -29,6 +29,8 @@ fn main() -> PdfResult<()> {
     }
     let source = PdfDocument::open_with_mode(&args[1], ParseMode::Strict)?;
     let result = source.extract_pages(&indices)?;
+    // Extraction must own all resources independently of the source reader.
+    drop(source);
     result.save_to_file(&args[0])?;
     let reopened = PdfDocument::open_with_mode(&args[0], ParseMode::Strict)?;
     if reopened.try_page_count()? != indices.len() {

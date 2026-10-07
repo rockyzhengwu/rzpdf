@@ -1,5 +1,92 @@
 # 中英文整字体构建验证
 
+## 真实字体自动推进补偿与不补偿对照（2026-10-08）
+
+新增`compare_cjk_advance`，输入为已有两页`create_cjk --images`样本。它在第一页正文后插入独立的“ PDF”文字事件，再复制出两页：第三页将整句缩短为“你好！”并自动补偿，第四页作相同替换但不补偿。输出顺序为基线、原第二页、补偿、无补偿；不修改输入文件，输出路径应与输入不同。
+
+```sh
+cargo run -p pdf --example compare_cjk_advance --locked --offline -- output/pdf/rzpdf-cjk-images.pdf output/pdf/rzpdf-cjk-advance.pdf
+bash docs/check-cjk-advance.sh output/pdf/rzpdf-cjk-advance.pdf
+mutool draw -r 72 -o tmp/pdfs/rzpdf-cjk-advance-%d.png output/pdf/rzpdf-cjk-advance.pdf
+```
+
+最终源码运行原session30593退出0，日志`/tmp/rzpdf-real-cjk-advance-final.log`；首次示例编译的索引Result错误已修正，未改变生产引擎。示例检查共享基线源码不变、补偿页后续P/D/F与基线位置差小于0.002、无补偿页水平差大于10，并在保存、释放原文档、严格重开后重复检查及解释四页。
+
+qpdf 11.2.0结构检查通过；MuPDF 1.27.0的stext XML由xmllint逐一读取四页末尾P/D/F原点，独立确认第三页位置保持、第四页明显左移且纵坐标保持。脚本另检查四页共享Type0/ToUnicode及RGB图片关系、第二页软遮罩，核对移除空白后的中文/拉丁文本与页序；归一化空白不是精确行布局验收。三页旧样本被拒绝；用本库extract_pages将补偿/无补偿页交换（0/1/3/2）后，四页结构仍通过但坐标检查退出1，避免仅检查页数误认成功。
+
+四页72 DPI PNG已目视检查：中文字形清晰、图片/透明度保持，第三页的空隙是保留后续位置的预期结果，第四页PDF自然左移；无重叠、裁切或缺字。第二页PNG与原第二页`cmp`字节一致。输出SHA-256为`ad379753907057b7b4de9c7f52e628317164b88a4d3d1f320bda069726a14eca`，不承诺重复生成PDF字节一致。沿用MuPDF渲染，未修改现有Poppler缺失依赖。
+
+只验证这款静态真实字体的水平整Tj缩短与后续事件位置，不代表竖排真实字形、TJ数组、嵌套Form、自动排版或完整P3。较长替换仍可能侵占后续字形区域；补偿只保留结束位置，不保证适配旧边界。未运行fuzz、未再次运行整个工作区。
+
+## 真实CID字体范围替换与事务回滚（2026-10-08）
+
+新增固定样本`edit_cjk_text INPUT.pdf OUTPUT.pdf`：读取两页`create_cjk --images`文件，复制第一页到第三页，以现有字体反向编码计算字符码字节范围，将第二个Tj中的“世界”替换为“你好”。范围不是Unicode字符索引，也不是转义源码偏移；此示例只面向原创建样本的直接Tf/Tj，不提供通用文字搜索或任意图形状态字体推断。
+
+```sh
+cargo run -p pdf --example edit_cjk_text --locked --offline -- output/pdf/rzpdf-cjk-images.pdf output/pdf/rzpdf-cjk-text-edit.pdf
+bash docs/check-cjk-page-edit.sh output/pdf/rzpdf-cjk-text-edit.pdf --text-edit
+mutool draw -r 72 -o tmp/pdfs/rzpdf-cjk-text-edit-%d.png output/pdf/rzpdf-cjk-text-edit.pdf
+```
+
+最终源码对应运行原session45065退出0，日志`/tmp/rzpdf-cjk-text-edit-final.log`。示例同时检查：未映射火箭字符拒绝且stamp/源码不变；外层事务在成功替换后注入错误，核对实际返回为该注入错误而非提前失败，并确认源码恢复；重新获取快照后重试成功；共享原页源码不变。保存、释放原文档后严格读回三页并解释通过。
+
+qpdf 11.2.0结构检查与MuPDF 1.27.0六行精确文本通过：第三页为“你好，你好！Hello PDF”，前两页不变；三页仍共享原嵌入字体，第一/三页共享RGB图片，第二页保留RGBA遮罩。旧页面重排产物在`--text-edit`模式拒绝，文字编辑产物在默认重排模式拒绝。前两页渲染PNG与原图`cmp`字节一致，第三页已目视检查中文替换清晰、正文与图片无重叠或裁切。输出SHA-256为`e22274a43e3452273fd6ff75fb41d8e5316d0d4e0ce0016abeb63b60d7369c0d`，不承诺重复生成PDF字节一致。
+
+此结果仅覆盖已映射字符的单Tj范围替换、固定真实字体及共享隔离/错误回滚；不代表新增字形/ToUnicode更新、字体子集、shaping、连续文字推进补偿、嵌套Form或全部复杂字体矩阵完成。生产引擎源码未变，未再次运行整个工作区，未运行fuzz。
+
+## 合并与逆序拆分组合（2026-10-08）
+
+现有`extract_pages`和`merge_documents`示例在复制完成后新增显式释放源文档，然后保存和严格读回，避免以源读取器仍存活掩盖资源所有权缺陷。使用上述创建及页面编辑样本执行：
+
+```sh
+cargo run -p pdf --example extract_pages --locked --offline -- output/pdf/rzpdf-cjk-extracted.pdf output/pdf/rzpdf-cjk-images.pdf 1 0
+cargo run -p pdf --example merge_documents --locked --offline -- output/pdf/rzpdf-cjk-merged.pdf output/pdf/rzpdf-cjk-images.pdf output/pdf/rzpdf-cjk-page-edit.pdf
+bash docs/check-cjk-transfer.sh extract output/pdf/rzpdf-cjk-extracted.pdf
+bash docs/check-cjk-transfer.sh merge output/pdf/rzpdf-cjk-merged.pdf
+mutool draw -r 72 -o tmp/pdfs/rzpdf-cjk-extracted-%d.png output/pdf/rzpdf-cjk-extracted.pdf
+mutool draw -r 72 -o tmp/pdfs/rzpdf-cjk-merged-%d.png output/pdf/rzpdf-cjk-merged.pdf
+```
+
+本库两条命令均退出0，保存后严格读回并解释全部页；qpdf 11.2.0检查通过。MuPDF 1.27.0提取及固定检查脚本确认拆分顺序为B/A（两页），合并顺序为A/B/A/B/B（五页）。脚本按页面树Kids顺序检查字体与图片，拆分保留一份共享嵌入字体，跨两个源文件合并保留两份字体对象，不声称跨源字体去重；每页RGB尺寸/位深及RGBA软遮罩顺序正确。错误顺序的原两页输入和错误页数的三页输入分别退出1。
+
+七份72 DPI渲染PNG逐一`cmp`与已目视验收的对应原页字节一致；另目视检查拆分第一页与合并末页，无缺字、裁切、图片翻转或透明度变化。输出SHA-256：拆分`acc71de6f348dd18d15514f3d1a6f83cd7e9152e0fc3293c46bc843219a3b1f0`，合并`9272547f30d4214265199d366fc77f273a8d65ca28b65c2a03d53ff57d0433d5`，仅标识本次产物。
+
+只验证固定静态字体/RGB/RGBA样本与源释放后使用，不覆盖批注、书签、Catalog元数据合并、任意页面树或全部失败回滚矩阵。`check-cjk-transfer.sh`仅接受上述固定样本布局，不是通用PDF验证器。生产引擎源码未变，未重复跑整个工作区，未运行fuzz。
+
+## 跨文档导入、复制与重排组合（2026-10-08）
+
+新增`edit_page_order INPUT.pdf OUTPUT.pdf`示例：将源页逆序导入新文档，复制导入后的首个页面，再重排为原始页序＋最后一页副本。保留源有效PDF版本；释放源文档后解释所有目标页，保存并释放目标，再严格重开并解释所有页。只复制页面对象图，不合并源Catalog元数据、书签或批注。
+
+以本节后述两页中英文/RGB/RGBA样本运行：
+
+```sh
+cargo run -p pdf --example edit_page_order --locked --offline -- output/pdf/rzpdf-cjk-images.pdf output/pdf/rzpdf-cjk-page-edit.pdf
+bash docs/check-cjk-page-edit.sh output/pdf/rzpdf-cjk-page-edit.pdf
+mutool draw -r 72 -o tmp/pdfs/rzpdf-cjk-page-edit-%d.png output/pdf/rzpdf-cjk-page-edit.pdf
+```
+
+本库示例退出0。qpdf 11.2.0检查通过；固定样本脚本按页面树Kids顺序验证三页、共享Type0/CIDFontType2嵌入字体与ToUnicode、第二/三页共享图片及DeviceGray SMask，并核对六行正文及页序。原始两页输入在此脚本下退出1。MuPDF 1.27.0的三页PNG已目视检查，文字、四象限方向及透明度不变；`cmp`逐一确认输出第1/2页与原始渲染PNG字节一致，第3页与第2页一致。本次输出SHA-256为`3e8ea0d61f13871638fade949d046fb5d3c48042ac13b88216452d77a0ad8bb2`，不承诺多次生成PDF字节一致。
+
+这验证固定真实字体/软遮罩对象图导入、源释放后使用及重排/复制读回，不代表P2所有继承属性、循环、批注归属、旋转裁剪、合并拆分或失败回滚矩阵完成。脚本仅适用于此直接资源/平坦页面树样本，不是通用PDF一致性验证器；未运行fuzz。
+
+## 中英文、RGB/RGBA插图与覆盖组合（2026-10-08）
+
+`create_cjk` 新增可选 `--images`，与 `--overlay` 可独立使用或组合（顺序任意，重复/未知选项拒绝且不写输出）。不传选项保留原来的四行文字示例。第一页绘制2×2 RGB四象限图，第二页绘制同色RGBA图，alpha依次为255、192、128、0；位置为用户空间(48,500)，尺寸240×160。正文与跨页共享的CID字体保持不变。
+
+使用下文同一静态字体（SHA-256 `0516f3d1fb52efaf83f1d7bc540d779d1eb405f37e0dbb7696537444a0931087`），本次验证命令：
+
+```sh
+cargo run -p pdf --example create_cjk --locked --offline -- FONT.ttf NotoSansSC-Thin 733 80 output/pdf/rzpdf-cjk-images.pdf --images
+bash docs/check-cjk-example.sh output/pdf/rzpdf-cjk-images.pdf --images
+mutool draw -r 72 -o tmp/pdfs/rzpdf-cjk-images-%d.png output/pdf/rzpdf-cjk-images.pdf
+```
+
+结果：本库示例退出0，保存后严格读回并解释两页；qpdf 11.2.0无语法/流编码错误。脚本验证原字体/标题/四行精确文本，并额外检查两页RGB Image的尺寸/位深及一个DeviceGray SMask。无图片原样本在`--images`检查下退出1，避免误认组合样本；当前默认示例仍通过原检查。MuPDF 1.27.0渲染的两页PNG已目视检查：文字清晰无缺字/裁切，红绿在上、蓝黄在下；第二页蓝色变浅、黄色完全透明，其余透明度符合预期。输出PDF SHA-256为`8dc24e3623132152c285cfcdf41fb6c6bc17b6a0cf482425893281d047ccad2e`，仅标识本次产物，不承诺跨次字节一致。
+
+另运行`--images --overlay`组合：本库严格读回、qpdf检查通过，MuPDF提取四行正文、两处“草稿”和两页对应页码；两页渲染图已目视检查，正文/图片/水印/页脚无重叠或裁切。原精确四行脚本不适用带覆盖的文件，不能以它证明覆盖路径。当前系统Poppler缺少libtiff.5.dylib不能启动，本次使用MuPDF，未修改系统依赖。
+
+仅完成此字体、水平文字与固定RGB/RGBA示例的组合验证；不代表全部字体、JPEG/PNG输入、旋转裁剪、多阅读器矩阵或完整P1验收。生产引擎源码未改变；此前938项全量对应a270aca，此轮新增StoreEntries公开接口专项1项通过，没有再次运行整个工作区。未运行fuzz。
+
 2026-10-04：新增 `pdf/examples/create_cjk.rs`，创建两页 A4 中英文，使用本项目字体注册、CID 编码、保存接口；第二页复用同一字体。保存后严格打开并构建两页 DisplayList。按 PDF 技能要求渲染检查，不使用外部库替代本项目构建。
 
 ## 字体来源和范围

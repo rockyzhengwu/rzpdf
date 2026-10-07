@@ -851,6 +851,51 @@ impl ContentProgram {
         )
     }
 
+    /// Rebuild a single-string text event as TJ with a caller-computed advance
+    /// adjustment. Quote operators expand to their equivalent state operations;
+    /// this method does not itself compute metrics or validate font coverage.
+    pub fn with_adjusted_text_codes_with_budget(
+        &self,
+        index: usize,
+        codes: &[u8],
+        adjustment: f32,
+        options: ParseOptions,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<BudgetedContentProgram> {
+        let target = &self.operations.get(index).ok_or_else(||
+            PdfError::ContentParseError("text operation index out of range".into()))?.operator;
+        let count = match (target.name(), target.num_operands()) {
+            ("Tj", 1) => { target.get_as_string(0)?; 1 }
+            ("'", 1) => { target.get_as_string(0)?; 2 }
+            ("\"", 3) => { target.get_as_f32(0)?; target.get_as_f32(1)?; target.get_as_string(2)?; 4 }
+            _ => return Err(PdfError::UnsupportedFeature("Adjusted text requires Tj or quote operator".into())),
+        };
+        let adjusted = super::content_builder::ContentBuilder::adjusted_encoded_text_with_budget(
+            codes, adjustment, options.limits, budget,
+        )?;
+        let prefix: [&[u8]; 5] = match target.name() {
+            "\"" => [
+                target.operand(0)?.as_number().unwrap().lexeme().as_bytes(), b" Tw\n",
+                target.operand(1)?.as_number().unwrap().lexeme().as_bytes(), b" Tc\n", b"T*\n",
+            ],
+            "'" => [b"", b"", b"", b"", b"T*\n"],
+            _ => [b""; 5],
+        };
+        let length = prefix.iter().try_fold(adjusted.as_slice().len(), |size, part|
+            size.checked_add(part.len())).ok_or_else(|| PdfError::ResourceLimit("Adjusted text prefix size".into()))?;
+        crate::filter::check_output_size(0, length,
+            options.limits.max_raw_stream_bytes.min(options.limits.max_decoded_bytes), "adjusted text bytes")?;
+        let mut replacement = crate::budget::BudgetedBytes::copy_from_slice(budget, b"")?;
+        replacement.try_reserve_capacity(length)?;
+        for part in prefix { replacement.try_extend_from_slice(part)?; }
+        replacement.try_extend_from_slice(adjusted.as_slice())?;
+        let mut allocation = Some(budget.reserve(0)?);
+        let program = self.with_replaced_operation_sequence_inner(
+            index, replacement.as_slice(), options, count, Some(budget), &mut allocation,
+        )?;
+        Ok(BudgetedContentProgram { program, _leases: ProgramLeases { _allocation: allocation } })
+    }
+
     /// Return an independently parsed program with one lexical operation replaced.
     /// Preserves surrounding bytes and stream count; replacement is placed in
     /// the stream containing the operation start. A newline terminates its tail.

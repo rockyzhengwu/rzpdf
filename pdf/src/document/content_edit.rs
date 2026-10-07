@@ -901,6 +901,41 @@ impl<R: Read + Seek> PdfDocument<R> {
         })
     }
 
+    /// Replace Tj/'/" Unicode text while retaining the old writing-axis end
+    /// position. Uses actual font metrics and spacing, not Unicode character
+    /// count. Quotes keep their line/spacing state; zero font size is rejected.
+    /// This does not add glyph coverage, shape text or fit replacement glyphs
+    /// inside the original painted bounds. TJ and nested Form edits are separate.
+    pub fn replace_page_text_preserving_advance(
+        &self,
+        page: u32,
+        expected: &ContentProgram,
+        operation: usize,
+        text: &str,
+    ) -> PdfResult<()> {
+        let budget = self.ctx.limits().operation_budget();
+        let mut retained_state = None;
+        let mut retained_codes = None;
+        self.commit_page_content_edit_with_budget(page, expected, &budget, || {
+            let target = &expected.operations().get(operation).ok_or_else(||
+                PdfError::ObjectError("text operation index out of range".into()))?.operator;
+            let old = match (target.name(), target.num_operands()) {
+                ("Tj" | "'", 1) => target.get_as_string(0)?.bytes(),
+                ("\"", 3) => target.get_as_string(2)?.bytes(),
+                _ => return Err(PdfError::UnsupportedFeature("Advance compensation requires single-string text".into())),
+            };
+            let state = self.get_page_with_budget(page, &budget)?
+                .text_metrics_for_operation_with_budget(expected, operation, &budget)?;
+            let state = retained_state.insert(state);
+            let codes = state.font.encode_text_with_budget(text, self.ctx.limits(), &budget)?;
+            let codes = retained_codes.insert(codes);
+            let adjustment = state.replacement_adjustment(old, codes.as_slice(), self.ctx.limits())?;
+            expected.with_adjusted_text_codes_with_budget(
+                operation, codes.as_slice(), adjustment, self.ctx.options(), &budget,
+            )
+        })
+    }
+
     /// Replace one TJ string item using its effective font and unchanged spacing.
     pub fn replace_page_text_array_item(
         &self,

@@ -241,6 +241,55 @@ impl ContentBuilder {
         Ok(self)
     }
 
+    /// Write [<codes> adjustment] TJ. A positive adjustment moves backwards
+    /// along the writing axis, in thousandths of text-space font-size units.
+    /// The caller computes the adjustment; this does not infer old advances,
+    /// encode Unicode, shape text or add missing font coverage.
+    pub fn show_adjusted_encoded_text(
+        &mut self,
+        codes: &[u8],
+        adjustment: f32,
+    ) -> crate::error::PdfResult<&mut Self> {
+        self.show_adjusted_encoded_text_with_limits(
+            codes, adjustment, crate::parser::options::Limits::default(),
+        )
+    }
+
+    pub fn show_adjusted_encoded_text_with_limits(
+        &mut self,
+        codes: &[u8],
+        adjustment: f32,
+        limits: crate::parser::options::Limits,
+    ) -> crate::error::PdfResult<&mut Self> {
+        let (number, number_len, length) = adjusted_text_layout(codes, adjustment, limits)?;
+        crate::filter::check_output_size(
+            self.bytes.len(), length, limits.max_raw_stream_bytes, "content builder bytes",
+        )?;
+        self.bytes.try_reserve_exact(length)
+            .map_err(|_| crate::error::PdfError::ResourceLimit("adjusted text allocation".into()))?;
+        write_adjusted_text(&mut self.bytes, codes, &number[..number_len]);
+        Ok(self)
+    }
+
+    /// Keep generated TJ bytes and their actual capacity in the caller's pool.
+    /// Number formatting uses a fixed stack buffer, not an untracked String.
+    pub fn adjusted_encoded_text_with_budget(
+        codes: &[u8],
+        adjustment: f32,
+        limits: crate::parser::options::Limits,
+        budget: &crate::budget::OperationBudget,
+    ) -> crate::error::PdfResult<crate::budget::BudgetedBytes> {
+        let (number, number_len, length) = adjusted_text_layout(codes, adjustment, limits)?;
+        crate::filter::check_output_size(0, length, limits.max_raw_stream_bytes, "content builder bytes")?;
+        let mut lease = budget.reserve(length)?;
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(length)
+            .map_err(|_| crate::error::PdfError::ResourceLimit("adjusted text allocation".into()))?;
+        lease.resize(bytes.capacity())?;
+        write_adjusted_text(&mut bytes, codes, &number[..number_len]);
+        crate::budget::BudgetedBytes::from_reserved_vec(bytes, lease)
+    }
+
     pub fn set_fill_rgb(&mut self, r: f32, g: f32, b: f32) -> &mut Self {
         self.push_line(&format!(
             "{} {} {} rg",
@@ -684,6 +733,39 @@ fn write_encoded_text(bytes: &mut Vec<u8>, codes: &[u8]) {
         bytes.push(HEX[(byte & 15) as usize]);
     }
     bytes.extend_from_slice(b"> Tj\n");
+}
+
+fn adjusted_text_layout(
+    codes: &[u8],
+    adjustment: f32,
+    limits: crate::parser::options::Limits,
+) -> crate::error::PdfResult<([u8; 64], usize, usize)> {
+    use crate::error::PdfError;
+    use std::io::Write;
+    if !adjustment.is_finite() {
+        return Err(PdfError::ObjectError("Non-finite TJ adjustment".into()));
+    }
+    let mut number = [0u8; 64];
+    let mut cursor = std::io::Cursor::new(number.as_mut_slice());
+    write!(cursor, "{adjustment}")
+        .map_err(|_| PdfError::ResourceLimit("TJ number formatting".into()))?;
+    let number_len = cursor.position() as usize;
+    if number_len > limits.max_token_bytes {
+        return Err(PdfError::ResourceLimit("TJ number token bytes".into()));
+    }
+    let length = encoded_text_length(codes, limits)?.checked_add(number_len)
+        .and_then(|size| size.checked_add(3))
+        .ok_or_else(|| PdfError::ResourceLimit("adjusted text size overflow".into()))?;
+    Ok((number, number_len, length))
+}
+
+fn write_adjusted_text(bytes: &mut Vec<u8>, codes: &[u8], number: &[u8]) {
+    bytes.push(b'[');
+    write_encoded_text(bytes, codes);
+    bytes.truncate(bytes.len() - 4); // Keep the hexadecimal token, not " Tj\n".
+    bytes.push(b' ');
+    bytes.extend_from_slice(number);
+    bytes.extend_from_slice(b"] TJ\n");
 }
 
 #[cfg(test)]

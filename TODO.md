@@ -51,7 +51,7 @@
       - [x] 局部XObject绑定/Form.Resources重建：预算字典替换先克隆保留值与新值、再原子交换，覆盖键/表扩容旧新共存；FmEdit名称由栈缓冲生成后预算复制，返回租约保留至事务返回。验证碰撞命名、峰值拒绝原字典不变、释放恢复/unwind及深度/键长/条目限制；页根注册、父/根程序和流输出仍待接入。
   - [ ] 解码/图片/事务克隆按容量与共存峰值计费，明确持久缓存转移及保留额度。
     - [ ] 工作对象表增长：DocumentStore.try_insert_object与reserve_entry目前直接HashMap.try_reserve，预算事务仅计费回滚数组/载荷。先确定可在分配前准确计费的表存储（不能以HashMap.capacity乘条目尺寸推测控制桶）；在插入、更新缺失ID、删除缺失ID三条入口统一接入事务预算作用域。嵌套同池/异池与普通事务混用须有明确规则，旧新表共存须计费，成功持久化和失败回滚须保持所有权。验收：触发扩容前拒绝不消耗对象号、不新增键、不改变原对象；错误/unwind及内层回滚后外层仍可重试，回滚复用现有存储不额外分配。对外entries返回HashMap的兼容性需随存储方案处理，不开放声称完整峰值约束的新接口。
-      - 方案核验：锁定依赖已有hashbrown 0.16.1，但当前pdf未直接依赖它；本地源码提供Allocator入口，需用实际Layout在allocate前预留并在deallocate归还，扩容期间旧新分配同时持有租约。评估适配器的租约存储本身（避免用另一未计费HashMap登记）、无预算分配/事务入池/成功转持久与嵌套异池拒绝；保持平均常数查找，不以有序Vec线性插入作为默认替代。DocumentStore.entries公开标准HashMap类型，切换实现须提供只读遍历接口迁移说明及下游编译验收。此为候选方案，尚未加入依赖或实现，不计作完成。
+      - 当前实现：提交a270aca已引入hashbrown 0.16.1与allocator-api2 0.2.21，TableAllocator在分配前按真实Layout预留，两个内联槽持有扩容旧新租约；同池嵌套、普通内层继承、异池拒绝、回滚及最外层转持久已接入。插入/更新缺失ID/删除缺失ID峰值拒绝与重试专项、工作区938项回归均通过。entries已迁移为StoreEntries只读视图，仓库内下游编译通过，外部下游兼容性未承诺；补充公开接口查询/借用/遍历专项中。上条为原验收要求，不再代表尚未实现；完整AR-03仍未完成。
   - [x] 固定Compressed/ObjStm保存组合：合法xref流样本中四压缩对象冷加载，原始/Flate对象流与Preserve/FlateUnencoded四组合的小额度拒绝不发布缓存、释放归零；拒绝后编辑压缩对象、充足额度保存不会被源展开覆盖，与独立普通保存字节一致且严格重开保留页/修改值。仅覆盖固定样本，不表示兼容性/持久总量/后端内存完整验收。
   - [x] 固定普通xref源流保存冷加载：未引用64 KiB流在严格打开时未加载，小额度保存拒绝不发布该缓存、额度归零且修订号不变；充足额度重试输出一致，缓存转为持久内存后普通/预算保存与页面读取不变。只覆盖此固定样本，不代表Compressed/ObjStm完整保存或持久缓存总量验收。
   - [x] 固定内存文档保存结果组合预算：Preserve/Flate结果持有期间计费，保留首结果导致第二次合计超限拒绝且原输出/修订号不变，释放后同池重试恢复；充足额度下双结果共存并逐份归还容量。仅覆盖已计费分配，不代表冷源加载、编码器私有内存或完整AR-03验收。
@@ -94,6 +94,44 @@ P0 的普通回归、错误处理、预算和真实样本登记贯穿上述工�
 执行约束：不新增或运行 fuzz，不接入 fuzz CI，不删除已有 fuzz 文件；常规单元、集成、像素回归和合法样本验证继续。每项仅在其验收条件达成后勾选，不因暂缓 fuzz 将完整项目标记完成。
 
 ### 实施记录
+
+- 2026-10-08 公共补偿外层unwind增强终态：原session71814退出0，adjusted_text七项通过、0失败/忽略、1.36秒，日志/tmp/rzpdf-compensation-outer-unwind-verified.log，含指定panic载荷确认；两共享页源码/Contents流ID恢复、旧快照拒绝、刷新重试及严格重开文本/后续字符/下一行位置均通过，取代此前待确认状态。此轮仅测试改动，生产版635项PDF单元证据仍有效；不表示所有失败点、TJ/嵌套或完整P3已完成，未运行fuzz、未提交。
+
+- 2026-10-08 公共补偿unwind首轮终态与增强复验：原session45816退出0，adjusted_text七项通过、0失败/忽略、1.37秒；随后新增panic载荷精确断言，要求确为成功编辑后注入的“injected compensation commit unwind”，避免其他断言panic被误认成功。增强版原session71814、日志/tmp/rzpdf-compensation-outer-unwind-verified.log，终态待确认，Rust源码冻结，不沿用初版结果。生产代码未改，635项单元基线仍有效；未运行fuzz、未提交。
+
+- 2026-10-08 自动补偿公共编辑外层unwind补验：新增adjusted_text回归，对Tj/两类引号先成功补偿并确认源码变化，再注入外层panic；核对两共享页源码/Contents流ID恢复、旧快照拒绝、刷新后重试、保存严格重开后的文本与后续C/下一行D位置。原session45816、日志/tmp/rzpdf-compensation-outer-unwind.log，终态待确认，Rust源码冻结。此轮只新增测试，生产版仍对应635项PDF单元通过；不把既有返回所有者unwind等同此次公共编辑链验收，未运行fuzz、未提交。
+
+- 2026-10-08 竖排增强终态及真实字体补偿对照：原session25333退出0，adjusted_text六项通过、0失败/忽略、1.36秒，含独立-1000/800/700与Vertical断言，取代下方待确认状态。新增compare_cjk_advance四页静态Noto Sans SC基线/原第二页/补偿/无补偿样本，最终原session30593退出0（首次示例索引Result编译错误已修正），本库保存/严格重开保持后续P/D/F位置；qpdf 11.2.0、MuPDF 1.27.0独立stext坐标/归一化文本和四页目视通过。check-cjk-advance.sh拒绝旧三页样本，交换对照页的四页负例在坐标检查拒绝；第二页PNG与原图cmp一致。命令/哈希/范围见docs/cjk-creation-validation.md；完整P3仍未完成，未运行fuzz、未提交。
+
+- 2026-10-08 竖排自动补偿合成回归：新增Identity-V/CIDFontType2、显式W2和ToUnicode样本，覆盖长替换/删除/双字节空格、Tc/Tw与负Tz/仿射文本矩阵、后续字符/下一行及严格重开。原session23609退出0，adjusted_text六项通过、0失败/忽略、1.40秒；随后增强独立数值断言（预期TJ为-1000/800/700）与实际WritingMode::Vertical检查，避免仅同一实现前后比对。增强版原session25333、日志/tmp/rzpdf-vertical-text-compensation-verified.log，终态待确认，Rust源码冻结。此轮只新增测试，生产代码仍对应635项PDF单元通过；合成度量不证明真实竖排字形/阅读器视觉，未运行fuzz、未提交。
+
+- 2026-10-08 预算重建专项终态：原session78609退出0，adjusted_text五项通过、0失败/忽略、0.47秒，日志/tmp/rzpdf-adjusted-program-ownership-final.log。新增Tj/两类引号的峰值差1拒绝、邻居保留、双结果合计拒绝、首结果不变、释放后重试和返回所有者unwind归零均通过，取代下条待确认状态。此轮只新增测试，生产版本仍对应全部PDF单元635项通过；没有运行全工作区，不把结果所有者unwind等同整个公共编辑链unwind或完整AR-03。完整P3仍未完成，未运行fuzz、未提交。
+
+- 2026-10-08 自动补偿版PDF单元终态及预算重建补验：原session43804退出0，全部PDF单元635项通过、0失败/忽略、1.80秒，日志/tmp/rzpdf-automatic-text-advance-pdf-unit.log，取代此前待确认状态。新增adjusted_text预算重建专项，覆盖Tj/两类引号峰值差1拒绝保留邻居、双结果共存拒绝/首结果不变、释放后重试、返回所有者unwind归零；首次测试编译原session95693退出101（预算程序须用AsRef访问，不是Deref），已修正测试，不改生产接口。当前原session78609、日志/tmp/rzpdf-adjusted-program-ownership-final.log终态待确认，Rust源码冻结。仅生产源码635项及此前四项专项已通过，不计新增预算测试为通过；未运行fuzz、未提交。
+
+- 2026-10-08 自动推进补偿专项终态：原session66501退出0，adjusted_text四项通过、0失败/忽略、0.52秒，日志/tmp/rzpdf-automatic-text-advance.log。Courier Tj/两类引号、长短/空替换、Tc/Tw、正负Tz、文本与页面仿射、后续C及下一行D位置、共享页/编码失败/外层回滚/旧快照拒绝及重试均通过。当前版本全部PDF单元原session43804、Cargo PID93587、日志/tmp/rzpdf-automatic-text-advance-pdf-unit.log，终态待确认，Rust源码冻结。TJ数组/嵌套、竖排/真实字体、完整unwind/独立渲染仍待补，完整P3未完成，未运行fuzz、未提交。
+
+- 2026-10-08 文本度量版专项终态及自动补偿接入：原session47982退出0，字体状态9项通过；原session90098退出0，全部PDF单元635项通过、0失败/忽略、1.85秒，取代此前待确认状态（日志/tmp/rzpdf-text-metrics-binding-verified.log与/tmp/rzpdf-text-metrics-pdf-unit.log）。随后新增replace_page_text_preserving_advance，按实际字符码宽度/字号/Tc/Tw计算TJ调整；Tj转TJ、单引号保留T*、双引号保留Tw/Tc/T*，字体/编码所有者与重建程序贯通同池。新旧字形遍历不分配字符数组，Tw仅作用于单字节空格，Tz不重复计入；零字号和溢出拒绝。新专项原session66501、日志/tmp/rzpdf-automatic-text-advance.log，终态待确认，Rust源码冻结。635项旧状态版不覆盖新补偿代码；TJ跨项/嵌套Form/独立渲染及完整P3仍待完成，未运行fuzz、未提交。
+
+- 2026-10-08 文本度量跟踪验收进程更新：原session71876编译退出101，测试误把add_page的返回值当作ObjectId；已改为读取实际页面引用，没有放宽接口可见性。当前专项原session47982、Cargo PID90508、日志/tmp/rzpdf-text-metrics-binding-verified.log，以及全部PDF单元原session90098、日志/tmp/rzpdf-text-metrics-pdf-unit.log，终态待确认。Rust源码冻结，不沿用上一构建版633项结果；未运行fuzz、未提交。
+
+- 2026-10-08 TJ构建版PDF单元终态与度量跟踪接入：原session92362退出0，633项通过、0失败/忽略、2.03秒，日志/tmp/rzpdf-adjusted-text-pdf-unit.log，取代下方待确认状态；不覆盖后续字体状态改动。当前BudgetedTextMetrics与已有字体前缀扫描共用，返回同池字体所有者和字号/Tc/Tw/Tz；q/Q保存/恢复标量与字体共享引用，ExtGState Font跟踪字号，双引号在目标绘制前设置Tw/Tc，栈按新增槽位大小计费。新增两项状态/ExtGState/所有权回归；首轮原session84047编译退出101（测试夹具构造器/私有方法），已修正；最终专项原session71876、日志/tmp/rzpdf-text-metrics-binding-final.log，终态待确认。自动推进差、嵌套继承及编辑入口仍待实现，未运行fuzz、未提交。
+
+- 2026-10-08 TJ调整专项终态：原session65546退出0，adjusted_text两项通过、0失败/忽略、0.18秒，日志/tmp/rzpdf-adjusted-text.log，取代下条专项待确认状态。明确正负千分字号单位、字符/词间距及缩放/旋转矩阵下后续位置与严格保存读回；PDF单元原session92362仍运行，Rust源码继续冻结。仅证明显式调整原语，不表示自动推进补偿已实现。
+
+- 2026-10-08 P3推进补偿构建前置：新增ContentBuilder显式TJ调整入口及BudgetedBytes版本；按真实输出容量持有租约，数字用固定栈缓冲格式化，拒绝非有限值和token/输出限额。新增adjusted_text两项专项，验证数值解析/预算所有权/失败原builder不变，以及Courier字符/词间距、Tz、旋转文本矩阵下后续C位置与严格保存读回。专项原session65546、Cargo PID86843，日志/tmp/rzpdf-adjusted-text.log；PDF单元原session92362、Cargo PID87078，日志/tmp/rzpdf-adjusted-text-pdf-unit.log；终态均待确认，Rust源码冻结。仅构建原语，不是自动字体度量或文档编辑补偿，后续状态/所有权方案见docs/content-editing.md。完整P3仍未完成，未运行fuzz、未提交。
+
+- 2026-10-08 P3真实CID文字范围替换：新增edit_cjk_text固定示例，复制第一中文/RGB页，只在副本将世界替换为你好；按字体编码字节计算范围，未映射字符拒绝保持stamp/源码、成功编辑后的外层注入错误回滚、刷新快照重试及原页隔离均通过。最终源码原session45065退出0；qpdf 11.2.0、MuPDF 1.27.0六行文本/共享字体图片与目视通过，前两页PNG与原图cmp一致。check-cjk-page-edit新增--text-edit模式，两种模式互相拒绝错误产物。只覆盖此静态真实字体/单Tj，完整P3及预算仍未完成；未运行fuzz、未提交，详见docs/cjk-creation-validation.md。
+
+- 2026-10-08 P2合并/拆分真实样本：extract_pages/merge_documents示例新增复制后释放源再保存，原session25380/5964均退出0。中文/RGB/RGBA样本逆序拆分两页、两源合并五页已通过本库严格读回、qpdf 11.2.0、MuPDF 1.27.0精确页序/文本和图像结构验证；七页PNG逐一cmp与已目视验收的原页一致，另检查拆分第一页/合并末页。新增固定check-cjk-transfer.sh及负例（错误顺序/页数退出1）；详细命令/哈希见docs/cjk-creation-validation.md。完整P2仍未完成，生产源码未变、未再次跑全工作区、未运行fuzz、未提交。
+
+- 2026-10-08 P2真实字体/图片页面编辑组合：新增edit_page_order示例，逆序跨文档导入、复制、重排为原始页序＋最后页副本；释放源后解释/保存，严格重开三页通过。固定中文/RGB/RGBA样本由qpdf 11.2.0、MuPDF 1.27.0精确六行/页序和三页目视检查验收；三份PNG逐一cmp与原页/副本一致。新增只读check-cjk-page-edit.sh检查页面树顺序、共享嵌入字体/ToUnicode和图片/SMask，错误两页输入退出1。README与验证记录已更新；只完成此矩阵子项，完整P2仍未完成，未运行fuzz、未提交。
+
+- 2026-10-08 P1组合创建样本：create_cjk新增可选--images，与--overlay组合兼容；当前静态Noto Sans SC字体的两页中英文/RGB/RGBA文件已由本库严格读回、qpdf 11.2.0结构检查、MuPDF 1.27.0精确文本和两页目视检查验收。默认命令仍通过原脚本，无图片样本在--images检查下拒绝，重复/未知选项不写输出。覆盖组合另已读回、提取及目视检查。详细命令/哈希/范围见docs/cjk-creation-validation.md，完整P1仍未完成，未运行fuzz、未提交。
+
+- 2026-10-08 StoreEntries公开接口专项终态：原session57226退出0，1项通过、0失败/忽略。覆盖查询/删除标记、临时视图借用与迭代及后续修改，取代下条待确认状态；不宣称标准HashMap全部接口或外部下游兼容。生产引擎源码未变，未再次运行整个工作区。
+
+- 2026-10-08 StoreEntries公开接口补验：新增pdf/tests/store_entries.rs，覆盖查询/容量/删除标记、临时视图返回的借用引用与迭代器、遍历返回原条目引用及后续编辑。`cargo test -p pdf --test store_entries --locked --offline --quiet` 原session57226、Cargo PID80283运行中，终态待确认，不计作通过。生产源码未改变；同步对象表条目的实现状态，未运行fuzz、未提交新改动，test.png保持不动。
 
 - 2026-10-08 对象表预算工作区验收终态：原session1967退出0，`cargo test --workspace --locked --offline --quiet` 汇总46组、938项通过、0失败、0忽略，日志 `/tmp/rzpdf-table-budget-full-workspace.log`。验收期间Rust源码保持冻结，此结果取代下方本轮待确认状态；工作对象表已接入真实Layout计费与事务作用域，完整AR-03及整个TODO仍未完成。按用户要求准备本地提交，不推送、不纳入test.png、未运行fuzz。
 
@@ -2004,6 +2042,7 @@ P0 的普通回归、错误处理、预算和真实样本登记贯穿上述工�
   - [x] 本地Rust unwind：新建/已有目标在write/sync及实际rename之前panic时，先关闭句柄后清理临时路径、原目标不变；不承诺成功rename后撤销或abort/断电恢复。
 - [x] P1-09 对未支持的加密文档保存显式拒绝，防止生成与 Encrypt 字典不一致的输出。
 - [ ] P1-10 提供新建中英文多页文档、插图和保存示例，更新 README 支持矩阵。
+  - [x] 固定静态Noto Sans SC两页中英文、RGB/RGBA插图及可选中文水印/页码组合：本库严格读回、独立结构/提取/目视检查通过，README说明已同步；只覆盖此样本，不代替完整P1矩阵。
 
 验收：从零创建的多页文件由本库读回，并通过独立结构检查工具和阅读器验证；文本可提取；字体与图片正确显示。记录验证工具版本。
 
@@ -2015,7 +2054,9 @@ P0 的普通回归、错误处理、预算和真实样本登记贯穿上述工�
 - [ ] P2-02 提供图片原始数据与解码数据提取接口，保留编码和尺寸信息。
 - [ ] P2-03 页面重排、复制、旋转与裁剪；统一 0 起始索引和错误语义。
 - [ ] P2-04 实现跨文档对象图复制：旧 ID 到新 ID 映射、循环处理、继承资源显式化和资源名称冲突处理。
+  - [x] 固定真实静态Noto Sans SC与RGB/RGBA软遮罩页面导入→复制→重排→源释放→保存读回组合：独立结构/文本及逐页渲染一致性通过；不代替循环、继承属性或完整失败矩阵验收。
 - [ ] P2-05 在对象图复制之上提供合并、拆分和页面导入。
+  - [x] 固定静态Noto Sans SC与RGB/RGBA软遮罩样本逆序拆分及两源合并：源释放后保存/严格重开，独立结构、精确文本/页序及七页渲染一致性通过；不代替所有页面树/归属/失败矩阵。
 - [ ] P2-06 提供水印、页码与覆盖内容；隔离图形状态，避免受原页面状态影响。
 - [ ] P2-07 提供显式可达性清理；保留未知扩展对象，定义删除策略。
 - [ ] P2-08 增加端到端编辑回归和独立结构/渲染验证。
@@ -2029,6 +2070,9 @@ P0 的普通回归、错误处理、预算和真实样本登记贯穿上述工�
 - [ ] P3-01 引入保留操作符、操作数、资源引用、流边界和来源位置的 ContentProgram；未知操作符可保留。
 - [ ] P3-02 定义文本/图片/路径的来源映射、坐标系、命中测试和稳定定位方式。
 - [ ] P3-03 提供文字替换与删除，明确字体覆盖、字距、换行和布局边界。
+  - [x] 固定自动补偿矩阵：Courier Tj/两类引号及Identity-V/W2合成独立数值回归，真实静态Noto Sans SC水平整Tj补偿/无补偿对照经独立坐标/文本/目视验收；不代替真实竖排、全部字体、TJ数组、嵌套或排版适配。
+  - [ ] 连续文字推进补偿：显式TJ预算原语、同池有效字体/字号/Tc/Tw/Tz与q/Q/gs/引号状态、新旧完整字符码度量及顶层单字符串事务入口已接入；Courier四项专项通过，当前PDF单元待终态。仍需TJ数组/跨项、嵌套继承与复制编辑、竖排/真实字体专项、完整unwind及独立渲染；不能以单字符数或Td估计/补偿，保留结束位置不代表字形装入原绘制边界。验收包括后续事件位置、行矩阵不变、共享隔离及失败所有权。
+  - [x] 固定真实静态Noto Sans SC单Tj已映射中文字范围替换：复制后原页隔离、未映射字符拒绝、外层错误回滚/重试、独立结构/精确文本/目视验证通过；不代替新增字形、连续推进或复杂字体矩阵。
 - [ ] P3-04 提供图片替换与移动、路径修改；处理共享 XObject 的复制后修改。
   - [x] 固定edit_content两页对照独立验证：qpdf结构检查、MuPDF文字提取及逐页渲染确认文字替换、图片旋转/单次删除、红路径删除和原页隔离。仅覆盖Helvetica英文与顶层图片/路径，复杂字体/Form/内联与完整视觉矩阵仍未验收。
 - [ ] P3-05 实现字体子集化与字符映射更新；确保修改后文本提取正确。

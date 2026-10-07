@@ -1,4 +1,4 @@
-//! Usage: create_cjk FONT.ttf POSTSCRIPT_NAME CAP_HEIGHT STEM_V OUTPUT.pdf [--overlay]
+//! Usage: create_cjk FONT.ttf POSTSCRIPT_NAME CAP_HEIGHT STEM_V OUTPUT.pdf [--overlay] [--images]
 //! Supply licensed static TrueType data and descriptor metrics in 1000 units.
 use pdf::{
     document::{
@@ -11,9 +11,24 @@ use pdf::{
 
 fn main() -> PdfResult<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if !(args.len() == 5 || (args.len() == 6 && args[5] == "--overlay")) {
+    let flags = if args.len() >= 5 { &args[5..] } else { &[] };
+    if args.len() < 5
+        || flags
+            .iter()
+            .any(|flag| flag != "--overlay" && flag != "--images")
+        || flags
+            .iter()
+            .filter(|flag| flag.as_str() == "--overlay")
+            .count()
+            > 1
+        || flags
+            .iter()
+            .filter(|flag| flag.as_str() == "--images")
+            .count()
+            > 1
+    {
         return Err(PdfError::DocumentError(
-            "Usage: create_cjk FONT.ttf POSTSCRIPT_NAME CAP_HEIGHT STEM_V OUTPUT.pdf [--overlay]"
+            "Usage: create_cjk FONT.ttf POSTSCRIPT_NAME CAP_HEIGHT STEM_V OUTPUT.pdf [--overlay] [--images]"
                 .into(),
         ));
     }
@@ -32,7 +47,8 @@ fn main() -> PdfResult<()> {
         "第二页 - 同一字体跨页复用",
         "中文可显示，也应正确提取。",
     ];
-    let overlays = args.len() == 6;
+    let overlays = flags.iter().any(|flag| flag == "--overlay");
+    let images = flags.iter().any(|flag| flag == "--images");
     let mut repertoire = lines.join("");
     if overlays {
         repertoire.push_str("草稿第 页 / 共 12");
@@ -60,6 +76,28 @@ fn main() -> PdfResult<()> {
             content.move_text(48.0, 770.0 - line_index as f32 * 48.0);
             content.show_encoded_text(&font.encoding().encode_text(line)?)?;
             content.end_text();
+        }
+        if images {
+            // Top row red/green, bottom row blue/yellow. The second page uses
+            // varying alpha to exercise a soft mask in the same CID document.
+            let image = if index == 0 {
+                doc.resources().embed_rgb_image(
+                    index,
+                    2,
+                    2,
+                    vec![230, 60, 50, 30, 150, 90, 40, 100, 210, 240, 190, 40],
+                )?
+            } else {
+                doc.resources().embed_rgba_image(
+                    index,
+                    2,
+                    2,
+                    vec![
+                        230, 60, 50, 255, 30, 150, 90, 192, 40, 100, 210, 128, 240, 190, 40, 0,
+                    ],
+                )?
+            };
+            content.draw_image(&image, [240.0, 0.0, 0.0, 160.0, 48.0, 500.0])?;
         }
         doc.replace_page_content_builder(index, &content)?;
     }

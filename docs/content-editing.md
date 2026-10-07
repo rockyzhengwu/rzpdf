@@ -1,5 +1,29 @@
 # 内容编辑
 
+## 显式 TJ 调整构建（验收中）
+
+`ContentBuilder::show_adjusted_encoded_text(codes, adjustment)`及带Limits版本输出`[<字符码> adjustment] TJ`，不推断字体、不编码Unicode。调整数值采用PDF TJ的千分之一字号单位：正值沿写字轴后退，负值向前。它只改变文字矩阵，不应拿Td代替（Td还会改变行矩阵）。`adjusted_encoded_text_with_budget(codes, adjustment, limits, budget)`返回持有实际Vec容量租约的BudgetedBytes；数字格式化使用64字节栈缓冲，不另分配String。非有限数值、字符串/数字token超限、输出超限或额度不足返回错误，普通builder已有字节不变。
+
+这只是自动推进补偿的构建原语。水平文字若希望替换后的结束位置不变，调用方应完整计算新旧推进差，再以`1000 * (新推进 - 旧推进) / 字号`得到TJ数值（推进未乘Tz）；字符间距和只作用于合法单字节空格码的词间距也须计入。不能只按Unicode字符数估计宽度，不能把Tz/页面CTM重复乘入数值；零字号、竖排、缺失/不可信字体度量与状态恢复仍需明确策略。
+
+自动补偿接入（验收中）：`replace_page_text_preserving_advance(page, &snapshot, operation, text)`借用同池文本度量/字体所有者，逐字符码计算新旧宽度及Tc/Tw差，以TJ调整保留原写字轴结束位置。接受Tj和两类引号；Tj转TJ，单引号转T*/TJ，双引号转Tw/Tc/T*/TJ，不改变行矩阵语义。零字号无法通过TJ补偿间距，明确拒绝；溢出/不可编码字符与旧快照按既有规则拒绝。保留结束位置不等于字形能装进旧绘制边界，较长文本可能与后续字形重叠；不是自动排版。
+
+`ContentProgram::with_adjusted_text_codes_with_budget`是对应低层字符码重建，不编码Unicode/计算度量；目标操作内部词法会重写，周围流片段与流数量沿用既有局部替换契约。调整字节、引号前缀、校验及重建程序同池持有租约，数字格式化不分配临时String，前缀完整长度在分配前检查。顶层编辑持有字体/编码所有者至提交返回，不产生裸Font深Clone。
+
+新入口专项原session66501退出0，adjusted_text四项通过、0失败/忽略、0.52秒，日志`/tmp/rzpdf-automatic-text-advance.log`。覆盖Courier单字符串三种操作符、不同新旧长度/空文本、字符/词间距、正负Tz、文本/页面仿射矩阵、后续字符及下一行位置、严格重开和共享页隔离/错误回滚/快照重试；当前生产版本全部PDF单元原session43804退出0，635项通过、0失败/忽略、1.80秒。新加预算重建专项原session78609尚待终态。TJ数组/跨项及嵌套Form补偿、竖排/真实字体专项、完整unwind和独立渲染仍待接入或验收，不能据此勾选完整P3。新旧字符码遍历采用字体visit_chars_limited，不生成额外字符数组；Tw只作用于单字节0x20，Tz/页面CTM不重复乘入调整数值。
+
+新增adjusted_text专项检查数字解析、输出/额度拒绝以及Courier已知度量下后续文字位置；原session65546退出0，两项通过、0失败/忽略，日志`/tmp/rzpdf-adjusted-text.log`。该版本PDF单元原session92362退出0，633项通过、0失败/忽略；不覆盖之后新增的文本度量跟踪，也不证明自动补偿或所有布局状态。
+
+文本度量状态接入：内部BudgetedTextMetrics将BudgetedFont和字号/Tc/Tw/Tz值一起返回，复用已有前缀字体解析。q/Q槽位保存同一个不可变字体引用及标量状态，并按新槽位大小计费；Tf和ExtGState Font更新字号，双引号在目标绘制之前设置Tw/Tc。BT/ET不重置这些图形状态标量。字体状态专项9项和该版本全部PDF单元635项均退出0；它们不覆盖随后新增的自动补偿入口。此状态暂只从页面顶层前缀获取，尚未传递嵌套Form的继承字号/间距。
+
+预算重建验收更新：原session78609退出0，adjusted_text当前五项通过、0失败/忽略、0.47秒，日志`/tmp/rzpdf-adjusted-program-ownership-final.log`，取代上文新增预算专项待确认状态。覆盖三种原操作的峰值差1拒绝、保留邻居、双结果合计拒绝且首结果保持、释放后重试、返回程序所有者unwind释放；生产代码未变，635项PDF单元证据仍对应当前生产版本。这不代替公共编辑链所有失败点/unwind或完整AR-03验收。
+
+竖排合成补验（增强版验收中）：Identity-V与显式W2分别给A/B/空格负推进，字体字号10、Tc=2、Tw=7；空格源码为双字节0020，不应加Tw。检查生成的TJ数值分别为-1000（A→AB）、800（A→空串）、700（A＋空格→B），确认实际WritingMode::Vertical及保存重开后后续字符/下一行位置。初版六项通过；新增独立数值/方向断言的原session25333尚待终态，不能沿用初版结果。字体只提供合成编码与度量，不是实际嵌入竖排字形或独立视觉验证。
+
+后续验收更新：竖排增强版原session25333退出0，六项通过、0失败/忽略、1.36秒，日志`/tmp/rzpdf-vertical-text-compensation-verified.log`，取代上文待确认状态。真实静态Noto Sans SC水平整Tj补偿/无补偿四页对照也已通过本库严格重开、MuPDF独立P/D/F坐标、归一化文本和四页目视检查；交换对照页的四页负例在坐标检查下拒绝，详见[中文构建验证](cjk-creation-validation.md)。这是固定矩阵证据，不表示真实竖排、全部字体、TJ/嵌套补偿或完整P3完成。
+
+公共补偿外层unwind补验通过：Tj/两类引号成功修改后注入panic，检查两共享页源码与Contents流ID恢复、旧快照拒绝、刷新重试与严格保存重开后的文本/后续字符及下一行位置。增强版要求panic载荷精确匹配指定注入消息，防止其他断言失败误认成成功清理；原session71814退出0，七项通过、0失败/忽略、1.36秒，日志`/tmp/rzpdf-compensation-outer-unwind-verified.log`。尚不代表所有公共入口和每一个失败点的完整unwind矩阵。
+
 ## Form 调用编辑与分层来源
 
 以下入口只编辑顶层页面 Contents 中选定的一次 Form `Do`，要求当前文档、当前 revision 和同页的 `ContentProgram`：

@@ -38,6 +38,8 @@ fn main() -> PdfResult<()> {
         sources.push(source);
     }
     let result = merge_sources(&sources)?;
+    // No imported font/image may depend on a still-open source context.
+    drop(sources);
     let expected = result.try_page_count()?;
     result.save_to_file(&paths[0])?;
     let reopened = PdfDocument::open_with_mode(&paths[0], ParseMode::Strict)?;

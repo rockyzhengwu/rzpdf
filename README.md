@@ -80,7 +80,7 @@ A Rust library for **PDF data extraction** and **rendering**.
 
 `watermark_pages_cid(&pages, "草稿", &registered_cid_font, font_size, matrix, color)` 使用本文件已有 CID 字体编码水印并跨页注册，同一事务内覆盖，不重复嵌入字体文件。固定字符集须包含全部文字；缺字与外来句柄拒绝。此接口的真实中文渲染验收仍待完成。
 
-`create_cjk` 示例在原有五个参数后可追加 `--overlay`，预先将水印及页码字符加入固定字符集，再为两页添加“草稿”和“第 1 页 / 共 2 页”中文覆盖。未传此选项时保留原来的正文示例行为；带选项路径已通过编译，实际外部验收待补。
+`create_cjk` 示例在原有五个参数后可追加 `--overlay`，预先将水印及页码字符加入固定字符集，再为两页添加“草稿”和“第 1 页 / 共 2 页”中文覆盖。也可追加 `--images` 添加RGB/RGBA插图，两种选项可组合。固定Noto Sans SC两页组合已通过本库严格读回、qpdf、MuPDF提取及目视检查，范围见[中文构建验证](docs/cjk-creation-validation.md)；不代表全部字体或页面布局验收。
 
 组合示例：`cargo run -p pdf --example overlay_document -- INPUT.pdf OUTPUT.pdf`。同一外层事务为全部页面添加斜向 DRAFT 和 `Page 1 / N` 页脚；先严格读回内存保存结果并解释全部页，再保存目标文件。示例使用固定位置，适合默认用户空间的 A4 页面演示，不自动处理旋转/裁剪/小尺寸页面；请使用与输入不同的新输出文件名，独立视觉验收仍待完成。
 
@@ -129,6 +129,24 @@ cargo run -p pdf --example create_cjk --locked -- FONT.ttf POSTSCRIPT_NAME CAP_H
 ```
 
 字体源许可、静态实例准备、参数与独立验证方法见 [中文构建验证](docs/cjk-creation-validation.md)。示例保存后还会严格读回并构建两页 DisplayList；可运行 `bash docs/check-cjk-example.sh output/pdf/rzpdf-cjk-example.pdf` 检查结构、字体跨页复用及精确提取文本（需 qpdf/mutool/jq）。这不是所有字体或排版情况的验收，视觉检查仍需单独进行。
+
+在创建命令末尾追加 `--images` 可生成中英文与RGB/RGBA插图组合，再向检查命令追加 `--images` 检查Image/SMask结构。追加 `--overlay` 会增加文字，原四行精确文本检查不适用于该模式。
+
+页面编辑组合示例：
+
+```sh
+cargo run -p pdf --example edit_page_order --locked -- INPUT.pdf OUTPUT.pdf
+```
+
+逆序导入全部页、复制最后一张源页，再恢复原始页序并追加副本；源文档释放后仍可保存和严格读回。仅复制页面，不合并Catalog元数据/书签/批注。两页中文插图样本的输出可用 `bash docs/check-cjk-page-edit.sh OUTPUT.pdf` 做固定三页结构、共享字体/图片及精确文本验收，独立渲染记录见[中文构建验证](docs/cjk-creation-validation.md)。不要把该脚本用于任意输入文件。
+
+`extract_pages`、`merge_documents` 示例也在复制完成后释放源，再保存并严格读回。固定中文/透明图片样本的逆序拆分和两源合并已有结构、精确文本及逐页渲染一致性验证；可分别用 `bash docs/check-cjk-transfer.sh extract OUTPUT.pdf` 或 `merge OUTPUT.pdf` 复验，输入要求与命令见[中文构建验证](docs/cjk-creation-validation.md)。合并不承诺跨源字体去重，也不合并Catalog元数据/书签/批注。
+
+真实中文字体文字编辑固定示例：`cargo run -p pdf --example edit_cjk_text --locked -- INPUT.pdf OUTPUT.pdf`，输入为两页`create_cjk --images`文件。复制第一页后仅在副本中把“世界”替换成“你好”，检查未映射字符拒绝、外层事务回滚及原页隔离，再保存严格读回。可用 `bash docs/check-cjk-page-edit.sh OUTPUT.pdf --text-edit` 复验；独立提取和目视结果见[中文构建验证](docs/cjk-creation-validation.md)。只替换已映射字符，不新增字形、不作布局补偿，也不是通用文本搜索替换。
+
+`replace_page_text_preserving_advance(page, &snapshot, operation, text)`提供顶层Tj/两类引号的可选推进补偿：按有效字体与字符/词间距生成TJ调整，保留后续文字的写字轴位置和引号行矩阵语义。零字号拒绝；较长文字仍可能与后续字形重叠，不是排版适配。Courier位置/共享隔离/回滚、合成竖排和固定真实中文水平字体对照已验收；TJ数组、嵌套Form、真实竖排及完整字体矩阵仍待完成。底层显式调整和预算接口见[内容编辑](docs/content-editing.md)。
+
+固定真实字体补偿对照：`cargo run -p pdf --example compare_cjk_advance --locked -- INPUT.pdf OUTPUT.pdf`，输入为两页`create_cjk --images`文件。输出四页基线/原第二页/补偿/无补偿，独立MuPDF坐标检查及目视确认后续PDF仅在补偿页保持原位；可运行 `bash docs/check-cjk-advance.sh OUTPUT.pdf` 复验。范围、负例和渲染记录见[中文构建验证](docs/cjk-creation-validation.md)。合成Identity-V/W2度量回归也已通过，但真实竖排字形和完整字体矩阵仍未验收。
 
 Info/XMP 默认独立编辑，不自动修改另一侧。`set_info_and_metadata(Some(info), Some(packet))` 可在同一事务替换两者；任一失败回滚全部修改，None 解除对应引用。该 API 只保证原子提交，语义一致性和合法 XML 由调用方负责，不自动映射字段或覆盖未知 XMP 属性。
 

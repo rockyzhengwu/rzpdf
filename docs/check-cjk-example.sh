@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Read-only checks for the exact two-page create_cjk example, not general PDF conformance.
 set -euo pipefail
-if [[ $# -ne 1 ]]; then
-    echo 'Usage: bash docs/check-cjk-example.sh path/to/example.pdf' >&2
+if [[ $# -lt 1 || $# -gt 2 || (${2:-} != '' && ${2:-} != '--images') ]]; then
+    echo 'Usage: bash docs/check-cjk-example.sh path/to/example.pdf [--images]' >&2
     exit 2
 fi
 task_pdf_path=$1
@@ -38,6 +38,25 @@ qpdf --json --json-key=qpdf "$task_pdf_path" | jq -e '
     ([$objects[] | .value? | select(.["/FontFile2"] != null)] | length == 1) and
     (deref($trailer["/Info"]).value["/Title"] == "u:rzpdf 中文构建验证")
 ' >/dev/null
+if [[ ${2:-} == '--images' ]]; then
+    qpdf --json --json-key=qpdf "$task_pdf_path" | jq -e '
+        .qpdf[1] as $objects |
+        def deref($ref): $objects["obj:" + $ref];
+        [$objects[] | .value? | select(.["/Type"] == "/Page")] as $pages |
+        [$pages[] | (.["/Resources"]["/XObject"] // {}) | to_entries[] | .value |
+         deref(.).stream.dict] as $images |
+        ($images | length == 2) and
+        ([$images[] | select(.["/Subtype"] == "/Image" and
+             .["/Width"] == 2 and .["/Height"] == 2 and
+             .["/BitsPerComponent"] == 8 and .["/ColorSpace"] == "/DeviceRGB")] | length == 2) and
+        ([$images[] | select(.["/SMask"] == null)] | length == 1) and
+        ([$images[] | select(.["/SMask"] != null) | deref(.["/SMask"]).stream.dict |
+             select(.["/Subtype"] == "/Image" and .["/Width"] == 2 and
+             .["/Height"] == 2 and .["/BitsPerComponent"] == 8 and
+             .["/ColorSpace"] == "/DeviceGray")] | length == 1)
+    ' >/dev/null
+    echo 'CJK example RGB/RGBA Image and SMask structure checks passed.'
+fi
 task_text=$(mutool draw -F txt "$task_pdf_path" | tr -d '\f' | sed '/^[[:space:]]*$/d')
 task_expected=$'rzpdf - 中文字体嵌入\n你好，世界！Hello PDF\n第二页 - 同一字体跨页复用\n中文可显示，也应正确提取。'
 [[ "$task_text" == "$task_expected" ]] || { echo 'CJK example extracted text or page order mismatch' >&2; exit 1; }
