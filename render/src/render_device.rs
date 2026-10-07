@@ -563,6 +563,93 @@ impl Device for SkiaRender {
         Ok(())
     }
 
+    fn do_shading(&mut self, object: pdf::page::shading_object::ShadingObject) -> PdfResult<()> {
+        if object.shading.colorspace().is_nonpainting() {
+            return Ok(());
+        }
+        let alpha = object.graphic_state.general_state.fill_alpha;
+        if !alpha.is_finite() || !(0.0..=1.0).contains(&alpha) {
+            return Err(PdfError::PageOperatorError("invalid shading alpha".into()));
+        }
+        let matrix = object.matrix.checked_mul(&self.matrix)?;
+        let [a, b, c, d, e, f] = [
+            matrix.a(),
+            matrix.b(),
+            matrix.c(),
+            matrix.d(),
+            matrix.e(),
+            matrix.f(),
+        ]
+        .map(f64::from);
+        let determinant = a * d - b * c;
+        if determinant == 0.0 {
+            return Ok(());
+        }
+        if self.page_width <= 0 || self.page_height <= 0 {
+            return Err(PdfError::DocumentError(
+                "shading requires an active page".into(),
+            ));
+        }
+        let bytes = (self.page_width as usize)
+            .checked_mul(self.page_height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| PdfError::ResourceLimit("shading raster size overflow".into()))?;
+        // Surface, Rust raster, and Skia's owned copy coexist. Native bookkeeping
+        // and temporary allocations inside color/function evaluation are excluded.
+        if bytes
+            .checked_mul(3)
+            .is_none_or(|peak| peak > self.limits.max_render_bytes)
+        {
+            return Err(PdfError::ResourceLimit(
+                "shading raster exceeds byte budget".into(),
+            ));
+        }
+        let mut rgba = Vec::new();
+        rgba.try_reserve_exact(bytes)
+            .map_err(|_| PdfError::ResourceLimit("unable to allocate shading raster".into()))?;
+        rgba.resize(bytes, 0);
+        for y in 0..self.page_height {
+            for x in 0..self.page_width {
+                let px = f64::from(x) + 0.5 - e;
+                let py = f64::from(y) + 0.5 - f;
+                let ux = (d * px - c * py) / determinant;
+                let uy = (-b * px + a * py) / determinant;
+                if let Some(color) = object.shading.color_at_point(ux, uy)? {
+                    let offset = (y as usize * self.page_width as usize + x as usize) * 4;
+                    rgba[offset..offset + 4].copy_from_slice(&[color.r(), color.g(), color.b(), 255]);
+                }
+            }
+        }
+        let info = skia_safe::ImageInfo::new(
+            (self.page_width, self.page_height),
+            skia_safe::ColorType::RGBA8888,
+            skia_safe::AlphaType::Unpremul,
+            None,
+        );
+        let image = skia_safe::images::raster_from_data(
+            &info,
+            skia_safe::Data::new_copy(&rgba),
+            info.min_row_bytes(),
+        )
+        .ok_or_else(|| PdfError::ResourceLimit("Skia rejected shading raster".into()))?;
+        drop(rgba);
+        let mut paint = Paint::default();
+        paint.set_alpha_f(alpha);
+        paint.set_blend_mode(Self::skia_blend_mode(
+            object.graphic_state.general_state.blend_mode,
+        ));
+        self.surface.canvas().save();
+        let result = self.set_clip(&object.graphic_state.clip_path);
+        if result.is_ok() {
+            self.surface.canvas().reset_matrix();
+            self.surface
+                .canvas()
+                .draw_image(&image, (0.0, 0.0), Some(&paint));
+        }
+        self.surface.canvas().restore();
+        result
+    }
+
     fn do_image(&mut self, imageobject: ImageObject) -> PdfResult<()> {
         let matrix = &imageobject.matrix;
         let ctm = matrix.checked_mul(&self.matrix)?;
@@ -641,6 +728,252 @@ impl Device for SkiaRender {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn type1_shading_pixels_and_bbox_survive_strict_save() {
+        use pdf::{
+            document::{
+                PdfDocument,
+                resource_manager::ResourceKind,
+                save_options::{SaveOptions, StreamCompression},
+            },
+            io::stream_reader::StreamReader,
+            objects::{PdfObject, pdf_stream::PdfStream},
+            page::page_builder::PageBuilder,
+            parser::syntax::{ParseMode, SyntaxParser},
+        };
+        let parse = |source: &str| {
+            SyntaxParser::new(
+                StreamReader::try_new(std::io::Cursor::new(source.as_bytes().to_vec())).unwrap(),
+            )
+            .get_object()
+            .unwrap()
+        };
+        for sampled in [false, true] {
+            let doc = PdfDocument::new().unwrap();
+            doc.add_page_with_builder(0, PageBuilder::new().size(40.0, 20.0))
+                .unwrap();
+            let (dict, data) = if sampled {
+                (
+                    "<< /FunctionType 0 /Domain [0 1 0 1] /Range [0 1 0 1 0 1] /Size [2 2] /BitsPerSample 8 >>",
+                    vec![0, 0, 0, 255, 0, 128, 0, 255, 128, 255, 255, 255],
+                )
+            } else {
+                (
+                    "<< /FunctionType 4 /Domain [0 1 0 1] /Range [0 1 0 1 0 1] >>",
+                    b"{ 2 copy add 2 div }".to_vec(),
+                )
+            };
+            let function = doc
+                .try_insert_object(PdfObject::PdfStream(PdfStream::new(
+                    parse(dict).into_dict().unwrap(),
+                    data,
+                )))
+                .unwrap();
+            let id = doc.try_insert_object(parse(&format!(
+                    "<< /ShadingType 1 /ColorSpace /DeviceRGB /Matrix [40 0 0 20 0 0] /BBox [4 4 36 16] /Background [1 0 0] /Function {} {} R >>",
+                    function.obj_num(), function.gen_num()
+                ))).unwrap();
+            let name = doc
+                .resources()
+                .register_existing(0, ResourceKind::Shading, id)
+                .unwrap();
+            doc.replace_page_contents(0, format!("/{name} sh").into_bytes())
+                .unwrap();
+            let raster = |document: &PdfDocument<std::io::Cursor<Vec<u8>>>| {
+                let mut renderer = SkiaRender::new(72.0, 72.0).unwrap();
+                document
+                    .get_page(0)
+                    .unwrap()
+                    .display(&mut renderer)
+                    .unwrap();
+                let info = skia_safe::ImageInfo::new(
+                    (40, 20),
+                    skia_safe::ColorType::RGBA8888,
+                    skia_safe::AlphaType::Unpremul,
+                    None,
+                );
+                let mut bytes = vec![0; 3200];
+                assert!(renderer.surface.read_pixels(&info, &mut bytes, 160, (0, 0)));
+                bytes
+            };
+            let expected = raster(&doc);
+            let pixel = |x: usize, y: usize| &expected[(y * 40 + x) * 4..(y * 40 + x) * 4 + 4];
+            assert_eq!(pixel(10, 5), &[67, 185, 126, 255]);
+            assert_eq!(pixel(10, 15), &[67, 57, 62, 255]);
+            assert_eq!(pixel(2, 10), &[255; 4]);
+            for compression in [
+                StreamCompression::Preserve,
+                StreamCompression::FlateUnencoded,
+            ] {
+                let bytes = doc
+                    .save_to_bytes_with_options(SaveOptions {
+                        compression,
+                        ..Default::default()
+                    })
+                    .unwrap();
+                assert_eq!(
+                    raster(&PdfDocument::from_bytes_with_mode(bytes, ParseMode::Strict).unwrap()),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shading_pixels_use_functions_geometry_and_strict_save() {
+        use pdf::{
+            document::{
+                PdfDocument,
+                resource_manager::ResourceKind,
+                save_options::{SaveOptions, StreamCompression},
+            },
+            io::stream_reader::StreamReader,
+            page::page_builder::PageBuilder,
+            parser::syntax::{ParseMode, SyntaxParser},
+        };
+        let parse = |source: &str| {
+            SyntaxParser::new(
+                StreamReader::try_new(std::io::Cursor::new(source.as_bytes().to_vec())).unwrap(),
+            )
+            .get_object()
+            .unwrap()
+        };
+        for radial in [false, true] {
+            let doc = PdfDocument::new().unwrap();
+            doc.add_page_with_builder(0, PageBuilder::new().size(40.0, 20.0))
+                .unwrap();
+            let source = if radial {
+                "<< /ShadingType 3 /ColorSpace /DeviceGray /Coords [20 10 0 20 10 10] /Function << /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 1 >> >>"
+            } else {
+                "<< /ShadingType 2 /ColorSpace /DeviceGray /Coords [0 0 40 0] /Function << /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 2 >> >>"
+            };
+            let id = doc.try_insert_object(parse(source)).unwrap();
+            let name = doc
+                .resources()
+                .register_existing(0, ResourceKind::Shading, id)
+                .unwrap();
+            doc.replace_page_contents(0, format!("/{name} sh").into_bytes())
+                .unwrap();
+            let render = |document: &PdfDocument<std::io::Cursor<Vec<u8>>>| {
+                let mut renderer = SkiaRender::new(72.0, 72.0).unwrap();
+                document
+                    .get_page(0)
+                    .unwrap()
+                    .display(&mut renderer)
+                    .unwrap();
+                let info = skia_safe::ImageInfo::new(
+                    (40, 20),
+                    skia_safe::ColorType::RGBA8888,
+                    skia_safe::AlphaType::Unpremul,
+                    None,
+                );
+                let mut bytes = vec![0; 40 * 20 * 4];
+                assert!(renderer.surface.read_pixels(&info, &mut bytes, 160, (0, 0)));
+                bytes
+            };
+            let expected = render(&doc);
+            let pixel = |x: usize, y: usize| &expected[(y * 40 + x) * 4..(y * 40 + x) * 4 + 4];
+            if radial {
+                assert_eq!(pixel(20, 10), &[18, 18, 18, 255]);
+                assert_eq!(pixel(0, 10), &[255; 4]);
+            } else {
+                assert_eq!(pixel(10, 10), &[18, 18, 18, 255]);
+                assert_eq!(pixel(30, 10), &[148, 148, 148, 255]);
+            }
+            for compression in [
+                StreamCompression::Preserve,
+                StreamCompression::FlateUnencoded,
+            ] {
+                let bytes = doc
+                    .save_to_bytes_with_options(SaveOptions {
+                        compression,
+                        ..SaveOptions::default()
+                    })
+                    .unwrap();
+                let reopened = PdfDocument::from_bytes_with_mode(bytes, ParseMode::Strict).unwrap();
+                assert_eq!(render(&reopened), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn shading_clip_alpha_and_budget_recover_without_partial_paint() {
+        use pdf::{
+            document::{PdfDocument, resource_manager::ResourceKind},
+            io::stream_reader::StreamReader,
+            page::{page_builder::PageBuilder, page_object::PageObject},
+            parser::syntax::SyntaxParser,
+        };
+        let doc = PdfDocument::new().unwrap();
+        doc.add_page_with_builder(0, PageBuilder::new().size(40.0, 20.0))
+            .unwrap();
+        let source = b"<< /ShadingType 2 /ColorSpace /DeviceGray /Coords [0 0 40 0] /Extend [true true] /BBox [0 0 30 20] /Function << /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [0] /N 1 >> >>";
+        let object =
+            SyntaxParser::new(StreamReader::try_new(std::io::Cursor::new(source.to_vec())).unwrap())
+                .get_object()
+                .unwrap();
+        let id = doc.try_insert_object(object).unwrap();
+        let name = doc
+            .resources()
+            .register_existing(0, ResourceKind::Shading, id)
+            .unwrap();
+        doc.replace_page_contents(0, format!("5 0 35 20 re W n /{name} sh").into_bytes())
+            .unwrap();
+        let list = doc.get_page(0).unwrap().display_list().unwrap();
+        let PageObject::Shading(mut shading) = list.objects()[0].clone() else {
+            panic!()
+        };
+        shading.graphic_state.general_state.fill_alpha = 0.5;
+        let pixels = |renderer: &mut SkiaRender| {
+            let info = skia_safe::ImageInfo::new(
+                (40, 20),
+                skia_safe::ColorType::RGBA8888,
+                skia_safe::AlphaType::Unpremul,
+                None,
+            );
+            let mut bytes = vec![0; 3200];
+            assert!(renderer.surface.read_pixels(&info, &mut bytes, 160, (0, 0)));
+            bytes
+        };
+        let mut renderer = SkiaRender::with_limits(
+            72.0,
+            72.0,
+            Limits {
+                max_render_bytes: 9599,
+                ..Limits::default()
+            },
+        )
+        .unwrap();
+        renderer.start_page(40.0, 20.0).unwrap();
+        assert!(matches!(
+            renderer.do_shading(shading.clone()),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        assert!(pixels(&mut renderer).iter().all(|byte| *byte == 255));
+        renderer.limits.max_render_bytes = 9600;
+        renderer.do_shading(shading.clone()).unwrap();
+        let bytes = pixels(&mut renderer);
+        assert_eq!(&bytes[(10 * 40 + 2) * 4..(10 * 40 + 2) * 4 + 4], &[255; 4]);
+        assert_eq!(
+            &bytes[(10 * 40 + 10) * 4..(10 * 40 + 10) * 4 + 4],
+            &[127, 127, 127, 255]
+        );
+        assert_eq!(
+            &bytes[(10 * 40 + 35) * 4..(10 * 40 + 35) * 4 + 4],
+            &[255; 4]
+        );
+        shading.graphic_state.general_state.fill_alpha = f32::NAN;
+        assert!(renderer.do_shading(shading.clone()).is_err());
+        assert_eq!(pixels(&mut renderer), bytes);
+        shading.graphic_state.general_state.fill_alpha = 1.0;
+        shading.graphic_state.clip_path.elements.clear();
+        renderer.do_shading(shading).unwrap();
+        assert_eq!(
+            &pixels(&mut renderer)[(10 * 40 + 2) * 4..(10 * 40 + 2) * 4 + 4],
+            &[0, 0, 0, 255]
+        );
+    }
+
     #[test]
     fn nested_multicolor_image_transform_preserves_orientation_and_shared_calls() {
         use pdf::{

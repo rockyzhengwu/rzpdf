@@ -2,9 +2,29 @@
 
 ## Shading 参数模型回归（2026-10-07）
 
+Type1 固定独立样本：create_shading 第八页使用 Type4 双输入 RGB 与 Matrix [160 0 0 80 20 20]。MuPDF info/draw 和 Skia 严格读取/渲染成功，最新两张图均目视检查；200×120、最大通道差2、平均最大差0.6、差>3为0。Skia 的 (60,60)/(100,40)/(140,80) RGB 分别 (65,126,95)/(128,190,159)/(192,62,127)，与像素中心反变换后的解析函数一致；MuPDF 选点存在1色阶采样差。临时证据 `tmp/pdfs/shading-type1.l7PEIo/`，不能泛化为整个 Type1/Pattern 验收。
+
+最新代码门禁：`/tmp/rzpdf-shading-current-final.log` 退出 0，544 单元、25 颜色流程、17 版本与14资源测试通过。`/tmp/rzpdf-shading-form-import.log` 退出 0，Form 同名局部 Shading 覆盖、两次调用来源/矩阵/裁剪、页面状态恢复、跨文档导入及两保存策略严格读回的集成组合通过（1 个测试函数，不按参数组合重复计数）。此结果不证明尚未完成的整个工作区和全部 Shading 类型。
+
+Form 修正样本：Shading.ColorSpace 改用显式 DeviceGray（资源别名不是合法定义），局部 Shading/S 保留。session 46424/36690 均退出 0；MuPDF 第七页无原先 LocalGray 诊断，MuPDF/Skia 双调用图像已目视检查，均 200×120。两次平移调用内各两个采样点的 Skia RGB 与 N=2 解析值一致，MuPDF 相差 1–2 色阶；调用间空白不被涂色。证据位于 `tmp/pdfs/shading-form-fixed.ULHu9o/`；尚不包含来源编辑、两策略读回和整个 Form 矩阵验收。
+
+非均匀 DPI 补充：`render_document` 接受可选 xdpi/ydpi，参数必须有限且正。session 19394 退出 0，144×108 DPI 六页图像已逐页目视检查；未旋转页 400×180、旋转页 240×300。轴向/同心径向/剪切径向各三个选点经像素中心逆缩放与解析 N=2 求值均与实际 RGB 精确一致；证据在 `tmp/pdfs/shading-transforms.nN0A8N/skia-dpi/`。此项覆盖尺寸与选点，不代替跨后端整页和边缘验收。
+
+### 独立阅读器验收待执行
+
+固定样本需由本库创建并分别 Preserve/Flate 保存，使用系统 Poppler 的 `pdfinfo` 检查版本/页数，再以 `pdftoppm -r 72 -png` 渲染到 `tmp/pdfs/`；稳定的最终样本放在 `output/pdf/`。不得覆盖工作区已有 `test.png`。同一 PDF 还需通过本库 Skia 渲染，并以页面内部明确采样点比较颜色；边缘抗锯齿差异单列，不用整页字节相等作为跨后端唯一判据。
+
+样本矩阵：轴向 N=2 非线性、同心与移动/缩小径向、两端 Extend、BBox 与当前裁剪交集、直接 sh 忽略 Background、透明度与混合模式、Form 局部命名颜色资源以及旋转/非均匀 DPI。逐页目视检查最新 PNG，记录颜色容差、坐标和已知差异；原生临时分配与性能限制单独列明。当前仅确认 Poppler 工具可用，尚未生成或验收这组独立样本，不记为完成。
+
+2026-10-07 首轮实测更新：Poppler 启动缺 libtiff.5.dylib，改用 MuPDF 1.27.0 和 Ghostscript 9.23。`create_shading` 四页、两保存策略已经生成；MuPDF 两策略 PNG 对应哈希一致。Skia、MuPDF 和 Ghostscript 的四页图像均逐页目视检查，形状一致但未通过跨后端差异验收。200×120 的同心径向页，像素中心反变换后 `t=hypot(x+0.5-100,120-(y+0.5)-60)/50`；N=2 的解析 RGB 在 (100,60)/(140,60)/(100,40) 分别为 (0,0,255)/(167,0,88)/(39,0,216)，与 Skia 完全一致。MuPDF 在第二点为 (161,0,93)，Ghostscript 为 (167,0,87)，因此不能仅凭某一个参考后端的逐像素差异修改解析颜色求值。
+
+覆盖范围也需独立处理：MuPDF/Skia 四页白色/非白色分类不同的像素为 120/141/121/0，其中轴向页差异集中于 x=19 的边界列。同心径向距中心小于 45 的内部区域最大通道差仍为 8，不属于覆盖边缘。暂不认定这些差异的具体实现原因；下一步补边缘面积覆盖策略、采样位置与参考后端近似算法审计，并扩大 Form/变换/透明度矩阵。临时证据位于 `tmp/pdfs/shading-validation.XVQgC4/`，不得视为整个 P4 已完成。
+
+变换扩展样本（`tmp/pdfs/shading-transforms.nN0A8N/`）第 5 页叠加 CTM/页面旋转，第 6 页径向矩阵为 `[1 0.2 0.3 0.6 -18 4]`，MuPDF/Skia 均已逐页目视检查。旋转页两后端尺寸 120×200、最大通道差 3；剪切页尺寸 200×120、最大差 255（含覆盖边界），平均差 1.779，差>3 共 2854 像素。剪切页四个选点经 f64 矩阵逆变换与 N=2 解析计算的 RGB 与 Skia 精确一致；这证明选点的变换/求值，不等于整页跨后端验收或非均匀 DPI 验收。
+
 Type2 轴向/Type3 径向 Shading 现有独立参数模型和归一化位置颜色求值。单元检查单函数/组件函数数组、Domain 映射、Extend/BBox/背景/抗锯齿提示、非法参数、Pattern/Indexed 拒绝及跨组件函数树额度失败后重试；依据 [Adobe PDF Reference 1.4 的 Axial/Radial Shadings](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/pdfreference1.4.pdf)。
 
-`/tmp/rzpdf-shading-model-final.log` 退出 0：541 单元、22 颜色流程通过，0 失败/忽略。尚无 sh 资源解释、显示事件或实际渐变渲染；数值测试不是页面/像素验收，Type1/4–7 和 Pattern 尚未完成。
+模型阶段 `/tmp/rzpdf-shading-model-final.log` 退出 0：541 单元、22 颜色流程通过。后续已接入 sh 资源解释、显示事件和 Skia 实际绘制；最终模型/资源回归为 544 单元、23 颜色流程、14 资源测试通过。`/tmp/rzpdf-shading-state.log` 退出 0：2 个专项检查轴向 N=2/径向明确像素与两保存策略严格重开、裁剪/BBox/透明度和预算失败恢复。渲染全量结果见 TODO，数值与库内像素测试不代替独立阅读器验收；Type1/4–7 和 Pattern 尚未完成。
 
 ## Type4 计算函数回归（2026-10-07）
 

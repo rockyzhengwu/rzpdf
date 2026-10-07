@@ -24,14 +24,82 @@ struct ColorDevice {
 }
 
 #[test]
-fn shading_resource_alias_state_and_replay_survive_strict_save() {
-    use pdf::{document::resource_manager::ResourceKind, page::page_object::PageObject};
+fn shading_registration_rejects_resource_alias_without_mutation() {
+    use pdf::document::resource_manager::ResourceKind;
     let doc = PdfDocument::new().unwrap();
     doc.add_page(0).unwrap();
-    let gray = doc
+    let alias = doc
         .resources()
         .register_color_space(0, parse_object("/DeviceGray"))
         .unwrap();
+    let id = doc.try_insert_object(parse_object(&format!(
+        "<< /ShadingType 2 /ColorSpace /{alias} /Coords [0 0 10 0] /Function << /FunctionType 2 /Domain [0 1] /N 1 >> >>"
+    ))).unwrap();
+    let revision = doc.revision();
+    let before = doc.save_to_bytes().unwrap();
+    assert!(matches!(
+        doc.resources()
+            .register_existing(0, ResourceKind::Shading, id),
+        Err(PdfError::ColorError(_))
+    ));
+    assert_eq!(doc.revision(), revision);
+    assert_eq!(doc.save_to_bytes().unwrap(), before);
+}
+
+#[test]
+fn shading_interpretation_rejects_alias_after_low_level_update() {
+    use pdf::document::resource_manager::ResourceKind;
+    let doc = PdfDocument::new().unwrap();
+    doc.add_page(0).unwrap();
+    let alias = doc
+        .resources()
+        .register_color_space(0, parse_object("/DeviceGray"))
+        .unwrap();
+    let make = |space: &str| {
+        parse_object(&format!(
+            "<< /ShadingType 2 /ColorSpace /{space} /Coords [0 0 10 0] /Function << /FunctionType 2 /Domain [0 1] /N 1 >> >>"
+        ))
+    };
+    let id = doc.try_insert_object(make("DeviceGray")).unwrap();
+    let name = doc
+        .resources()
+        .register_existing(0, ResourceKind::Shading, id)
+        .unwrap();
+    doc.replace_page_contents(0, format!("/{name} sh").into_bytes())
+        .unwrap();
+    assert_eq!(
+        doc.get_page(0)
+            .unwrap()
+            .display_list()
+            .unwrap()
+            .objects()
+            .len(),
+        1
+    );
+    doc.update_object(id, make(&alias)).unwrap();
+    let revision = doc.revision();
+    assert!(matches!(
+        doc.get_page(0).unwrap().display_list(),
+        Err(PdfError::ColorError(_))
+    ));
+    assert_eq!(doc.revision(), revision);
+    doc.update_object(id, make("DeviceGray")).unwrap();
+    assert_eq!(
+        doc.get_page(0)
+            .unwrap()
+            .display_list()
+            .unwrap()
+            .objects()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn shading_direct_colorspace_state_and_replay_survive_strict_save() {
+    use pdf::{document::resource_manager::ResourceKind, page::page_object::PageObject};
+    let doc = PdfDocument::new().unwrap();
+    doc.add_page(0).unwrap();
     let none = doc
         .resources()
         .register_color_space(
@@ -41,9 +109,9 @@ fn shading_resource_alias_state_and_replay_survive_strict_save() {
             ),
         )
         .unwrap();
-    let object = parse_object(&format!(
-        "<< /ShadingType 2 /ColorSpace /{gray} /Coords [0 0 10 0] /Extend [true true] /Function << /FunctionType 2 /Domain [0 1] /N 1 >> >>"
-    ));
+    let object = parse_object(
+        "<< /ShadingType 2 /ColorSpace /DeviceGray /Coords [0 0 10 0] /Extend [true true] /Function << /FunctionType 2 /Domain [0 1] /N 1 >> >>",
+    );
     let id = doc.try_insert_object(object).unwrap();
     let name = doc
         .resources()

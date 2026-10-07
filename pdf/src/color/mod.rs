@@ -14,4 +14,5 @@ pub mod lab;
 pub mod pattern;
 pub mod separation;
 pub mod shading;
+mod shading_mesh;
 pub mod value;

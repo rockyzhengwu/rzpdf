@@ -13,11 +13,12 @@ use crate::{
 
 #[derive(Debug, Clone, Copy)]
 pub enum ShadingGeometry {
+    FunctionBased { domain: [f32; 4], matrix: [f32; 6] },
     Axial([f32; 4]),
     Radial([f32; 6]),
 }
 
-/// Axial/radial shading parameters, independent of page graphics state.
+/// Function-based, axial and radial shading, independent of page graphics state.
 #[derive(Debug, Clone)]
 pub struct Shading {
     geometry: ShadingGeometry,
@@ -56,29 +57,6 @@ fn numbers<R: Read + Seek, const N: usize>(
 }
 
 impl Shading {
-    pub(crate) fn resolve_resource_colorspace<R: Read + Seek>(
-        object: &PdfObject,
-        ctx: &PDFContext<R>,
-        lookup: impl FnOnce(&str) -> PdfResult<PdfObject>,
-    ) -> PdfResult<PdfObject> {
-        let mut object = ctx.resolve(object)?;
-        if let Some(value) = object.get_attr("ColorSpace") {
-            let value = ctx.resolve(value)?;
-            if let Some(name) = value.as_name() {
-                if !matches!(
-                    name.name(),
-                    "DeviceGray" | "DeviceRGB" | "DeviceCMYK" | "G" | "RGB" | "CMYK" | "Pattern"
-                ) {
-                    let color = lookup(name.name())?;
-                    object
-                        .as_dict_mut()
-                        .ok_or_else(|| invalid("requires a dictionary"))?
-                        .try_insert("ColorSpace".into(), color)?;
-                }
-            }
-        }
-        Ok(object)
-    }
     pub fn try_new<R: Read + Seek>(object: &PdfObject, ctx: &PDFContext<R>) -> PdfResult<Self> {
         let object = ctx.resolve(object)?;
         let dict = object
@@ -94,6 +72,22 @@ impl Shading {
             .ok_or_else(|| invalid("ShadingType must be an integer"))?
             .as_u32_checked()?;
         let geometry = match kind {
+            1 => {
+                let domain: [f32; 4] = dict
+                    .get("Domain")
+                    .map(|value| numbers(value, ctx))
+                    .transpose()?
+                    .unwrap_or([0.0, 1.0, 0.0, 1.0]);
+                if domain[0] > domain[1] || domain[2] > domain[3] {
+                    return Err(invalid("two-dimensional Domain must be ordered"));
+                }
+                let matrix = dict
+                    .get("Matrix")
+                    .map(|value| numbers(value, ctx))
+                    .transpose()?
+                    .unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+                ShadingGeometry::FunctionBased { domain, matrix }
+            }
             2 => ShadingGeometry::Axial(numbers(required("Coords")?, ctx)?),
             3 => {
                 let values = numbers(required("Coords")?, ctx)?;
@@ -104,18 +98,32 @@ impl Shading {
             }
             _ => return Err(PdfError::UnsupportedFeature(format!("ShadingType {kind}"))),
         };
-        let colorspace = ColorSpace::try_new(required("ColorSpace")?, ctx)?;
+        let color_object = ctx.resolve(required("ColorSpace")?)?;
+        if color_object.as_name().is_some_and(|name| {
+            !matches!(
+                name.name(),
+                "DeviceGray" | "DeviceRGB" | "DeviceCMYK" | "G" | "RGB" | "CMYK" | "Pattern"
+            )
+        }) {
+            return Err(invalid(
+                "ColorSpace must be an explicit definition, not a resource alias",
+            ));
+        }
+        let colorspace = ColorSpace::try_new(&color_object, ctx)?;
         if matches!(colorspace, ColorSpace::Pattern(_) | ColorSpace::Indexed(_)) {
             return Err(invalid(
                 "axial/radial ColorSpace must not be Pattern or Indexed",
             ));
         }
         let components = colorspace.number_of_components()?;
-        let domain = dict
-            .get("Domain")
-            .map(|object| numbers(object, ctx))
-            .transpose()?
-            .unwrap_or([0.0, 1.0]);
+        let domain = if let ShadingGeometry::FunctionBased { domain, .. } = geometry {
+            [domain[0], domain[1]]
+        } else {
+            dict.get("Domain")
+                .map(|object| numbers(object, ctx))
+                .transpose()?
+                .unwrap_or([0.0, 1.0])
+        };
         if domain[0] > domain[1] {
             return Err(invalid("Domain must be ordered"));
         }
@@ -166,22 +174,38 @@ impl Shading {
             .try_reserve_exact(count)
             .map_err(|_| PdfError::ResourceLimit("shading function allocation".into()))?;
         let mut remaining = ctx.limits().max_objects;
+        let inputs = if kind == 1 { 2 } else { 1 };
         if let Some(array) = function.as_array() {
             for object in array {
                 let function = create_function_at_depth(object, ctx, 0, &mut remaining)?;
-                if function.dimensions() != (1, 1) {
+                if function.dimensions() != (inputs, 1) {
                     return Err(invalid(
-                        "each component function must map one input to one output",
+                        "component function input/output dimensions do not match shading",
                     ));
                 }
                 functions.push(function);
             }
         } else {
             let function = create_function_at_depth(&function, ctx, 0, &mut remaining)?;
-            if function.dimensions() != (1, components) {
+            if function.dimensions() != (inputs, components) {
                 return Err(invalid("function dimensions must match ColorSpace"));
             }
             functions.push(function);
+        }
+        if let ShadingGeometry::FunctionBased { domain, .. } = geometry {
+            for function in &functions {
+                let input_domain = function
+                    .two_input_domain()
+                    .filter(|values| values.len() == 4)
+                    .ok_or_else(|| invalid("Type1 function requires a two-dimensional Domain"))?;
+                if input_domain[0] > domain[0]
+                    || input_domain[1] < domain[1]
+                    || input_domain[2] > domain[2]
+                    || input_domain[3] < domain[3]
+                {
+                    return Err(invalid("function Domain must contain shading Domain"));
+                }
+            }
         }
         let background = if let Some(object) = dict.get("Background") {
             let object = ctx.resolve(object)?;
@@ -251,6 +275,8 @@ impl Shading {
     pub fn colorspace(&self) -> &ColorSpace {
         &self.colorspace
     }
+    /// Scalar blend domain; for Type1, returns the x interval. The complete
+    /// two-dimensional domain and matrix are available through `geometry()`.
     pub fn domain(&self) -> [f32; 2] {
         self.domain
     }
@@ -288,6 +314,28 @@ impl Shading {
                 && (fraction <= 1.0 || self.extend[1])
         };
         let fraction = match self.geometry {
+            ShadingGeometry::FunctionBased { domain, matrix } => {
+                let [a, b, c, d, e, f] = matrix.map(f64::from);
+                let determinant = a * d - b * c;
+                if determinant == 0.0 {
+                    return Ok(None);
+                }
+                let px = x - e;
+                let py = y - f;
+                let u = (d * px - c * py) / determinant;
+                let v = (-b * px + a * py) / determinant;
+                if !u.is_finite() || !v.is_finite() {
+                    return Err(invalid("Type1 inverse coordinates overflow"));
+                }
+                if u < f64::from(domain[0])
+                    || u > f64::from(domain[1])
+                    || v < f64::from(domain[2])
+                    || v > f64::from(domain[3])
+                {
+                    return Ok(None);
+                }
+                return self.evaluate_color(&[u as f32, v as f32]).map(Some);
+            }
             ShadingGeometry::Axial(coords) => {
                 let [x0, y0, x1, y1] = coords.map(f64::from);
                 let dx = x1 - x0;
@@ -348,21 +396,34 @@ impl Shading {
     /// Evaluate a normalized location within the shading's domain.
     /// Geometry/Extend/BBox and background application belong to the painter.
     pub fn color_at(&self, fraction: f64) -> PdfResult<ColorRgb> {
+        if matches!(self.geometry, ShadingGeometry::FunctionBased { .. }) {
+            return Err(invalid("Type1 requires two-dimensional point sampling"));
+        }
         if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
             return Err(invalid("fraction must be in [0,1]"));
         }
         let parameter = (f64::from(self.domain[0])
             + fraction * (f64::from(self.domain[1]) - f64::from(self.domain[0])))
             as f32;
+        self.evaluate_color(&[parameter])
+    }
+
+    // Shared by one-dimensional blends and future two-dimensional Type1
+    // sampling; coordinates arrive in the function's own domain.
+    fn evaluate_color(&self, parameters: &[f32]) -> PdfResult<ColorRgb> {
         let values = if self.functions.len() == 1 {
-            self.functions[0].eval(&[parameter])?
+            self.functions[0].eval(parameters)?
         } else {
             let mut values = Vec::new();
             values
                 .try_reserve_exact(self.functions.len())
                 .map_err(|_| PdfError::ResourceLimit("shading color allocation".into()))?;
             for function in &self.functions {
-                values.push(function.eval(&[parameter])?[0]);
+                let output = function.eval(parameters)?;
+                let [component] = output.as_slice() else {
+                    return Err(invalid("component function must return one value"));
+                };
+                values.push(*component);
             }
             values
         };
@@ -381,6 +442,106 @@ mod tests {
         SyntaxParser::new(StreamReader::try_new(Cursor::new(source.as_bytes().to_vec())).unwrap())
             .get_object()
             .unwrap()
+    }
+
+    #[test]
+    fn function_based_shading_maps_two_dimensional_domain_and_matrix() {
+        use crate::objects::pdf_stream::PdfStream;
+        let doc = PdfDocument::new().unwrap();
+        let function = doc
+            .try_insert_object(PdfObject::PdfStream(PdfStream::new(
+                parse("<< /FunctionType 4 /Domain [-1 2 -1 2] /Range [0 1] >>")
+                    .into_dict()
+                    .unwrap(),
+                b"{ add 2 div }".to_vec(),
+            )))
+            .unwrap();
+        let make = |extra: &str| {
+            Shading::try_new(
+                &parse(&format!(
+                    "<< /ShadingType 1 /ColorSpace /DeviceGray /Function {} {} R {extra} >>",
+                    function.obj_num(),
+                    function.gen_num()
+                )),
+                doc.ctx(),
+            )
+        };
+        let default = make("").unwrap();
+        assert_eq!(
+            default.color_at_point(0.25, 0.75).unwrap().unwrap().r(),
+            128
+        );
+        assert!(default.color_at_point(2.0, 0.5).unwrap().is_none());
+        assert!(default.color_at(0.5).is_err());
+        let mapped = make("/Matrix [2 1 0 3 10 20] /BBox [10 20 12 24]").unwrap();
+        assert_eq!(mapped.color_at_point(10.5, 22.5).unwrap().unwrap().r(), 128);
+        assert!(mapped.color_at_point(9.0, 22.0).unwrap().is_none());
+        let collapsed = make("/Matrix [0 0 0 1 0 0]").unwrap();
+        assert!(collapsed.color_at_point(0.0, 0.5).unwrap().is_none());
+        for extra in [
+            "/Domain [1 0 0 1]",
+            "/Domain [0 3 0 1]",
+            "/Domain [0 1]",
+            "/Matrix [1 0 0 1 0]",
+        ] {
+            assert!(make(extra).is_err(), "{extra}");
+        }
+        assert!(Shading::try_new(&parse(
+            "<< /ShadingType 1 /ColorSpace /DeviceGray /Function << /FunctionType 2 /Domain [0 1] /N 1 >> >>"
+        ), doc.ctx()).is_err());
+    }
+
+    #[test]
+    fn function_based_shading_component_arrays_and_sampled_functions() {
+        use crate::objects::pdf_stream::PdfStream;
+        let doc = PdfDocument::new().unwrap();
+        let stream = |dict: &str, bytes: Vec<u8>| {
+            doc.try_insert_object(PdfObject::PdfStream(PdfStream::new(
+                parse(dict).into_dict().unwrap(),
+                bytes,
+            )))
+            .unwrap()
+        };
+        let ids: Vec<_> = ["{ pop }", "{ exch pop }", "{ add 2 div }"]
+            .iter()
+            .map(|code| {
+                stream(
+                    "<< /FunctionType 4 /Domain [0 1 0 1] /Range [0 1] >>",
+                    code.as_bytes().to_vec(),
+                )
+            })
+            .collect();
+        let refs = ids
+            .iter()
+            .map(|id| format!("{} {} R", id.obj_num(), id.gen_num()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let rgb = Shading::try_new(
+            &parse(&format!(
+                "<< /ShadingType 1 /ColorSpace /DeviceRGB /Function [{refs}] >>"
+            )),
+            doc.ctx(),
+        )
+        .unwrap();
+        let color = rgb.color_at_point(0.25, 0.75).unwrap().unwrap();
+        assert_eq!([color.r(), color.g(), color.b()], [64, 191, 128]);
+        let sampled = stream(
+            "<< /FunctionType 0 /Domain [0 1 0 1] /Range [0 1] /Size [2 2] /BitsPerSample 8 >>",
+            vec![0, 255, 255, 0],
+        );
+        let gray = Shading::try_new(
+            &parse(&format!(
+                "<< /ShadingType 1 /ColorSpace /DeviceGray /Function {} {} R >>",
+                sampled.obj_num(),
+                sampled.gen_num()
+            )),
+            doc.ctx(),
+        )
+        .unwrap();
+        assert_eq!(gray.color_at_point(0.0, 0.0).unwrap().unwrap().r(), 0);
+        assert_eq!(gray.color_at_point(1.0, 0.0).unwrap().unwrap().r(), 255);
+        assert_eq!(gray.color_at_point(0.25, 0.75).unwrap().unwrap().r(), 159);
+        assert_eq!(gray.color_at_point(0.5, 0.5).unwrap().unwrap().r(), 128);
     }
 
     #[test]

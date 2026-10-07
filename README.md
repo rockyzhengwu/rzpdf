@@ -100,6 +100,8 @@ Indexed XObject 已增加专用索引采样路径：默认 Decode 保留原始�
 
 Type4 计算函数已支持规定的数值/逻辑/栈/条件运算符和 Domain/Range 裁剪，按现有 Limits 约束程序存储、执行步数与过程深度。Separation/DeviceN 条件颜色及图像的两保存策略严格读回已验证；不是通用 PostScript 执行器，Pattern/Shading、独立阅读器及共享聚合预算仍未完成。本文历史 Type4 不支持说明由此更新。
 
+Shading Type2/3 已接入资源、显示事件和 Skia 逐像素函数求值，支持 Domain、Extend、BBox 与图形状态裁剪/透明度/混合模式；直接 sh 不使用 Background。颜色空间必须直接定义，不允许资源别名；注册在事务前预检。模型、像素及保存版本已有定向回归，MuPDF/Ghostscript 样本仍存在已记录的边缘与色阶差异。Type1/4–7、Pattern、完整跨后端验收和操作级聚合预算尚未完成；具体测试版本与结果见 TODO/docs/testing.md。
+
 普通 CalGray/CalRGB/Lab/ICCBased/Separation/DeviceN XObject 也支持 1/2/4/8/16 位采样和 Decode：保留 packed 精度，RGBA 转换时应用空间端点；Lab/ICC 16 位默认/反转、六分量 DeviceN 低位深/行填充/末分量反转及两保存策略严格读回已验证。动态 Decode 不限于设备颜色的四分量。ICC 仅使用 Alternate，专色仅使用 tint-transform；非零 Lab BlackPoint、原生色版/叠印、完整颜色管理与独立阅读器对照未完成。
 
 Indexed 的 DeviceN 基空间通过现有 tint-transform/替代空间转换，不再一概拒绝；混合 None 分量仍保留并传给显示转换，不将其当作整体不绘制。Indexed 基空间为 Separation /None 或全 None DeviceN 时，绘制适配层会抑制路径、文字和普通图像，DisplayList 仍保留对象。原生专色版、叠印、Type4 函数执行与完整 DeviceN 兼容性仍未实现。

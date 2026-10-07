@@ -96,6 +96,13 @@ pub(crate) fn create_function_at_depth<R: Seek + Read>(
 }
 
 impl Function {
+    pub(crate) fn two_input_domain(&self) -> Option<&[f32]> {
+        match self {
+            Self::Type0(function) => Some(function.input_domain()),
+            Self::Type4(function) => Some(function.input_domain()),
+            _ => None,
+        }
+    }
     pub(crate) fn retained_payload_bytes(
         &self,
         limits: &crate::parser::options::Limits,

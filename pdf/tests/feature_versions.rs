@@ -10,6 +10,63 @@ use pdf::{
 };
 
 #[test]
+fn shading_versions_reject_before_output_and_accept_explicit_upgrade() {
+    for kind in 1..=7 {
+        for indirect in [false, true] {
+            let doc = Document::new_with_version(PdfVersion::V1_2).unwrap();
+            doc.add_page(0).unwrap();
+            let mut value = PdfObject::PdfNumber(PdfNumber::new(kind as f32));
+            if indirect {
+                value = PdfObject::PdfReference(PdfReference::from_id(
+                    doc.try_insert_object(value).unwrap(),
+                ));
+            }
+            let mut dict = PdfDict::default();
+            dict.insert("ShadingType".into(), value);
+            // Version detection is independent of model/rendering validation.
+            let object = if kind >= 4 {
+                PdfObject::PdfStream(pdf::objects::pdf_stream::PdfStream::new(dict, vec![]))
+            } else {
+                PdfObject::PdfDict(dict)
+            };
+            let id = doc.try_insert_object(object).unwrap();
+            let revision = doc.revision();
+            let mut output = b"original".to_vec();
+            assert!(
+                matches!(doc.save_to_writer_with_options(&mut output, SaveOptions::default()),
+                Err(PdfError::UnsupportedFeature(message)) if message.contains("shading"))
+            );
+            assert_eq!(output, b"original");
+            assert_eq!(doc.revision(), revision);
+            let bytes = doc
+                .save_to_bytes_with_options(SaveOptions {
+                    version: Some(PdfVersion::V1_3),
+                    ..Default::default()
+                })
+                .unwrap();
+            let reopened = Document::from_bytes_with_mode(bytes, ParseMode::Strict).unwrap();
+            assert_eq!(reopened.effective_version().unwrap(), PdfVersion::V1_3);
+            assert!(reopened.resolve_object(id).is_ok());
+        }
+    }
+}
+
+#[test]
+fn shading_version_detection_does_not_round_unknown_values() {
+    for lexeme in [b"2.00000000001".as_slice(), b"2.0", b"0", b"8", b"-1"] {
+        let doc = Document::new_with_version(PdfVersion::V1_2).unwrap();
+        doc.add_page(0).unwrap();
+        let mut dict = PdfDict::default();
+        dict.insert(
+            "ShadingType".into(),
+            PdfObject::PdfNumber(PdfNumber::new_from_lexeme(lexeme).unwrap()),
+        );
+        doc.try_insert_object(PdfObject::PdfDict(dict)).unwrap();
+        assert!(doc.save_to_bytes().is_ok());
+    }
+}
+
+#[test]
 fn function_types_require_their_introduction_version_before_writer_output() {
     for (kind, old, minimum) in [
         (0, PdfVersion::V1_1, PdfVersion::V1_2),

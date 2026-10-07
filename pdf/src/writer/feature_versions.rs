@@ -96,6 +96,20 @@ pub(super) fn validate_feature_versions_with_budget<R: Read + Seek>(
                 }
             }
             if version < PdfVersion::V1_3 {
+                if let Some(value) = dict.get("ShadingType") {
+                    let value = doc.resolve(value)?;
+                    if matches!(
+                        value
+                            .as_number()
+                            .and_then(|number| number.as_u64_checked().ok()),
+                        Some(1..=7)
+                    ) {
+                        return Err(PdfError::UnsupportedFeature(
+                            "shading requires PDF 1.3 or later; select an explicit version upgrade"
+                                .into(),
+                        ));
+                    }
+                }
                 if let Some(value) = dict.get("FunctionType") {
                     let value = doc.resolve(value)?;
                     let minimum = match value

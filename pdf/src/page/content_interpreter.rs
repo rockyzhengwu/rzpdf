@@ -2290,11 +2290,6 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
         let name = op.get_as_name(0)?.name();
         device.preflight_draw(&self.current_state.graphic_state, None)?;
         let object = self.named_resource("Shading", name)?;
-        let object = crate::color::shading::Shading::resolve_resource_colorspace(
-            &object,
-            self.ctx,
-            |name| self.named_resource("ColorSpace", name),
-        )?;
         let shading = match crate::color::shading::Shading::try_new(&object, self.ctx) {
             Ok(shading) => shading,
             Err(PdfError::UnsupportedFeature(_)) => return self.unsupported_operator(&op),

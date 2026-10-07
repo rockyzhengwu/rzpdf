@@ -93,6 +93,68 @@ P0 的普通回归、错误处理、预算和真实样本登记贯穿上述工�
 
 ### 实施记录
 
+- 2026-10-07 用户要求本地提交检查点：提交 Shading 渲染、Type1 二维函数着色、资源校验、版本检查、流程/示例与私有 Type4 网格基础。网格顶点专项日志确认 1 项通过，新增共享边三角形组装专项日志 `/tmp/rzpdf-shading-mesh-topology.log` 确认 2 项通过；Type4 尚未接入 Shading 构造、插值或渲染，仍不支持。此前 render 全量 36 项通过；工作区全量仍运行且期间源码有变化，不代表本次提交全量通过。不提交来源未确认的 `test.png`，不推送远端、不运行 fuzz；项目总体 TODO 仍未完成。
+
+- 2026-10-07 Type1 render 全量确认：session 31572 退出 0，36 渲染测试通过、0 失败/忽略（47.07 秒），日志 `/tmp/rzpdf-shading-type1-render-full.log`。该门禁早于新增网格模块，不代表 Type4 网格或全部当前工作区通过；Type1 固定独立页面证据及明确未完成边界保留。未运行 fuzz 或自动提交。
+
+- 2026-10-07 Type4 网格顶点解码阶段：新增私有 shading_mesh 顶点解析，校验规定 flag/坐标/分量位宽、Decode 数量/有限值、记录字节对齐、截断和输入/顶点/分量共存上限；f64 Decode 支持32位坐标、反转分量及仅低2位标志。新增补齐位/逐记录重置/32位/截断/额度单元，session 93337 运行中，日志 `/tmp/rzpdf-shading-mesh-vertices.log`。尚未接入 Shading 构造、三角形共享边、插值或显示，Type4 仍不支持，不能把解析基础计为完整网格实现。Type1 render 原全量 session 31572 继续跟踪；未运行 fuzz 或自动提交。
+
+- 2026-10-07 Type1 独立显示证据：session 53352/81708 均退出 0，八页样本生成与 Skia 严格读取渲染成功；MuPDF info 确认第八页 Function Shading、200×120，draw 无语法诊断，两张最新 PNG 均目视检查。全页 MuPDF/Skia 最大通道差2、平均最大差0.6、差>3为0，三个内部选点及外部空白的 Skia RGB 与解析公式一致。证据在 `tmp/pdfs/shading-type1.l7PEIo/`；只覆盖此固定 Type4 RGB 页面，不表示全部 Type1 函数/矩阵/抗锯齿验收。已启动含 Type1 的 render 全量，日志 `/tmp/rzpdf-shading-type1-render-full.log`，尚无终态；未运行 fuzz 或自动提交。
+
+- 2026-10-07 Type1 流程/像素确认：session 91422 退出 0，2 个 shading_workflow 集成通过；session 60844 退出 0，新增 Type1 双函数组合像素/两保存策略严格重开专项 1 通过（35 filtered）。session 55524 退出 0，日志实际结果为 545 单元、25 颜色流程、2 Shading 流程通过；组件/Sampled 新单元此前另由 92575 覆盖，不混报当前全部546单元全量。生成示例已增加第八页 Type1 RGB/显式矩阵，session 53352 运行中，临时输出 `tmp/pdfs/shading-type1.l7PEIo/preserve.pdf`，尚未生成/独立渲染终态。P4 仍未完成，未运行 fuzz 或自动提交。
+
+- 2026-10-07 Type1 实际像素回归补充：Skia 新增 Type4/Type0 Sampled 双输入 RGB 两组合，检查 Matrix 后明确像素、BBox 外透明且直接 sh 不以 Background 填充、Preserve/Flate 严格重开全页一致。新增代码仅局部格式；session 60844 运行中，日志 `/tmp/rzpdf-shading-type1-pixels.log`，尚未记为通过。Type1 模型和流程原会话继续跟踪；未运行 fuzz 或自动提交，P4-03 保持未完成。
+
+- 2026-10-07 Type1 数值专项确认：session 92575 退出 0，5 个 Shading 单元通过（541 filtered），覆盖二维域/矩阵、双输入组件数组和 Sampled 插值。session 55524 的 545 单元已通过但颜色/流程目标仍运行；不把两个运行范围混记为当前全部单元/流程全量。未运行 fuzz 或自动提交。
+
+- 2026-10-07 Type1 流程回归补充：shading_workflow 新增双输入 Type4/Type0 Sampled RGB 两种函数，检查资源注册、单个带来源 Shading 显示事件、矩阵求值/域外不绘制、跨文档页面导入、源与导入文档的 Preserve/Flate 严格读回。新 session 91422 运行中，日志 `/tmp/rzpdf-shading-type1-workflow.log`，尚未计通过。新测试不在先前 session 55524 编译的旧流程目标内；Type1 独立像素矩阵与完整 P4 仍待验收，未运行 fuzz 或自动提交。
+
+- 2026-10-07 Type1 函数表示覆盖补充：新增 RGB 三个双输入 Type4 组件函数，检查 (.25,.75)→(64,191,128)；新增二维 Type0 Sampled [2,2] 网格端点、中心及非中心双线性插值。session 92575 专项运行中，日志 `/tmp/rzpdf-shading-type1-functions.log`，不记为通过。此前通用求值重构 session 12621 已退出 0（3 个原 Shading 单元通过）；Type1 首轮模型/流程 session 55524 尚未终态。未运行 fuzz 或自动提交。
+
+- 2026-10-07 Type1 模型/点求值接入：新增 FunctionBased 几何（二维 Domain 默认 [0 1 0 1]、Matrix 默认单位矩阵）、f64 逆变换和域外透明；双输入单函数/组件数组校验以及函数 Domain 包含 Shading Domain 检查，奇异矩阵不绘制。单位置 color_at 对 Type1 明确拒绝，geometry 提供完整域/矩阵，旧 domain getter 为 x 区间。补默认/矩阵/BBox/奇异/维度/域错误单元；历史 unsupported 操作 fixture 改为仍未支持的 Type4 网格。render 编译检查 session 47796 退出 0；PDF 模型/流程 session 55524 运行中，日志 `/tmp/rzpdf-shading-type1-model.log`，尚无测试通过结论。后端像素、组件函数数组、Sampled、保存/导入和独立阅读器矩阵仍待验收；P4-03 不勾选，未运行 fuzz 或自动提交。
+
+- 2026-10-07 Type1 实现准备：核对二维 Domain 与 Matrix、2→n/组件 2→1 函数要求；先抽取 Shading 内部通用坐标输入颜色求值，组件函数不再直接索引输出而检查恰好一个值。Type1 构造/二维域映射/矩阵/函数域包含校验尚未实现，不能声称支持；轴向/径向模型专项日志 `/tmp/rzpdf-shading-evaluator-refactor.log` 运行中。未运行 fuzz 或自动提交。
+
+- 2026-10-07 当前 Shading 修复门禁确认：session 87146 退出 0，544 单元、25 颜色流程、17 保存版本、14 资源测试全部通过；session 5710 退出 0，Form 局部覆盖/来源/状态与跨文档页面导入、两策略严格读回组合 1 测试通过。日志 `/tmp/rzpdf-shading-current-final.log`、`/tmp/rzpdf-shading-form-import.log`。当前完整工作区仍未验收；session 75157 尚运行且使用修复前源码，不作为当前全量结论。下一实现缺口为边缘覆盖、Type1/4–7、Pattern、完整预算与跨后端矩阵，P4-03 不勾选，未运行 fuzz 或自动提交。
+
+- 2026-10-07 Form Shading 来源/作用域回归通过：session 84732 退出 0，新增集成 1 测试通过，两保存策略严格重开保留同名局部覆盖、调用矩阵/裁剪、各调用来源及页面状态恢复。随后扩展跨文档页面导入与保存读回，验证资源图中的 Shading 与来源层级保留；新测试仍运行，日志 `/tmp/rzpdf-shading-form-import.log`，不把旧结果当作扩展通过。当前版本门禁已通过 544 单元和25颜色流程，剩余目标尚未终态；未运行 fuzz 或自动提交。
+
+- 2026-10-07 Form Shading 集成回归补齐：新增独立 `pdf/tests/shading_workflow.rs`，页面与 Form 同名 Shading 验证局部覆盖、两次调用不同来源、Form 裁剪/矩阵及回到页面后状态恢复，两保存策略严格读回。session 84732 运行中，日志 `/tmp/rzpdf-shading-form-workflow.log`，尚未记为通过；当前四目标门禁 session 87146 亦运行中，不包含这个新增测试文件。原工作区门禁仍为修复前基线，未运行 fuzz 或自动提交。
+
+- 2026-10-07 Shading 别名/预检修复验证完成：session 9160 退出 0，24 个颜色流程、14 个资源测试全部通过；session 19190 退出 0，3 个 Shading 专项通过（22 filtered），包括低层非法修改后解释拒绝不改修订号及合法恢复。此前 session 99023 的 544 单元已通过但流程失败，不抹去该失败记录；本次尚未重新验证全部 25 个颜色测试或新工作区，不能宣称完整当前全量通过。README/架构文档同步直接颜色定义与事务前预检边界；未运行 fuzz 或自动提交。
+
+- 2026-10-07 Shading 事务前预检进展：session 9160 的 24 个颜色流程已全部通过，资源目标仍运行，未记完整终态。新增合法注册后低层改为非法别名、解释拒绝不改修订号、修回 DeviceGray 后解释恢复的回归；session 19190 专项运行中，日志 `/tmp/rzpdf-shading-alias-interpretation.log`，尚无结论。该新测试不属于 9160 已执行颜色目标的范围；未运行 fuzz 或自动提交。
+
+- 2026-10-07 Shading 修复回归发现并调整事务边界：session 99023 单元 544 通过，但颜色流程新增回归失败（23 通过/1 失败，修订号 10 对 9），并未全部通过。原因是非法定义在事务内校验，回滚按既有契约推进修订号；改为 Shading 在事务前预检并避免事务内重复构造。新 session 9160 验证颜色/资源目标，日志 `/tmp/rzpdf-shading-preflight-revision.log`，仍运行，不记为通过。源码再次变化，旧工作区门禁仍只代表修复前基线；未运行 fuzz 或自动提交。
+
+- 2026-10-07 Shading 显式颜色定义修复：删除模型辅助别名查找以及资源注册/内容解释中的 ColorSpace 资源解析；构造对未知名称别名明确 ColorError。合法流程测试改为 DeviceGray，新增别名注册失败修订号/保存字节不变回归。新 session 99023（544 单元＋颜色/资源目标）运行中，日志 `/tmp/rzpdf-shading-explicit-colorspace.log`，尚未记为通过。自此生产/测试源已变化；原工作区 session 75157 仅代表启动时修复前版本，不能证明本修复或新示例通过。未运行 fuzz 或自动提交。
+
+- 2026-10-07 Shading 别名问题定位：Adobe PDF Reference 1.6 色彩空间定义要求内容流外直接指定颜色空间，不通过 ColorSpace 资源子字典。当前 register_existing 只在临时校验副本解析别名，源字典未改，可能保存非规范 LocalGray 名称；此为待修实现缺口，不能把本库读回成功当作合法写出。Form 样本改用明确 DeviceGray，局部 Shading/S 与双次调用仍保留；新样本尚待重新生成验证。原工作区 session 75157 针对修复前生产源继续运行，不把该结果作为别名修复证明。
+
+- 2026-10-07 Form 样本发现兼容性问题：MuPDF 第七页报告 `unknown colorspace: LocalGray`，虽 draw 退出但有语法诊断，不能视为独立显示成功。需核对 Shading.ColorSpace 是否允许资源别名及本库注册/解释的规范边界；Skia session 23073 尚运行，先保留该失败证据，不忽略诊断或直接判为支持。
+
+- 2026-10-07 Form Shading 样本准备：第七页增加仅在 Form.Resources 中定义的 LocalGray 颜色别名及 Shading/S，同一 Form 两次平移调用。修正示例 Option/Result 字典转换后 session 62095 退出 0，生成 `tmp/pdfs/shading-form.DNyq6U/preserve.pdf`；第七页独立/Skia 渲染对比尚进行中，不计为 Form 验收。原工作区 session 75157 继续运行，未修改其既有生产/测试源，未运行 fuzz 或自动提交。
+
+- 2026-10-07 Shading 变换样本扩展：生成示例新增 CTM 90° 旋转叠加页面 Rotate=90、带剪切与非均匀缩放的径向两页，共六页；session 27468 退出 0，临时 PDF 位于 `tmp/pdfs/shading-transforms.nN0A8N/preserve.pdf`。旧四页证据未覆盖；新 Skia/MuPDF 对比尚待完成，不记为变换验收。原工作区 session 75157 继续执行集成测试，未运行 fuzz 或自动提交。
+
+- 2026-10-07 Shading 差异分层：Ghostscript 9.23 四页渲染退出 0且逐页目视检查；三处同心径向像素的解析 N=2 结果与 Skia 完全一致，参考后端互有差异。另统计 MuPDF/Skia 白色覆盖分类不一致 120/141/121/0 像素，轴向集中在边界列；径向内部仍存在色阶差异。分析及具体坐标写入 docs/testing.md；未据单一后端修改求值或放宽容差，边缘覆盖/参考近似审计仍待实施。工作区原 session 75157 继续运行，未运行 fuzz 或自动提交。
+
+- 2026-10-07 Shading 跨后端首轮比较：新增严格读取、逐页 72 DPI 输出且拒绝覆盖文件的 `render/examples/render_document.rs`；修复页数/索引 API 编译错误后 session 49063 退出 0，四页 Skia PNG 已逐页目视检查。MuPDF/Skia 同为 200×120；每页最大通道差分别 255/255/255/4，差>3 的像素分别 449/2952/744/23，平均最大通道差约 2.412/2.454/1.847/0.336。形状一致但尚未通过差异验收；径向内部 (140,60) 的 RGB 为 MuPDF(161,0,93)/Skia(167,0,88)，边界存在高差，需分离抗锯齿/采样误差并追踪原因，不能仅放宽容差。PNG 位于 `tmp/pdfs/shading-validation.XVQgC4/`；当前工作区回归仍运行，新增两示例不在其启动时指纹内。未运行 fuzz 或自动提交。
+
+- 2026-10-07 Flate Shading 样本：session 60506 退出 0，MuPDF info/draw 同样成功；两保存策略的四张 PNG 对应 SHA-256 完全相同，故前述逐页目视检查也覆盖相同像素内容。尚未进行 Skia 与 MuPDF 的跨后端对比，不扩大为完整 Shading/P4 验收。
+
+- 2026-10-07 Shading 样本独立读取初步证据：新示例 Preserve 生成 session 57563 退出 0；临时样本 `tmp/pdfs/shading-validation.XVQgC4/preserve.pdf` 经 MuPDF info 确认 PDF 1.7、4 页、200×120 及两轴向/两径向，draw 退出 0，四页 PNG 已逐页目视检查。系统 Poppler 虽有命令但启动缺 libtiff.5.dylib；未修改系统库，改用现有 MuPDF。不把此次识别/显示视为跨后端像素一致性验收，Flate 样本、本库同页图像比较及完整矩阵仍待完成。工作区 session 75157 中 544 单元和 23 颜色流程已通过，但整体仍运行；未运行 fuzz 或自动提交。
+
+- 2026-10-07 独立 Shading 样本准备：新增 `pdf/examples/create_shading.rs`，四页覆盖轴向/同心径向/移动缩小径向、N=2、Extend、BBox、当前裁剪及直接 sh 的 Background，支持 Preserve 与 --flate 保存参数。仅已局部格式与差异检查；尚未编译、生成 PDF 或经 Poppler 验证，不计为验收。该新示例不属于已启动 session 75157 的源码指纹范围，后续单独运行验证；既有生产/测试源指纹未变化，全工作区测试仍运行。未运行 fuzz 或自动提交。
+
+- 2026-10-07 新工作区门禁已启动：`cargo test --workspace --locked --quiet`，session 75157，日志 `/tmp/rzpdf-workspace-shading.log`；当前仍运行，尚无全量通过结论。启动时跟踪的 Rust/清单/锁文件 SHA-256 汇总为 `59b7e69141cee28061d8f58de73d46e5554e2bfec874d2f26ab2afdd598f899a`，测试期间未修改这些文件。workspace 不包含 fuzz；本门禁不代替独立阅读器或未完成 TODO 的验收。
+
+- 2026-10-07 Shading 渲染全量及版本检查：session 73417 退出 0，render 35 测试通过、0 失败/忽略（48.48 秒），日志 `/tmp/rzpdf-shading-render-full.log`。ShadingType 精确整数 1–7 最低版本检查接入已有普通/预算预检解析器，低于 1.3 写出前拒绝；session 13812 退出 0，feature_versions 17 测试通过，日志 `/tmp/rzpdf-shading-versions.log`，覆盖直接/间接字段、输出/修订号不变、显式升级严格读回及不舍入未知数字。依据 Adobe PDF 32000-1 的 Shading 版本定义；这是定向功能检查，不是完整规范符合性。新完整工作区、独立阅读器与其他 P4 功能仍待推进，未运行 fuzz 或自动提交。
+
+- 2026-10-07 Shading 状态/预算专项：新增裁剪与 BBox 交集、0.5 填充透明度明确像素、栅格共存预算 9599 字节拒绝/9600 字节接受、拒绝不留下部分绘制、NaN 透明度不改变已有画面及去裁剪后重试回归。session 1630 退出 0：2 个 Shading 专项通过，日志 `/tmp/rzpdf-shading-state.log`。新增代码已局部格式整理，render 全量回归正在运行，尚不记为通过；完整工作区、独立阅读器、Type1/4–7 和 Pattern 仍待推进，P4 不勾选，未运行 fuzz 或自动提交。
+
+- 2026-10-07 Shading 后端初步接入：Skia 新增 Type2/3 逐像素反变换、调用原 PDF 函数/颜色转换的绘制路径，不以端点 RGB 线性插值替代非线性函数；无覆盖区域透明，裁剪/填充透明度/混合模式使用图形状态，奇异矩阵不绘制。按表面、Rust 栅格、Skia 像素副本共存检查 max_render_bytes，原生记账和函数求值临时分配仍未纳入完整聚合预算。cargo check -p render 退出 0；session 67521 退出 0，轴向 N=2 与径向像素及 Preserve/Flate 严格保存读回专项 1 测试通过，日志 `/tmp/rzpdf-shading-render-pixels.log`。裁剪/透明度/预算失败专项、完整 render/工作区与独立阅读器尚待验证；P4 不勾选，未运行 fuzz 或自动提交。
+
 - 2026-10-07 本地提交检查点：Shading Type2/3 已接入命名颜色资源解析、注册复用、sh 显示事件、状态/来源记录及回放；新增轴向投影和径向求根的点采样。最终 session 89144 退出 0：544 单元、23 颜色流程、14 资源测试全部通过，日志 `/tmp/rzpdf-shading-geometry-final.log`。Type4 扩展后的 render 全量此前 33 测试通过；当前尚未重新跑完整工作区。PageObject::Shading 从占位变为携带 ShadingObject，Device 新回调默认返回不支持；Skia 实际渐变绘制仍未实现。函数保留容量及每次绘制载荷已有保守计数，但不等于完整操作级聚合预算。未运行 fuzz，未推送远程，P4 仍未完成。
 
 - 2026-10-07 Shading 参数模型阶段：新增 color::shading 的 Type2 轴向/Type3 径向参数，校验有限坐标、非负半径、Domain/Extend/BBox/Background/AntiAlias，拒绝 Pattern/Indexed 基空间。单函数必须 1→颜色分量，组件函数数组各 1→1，函数树节点额度跨组件共用；color_at 按 Domain 插值后调用已有函数/颜色转换。参数错误与总节点失败后重试/修订号不变已覆盖。session 67163 退出 0：541 单元、22 流程通过，0 失败/忽略，日志 `/tmp/rzpdf-shading-model-final.log`。当前仅模型/数值，sh 资源解释、带状态显示事件、显示载荷计数及实际后端尚未接入，不能声称渐变可显示；Type1/4–7、Pattern 和独立阅读器另待推进。未运行 fuzz/自动提交，P4 未完成。
@@ -1623,6 +1685,9 @@ P0 的普通回归、错误处理、预算和真实样本登记贯穿上述工�
 - [ ] P4-01 完成内联图像边界识别与解码，避免将图像数据中的 EI 误判为结束。
 - [ ] P4-02 完成 Type3、字体编码回退、复杂 CJK/竖排和更多 TrueType cmap 格式。
 - [ ] P4-03 完成 Pattern、Shading、Lab/ICC 等颜色和 PDF 函数实现。
+  - [ ] Shading Type2/3 交付验收：已有参数/点采样、资源与显示事件、Skia 实际函数求值像素以及保存版本检查；补 Form 局部资源/来源、旋转与非均匀 DPI、Extend 与 Background 页面样本、独立阅读器对比和性能/临时分配预算，不能以现有专项代替完整验收。
+  - [ ] Shading Type1 与 Type4–7：分别实现函数域映射和网格/补片解析、求值、资源/显示事件与保存读回，建立各类型独立像素样本。
+  - [ ] Pattern：实现平铺与 Shading Pattern 的坐标/资源作用域、着色/非着色语义和背景绘制，与直接 sh 的 Background 语义区分。
   - [x] 零BlackPoint的Lab数值转换：白点适配到D65的固定sRGB策略、输入/Range裁剪、灰阶/主色及间接参数严格往返已验证；完整颜色管理与独立视觉矩阵仍未验收。
   - [x] Type3 Stitching单输入分段求值与构造维度校验：Domain/Encode/Range、嵌套/间接参数、端点与错误回归及Separation颜色转换保存重开已验证；不表示Type4、Shading/Pattern或聚合内存验收完成。
 - [ ] P4-04 完成 ExtGState、透明组、软蒙版、混合模式与文字渲染模式；扩展 Device/DisplayList 事件。
