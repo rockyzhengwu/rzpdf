@@ -61,6 +61,10 @@ pub struct MemoryLease {
 }
 
 impl MemoryLease {
+    pub(crate) fn belongs_to(&self, budget: &OperationBudget) -> bool {
+        Rc::ptr_eq(&self.state, &budget.state)
+    }
+
     pub fn bytes(&self) -> usize {
         self.bytes
     }
@@ -243,6 +247,45 @@ pub(crate) fn copy_string(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reserved_parts_transfer_preserves_allocation_and_shared_pool() {
+        let pool = super::OperationBudget::new(64);
+        let shared = pool.clone();
+        let foreign = super::OperationBudget::new(64);
+        let mut bytes = super::BudgetedBytes::copy_from_slice(&pool, b"data").unwrap();
+        bytes.try_reserve_capacity(16).unwrap();
+        let address = bytes.as_slice().as_ptr();
+        let capacity = bytes.capacity();
+        let (lease, data) = {
+            let (data, lease) = bytes.into_reserved_parts();
+            (lease, data)
+        };
+        assert_eq!(pool.live_bytes(), capacity);
+        assert_eq!(data.as_ptr(), address);
+        assert_eq!(lease.bytes(), capacity);
+        assert!(lease.belongs_to(&shared));
+        assert!(!lease.belongs_to(&foreign));
+        let owner = super::BudgetedBytes::from_reserved_vec(data, lease).unwrap();
+        assert_eq!(owner.as_slice().as_ptr(), address);
+        assert_eq!(owner.as_slice(), b"data");
+        assert_eq!(pool.live_bytes(), capacity);
+        let peak = pool.peak_bytes();
+        drop(owner);
+        assert_eq!(pool.live_bytes(), 0);
+        assert_eq!(pool.peak_bytes(), peak);
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let bytes = super::BudgetedBytes::copy_from_slice(&pool, b"data").unwrap();
+            let (_lease, _data) = {
+                let (data, lease) = bytes.into_reserved_parts();
+                (lease, data)
+            };
+            panic!("transferred parts unwind");
+        }));
+        assert!(caught.is_err());
+        assert_eq!(pool.live_bytes(), 0);
+        assert_eq!(foreign.live_bytes(), 0);
+    }
+
     #[test]
     fn explicit_capacity_growth_counts_overlap_and_preserves_rejected_buffer() {
         let pool = super::OperationBudget::new(24);

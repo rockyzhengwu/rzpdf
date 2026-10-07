@@ -41,13 +41,22 @@ impl BudgetedDictBuilder {
         key_lease: crate::budget::MemoryLease,
         value_lease: crate::budget::MemoryLease,
     ) -> PdfResult<()> {
-        let index = match self.entries.binary_search_by(|entry| entry.0.cmp(&key)) {
+        // Tuple field order keeps rejected payloads ahead of their leases on
+        // every error path, not only foreign-pool rejection.
+        let entry = (key, value, key_lease, value_lease);
+        if !entry.2.belongs_to(&self.budget) || !entry.3.belongs_to(&self.budget) {
+            return Err(PdfError::ResourceLimit(
+                "dictionary leases belong to different operations".into(),
+            ));
+        }
+        let index = match self
+            .entries
+            .binary_search_by(|existing| existing.0.cmp(&entry.0))
+        {
             Ok(index) => {
-                let old = std::mem::replace(&mut self.entries[index].1, value);
+                let old = std::mem::replace(&mut self.entries[index].1, entry.1);
                 drop(old);
-                self.entries[index].3 = value_lease;
-                drop(key);
-                drop(key_lease);
+                self.entries[index].3 = entry.3;
                 return Ok(());
             }
             Err(index) => index,
@@ -81,8 +90,7 @@ impl BudgetedDictBuilder {
             self.entries = entries;
             self.table = lease;
         }
-        self.entries
-            .insert(index, (key, value, key_lease, value_lease));
+        self.entries.insert(index, entry);
         Ok(())
     }
 
@@ -255,6 +263,73 @@ impl PdfDict {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn budgeted_builder_rejects_foreign_leases_before_insert_or_replacement() {
+        use crate::{
+            budget::{copy_string, OperationBudget},
+            objects::pdf_string::PdfString,
+        };
+        let pool = OperationBudget::new(65536);
+        let foreign = OperationBudget::new(65536);
+        let neighbor = foreign.reserve(7).unwrap();
+        let mut builder = BudgetedDictBuilder::new(&pool, 8).unwrap();
+        let (key, key_lease) = copy_string("A", &pool).unwrap();
+        builder
+            .insert(key, PdfObject::PdfNull, key_lease, pool.reserve(0).unwrap())
+            .unwrap();
+        let live = pool.live_bytes();
+        for name in ["A", "B"] {
+            for foreign_key in [true, false] {
+                let key_pool = if foreign_key { &foreign } else { &pool };
+                let value_pool = if foreign_key { &pool } else { &foreign };
+                let (key, key_lease) = copy_string(name, key_pool).unwrap();
+                let value = PdfObject::PdfString(PdfString::new(vec![b'x'; 1024], false));
+                let (value, value_lease) = crate::objects::clone_object_with_budget(
+                    &value,
+                    value_pool,
+                    crate::parser::options::Limits::default(),
+                    0,
+                )
+                .unwrap();
+                assert!(matches!(
+                    builder.insert(key, value, key_lease, value_lease),
+                    Err(PdfError::ResourceLimit(_))
+                ));
+                assert_eq!(pool.live_bytes(), live);
+                assert_eq!(foreign.live_bytes(), 7);
+                assert_eq!(builder.entries.len(), 1);
+                assert_eq!(builder.entries[0].1, PdfObject::PdfNull);
+            }
+        }
+        let (key, key_lease) = copy_string("A", &pool).unwrap();
+        assert!(builder
+            .insert(
+                key,
+                PdfObject::PdfNull,
+                key_lease,
+                foreign.reserve(0).unwrap()
+            )
+            .is_err());
+        assert_eq!(pool.live_bytes(), live);
+        let shared = pool.clone();
+        let (key, key_lease) = copy_string("B", &shared).unwrap();
+        builder
+            .insert(
+                key,
+                PdfObject::PdfNull,
+                key_lease,
+                shared.reserve(0).unwrap(),
+            )
+            .unwrap();
+        let (dict, lease) = builder.finish().unwrap();
+        assert_eq!(dict.into_iter().len(), 2);
+        drop((dict, lease));
+        assert_eq!(pool.live_bytes(), 0);
+        assert_eq!(foreign.live_bytes(), 7);
+        drop(neighbor);
+        assert_eq!(foreign.live_bytes(), 0);
+    }
+
     #[test]
     fn budgeted_replacement_preserves_input_and_checks_dictionary_limits() {
         use crate::{budget::OperationBudget, parser::options::Limits};

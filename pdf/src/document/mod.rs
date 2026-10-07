@@ -215,6 +215,40 @@ impl<R: Seek + Read> PdfDocument<R> {
             return Ok(header);
         };
         let value = self.ctx.resolve(value)?;
+        Self::merge_catalog_version(header, &value)
+    }
+
+    pub(crate) fn effective_version_with_budget(
+        &self,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<save_options::PdfVersion> {
+        let header = save_options::PdfVersion::parse(self.version())
+            .ok_or_else(|| PdfError::UnsupportedFeature("unknown PDF Header version".into()))?;
+        let (_root_lease, root) = {
+            let trailer = self.ctx.trailer();
+            let root = trailer
+                .get("Root")
+                .ok_or_else(|| PdfError::DocumentError("Root not found".into()))?;
+            let (root, lease) = self.ctx.resolve_owned_with_budget(root, budget)?;
+            (lease, root)
+        };
+        let root = root
+            .as_dict()
+            .ok_or_else(|| PdfError::DocumentError("Root is not a Dict".into()))?;
+        let Some(value) = root.get("Version") else {
+            return Ok(header);
+        };
+        let (_value_lease, value) = {
+            let (value, lease) = self.ctx.resolve_owned_with_budget(value, budget)?;
+            (lease, value)
+        };
+        Self::merge_catalog_version(header, &value)
+    }
+
+    fn merge_catalog_version(
+        header: save_options::PdfVersion,
+        value: &PdfObject,
+    ) -> PdfResult<save_options::PdfVersion> {
         if matches!(value, PdfObject::PdfNull) {
             return Ok(header);
         }

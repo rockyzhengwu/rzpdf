@@ -47,3 +47,24 @@ mutool draw -r 72 -o output/pdf/build-validation.XQhHb5/mupdf-page-%d.png output
 环境限制：本机 Poppler 因缺少 `libtiff.5.dylib` 无法启动，Swift/PDFKit 回退因 JIT 缺少 `PDFDocument` 类符号失败，均不计为通过，未修改系统依赖。成功验证来自 qpdf 和 MuPDF。
 
 范围仅为当前标准字体英文、RGB 图片及带 Info/XMP 的两页构建样本；未独立校验全部元数据内容，不覆盖真实复杂字体、编辑后文件、导入重排、加密签名或完整样本矩阵。整体任务保持未完成，本次未运行 fuzz。
+
+## 编辑示例独立验证（2026-10-07）
+
+使用本项目现有 `edit_content` 示例，生成原页/复制后编辑页的两页对照 PDF。样本完全由项目生成，没有引入第三方文件；没有覆盖既有验证产物。
+
+```sh
+cargo run -p pdf --example edit_content --locked --quiet -- output/pdf/edit-validation.Udmdci/edited-comparison.pdf
+qpdf --check output/pdf/edit-validation.Udmdci/edited-comparison.pdf
+qpdf --show-npages output/pdf/edit-validation.Udmdci/edited-comparison.pdf
+mutool draw -F txt -o - output/pdf/edit-validation.Udmdci/edited-comparison.pdf
+mutool draw -r 72 -o output/pdf/edit-validation.Udmdci/page-%d.png output/pdf/edit-validation.Udmdci/edited-comparison.pdf
+```
+
+- qpdf 11.2.0：无语法或流编码错误，页数为2，不代表完整规范符合性。
+- MuPDF/mutool 1.27.0：第一页提取 `Original content`，第二页提取 `Edited content`。
+- 按 PDF 技能逐页检查72 DPI渲染图：原页文字、两次红绿图片绘制和红/蓝矩形保持；编辑页文字替换正确，第一张图片旋转为竖向红上绿下，第二次图片绘制消失，红色路径绘制消失而蓝矩形保留。未见明显裁切、重叠、异常黑块或不可读字符。
+- SHA-256：`b2712b6c78c5c1e2761a0c4aa4925e8b928873e8abc245b20304be9d9b6ee953`。
+
+产物：[PDF](../output/pdf/edit-validation.Udmdci/edited-comparison.pdf)、[原页](../output/pdf/edit-validation.Udmdci/page-1.png)、[编辑页](../output/pdf/edit-validation.Udmdci/page-2.png)。复现时使用新目录；示例拒绝覆盖已有PDF。
+
+Poppler仍因缺少 `libtiff.5.dylib` 无法启动，不计为通过；使用已安装MuPDF作为PDF技能渲染回退，未修改系统依赖。此验证覆盖固定Helvetica英文、顶层图片/路径与复制页隔离，不覆盖真实复杂字体、Form/内联图片、裁剪透明或完整P3验收。fuzz未运行。

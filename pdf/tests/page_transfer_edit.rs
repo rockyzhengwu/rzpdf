@@ -5,6 +5,114 @@ use pdf::{
 };
 
 #[test]
+fn reorder_import_and_copy_edit_preserve_geometry_and_reject_old_snapshots() {
+    use pdf::page::page_builder::PageBuilder;
+    let source = PdfDocument::new().unwrap();
+    for index in 0..2 {
+        source
+            .add_page_with_builder(
+                index,
+                PageBuilder::new()
+                    .size(220., 160.)
+                    .crop_box(Rectangle::new(10., 20., 190., 120.))
+                    .rotation(if index == 0 { 90 } else { 270 })
+                    .user_unit(if index == 0 { 1. } else { 2. }),
+            )
+            .unwrap();
+        let font = source
+            .resources()
+            .register_standard_font(index, StandardFont::Helvetica)
+            .unwrap();
+        source
+            .replace_page_contents(
+                index,
+                format!(
+                    "BT /{font} 12 Tf 40 70 Td (Page{}) Tj ET",
+                    if index == 0 { "A" } else { "B" }
+                )
+                .into_bytes(),
+            )
+            .unwrap();
+    }
+    let dimensions = |doc: &PdfDocument<_>, index| {
+        let list = doc.get_page(index).unwrap().display_list().unwrap();
+        (list.page_width(), list.page_height())
+    };
+    let text = |doc: &PdfDocument<_>, index| {
+        doc.get_page(index)
+            .unwrap()
+            .extract_characters_paint_order()
+            .unwrap()
+            .iter()
+            .map(|ch| ch.unicode.as_deref().unwrap())
+            .collect::<String>()
+    };
+    let characters = |doc: &PdfDocument<_>, index| {
+        doc.get_page(index)
+            .unwrap()
+            .extract_characters_paint_order()
+            .unwrap()
+            .iter()
+            .map(|ch| {
+                (
+                    ch.unicode.clone(),
+                    ch.position.x(),
+                    ch.position.y(),
+                    ch.writing_axis(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let original_dimensions = [dimensions(&source, 0), dimensions(&source, 1)];
+    let original_characters = [characters(&source, 0), characters(&source, 1)];
+    let stale = source.get_page(0).unwrap().content_program().unwrap();
+    let operation = stale
+        .operations()
+        .iter()
+        .position(|op| op.operator.name() == "Tj")
+        .unwrap();
+    source.reorder_pages(&[1, 0]).unwrap();
+    let stamp = source.stamp();
+    let bytes = source.save_to_bytes().unwrap();
+    assert!(source.reorder_pages(&[0, 0]).is_err());
+    assert!(source.remove_page_text_draw(1, &stale, operation).is_err());
+    assert!(source.is_stamp_current(&stamp));
+    assert_eq!(source.save_to_bytes().unwrap(), bytes);
+    let target = PdfDocument::new().unwrap();
+    target.import_pages_from(&source, &[0, 1], 0).unwrap();
+    target.copy_page(0, 2).unwrap();
+    let snapshot = target.get_page(2).unwrap().content_program().unwrap();
+    let operation = snapshot
+        .operations()
+        .iter()
+        .position(|op| op.operator.name() == "Tj")
+        .unwrap();
+    target
+        .remove_page_text_draw(2, &snapshot, operation)
+        .unwrap();
+    let reopened =
+        PdfDocument::from_bytes_with_mode(target.save_to_bytes().unwrap(), ParseMode::Strict)
+            .unwrap();
+    for doc in [&target, &reopened] {
+        assert_eq!(doc.try_page_count().unwrap(), 3);
+        assert_eq!(text(doc, 0), "PageB");
+        assert_eq!(text(doc, 1), "PageA");
+        assert_eq!(text(doc, 2), "");
+        assert_eq!(characters(doc, 0), original_characters[1]);
+        assert_eq!(characters(doc, 1), original_characters[0]);
+        for (index, expected) in [(0, 1), (1, 0), (2, 1)] {
+            assert_eq!(dimensions(doc, index), original_dimensions[expected]);
+        }
+    }
+    assert!(source.is_stamp_current(&stamp));
+    assert_eq!(source.save_to_bytes().unwrap(), bytes);
+    assert_eq!(text(&source, 0), "PageB");
+    assert_eq!(text(&source, 1), "PageA");
+    assert_eq!(characters(&source, 0), original_characters[1]);
+    assert_eq!(characters(&source, 1), original_characters[0]);
+}
+
+#[test]
 fn user_unit_is_leaf_only_even_after_copy_and_import() {
     use pdf::{
         document::save_options::PdfVersion,

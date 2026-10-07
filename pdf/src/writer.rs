@@ -54,7 +54,11 @@ fn write_document_output<R: std::io::Read + std::io::Seek>(
     mut output: &mut impl OutputBuffer,
 ) -> PdfResult<()> {
     // Validate the latest Catalog override as well as the source Header.
-    let effective = document.effective_version()?;
+    let budget = output.budget();
+    let effective = match budget.as_ref() {
+        Some(budget) => document.effective_version_with_budget(budget)?,
+        None => document.effective_version()?,
+    };
     let version = match options.version {
         Some(version) => {
             if version < effective {
@@ -86,7 +90,7 @@ fn write_document_output<R: std::io::Read + std::io::Seek>(
             "saving encrypted documents requires a document security handler".into(),
         ));
     }
-    validate_serialization_nodes(
+    validate_serialization_nodes_with_budget(
         document
             .ctx()
             .trailer()
@@ -94,17 +98,17 @@ fn write_document_output<R: std::io::Read + std::io::Seek>(
             .map(|(_, value)| (value, 2)),
         1,
         document.ctx().limits(),
+        budget.as_ref(),
     )?;
-    let budget = output.budget();
     if let Some(budget) = budget.as_ref() {
         document.ctx().materialize_all_objects_with_budget(budget)?;
     } else {
         document.ctx().materialize_all_objects()?;
     }
 
-    append_output(
+    append_formatted_output(
         &mut output,
-        format!("%PDF-{version}\n").as_bytes(),
+        format_args!("%PDF-{version}\n"),
         options.max_output_bytes,
     )?;
     append_output(
@@ -149,19 +153,42 @@ fn write_document_output<R: std::io::Read + std::io::Seek>(
             document.ctx().object_for_write(object_id)?
         };
         if let Some(obj) = object {
-            validate_serialization_graph(&obj, document.ctx().limits())?;
-            let obj = prepare_document_output_object(document, obj, options.compression)?;
-            validate_serialization_graph(&obj, document.ctx().limits())?;
-            feature_versions::validate_feature_versions(
+            validate_serialization_nodes_with_budget(
+                std::iter::once((&obj, 1)),
+                0,
+                document.ctx().limits(),
+                budget.as_ref(),
+            )?;
+            let mut _prepared_lease = None;
+            let obj = if let Some(budget) = budget.as_ref() {
+                let (object, lease) = prepare_document_output_object_with_budget(
+                    document,
+                    obj,
+                    options.compression,
+                    budget,
+                )?;
+                _prepared_lease = Some(lease);
+                object
+            } else {
+                prepare_document_output_object(document, obj, options.compression)?
+            };
+            validate_serialization_nodes_with_budget(
+                std::iter::once((&obj, 1)),
+                0,
+                document.ctx().limits(),
+                budget.as_ref(),
+            )?;
+            feature_versions::validate_feature_versions_with_budget(
                 document,
                 &obj,
                 effective.max(options.version.unwrap_or(effective)),
+                budget.as_ref(),
             )?;
             xref_entries[object_id.obj_num() as usize] =
                 (output.len() as u64, object_id.gen_num(), b'n');
-            append_output(
+            append_formatted_output(
                 &mut output,
-                format!("{} {} obj\n", object_id.obj_num(), object_id.gen_num()).as_bytes(),
+                format_args!("{} {} obj\n", object_id.obj_num(), object_id.gen_num()),
                 options.max_output_bytes,
             )?;
             write_object_limited(&mut output, &obj, options.max_output_bytes)?;
@@ -179,9 +206,9 @@ fn write_document_output<R: std::io::Read + std::io::Seek>(
         options.max_output_bytes,
     )?;
     append_output(&mut output, b"startxref\n", options.max_output_bytes)?;
-    append_output(
+    append_formatted_output(
         &mut output,
-        format!("{xref_offset}\n").as_bytes(),
+        format_args!("{xref_offset}\n"),
         options.max_output_bytes,
     )?;
     append_output(&mut output, b"%%EOF\n", options.max_output_bytes)?;
@@ -284,7 +311,12 @@ pub(crate) fn serialize_object_with_budget(
     limits: crate::parser::options::Limits,
     budget: &crate::budget::OperationBudget,
 ) -> PdfResult<crate::budget::BudgetedBytes> {
-    validate_serialization_graph(object, limits)?;
+    validate_serialization_nodes_with_budget(
+        std::iter::once((object, 1)),
+        0,
+        limits,
+        Some(budget),
+    )?;
     let mut output = SerializationOutput {
         bytes: crate::budget::BudgetedBytes::copy_from_slice(budget, &[])?,
         limits,
@@ -397,6 +429,136 @@ fn prepare_document_output_object<R: std::io::Read + std::io::Seek>(
     )
 }
 
+fn compress_with_budget(
+    input: &[u8],
+    budget: &crate::budget::OperationBudget,
+    limits: crate::parser::options::Limits,
+) -> PdfResult<crate::budget::BudgetedBytes> {
+    // Own the staging allocation so reservation precedes allocation and actual
+    // capacity can be reconciled. Backend-private state remains excluded.
+    let mut _workspace_lease = budget.reserve(32 * 1024)?;
+    let mut workspace = Vec::new();
+    workspace
+        .try_reserve_exact(32 * 1024)
+        .map_err(|_| PdfError::ResourceLimit("compression workspace allocation".into()))?;
+    _workspace_lease.resize(workspace.capacity())?;
+    workspace.resize(32 * 1024, 0);
+    let mut encoder = flate2::Compress::new(flate2::Compression::default(), true);
+    let mut output = SerializationOutput {
+        bytes: crate::budget::BudgetedBytes::copy_from_slice(budget, &[])?,
+        limits,
+        capacity_limit: limits.max_raw_stream_bytes,
+    };
+    let mut position = 0;
+    loop {
+        let before_in = encoder.total_in();
+        let before_out = encoder.total_out();
+        let flush = if position == input.len() {
+            flate2::FlushCompress::Finish
+        } else {
+            flate2::FlushCompress::None
+        };
+        let status = encoder
+            .compress(&input[position..], &mut workspace, flush)
+            .map_err(|_| PdfError::IOError("compress output stream failed".into()))?;
+        let consumed = usize::try_from(encoder.total_in() - before_in)
+            .map_err(|_| PdfError::ResourceLimit("compression input progress".into()))?;
+        let produced = usize::try_from(encoder.total_out() - before_out)
+            .map_err(|_| PdfError::ResourceLimit("compression output progress".into()))?;
+        position = position
+            .checked_add(consumed)
+            .filter(|position| *position <= input.len())
+            .ok_or_else(|| PdfError::IOError("invalid compressor progress".into()))?;
+        append_output(
+            &mut output,
+            &workspace[..produced],
+            limits.max_raw_stream_bytes,
+        )?;
+        if status == flate2::Status::StreamEnd {
+            if position != input.len() {
+                return Err(PdfError::IOError("incomplete compression input".into()));
+            }
+            return Ok(output.bytes);
+        }
+        if consumed == 0 && produced == 0 {
+            return Err(PdfError::IOError("compressor made no progress".into()));
+        }
+    }
+}
+
+fn prepare_document_output_object_with_budget<R: std::io::Read + std::io::Seek>(
+    document: &PdfDocument<R>,
+    object: PdfObject,
+    compression: crate::document::save_options::StreamCompression,
+    budget: &crate::budget::OperationBudget,
+) -> PdfResult<(PdfObject, crate::budget::MemoryLease)> {
+    use crate::{
+        document::save_options::StreamCompression,
+        objects::pdf_stream::resolve_setting_reference_with_budget,
+    };
+    let mut lease = budget.reserve(0)?;
+    if !matches!(compression, StreamCompression::FlateUnencoded) {
+        return Ok((object, lease));
+    }
+    let PdfObject::PdfStream(stream) = object else {
+        return Ok((object, lease));
+    };
+    if ["F", "FFilter", "FDecodeParms"]
+        .iter()
+        .any(|key| stream.dict().contains_key(key))
+    {
+        return Ok((PdfObject::PdfStream(stream), lease));
+    }
+    if let Some(filter) = stream.dict().get("Filter") {
+        let (_filter_lease, filter) = {
+            let (filter, lease) =
+                resolve_setting_reference_with_budget(filter, document.ctx(), budget)?;
+            (lease, filter)
+        };
+        if !matches!(filter, PdfObject::PdfNull) {
+            return Ok((PdfObject::PdfStream(stream), lease));
+        }
+    }
+    if let Some(params) = stream.dict().get("DecodeParms") {
+        let (_params_lease, params) = {
+            let (params, lease) =
+                resolve_setting_reference_with_budget(params, document.ctx(), budget)?;
+            (lease, params)
+        };
+        if !matches!(params, PdfObject::PdfNull) {
+            return Err(PdfError::UnsupportedFeature(
+                "cannot compress unfiltered stream with DecodeParms".into(),
+            ));
+        }
+    }
+    let limits = document.ctx().limits();
+    crate::filter::check_output_size(
+        0,
+        stream.raw_data().len(),
+        limits.max_raw_stream_bytes.min(limits.max_decoded_bytes),
+        "unencoded compression input bytes",
+    )?;
+    let bytes = compress_with_budget(stream.raw_data(), budget, limits)?;
+    let (_name_lease, name) = {
+        let (name, lease) = PdfName::new_from_buffer_with_budget(b"/FlateDecode", budget)?;
+        (lease, PdfObject::PdfName(name))
+    };
+    let (mut dict_lease, mut dict) = {
+        let (dict, lease) = stream
+            .dict()
+            .with_replaced_entry_with_budget("Filter", &name, budget, limits)?;
+        (lease, dict)
+    };
+    dict.remove("DecodeParms");
+    lease.absorb(&mut dict_lease)?;
+    let (mut data_lease, data) = {
+        let (data, lease) = bytes.into_reserved_parts();
+        (lease, data)
+    };
+    lease.absorb(&mut data_lease)?;
+    Ok((PdfObject::PdfStream(PdfStream::new(dict, data)), lease))
+}
+
 fn prepare_output_object_with_limits(
     object: PdfObject,
     compression: crate::document::save_options::StreamCompression,
@@ -468,22 +630,67 @@ fn validate_serialization_graph(
 
 fn validate_serialization_nodes<'a>(
     roots: impl Iterator<Item = (&'a PdfObject, usize)>,
+    nodes: usize,
+    limits: crate::parser::options::Limits,
+) -> PdfResult<()> {
+    validate_serialization_nodes_with_budget(roots, nodes, limits, None)
+}
+
+fn reserve_validation_slots<T>(
+    pending: &mut Vec<T>,
+    additional: usize,
+    lease: &mut Option<crate::budget::MemoryLease>,
+    budget: Option<&crate::budget::OperationBudget>,
+) -> PdfResult<()> {
+    let needed = pending
+        .len()
+        .checked_add(additional)
+        .ok_or_else(|| PdfError::ResourceLimit("serialization validation slots".into()))?;
+    if needed <= pending.capacity() {
+        return Ok(());
+    }
+    if let Some(budget) = budget {
+        let slot_size = std::mem::size_of::<T>();
+        let capacity = needed.max(pending.capacity().saturating_mul(2));
+        let mut next_lease =
+            budget.reserve(capacity.checked_mul(slot_size).ok_or_else(|| {
+                PdfError::ResourceLimit("serialization validation bytes".into())
+            })?)?;
+        let mut next = Vec::new();
+        next.try_reserve_exact(capacity)
+            .map_err(|_| PdfError::ResourceLimit("serialization validation allocation".into()))?;
+        next_lease.resize(next.capacity().checked_mul(slot_size).ok_or_else(|| {
+            PdfError::ResourceLimit("serialization validation capacity".into())
+        })?)?;
+        next.append(pending);
+        *pending = next;
+        *lease = Some(next_lease);
+        Ok(())
+    } else {
+        pending
+            .try_reserve(additional)
+            .map_err(|_| PdfError::ResourceLimit("serialization validation allocation".into()))
+    }
+}
+
+fn validate_serialization_nodes_with_budget<'a>(
+    roots: impl Iterator<Item = (&'a PdfObject, usize)>,
     mut nodes: usize,
     limits: crate::parser::options::Limits,
+    budget: Option<&crate::budget::OperationBudget>,
 ) -> PdfResult<()> {
     crate::filter::check_output_size(0, nodes, limits.max_objects, "serialized object nodes")?;
     if nodes > 0 && limits.max_depth == 0 {
         return Err(PdfError::ResourceLimit("serialized object depth".into()));
     }
+    let mut _pending_lease = None;
     let mut pending = Vec::new();
     for root in roots {
         let used = nodes
             .checked_add(pending.len())
             .ok_or_else(|| PdfError::ResourceLimit("serialized nodes overflow".into()))?;
         crate::filter::check_output_size(used, 1, limits.max_objects, "serialized object nodes")?;
-        pending
-            .try_reserve(1)
-            .map_err(|_| PdfError::ResourceLimit("serialization validation allocation".into()))?;
+        reserve_validation_slots(&mut pending, 1, &mut _pending_lease, budget)?;
         pending.push(root);
     }
     while let Some((object, depth)) = pending.pop() {
@@ -503,9 +710,7 @@ fn validate_serialization_nodes<'a>(
                     limits.max_objects,
                     "serialized array nodes",
                 )?;
-                pending.try_reserve(array.len()).map_err(|_| {
-                    PdfError::ResourceLimit("serialization validation allocation".into())
-                })?;
+                reserve_validation_slots(&mut pending, array.len(), &mut _pending_lease, budget)?;
                 pending.extend(array.into_iter().map(|child| (child, next_depth)));
             }
             PdfObject::PdfDict(dict) => {
@@ -516,9 +721,7 @@ fn validate_serialization_nodes<'a>(
                     "serialized dictionary nodes",
                 )?;
                 for (_, child) in dict {
-                    pending.try_reserve(1).map_err(|_| {
-                        PdfError::ResourceLimit("serialization validation allocation".into())
-                    })?;
+                    reserve_validation_slots(&mut pending, 1, &mut _pending_lease, budget)?;
                     pending.push((child, next_depth));
                 }
             }
@@ -535,9 +738,7 @@ fn validate_serialization_nodes<'a>(
                     "serialized stream dictionary nodes",
                 )?;
                 for (_, child) in stream.dict() {
-                    pending.try_reserve(1).map_err(|_| {
-                        PdfError::ResourceLimit("serialization validation allocation".into())
-                    })?;
+                    reserve_validation_slots(&mut pending, 1, &mut _pending_lease, budget)?;
                     pending.push((child, next_depth));
                 }
             }
@@ -588,12 +789,48 @@ fn write_indirect_object(
     object_id: ObjectId,
     obj: &PdfObject,
 ) -> PdfResult<()> {
-    output.extend_from_slice(
-        format!("{} {} obj\n", object_id.obj_num(), object_id.gen_num()).as_bytes(),
-    );
+    append_formatted_output(
+        output,
+        format_args!("{} {} obj\n", object_id.obj_num(), object_id.gen_num()),
+        usize::MAX,
+    )?;
     write_object(output, obj)?;
     output.extend_from_slice(b"\nendobj\n");
     Ok(())
+}
+
+struct StackFormat {
+    bytes: [u8; 64],
+    len: usize,
+}
+impl std::fmt::Write for StackFormat {
+    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        let end = self
+            .len
+            .checked_add(value.len())
+            .filter(|end| *end <= self.bytes.len())
+            .ok_or(std::fmt::Error)?;
+        self.bytes[self.len..end].copy_from_slice(value.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+fn format_stack(arguments: std::fmt::Arguments<'_>) -> PdfResult<StackFormat> {
+    let mut token = StackFormat {
+        bytes: [0; 64],
+        len: 0,
+    };
+    std::fmt::Write::write_fmt(&mut token, arguments)
+        .map_err(|_| PdfError::ResourceLimit("writer stack token capacity".into()))?;
+    Ok(token)
+}
+fn append_formatted_output(
+    output: &mut impl OutputBuffer,
+    arguments: std::fmt::Arguments<'_>,
+    limit: usize,
+) -> PdfResult<()> {
+    let token = format_stack(arguments)?;
+    append_output(output, &token.bytes[..token.len], limit)
 }
 
 fn write_xref_table(
@@ -609,11 +846,11 @@ fn write_xref_table(
         ));
     }
     append_output(output, b"xref\n", limit)?;
-    append_output(output, format!("0 {}\n", entries.len()).as_bytes(), limit)?;
+    append_formatted_output(output, format_args!("0 {}\n", entries.len()), limit)?;
     for (offset, gen_num, state) in entries {
-        append_output(
+        append_formatted_output(
             output,
-            format!("{offset:010} {gen_num:05} {} \n", *state as char).as_bytes(),
+            format_args!("{offset:010} {gen_num:05} {} \n", *state as char),
             limit,
         )?;
     }
@@ -637,27 +874,83 @@ fn write_trailer_limited(
     limits: crate::parser::options::Limits,
     output_limit: usize,
 ) -> PdfResult<()> {
-    let mut trailer = PdfDict::default();
-    for (key, value) in original {
-        if matches!(
-            key.as_str(),
-            "Prev" | "XRefStm" | "Type" | "W" | "Index" | "Filter" | "DecodeParms" | "Length"
-        ) {
-            continue;
+    // Keep leases outside their owned values so unwinding frees data first.
+    let mut _size_lease = None;
+    let mut digits = [0u8; 10];
+    let mut start = digits.len();
+    let mut remaining = size;
+    loop {
+        start -= 1;
+        digits[start] = b'0' + (remaining % 10) as u8;
+        remaining /= 10;
+        if remaining == 0 {
+            break;
         }
-        trailer.try_insert(key.clone(), value.clone())?;
     }
-    trailer.try_insert(
-        "Size".to_string(),
-        PdfObject::PdfNumber(crate::objects::pdf_number::PdfNumber::new_from_lexeme(
-            size.to_string().as_bytes(),
-        )?),
+    let size = if let Some(budget) = output.budget() {
+        let (lexeme, lease) =
+            crate::budget::copy_string(std::str::from_utf8(&digits[start..]).unwrap(), &budget)?;
+        _size_lease = Some(lease);
+        crate::objects::pdf_number::PdfNumber::from_owned_lexeme(lexeme)?
+    } else {
+        crate::objects::pdf_number::PdfNumber::new_from_lexeme(&digits[start..])?
+    };
+    let size = PdfObject::PdfNumber(size);
+    let (_trailer_lease, trailer) = if let Some(budget) = output.budget() {
+        let mut builder =
+            crate::objects::pdf_dict::BudgetedDictBuilder::new(&budget, limits.max_objects)?;
+        for (key, value) in original {
+            if !retained_trailer_key(key) || key == "Size" {
+                continue;
+            }
+            if key.len() > limits.max_token_bytes {
+                return Err(PdfError::ResourceLimit("trailer key bytes".into()));
+            }
+            // Declare the key lease before its data, including value-copy errors.
+            let (key_lease, key) = {
+                let (key, lease) = crate::budget::copy_string(key, &budget)?;
+                (lease, key)
+            };
+            let (value, value_lease) =
+                crate::objects::clone_object_with_budget(value, &budget, limits, 1)?;
+            builder.insert(key, value, key_lease, value_lease)?;
+        }
+        let (key_lease, key) = {
+            let (key, lease) = crate::budget::copy_string("Size", &budget)?;
+            (lease, key)
+        };
+        let (value, value_lease) =
+            crate::objects::clone_object_with_budget(&size, &budget, limits, 1)?;
+        builder.insert(key, value, key_lease, value_lease)?;
+        let (trailer, lease) = builder.finish()?;
+        (Some(lease), trailer)
+    } else {
+        let mut trailer = PdfDict::default();
+        for (key, value) in original {
+            if retained_trailer_key(key) {
+                trailer.try_insert(key.clone(), value.clone())?;
+            }
+        }
+        trailer.try_insert("Size".to_string(), size)?;
+        (None, trailer)
+    };
+    validate_serialization_nodes_with_budget(
+        trailer.into_iter().map(|(_, value)| (value, 2)),
+        1,
+        limits,
+        output.budget().as_ref(),
     )?;
-    validate_serialization_nodes(trailer.into_iter().map(|(_, value)| (value, 2)), 1, limits)?;
     append_output(output, b"trailer\n", output_limit)?;
     write_dict_limited(output, &trailer, output_limit)?;
     append_output(output, b"\n", output_limit)?;
     Ok(())
+}
+
+fn retained_trailer_key(key: &str) -> bool {
+    !matches!(
+        key,
+        "Prev" | "XRefStm" | "Type" | "W" | "Index" | "Filter" | "DecodeParms" | "Length"
+    )
 }
 
 fn write_object(output: &mut Vec<u8>, obj: &PdfObject) -> PdfResult<()> {
@@ -672,9 +965,11 @@ fn write_object(output: &mut Vec<u8>, obj: &PdfObject) -> PdfResult<()> {
         PdfObject::PdfArray(array) => write_array(output, array)?,
         PdfObject::PdfDict(dict) => write_dict(output, dict)?,
         PdfObject::PdfStream(stream) => write_stream(output, stream)?,
-        PdfObject::PdfReference(reference) => output.extend_from_slice(
-            format!("{} {} R", reference.objnum(), reference.gennum()).as_bytes(),
-        ),
+        PdfObject::PdfReference(reference) => append_formatted_output(
+            output,
+            format_args!("{} {} R", reference.objnum(), reference.gennum()),
+            usize::MAX,
+        )?,
     }
     Ok(())
 }
@@ -757,7 +1052,12 @@ fn write_object_limited(
                     }
                 }
                 PdfObject::PdfReference(reference) => {
-                    format!("{} {} R", reference.objnum(), reference.gennum()).len()
+                    format_stack(format_args!(
+                        "{} {} R",
+                        reference.objnum(),
+                        reference.gennum()
+                    ))?
+                    .len
                 }
                 _ => {
                     return Err(PdfError::ObjectError(
@@ -1048,6 +1348,17 @@ fn save_file_atomically(
     path: &Path,
     write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
 ) -> PdfResult<()> {
+    save_file_atomically_with_actions(path, write, std::fs::File::sync_all, |source, target| {
+        std::fs::rename(source, target)
+    })
+}
+
+fn save_file_atomically_with_actions(
+    path: &Path,
+    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+    sync: impl FnOnce(&std::fs::File) -> std::io::Result<()>,
+    replace: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> PdfResult<()> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let parent = path
@@ -1095,8 +1406,13 @@ fn save_file_atomically(
             }
         }
     }
-    let (mut file, mut temporary) = allocated
-        .ok_or_else(|| PdfError::IOError("temporary output name attempts exhausted".into()))?;
+    // Locals unwind in reverse declaration order: close the file before the
+    // path guard attempts removal, not only on explicit Result error paths.
+    let (mut temporary, mut file) = {
+        let (file, temporary) = allocated
+            .ok_or_else(|| PdfError::IOError("temporary output name attempts exhausted".into()))?;
+        (temporary, file)
+    };
     let prepared = (|| {
         write(&mut file)
             .map_err(|error| PdfError::IOError(format!("write temporary PDF failed: {error}")))?;
@@ -1105,13 +1421,13 @@ fn save_file_atomically(
                 PdfError::IOError(format!("set output permissions failed: {error}"))
             })?;
         }
-        file.sync_all()
+        sync(&file)
             .map_err(|error| PdfError::IOError(format!("sync temporary PDF failed: {error}")))
     })();
     // Close before cleanup on success and error paths, including Windows.
     drop(file);
     prepared?;
-    std::fs::rename(&temporary.0, path)
+    replace(&temporary.0, path)
         .map_err(|error| PdfError::IOError(format!("replace output file failed: {error}")))?;
     temporary.1 = true;
     Ok(())
@@ -1119,6 +1435,513 @@ fn save_file_atomically(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn compression_workspace_budget_handles_empty_and_multibuffer_streams() {
+        use crate::{budget::OperationBudget, parser::options::Limits};
+        use std::io::Write;
+        let inputs = [
+            vec![],
+            (0..=255).collect(),
+            (0u32..32768).flat_map(u32::to_le_bytes).collect(),
+        ];
+        for input in inputs {
+            let mut ordinary =
+                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+            ordinary.write_all(&input).unwrap();
+            let expected = ordinary.finish().unwrap();
+            let pool = OperationBudget::new(1024 * 1024);
+            let output = super::compress_with_budget(&input, &pool, Limits::default()).unwrap();
+            assert_eq!(output.as_slice(), expected);
+            assert_eq!(pool.live_bytes(), output.capacity());
+            assert!(pool.peak_bytes() >= 32 * 1024 + output.capacity());
+            let peak = pool.peak_bytes();
+            let mut decoded = Vec::new();
+            std::io::Read::read_to_end(
+                &mut flate2::read::ZlibDecoder::new(output.as_slice()),
+                &mut decoded,
+            )
+            .unwrap();
+            assert_eq!(decoded, input);
+            drop(output);
+            assert_eq!(pool.live_bytes(), 0);
+            let insufficient = OperationBudget::new(32 * 1024 - 1);
+            assert!(super::compress_with_budget(&input, &insufficient, Limits::default()).is_err());
+            assert_eq!(insufficient.live_bytes(), 0);
+            let insufficient = OperationBudget::new(peak - 1);
+            assert!(super::compress_with_budget(&input, &insufficient, Limits::default()).is_err());
+            assert_eq!(insufficient.live_bytes(), 0);
+            assert!(super::compress_with_budget(
+                &input,
+                &pool,
+                Limits {
+                    max_raw_stream_bytes: expected.len() - 1,
+                    ..Default::default()
+                }
+            )
+            .is_err());
+            assert_eq!(pool.live_bytes(), 0);
+        }
+    }
+
+    #[test]
+    fn stack_writer_tokens_preserve_bounds_and_xref_bytes() {
+        use crate::{budget::OperationBudget, parser::options::Limits};
+        let token = super::format_stack(format_args!("{} {} R", u32::MAX, u32::MAX)).unwrap();
+        assert_eq!(&token.bytes[..token.len], b"4294967295 4294967295 R");
+        let token = super::format_stack(format_args!("{}\n", u64::MAX)).unwrap();
+        assert_eq!(&token.bytes[..token.len], b"18446744073709551615\n");
+        let long = [b'x'; 65];
+        let mut unchanged = b"prefix".to_vec();
+        assert!(super::append_formatted_output(
+            &mut unchanged,
+            format_args!("{}", std::str::from_utf8(&long).unwrap()),
+            usize::MAX
+        )
+        .is_err());
+        assert_eq!(unchanged, b"prefix");
+        let entries = [(9_999_999_999, 65535, b'f'), (0, 0, b'n')];
+        let expected = b"xref\n0 2\n9999999999 65535 f \n0000000000 00000 n \n";
+        let mut plain = Vec::new();
+        super::write_xref_table(&mut plain, &entries, expected.len()).unwrap();
+        assert_eq!(plain, expected);
+        let pool = OperationBudget::new(1024);
+        let mut output = super::SerializationOutput {
+            bytes: crate::budget::BudgetedBytes::copy_from_slice(&pool, &[]).unwrap(),
+            limits: Limits::default(),
+            capacity_limit: expected.len(),
+        };
+        super::write_xref_table(&mut output, &entries, expected.len()).unwrap();
+        assert_eq!(output.bytes.as_slice(), expected);
+        assert_eq!(pool.live_bytes(), output.bytes.capacity());
+        drop(output);
+        assert_eq!(pool.live_bytes(), 0);
+        for invalid in [(10_000_000_000, 0, b'n'), (0, 65536, b'n'), (0, 0, b'?')] {
+            let mut output = Vec::new();
+            assert!(super::write_xref_table(&mut output, &[invalid], usize::MAX).is_err());
+            assert!(output.is_empty());
+        }
+    }
+
+    #[test]
+    fn compressed_output_budget_retains_payload_and_rebuilt_dictionary() {
+        use crate::{
+            budget::OperationBudget,
+            document::save_options::StreamCompression,
+            objects::{pdf_reference::PdfReference, pdf_stream::PdfStream},
+        };
+        let doc = PdfDocument::new().unwrap();
+        let null = doc.insert_object(PdfObject::PdfNull);
+        let mut dict = PdfDict::default();
+        for key in ["Filter", "DecodeParms"] {
+            dict.insert(
+                key.into(),
+                PdfObject::PdfReference(PdfReference::new(null.obj_num(), null.gen_num())),
+            );
+        }
+        dict.insert(
+            "Custom".into(),
+            PdfObject::PdfString(PdfString::new(vec![b'x'; 4096], false)),
+        );
+        let source = PdfObject::PdfStream(PdfStream::new(
+            dict.clone(),
+            (0..16384).map(|i| (i % 251) as u8).collect(),
+        ));
+        let revision = doc.revision();
+        let ordinary = super::prepare_document_output_object(
+            &doc,
+            source.clone(),
+            StreamCompression::FlateUnencoded,
+        )
+        .unwrap();
+        let pool = OperationBudget::new(1024 * 1024);
+        let (lease, object) = {
+            let (object, lease) = super::prepare_document_output_object_with_budget(
+                &doc,
+                source.clone(),
+                StreamCompression::FlateUnencoded,
+                &pool,
+            )
+            .unwrap();
+            (lease, object)
+        };
+        assert_eq!(ordinary, object);
+        assert!(pool.live_bytes() > 4096);
+        let peak = pool.peak_bytes();
+        drop(object);
+        drop(lease);
+        assert_eq!(pool.live_bytes(), 0);
+        let small = OperationBudget::new(peak - 1);
+        assert!(matches!(
+            super::prepare_document_output_object_with_budget(
+                &doc,
+                source.clone(),
+                StreamCompression::FlateUnencoded,
+                &small
+            ),
+            Err(crate::error::PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(small.live_bytes(), 0);
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (_lease, _object) = {
+                let (object, lease) = super::prepare_document_output_object_with_budget(
+                    &doc,
+                    source.clone(),
+                    StreamCompression::FlateUnencoded,
+                    &pool,
+                )
+                .unwrap();
+                (lease, object)
+            };
+            panic!("compressed owner unwind");
+        }));
+        assert!(caught.is_err());
+        assert_eq!(pool.live_bytes(), 0);
+        dict.insert("F".into(), PdfObject::PdfNull);
+        let external = PdfObject::PdfStream(PdfStream::new(dict, vec![1, 2, 3]));
+        let zero = OperationBudget::new(0);
+        let (preserved, lease) = super::prepare_document_output_object_with_budget(
+            &doc,
+            external.clone(),
+            StreamCompression::FlateUnencoded,
+            &zero,
+        )
+        .unwrap();
+        assert_eq!(preserved, external);
+        drop(preserved);
+        drop(lease);
+        assert_eq!(zero.live_bytes(), 0);
+        assert_eq!(doc.revision(), revision);
+    }
+
+    #[test]
+    fn effective_version_budget_retains_catalog_and_override_copies() {
+        use crate::{
+            budget::OperationBudget,
+            document::save_options::{PdfVersion, SaveOptions},
+            objects::{pdf_number::PdfNumber, pdf_reference::PdfReference},
+        };
+        let doc = PdfDocument::new_with_version(PdfVersion::V1_3).unwrap();
+        let root_id = doc
+            .ctx()
+            .trailer()
+            .get("Root")
+            .unwrap()
+            .as_object_id()
+            .unwrap();
+        let version_id = doc.insert_object(PdfObject::PdfName(PdfName::new("1.6".into())));
+        let mut catalog = doc.resolve_object(root_id).unwrap().into_dict().unwrap();
+        catalog.insert(
+            "Version".into(),
+            PdfObject::PdfReference(PdfReference::new(
+                version_id.obj_num(),
+                version_id.gen_num(),
+            )),
+        );
+        catalog.insert(
+            "Custom".into(),
+            PdfObject::PdfString(PdfString::new(vec![b'x'; 4096], false)),
+        );
+        doc.update_object(root_id, PdfObject::PdfDict(catalog.clone()))
+            .unwrap();
+        let revision = doc.revision();
+        let pool = OperationBudget::new(1024 * 1024);
+        assert_eq!(
+            doc.effective_version_with_budget(&pool).unwrap(),
+            doc.effective_version().unwrap()
+        );
+        assert_eq!(
+            doc.effective_version_with_budget(&pool).unwrap(),
+            PdfVersion::V1_6
+        );
+        assert_eq!(pool.live_bytes(), 0);
+        let small = OperationBudget::new(pool.peak_bytes() - 1);
+        assert!(matches!(
+            doc.effective_version_with_budget(&small),
+            Err(crate::error::PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(small.live_bytes(), 0);
+        assert_eq!(doc.revision(), revision);
+        assert_eq!(
+            doc.resolve_object(root_id).unwrap(),
+            PdfObject::PdfDict(catalog.clone())
+        );
+        let output =
+            super::write_document_with_budget(&doc, SaveOptions::default(), &pool).unwrap();
+        assert_eq!(output.as_slice(), doc.save_to_bytes().unwrap());
+        drop(output);
+        assert_eq!(pool.live_bytes(), 0);
+        for value in [
+            PdfObject::PdfNull,
+            PdfObject::PdfName(PdfName::new("1.2".into())),
+            PdfObject::PdfName(PdfName::new("unknown".into())),
+            PdfObject::PdfNumber(PdfNumber::new(1.6)),
+        ] {
+            catalog.insert("Version".into(), value);
+            doc.update_object(root_id, PdfObject::PdfDict(catalog.clone()))
+                .unwrap();
+            let plain = doc.effective_version();
+            let budgeted = doc.effective_version_with_budget(&pool);
+            match (plain, budgeted) {
+                (Ok(plain), Ok(budgeted)) => assert_eq!(plain, budgeted),
+                (Err(plain), Err(budgeted)) => assert_eq!(plain.to_string(), budgeted.to_string()),
+                _ => panic!("effective version behavior differs"),
+            }
+            assert_eq!(pool.live_bytes(), 0);
+        }
+    }
+
+    #[test]
+    fn compressed_source_save_budget_preserves_edit_view_and_cache_transfer() {
+        use crate::{
+            budget::OperationBudget,
+            document::save_options::{SaveOptions, StreamCompression},
+            objects::{object_id::ObjectId, pdf_number::PdfNumber},
+            parser::syntax::ParseMode,
+        };
+        use std::io::Write;
+        let make_source = |encoded: bool| {
+            let mut large = vec![b'('; 1];
+            large.extend(std::iter::repeat_n(b'x', 65536));
+            large.push(b')');
+            let objects: [&[u8]; 4] = [
+                b"<< /Type /Catalog /Pages 2 0 R /Private 4 0 R >>",
+                b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] >>",
+                &large,
+            ];
+            let mut header = String::new();
+            let mut body = Vec::new();
+            for (index, object) in objects.iter().enumerate() {
+                header.push_str(&format!("{} {} ", index + 1, body.len()));
+                body.extend_from_slice(object);
+                body.push(b' ');
+            }
+            let first = header.len();
+            let mut payload = header.into_bytes();
+            payload.extend_from_slice(&body);
+            if encoded {
+                let mut encoder =
+                    flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+                encoder.write_all(&payload).unwrap();
+                payload = encoder.finish().unwrap();
+            }
+            let mut source = b"%PDF-1.5\n%\xE2\xE3\xCF\xD3\n".to_vec();
+            let stream_offset = source.len() as u32;
+            source.extend_from_slice(
+                format!(
+                    "5 0 obj\n<< /Type /ObjStm /N 4 /First {first} /Length {} {} >>\nstream\n",
+                    payload.len(),
+                    if encoded { "/Filter /FlateDecode" } else { "" }
+                )
+                .as_bytes(),
+            );
+            source.extend_from_slice(&payload);
+            source.extend_from_slice(b"\nendstream\nendobj\n");
+            let xref_offset = source.len() as u32;
+            let mut entries = Vec::new();
+            for (kind, field, index) in [
+                (0u8, 0u32, 65535u16),
+                (2, 5, 0),
+                (2, 5, 1),
+                (2, 5, 2),
+                (2, 5, 3),
+                (1, stream_offset, 0),
+                (1, xref_offset, 0),
+            ] {
+                entries.push(kind);
+                entries.extend_from_slice(&field.to_be_bytes());
+                entries.extend_from_slice(&index.to_be_bytes());
+            }
+            source.extend_from_slice(format!("6 0 obj\n<< /Type /XRef /Size 7 /Root 1 0 R /W [1 4 2] /Length {} >>\nstream\n", entries.len()).as_bytes());
+            source.extend_from_slice(&entries);
+            source.extend_from_slice(
+                format!("\nendstream\nendobj\nstartxref\n{xref_offset}\n%%EOF\n").as_bytes(),
+            );
+            source
+        };
+        let root = ObjectId::new(1, 0);
+        let edited_id = ObjectId::new(4, 0);
+        let stream = ObjectId::new(5, 0);
+        for encoded in [false, true] {
+            let source = make_source(encoded);
+            for compression in [
+                StreamCompression::Preserve,
+                StreamCompression::FlateUnencoded,
+            ] {
+                let options = SaveOptions {
+                    compression,
+                    ..Default::default()
+                };
+                let doc =
+                    PdfDocument::from_bytes_with_mode(source.clone(), ParseMode::Strict).unwrap();
+                for id in [root, edited_id, stream] {
+                    assert!(!doc.ctx().source_object_is_cached(id));
+                }
+                let revision = doc.revision();
+                let small = OperationBudget::new(8192);
+                assert!(matches!(
+                    super::write_document_with_budget(&doc, options, &small),
+                    Err(crate::error::PdfError::ResourceLimit(_))
+                ));
+                assert_eq!(small.live_bytes(), 0);
+                assert_eq!(doc.revision(), revision);
+                for id in [root, edited_id, stream] {
+                    assert!(!doc.ctx().source_object_is_cached(id));
+                }
+                let edited = PdfObject::PdfNumber(PdfNumber::new(17.0));
+                doc.update_object(edited_id, edited.clone()).unwrap();
+                let revision = doc.revision();
+                let ordinary =
+                    PdfDocument::from_bytes_with_mode(source.clone(), ParseMode::Strict).unwrap();
+                ordinary.update_object(edited_id, edited.clone()).unwrap();
+                let expected = ordinary.save_to_bytes_with_options(options).unwrap();
+                let pool = OperationBudget::new(2 * 1024 * 1024);
+                let output = super::write_document_with_budget(&doc, options, &pool).unwrap();
+                assert_eq!(output.as_slice(), expected);
+                assert_eq!(pool.live_bytes(), output.capacity());
+                for id in [root, edited_id, stream] {
+                    assert!(doc.ctx().source_object_is_cached(id));
+                }
+                assert_eq!(doc.resolve_object(edited_id).unwrap(), edited);
+                assert_eq!(doc.revision(), revision);
+                let reopened = PdfDocument::from_bytes_with_mode(
+                    output.as_slice().to_vec(),
+                    ParseMode::Strict,
+                )
+                .unwrap();
+                assert_eq!(reopened.try_page_count().unwrap(), 1);
+                assert_eq!(reopened.resolve_object(edited_id).unwrap(), edited);
+                drop(output);
+                assert_eq!(pool.live_bytes(), 0);
+                assert!(doc.ctx().source_object_is_cached(stream));
+            }
+        }
+    }
+
+    #[test]
+    fn cold_source_save_budget_refuses_before_large_cache_publication() {
+        use crate::{
+            budget::OperationBudget,
+            document::save_options::{SaveOptions, StreamCompression},
+            objects::pdf_stream::PdfStream,
+            parser::syntax::ParseMode,
+        };
+        let fixture = PdfDocument::new().unwrap();
+        fixture.add_page(0).unwrap();
+        fixture.replace_page_contents(0, b"q Q".to_vec()).unwrap();
+        // Unreferenced objects are still materialized by a full rewrite, but
+        // opening the Catalog must not eagerly load this payload.
+        let payload_id = fixture.insert_object(PdfObject::PdfStream(PdfStream::new(
+            PdfDict::default(),
+            vec![b'x'; 65536],
+        )));
+        let source = fixture.save_to_bytes().unwrap();
+        for compression in [
+            StreamCompression::Preserve,
+            StreamCompression::FlateUnencoded,
+        ] {
+            let options = SaveOptions {
+                compression,
+                ..Default::default()
+            };
+            let expected_doc =
+                PdfDocument::from_bytes_with_mode(source.clone(), ParseMode::Strict).unwrap();
+            let expected = expected_doc.save_to_bytes_with_options(options).unwrap();
+            let doc = PdfDocument::from_bytes_with_mode(source.clone(), ParseMode::Strict).unwrap();
+            assert!(!doc.ctx().source_object_is_cached(payload_id));
+            let revision = doc.revision();
+            let small = OperationBudget::new(8192);
+            assert!(matches!(
+                super::write_document_with_budget(&doc, options, &small),
+                Err(crate::error::PdfError::ResourceLimit(_))
+            ));
+            assert_eq!(small.live_bytes(), 0);
+            assert!(!doc.ctx().source_object_is_cached(payload_id));
+            assert_eq!(doc.revision(), revision);
+            let pool = OperationBudget::new(2 * 1024 * 1024);
+            let output = super::write_document_with_budget(&doc, options, &pool).unwrap();
+            assert_eq!(output.as_slice(), expected);
+            assert!(doc.ctx().source_object_is_cached(payload_id));
+            assert_eq!(pool.live_bytes(), output.capacity());
+            assert_eq!(doc.revision(), revision);
+            drop(output);
+            assert_eq!(pool.live_bytes(), 0);
+            // Valid source caches survive quota transfer and ordinary saves.
+            assert!(doc.ctx().source_object_is_cached(payload_id));
+            assert_eq!(doc.save_to_bytes_with_options(options).unwrap(), expected);
+            assert_eq!(
+                doc.get_page(0)
+                    .unwrap()
+                    .content_program()
+                    .unwrap()
+                    .source_bytes(),
+                b"q Q"
+            );
+            let output = super::write_document_with_budget(&doc, options, &pool).unwrap();
+            assert_eq!(output.as_slice(), expected);
+            drop(output);
+            assert_eq!(pool.live_bytes(), 0);
+        }
+    }
+
+    #[test]
+    fn document_save_results_share_budget_until_owner_release() {
+        use crate::{
+            budget::OperationBudget,
+            document::save_options::{SaveOptions, StreamCompression},
+        };
+        let doc = PdfDocument::new().unwrap();
+        doc.add_page(0).unwrap();
+        doc.replace_page_contents(0, b"q Q\n".repeat(4096)).unwrap();
+        let revision = doc.revision();
+        for compression in [
+            StreamCompression::Preserve,
+            StreamCompression::FlateUnencoded,
+        ] {
+            let options = SaveOptions {
+                compression,
+                ..Default::default()
+            };
+            let expected = doc.save_to_bytes_with_options(options).unwrap();
+            let measure = OperationBudget::new(16 * 1024 * 1024);
+            let output = super::write_document_with_budget(&doc, options, &measure).unwrap();
+            let capacity = output.capacity();
+            let peak = measure.peak_bytes();
+            drop(output);
+            assert_eq!(measure.live_bytes(), 0);
+            let shared = OperationBudget::new(peak + capacity - 1);
+            let first = super::write_document_with_budget(&doc, options, &shared).unwrap();
+            assert_eq!(first.as_slice(), expected);
+            assert_eq!(shared.live_bytes(), capacity);
+            assert!(matches!(
+                super::write_document_with_budget(&doc, options, &shared),
+                Err(crate::error::PdfError::ResourceLimit(_))
+            ));
+            assert_eq!(shared.live_bytes(), capacity);
+            assert_eq!(first.as_slice(), expected);
+            assert_eq!(doc.revision(), revision);
+            assert_eq!(doc.save_to_bytes_with_options(options).unwrap(), expected);
+            drop(first);
+            assert_eq!(shared.live_bytes(), 0);
+            let retry = super::write_document_with_budget(&doc, options, &shared).unwrap();
+            assert_eq!(retry.as_slice(), expected);
+            drop(retry);
+            assert_eq!(shared.live_bytes(), 0);
+            let sufficient = OperationBudget::new(peak + capacity);
+            let first = super::write_document_with_budget(&doc, options, &sufficient).unwrap();
+            let second = super::write_document_with_budget(&doc, options, &sufficient).unwrap();
+            assert_eq!(
+                sufficient.live_bytes(),
+                first.capacity() + second.capacity()
+            );
+            assert_eq!(first.as_slice(), second.as_slice());
+            drop(first);
+            assert_eq!(sufficient.live_bytes(), second.capacity());
+            drop(second);
+            assert_eq!(sufficient.live_bytes(), 0);
+        }
+    }
+
     #[test]
     fn budgeted_document_output_matches_save_and_reopens_with_options() {
         use crate::{
@@ -1337,6 +2160,138 @@ mod tests {
     }
 
     #[test]
+    fn serialization_validation_budget_covers_growth_and_error_cleanup() {
+        use crate::objects::pdf_stream::PdfStream;
+        use crate::{budget::OperationBudget, parser::options::Limits};
+        let object = PdfObject::PdfNull;
+        let slot = std::mem::size_of::<(&PdfObject, usize)>();
+        for maximum in [slot * 3, slot * 3 - 1] {
+            let pool = OperationBudget::new(maximum);
+            let mut lease = None;
+            let mut pending = Vec::new();
+            super::reserve_validation_slots(&mut pending, 1, &mut lease, Some(&pool)).unwrap();
+            pending.push((&object, 1));
+            let result = super::reserve_validation_slots(&mut pending, 1, &mut lease, Some(&pool));
+            if maximum == slot * 3 {
+                result.unwrap();
+                assert_eq!(pool.peak_bytes(), slot * 3);
+                assert_eq!(pool.live_bytes(), slot * 2);
+            } else {
+                assert!(result.is_err());
+                assert_eq!(pending.capacity(), 1);
+                assert_eq!(pool.live_bytes(), slot);
+            }
+            assert_eq!(pending.len(), 1);
+            drop(pending);
+            drop(lease);
+            assert_eq!(pool.live_bytes(), 0);
+        }
+        let pool = OperationBudget::new(slot * 3);
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut lease = None;
+            let mut pending = Vec::new();
+            super::reserve_validation_slots(&mut pending, 2, &mut lease, Some(&pool)).unwrap();
+            pending.push((&object, 1));
+            panic!("validation table unwind");
+        }));
+        assert!(caught.is_err());
+        assert_eq!(pool.live_bytes(), 0);
+        let invalid = PdfObject::PdfArray(PdfArray::from_items(vec![PdfObject::PdfStream(
+            PdfStream::new(PdfDict::default(), vec![]),
+        )]));
+        assert!(super::validate_serialization_nodes_with_budget(
+            std::iter::once((&invalid, 1)),
+            0,
+            Limits::default(),
+            Some(&pool)
+        )
+        .is_err());
+        assert_eq!(pool.live_bytes(), 0);
+        let empty = OperationBudget::new(0);
+        assert!(super::validate_serialization_nodes_with_budget(
+            std::iter::once((&object, 1)),
+            0,
+            Limits::default(),
+            Some(&empty)
+        )
+        .is_err());
+        assert_eq!(empty.live_bytes(), 0);
+    }
+
+    #[test]
+    fn budgeted_trailer_retains_fields_and_charges_owned_copies() {
+        use crate::{budget::OperationBudget, parser::options::Limits};
+        let limits = Limits::default();
+        let mut original = PdfDict::default();
+        original.insert(
+            "Custom".into(),
+            PdfObject::PdfString(PdfString::new(vec![b'x'; 4096], false)),
+        );
+        original.insert(
+            "Size".into(),
+            PdfObject::PdfString(PdfString::new(vec![b'z'; 8192], false)),
+        );
+        for key in [
+            "Prev",
+            "XRefStm",
+            "Type",
+            "W",
+            "Index",
+            "Filter",
+            "DecodeParms",
+            "Length",
+        ] {
+            original.insert(
+                key.into(),
+                PdfObject::PdfString(PdfString::new(vec![b'z'; 8192], false)),
+            );
+        }
+        let before = original.clone();
+        let mut expected = Vec::new();
+        super::write_trailer(&mut expected, &original, u32::MAX, limits).unwrap();
+        let pool = OperationBudget::new(1024 * 1024);
+        let make_output = |pool: &OperationBudget| super::SerializationOutput {
+            bytes: crate::budget::BudgetedBytes::copy_from_slice(pool, &[]).unwrap(),
+            limits,
+            capacity_limit: usize::MAX,
+        };
+        let mut output = make_output(&pool);
+        super::write_trailer_limited(&mut output, &original, u32::MAX, limits, usize::MAX).unwrap();
+        assert_eq!(output.bytes.as_slice(), expected);
+        assert!(!expected.windows(8).any(|window| window == b"zzzzzzzz"));
+        assert_eq!(pool.live_bytes(), output.bytes.capacity());
+        let peak = pool.peak_bytes();
+        // Removed xref fields and replaced Size must never be cloned.
+        assert!(peak < 32 * 1024);
+        drop(output);
+        assert_eq!(pool.live_bytes(), 0);
+        let small = OperationBudget::new(peak - 1);
+        let mut output = make_output(&small);
+        assert!(matches!(
+            super::write_trailer_limited(&mut output, &original, u32::MAX, limits, usize::MAX),
+            Err(crate::error::PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(small.live_bytes(), output.bytes.capacity());
+        drop(output);
+        assert_eq!(small.live_bytes(), 0);
+        assert_eq!(original, before);
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut output = make_output(&pool);
+            super::write_trailer_limited(&mut output, &original, 0, limits, usize::MAX).unwrap();
+            panic!("trailer owner unwind");
+        }));
+        assert!(caught.is_err());
+        assert_eq!(pool.live_bytes(), 0);
+        let zero = OperationBudget::new(0);
+        let mut output = make_output(&zero);
+        assert!(
+            super::write_trailer_limited(&mut output, &original, 1, limits, usize::MAX).is_err()
+        );
+        assert!(output.bytes.as_slice().is_empty());
+        assert_eq!(zero.live_bytes(), 0);
+    }
+
+    #[test]
     fn trailer_serialization_respects_remaining_output_budget() {
         use crate::{
             objects::{pdf_dict::PdfDict, pdf_string::PdfString, PdfObject},
@@ -1546,6 +2501,134 @@ mod tests {
             dict.get("Filter").unwrap().as_name().unwrap().bytes(),
             b"FlateDecode"
         );
+    }
+
+    #[test]
+    fn temporary_save_stage_panics_preserve_target_and_clean_output() {
+        use std::{cell::Cell, io::Write};
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("rzpdf-save-unwind-{}-{stamp}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let target = directory.join("target.pdf");
+        for existing in [false, true] {
+            if existing {
+                std::fs::write(&target, b"original bytes").unwrap();
+            }
+            for stage in 0..3 {
+                let reached = Cell::new(0);
+                let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    super::save_file_atomically_with_actions(
+                        &target,
+                        |file| {
+                            reached.set(1);
+                            file.write_all(if stage == 0 { b"partial" } else { b"new bytes" })?;
+                            if stage == 0 {
+                                panic!("injected write unwind");
+                            }
+                            Ok(())
+                        },
+                        |file| {
+                            reached.set(2);
+                            if stage == 1 {
+                                panic!("injected sync unwind");
+                            }
+                            file.sync_all()
+                        },
+                        |source, destination| {
+                            reached.set(3);
+                            assert_eq!(destination, target);
+                            assert_eq!(std::fs::read(source)?, b"new bytes");
+                            panic!("injected replace unwind");
+                        },
+                    )
+                }));
+                assert!(caught.is_err());
+                assert_eq!(reached.get(), stage + 1);
+                if existing {
+                    assert_eq!(std::fs::read(&target).unwrap(), b"original bytes");
+                } else {
+                    assert!(!target.exists());
+                }
+                assert_eq!(
+                    std::fs::read_dir(&directory).unwrap().count(),
+                    usize::from(existing)
+                );
+            }
+        }
+        std::fs::remove_file(target).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn temporary_sync_and_replace_failures_preserve_target_and_clean_output() {
+        use std::{cell::Cell, io::Write};
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "rzpdf-sync-rename-fault-{}-{stamp}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let target = directory.join("target.pdf");
+        for existing in [false, true] {
+            if existing {
+                std::fs::write(&target, b"original bytes").unwrap();
+            }
+            for fail_sync in [true, false] {
+                let synced = Cell::new(false);
+                let replaced = Cell::new(false);
+                let result = super::save_file_atomically_with_actions(
+                    &target,
+                    |file| file.write_all(b"new bytes"),
+                    |file| {
+                        synced.set(true);
+                        assert_eq!(file.metadata()?.len(), 9);
+                        if fail_sync {
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::StorageFull,
+                                "injected sync failure",
+                            ))
+                        } else {
+                            file.sync_all()
+                        }
+                    },
+                    |source, destination| {
+                        replaced.set(true);
+                        assert_eq!(destination, target);
+                        assert_eq!(std::fs::read(source)?, b"new bytes");
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "injected replace failure",
+                        ))
+                    },
+                );
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains(if fail_sync {
+                    "sync temporary PDF failed"
+                } else {
+                    "replace output file failed"
+                }));
+                assert!(synced.get());
+                assert_eq!(replaced.get(), !fail_sync);
+                if existing {
+                    assert_eq!(std::fs::read(&target).unwrap(), b"original bytes");
+                } else {
+                    assert!(!target.exists());
+                }
+                assert_eq!(
+                    std::fs::read_dir(&directory).unwrap().count(),
+                    usize::from(existing)
+                );
+            }
+        }
+        std::fs::remove_file(target).unwrap();
+        std::fs::remove_dir(directory).unwrap();
     }
 
     #[test]

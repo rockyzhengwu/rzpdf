@@ -1091,6 +1091,13 @@ impl<R: Seek + Read> PDFContext<R> {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn source_object_is_cached(&self, id: ObjectId) -> bool {
+        self.indirect_objects
+            .get(&id)
+            .is_some_and(|cell| cell.get().is_some())
+    }
+
     /// Budget the owned copy without first making an untracked Clone.
     /// Normal source objects reserve while parsing and while the source and
     /// returned copy coexist. Object-stream decoding, tables and payloads use

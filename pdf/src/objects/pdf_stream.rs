@@ -293,13 +293,16 @@ impl PdfStream {
 
 /// Resolve only the filter settings, not arbitrary stream dictionary graphs.
 /// The context chooses the latest or source view for every referenced item.
-fn resolve_setting_reference_with_budget<R: Seek + Read>(
+pub(crate) fn resolve_setting_reference_with_budget<R: Seek + Read>(
     obj: &PdfObject,
     ctx: &PDFContext<R>,
     budget: &crate::budget::OperationBudget,
 ) -> PdfResult<(PdfObject, crate::budget::MemoryLease)> {
-    let (mut object, mut lease) =
-        crate::objects::clone_object_with_budget(obj, budget, ctx.limits(), 0)?;
+    let (mut lease, mut object) = {
+        let (object, lease) =
+            crate::objects::clone_object_with_budget(obj, budget, ctx.limits(), 0)?;
+        (lease, object)
+    };
     let mut depth = 0;
     while object.as_reference().is_some() {
         if depth >= ctx.limits().max_depth {
