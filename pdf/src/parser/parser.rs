@@ -3,7 +3,7 @@ use std::io::{Read, Seek};
 
 use crate::document::cross_ref_table::{CrossRefTable, ObjectInfo, ObjectState};
 
-use crate::filter::{FilterContext, apply_filters};
+use crate::filter::{apply_filters, FilterContext};
 use crate::objects::PdfObject;
 use crate::{
     error::{PdfError, PdfResult},
@@ -533,6 +533,26 @@ impl<R: Seek + Read> PdfParser<R> {
             )));
         }
         Ok(indirect.to_obj())
+    }
+
+    pub(crate) fn parse_indirect_obj_checked_with_budget(
+        &mut self,
+        pos: u64,
+        expected: crate::objects::object_id::ObjectId,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<(PdfObject, crate::budget::MemoryLease)> {
+        self.syntax.set_pos(pos)?;
+        let (lease, indirect) = {
+            let (indirect, lease) = self.syntax.get_indirect_object_with_budget(budget)?;
+            (lease, indirect)
+        };
+        if indirect.id() != expected {
+            return Err(PdfError::InvalidReference(format!(
+                "xref for {expected:?} at byte {pos} points to {:?}",
+                indirect.id()
+            )));
+        }
+        Ok((indirect.to_obj(), lease))
     }
 }
 

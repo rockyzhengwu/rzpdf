@@ -405,7 +405,7 @@ impl<R: Read + Seek> PdfDocument<R> {
                 return Err(PdfError::ObjectError("array range requires TJ".into()));
             }
             validate_text_array_range(target.get_as_array(0)?, &range, self.ctx.limits())?;
-            let current_page = self.get_page(page)?;
+            let current_page = self.get_page_with_budget(page, &budget)?;
             let font =
                 current_page.font_for_text_operation_with_budget(expected, operation, &budget)?;
             let font = retained_font.insert(font);
@@ -643,7 +643,7 @@ impl<R: Read + Seek> PdfDocument<R> {
                     "text code range out of bounds".into(),
                 ));
             }
-            let current_page = self.get_page(page)?;
+            let current_page = self.get_page_with_budget(page, &budget)?;
             let font =
                 current_page.font_for_text_operation_with_budget(expected, operation, &budget)?;
             let font = retained_font.insert(font);
@@ -889,7 +889,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         let mut retained_codes = None;
         self.commit_page_content_edit_with_budget(page, expected, &budget, || {
             let codes = self
-                .get_page(page)?
+                .get_page_with_budget(page, &budget)?
                 .encode_text_for_operation(expected, operation, text, &budget)?;
             let codes = retained_codes.insert(codes);
             expected.with_replaced_text_codes_with_budget(
@@ -934,7 +934,7 @@ impl<R: Read + Seek> PdfDocument<R> {
                 ));
             }
             let codes = self
-                .get_page(page)?
+                .get_page_with_budget(page, &budget)?
                 .encode_text_for_operation(expected, operation, text, &budget)?;
             let codes = retained_codes.insert(codes);
             expected.with_replaced_text_array_items_codes_with_budget(
@@ -1018,15 +1018,24 @@ impl<R: Read + Seek> PdfDocument<R> {
                 "content snapshot is foreign, offline or stale".into(),
             ));
         }
-        let location = self.page_location(page)?;
+        let (_location_lease, location) = if let Some(budget) = budget {
+            let (location, lease) = self.page_location_with_budget(page, budget)?.into_parts();
+            (Some(lease), location)
+        } else {
+            (None, self.page_location(page)?)
+        };
         if expected.source_page_id != Some(location.page_id) {
             return Err(PdfError::ObjectError(
                 "content snapshot belongs to another page".into(),
             ));
         }
         drop(location);
+        drop(_location_lease);
         let retained_current = budget
-            .map(|budget| self.get_page(page)?.content_program_with_budget(budget))
+            .map(|budget| {
+                self.get_page_with_budget(page, budget)?
+                    .content_program_with_budget(budget)
+            })
             .transpose()?;
         let legacy_current = if budget.is_none() {
             Some(self.get_page(page)?.content_program()?)
@@ -1051,20 +1060,11 @@ impl<R: Read + Seek> PdfDocument<R> {
         let edited = edited_owner.as_ref();
         // Preparation may have registered a new resource in an enclosing
         // transaction. Preserve that current page dictionary when updating Contents.
-        let mut location = self.page_location(page)?;
-        // Page-tree traversal still uses legacy copies. Track the working page
-        // dictionary independently, retaining its lease through commit/rollback.
-        let _page_dict_lease = if let Some(budget) = budget {
-            let (dict, lease) = crate::objects::clone_dict_with_budget(
-                &location.page_dict,
-                budget,
-                self.ctx.limits(),
-                0,
-            )?;
-            location.page_dict = dict;
-            Some(lease)
+        let (_page_dict_lease, mut location) = if let Some(budget) = budget {
+            let (location, lease) = self.page_location_with_budget(page, budget)?.into_parts();
+            (Some(lease), location)
         } else {
-            None
+            (None, self.page_location(page)?)
         };
         // Reserve all changed payload copies before entering the transaction.
         // This quota remains held until commit or rollback has completed.
@@ -1243,13 +1243,10 @@ mod tests {
         let revision = doc.revision();
         let budget = OperationBudget::new(16384);
         let probe = OperationBudget::new(16384);
-        let (_, page_lease) = crate::objects::clone_dict_with_budget(
-            &doc.page_location(0).unwrap().page_dict,
-            &probe,
-            doc.ctx.limits(),
-            0,
-        )
-        .unwrap();
+        let (_, page_lease) = doc
+            .page_location_with_budget(0, &probe)
+            .unwrap()
+            .into_parts();
         let page_bytes = page_lease.bytes();
         let page_peak = probe.peak_bytes();
         let snapshot_probe = OperationBudget::new(16384);
@@ -1297,13 +1294,10 @@ mod tests {
         doc.replace_page_contents(0, b"q Q".to_vec()).unwrap();
         let expected = doc.get_page(0).unwrap().content_program().unwrap();
         let probe = OperationBudget::new(65536);
-        let (_, page_lease) = crate::objects::clone_dict_with_budget(
-            &doc.page_location(0).unwrap().page_dict,
-            &probe,
-            doc.ctx.limits(),
-            0,
-        )
-        .unwrap();
+        let (_, page_lease) = doc
+            .page_location_with_budget(0, &probe)
+            .unwrap()
+            .into_parts();
         let page_peak = probe.peak_bytes();
         let snapshot_probe = OperationBudget::new(65536);
         doc.edit_transaction_with_budget(&snapshot_probe, |_| {

@@ -231,8 +231,8 @@ impl<R: Read + Seek> PdfDocument<R> {
         edit: NestedTextEdit,
         text: &str,
     ) -> PdfResult<()> {
-        let current_page = self.get_page(page)?;
         let budget = self.ctx.limits().operation_budget();
+        let current_page = self.get_page_with_budget(page, &budget)?;
         let chain = current_page.prepare_form_chain_with_budget(root, source, &budget)?;
         let target = &chain
             .last()
@@ -705,12 +705,18 @@ impl<R: Read + Seek> PdfDocument<R> {
                     };
                     child = Some(doc.try_insert_object(PdfObject::PdfStream(output))?);
                 }
-                let name = doc.resources().register_existing(
-                    page,
-                    ResourceKind::Form,
-                    child
-                        .ok_or_else(|| PdfError::ObjectError("Nested copied root absent".into()))?,
-                )?;
+                let child = child
+                    .ok_or_else(|| PdfError::ObjectError("Nested copied root absent".into()))?;
+                let name = if let Some(budget) = budget {
+                    let (name, mut lease) = doc
+                        .resources()
+                        .register_form_with_budget(page, child, budget)?;
+                    retained_copies.as_mut().unwrap().absorb(&mut lease)?;
+                    name
+                } else {
+                    doc.resources()
+                        .register_existing(page, ResourceKind::Form, child)?
+                };
                 let edited_root = rebuild_form_call(
                     root,
                     source.invocations[0].operation_index,
@@ -947,6 +953,102 @@ mod tests {
         assert_eq!(name, "FmEdit1");
         drop((resources, name, lease));
         assert_eq!(limited.live_bytes(), 0);
+    }
+
+    #[test]
+    fn budgeted_root_form_registration_preserves_names_and_rolls_back() {
+        use crate::{
+            budget::OperationBudget, io::stream_reader::StreamReader, parser::syntax::SyntaxParser,
+        };
+        use std::io::Cursor;
+        let fixture = || {
+            let doc = PdfDocument::new().unwrap();
+            doc.add_page(0).unwrap();
+            let dictionary = SyntaxParser::new(
+                StreamReader::try_new(Cursor::new(
+                    b"<< /Subtype /Form /BBox [0 0 10 10] >>".to_vec(),
+                ))
+                .unwrap(),
+            )
+            .get_object()
+            .unwrap()
+            .into_dict()
+            .unwrap();
+            let first = doc
+                .try_insert_object(PdfObject::PdfStream(
+                    PdfStream::from_decoded_data(dictionary.clone(), b"q Q".to_vec()).unwrap(),
+                ))
+                .unwrap();
+            assert_eq!(
+                doc.resources()
+                    .register_existing(0, ResourceKind::Form, first)
+                    .unwrap(),
+                "Fm1"
+            );
+            let second = doc
+                .try_insert_object(PdfObject::PdfStream(
+                    PdfStream::from_decoded_data(dictionary, b"q Q".to_vec()).unwrap(),
+                ))
+                .unwrap();
+            (doc, second)
+        };
+        let (normal, id) = fixture();
+        let expected = normal
+            .resources()
+            .register_existing(0, ResourceKind::Form, id)
+            .unwrap();
+        let (doc, id) = fixture();
+        let pool = OperationBudget::new(8 * 1024 * 1024);
+        let before = doc.get_page(0).unwrap().resource().unwrap();
+        let neighbor = pool.reserve(pool.maximum_bytes()).unwrap();
+        assert!(matches!(
+            doc.resources().register_form_with_budget(0, id, &pool),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(doc.get_page(0).unwrap().resource().unwrap(), before);
+        assert_eq!(pool.live_bytes(), neighbor.bytes());
+        drop(neighbor);
+        let (name, lease) = doc
+            .resources()
+            .register_form_with_budget(0, id, &pool)
+            .unwrap();
+        assert_eq!(name, expected);
+        assert_eq!(name, "Fm2");
+        assert_eq!(
+            doc.get_page(0).unwrap().resource().unwrap(),
+            normal.get_page(0).unwrap().resource().unwrap()
+        );
+        assert_eq!(pool.live_bytes(), lease.bytes());
+        drop((name, lease));
+        assert_eq!(pool.live_bytes(), 0);
+        let (name, lease) = doc
+            .resources()
+            .register_form_with_budget(0, id, &pool)
+            .unwrap();
+        assert_eq!(name, "Fm2");
+        assert_eq!(pool.live_bytes(), name.capacity());
+        drop((name, lease));
+        assert_eq!(pool.live_bytes(), 0);
+        let (rollback, id) = fixture();
+        let before = rollback.get_page(0).unwrap().resource().unwrap();
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: PdfResult<()> = rollback.edit_transaction_with_budget(&pool, |doc| {
+                let owned = doc.resources().register_form_with_budget(0, id, &pool)?;
+                assert_eq!(owned.0, "Fm2");
+                let _owned = owned;
+                panic!("root registration rollback");
+            });
+        }));
+        assert!(caught.is_err());
+        assert_eq!(pool.live_bytes(), 0);
+        assert_eq!(rollback.get_page(0).unwrap().resource().unwrap(), before);
+        let invalid = rollback.try_insert_object(PdfObject::PdfNull).unwrap();
+        assert!(rollback
+            .resources()
+            .register_form_with_budget(0, invalid, &pool)
+            .is_err());
+        assert_eq!(pool.live_bytes(), 0);
+        assert_eq!(rollback.get_page(0).unwrap().resource().unwrap(), before);
     }
 
     #[test]

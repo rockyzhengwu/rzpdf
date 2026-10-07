@@ -1,7 +1,7 @@
 use super::PdfDocument;
 use crate::{
     error::{PdfError, PdfResult},
-    objects::{PdfObject, object_id::ObjectId, pdf_dict::PdfDict, pdf_reference::PdfReference},
+    objects::{object_id::ObjectId, pdf_dict::PdfDict, pdf_reference::PdfReference, PdfObject},
 };
 use std::io::{Read, Seek};
 
@@ -77,6 +77,116 @@ pub struct ResourceManager<'a, R: Read + Seek> {
 }
 
 impl<R: Read + Seek> ResourceManager<'_, R> {
+    /// Internal Form registration for a budgeted nested edit. Page-tree
+    /// traversal, owned registration copies and transaction snapshot payloads
+    /// use the caller's pool. Initial source-cache loading remains excluded.
+    pub(super) fn register_form_with_budget(
+        &self,
+        page_index: u32,
+        id: ObjectId,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<(String, crate::budget::MemoryLease)> {
+        self.document.edit_transaction_with_budget(budget, |doc| {
+            let reference = PdfObject::PdfReference(PdfReference::from_id(id));
+            let (_object_lease, object) = {
+                let (object, lease) = doc.ctx.resolve_owned_with_budget(&reference, budget)?;
+                (lease, object)
+            };
+            let (_form_lease, _form) = {
+                let (form, lease) =
+                    crate::page::pdf_form::PdfForm::try_new_with_budget(&object, &doc.ctx, budget)?;
+                (lease, form)
+            };
+            let (_page_lease, location) = {
+                let (location, lease) = doc
+                    .page_location_with_budget(page_index, budget)?
+                    .into_parts();
+                (lease, location)
+            };
+            let page_id = location.page_id;
+            let page = location.page_dict;
+            let mut _resources_lease = None;
+            let resources = match super::page_tree::PageTree::inherited_attribute_with_budget(
+                &doc.ctx,
+                &PdfObject::PdfReference(PdfReference::from_id(page_id)),
+                "Resources",
+                budget,
+            )? {
+                Some((value, lease)) => {
+                    _resources_lease = Some(lease);
+                    value.into_dict().ok_or(PdfError::PageResourcesIsNotDict)?
+                }
+                None => PdfDict::default(),
+            };
+            let mut _entries_lease = None;
+            let entries = match resources.get("XObject") {
+                Some(value) => {
+                    let (value, lease) = doc.ctx.resolve_owned_with_budget(value, budget)?;
+                    _entries_lease = Some(lease);
+                    value.into_dict().ok_or_else(|| {
+                        PdfError::ObjectError("resource category must be a dictionary".into())
+                    })?
+                }
+                None => PdfDict::default(),
+            };
+            if let Some(name) = (&entries)
+                .into_iter()
+                .filter(|(_, value)| value.as_reference().is_some_and(|value| value.id() == id))
+                .map(|(name, _)| name)
+                .min()
+            {
+                return crate::budget::copy_string(name, budget);
+            }
+            let limits = doc.ctx.limits();
+            if (&entries).into_iter().len() >= limits.max_objects {
+                return Err(PdfError::ResourceLimit("page resource count".into()));
+            }
+            for index in 1..=limits.max_objects {
+                let mut digits = [0u8; 20];
+                let mut start = digits.len();
+                let mut number = index;
+                loop {
+                    start -= 1;
+                    digits[start] = b'0' + (number % 10) as u8;
+                    number /= 10;
+                    if number == 0 {
+                        break;
+                    }
+                }
+                let mut buffer = [0u8; 22];
+                buffer[..2].copy_from_slice(b"Fm");
+                let length = 2 + digits.len() - start;
+                buffer[2..length].copy_from_slice(&digits[start..]);
+                if length > limits.max_token_bytes {
+                    return Err(PdfError::ResourceLimit("page resource name bytes".into()));
+                }
+                let candidate = std::str::from_utf8(&buffer[..length]).unwrap();
+                if entries.contains_key(candidate) {
+                    continue;
+                }
+                let (name, mut retained) = crate::budget::copy_string(candidate, budget)?;
+                let (entries, _binding_lease) =
+                    entries.with_replaced_entry_with_budget(&name, &reference, budget, limits)?;
+                let (resources, _replacement_lease) = resources.with_replaced_entry_with_budget(
+                    "XObject",
+                    &PdfObject::PdfDict(entries),
+                    budget,
+                    limits,
+                )?;
+                let (page, mut page_lease) = page.with_replaced_entry_with_budget(
+                    "Resources",
+                    &PdfObject::PdfDict(resources),
+                    budget,
+                    limits,
+                )?;
+                retained.absorb(&mut page_lease)?;
+                doc.update_object(page_id, PdfObject::PdfDict(page))?;
+                return Ok((name, retained));
+            }
+            Err(PdfError::ResourceLimit("resource name exhausted".into()))
+        })
+    }
+
     /// Register an unembedded standard font with WinAnsiEncoding. Reuses an
     /// identical font already registered in this page's resource scope.
     pub fn register_standard_font(&self, page_index: u32, font: StandardFont) -> PdfResult<String> {

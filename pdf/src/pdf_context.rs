@@ -41,8 +41,301 @@ impl Drop for LoadingGuard<'_> {
     }
 }
 
+struct BudgetedLoadingGuard<'a> {
+    previous: Option<Vec<ObjectId>>,
+    stack: &'a RefCell<Vec<ObjectId>>,
+    _lease: crate::budget::MemoryLease,
+}
+
+impl Drop for BudgetedLoadingGuard<'_> {
+    fn drop(&mut self) {
+        let current = self.stack.replace(self.previous.take().unwrap());
+        // Free this frame's replacement before releasing its reservation.
+        drop(current);
+    }
+}
+
 #[cfg(test)]
 mod loading_tests {
+    #[test]
+    fn save_budget_ids_preserve_edits_tombstones_and_original_materialization() {
+        use crate::{budget::OperationBudget, objects::pdf_string::PdfString};
+        let xref = CrossRefTable::new(
+            HashMap::from([(1, ObjectInfo::new(1, 0, 0, ObjectState::Normal))]),
+            PdfDict::default(),
+        );
+        let syntax = SyntaxParser::new(
+            StreamReader::try_new(std::io::Cursor::new(b"1 0 obj (source) endobj".to_vec()))
+                .unwrap(),
+        )
+        .with_xref_table(xref.clone());
+        let ctx = PDFContext::try_new(PdfParser::new(syntax), xref).unwrap();
+        let original = ObjectId::new(1, 0);
+        ctx.update_object(
+            original,
+            PdfObject::PdfString(PdfString::new(b"edited".to_vec(), true)),
+        )
+        .unwrap();
+        let added = ctx.try_insert_object(PdfObject::PdfNull).unwrap();
+        ctx.delete_object(added).unwrap();
+        let revision = ctx.revision();
+        let pool = OperationBudget::new(65536);
+        let (ids, lease) = ctx.object_ids_with_budget(true, &pool).unwrap();
+        assert_eq!(ids, ctx.serializable_object_ids());
+        assert_eq!(ids, vec![original, added]);
+        assert_eq!(
+            pool.live_bytes(),
+            ids.capacity() * std::mem::size_of::<ObjectId>()
+        );
+        drop((ids, lease));
+        assert_eq!(pool.live_bytes(), 0);
+        assert!(ctx
+            .object_for_write_with_budget(added, &pool)
+            .unwrap()
+            .is_none());
+        let (object, lease) = ctx
+            .object_for_write_with_budget(original, &pool)
+            .unwrap()
+            .unwrap();
+        assert_eq!(object.as_string().unwrap().bytes(), b"edited");
+        drop((object, lease));
+        assert_eq!(pool.live_bytes(), 0);
+        let blocked = OperationBudget::new(0);
+        assert!(ctx.materialize_all_objects_with_budget(&blocked).is_err());
+        assert!(ctx.indirect_objects[&original].get().is_none());
+        ctx.materialize_all_objects_with_budget(&pool).unwrap();
+        assert_eq!(
+            ctx.indirect_objects[&original]
+                .get()
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .bytes(),
+            b"source"
+        );
+        assert_eq!(pool.live_bytes(), 0);
+        assert_eq!(ctx.revision(), revision);
+    }
+    #[test]
+    fn budgeted_loading_stack_restores_prior_storage_and_quotas() {
+        use crate::budget::OperationBudget;
+        let ctx: PDFContext<std::io::Cursor<Vec<u8>>> =
+            PDFContext::new_without_source(PdfDict::default(), Default::default());
+        let original = ObjectId::new(9, 0);
+        ctx.loading_objects.borrow_mut().push(original);
+        let capacity = ctx.loading_objects.borrow().capacity();
+        let first = ObjectId::new(1, 0);
+        let second = ObjectId::new(2, 0);
+        let pool = OperationBudget::new(65536);
+        let root = ctx.begin_loading_with_budget(first, &pool).unwrap();
+        let root_bytes = root._lease.bytes();
+        assert_eq!(pool.live_bytes(), root_bytes);
+        assert_eq!(&*ctx.loading_objects.borrow(), &[original, first]);
+        let nested = ctx.begin_loading_with_budget(second, &pool).unwrap();
+        let peak = pool.live_bytes();
+        assert_eq!(peak, root_bytes + nested._lease.bytes());
+        assert_eq!(&*ctx.loading_objects.borrow(), &[original, first, second]);
+        assert!(matches!(
+            ctx.begin_loading_with_budget(first, &pool),
+            Err(PdfError::InvalidReference(_))
+        ));
+        assert_eq!(pool.live_bytes(), peak);
+        drop(nested);
+        assert_eq!(pool.live_bytes(), root_bytes);
+        assert_eq!(&*ctx.loading_objects.borrow(), &[original, first]);
+        drop(root);
+        assert_eq!(pool.live_bytes(), 0);
+        assert_eq!(&*ctx.loading_objects.borrow(), &[original]);
+        assert_eq!(ctx.loading_objects.borrow().capacity(), capacity);
+        let small = OperationBudget::new(peak - 1);
+        let root = ctx.begin_loading_with_budget(first, &small).unwrap();
+        assert!(matches!(
+            ctx.begin_loading_with_budget(second, &small),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(small.live_bytes(), root._lease.bytes());
+        assert_eq!(&*ctx.loading_objects.borrow(), &[original, first]);
+        drop(root);
+        assert_eq!(small.live_bytes(), 0);
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _root = ctx.begin_loading_with_budget(first, &pool).unwrap();
+            let _nested = ctx.begin_loading_with_budget(second, &pool).unwrap();
+            panic!("budgeted loading stack unwind");
+        }));
+        assert!(caught.is_err());
+        assert_eq!(pool.live_bytes(), 0);
+        assert_eq!(&*ctx.loading_objects.borrow(), &[original]);
+        assert_eq!(ctx.loading_objects.borrow().capacity(), capacity);
+        let shallow: PDFContext<std::io::Cursor<Vec<u8>>> = PDFContext::new_without_source(
+            PdfDict::default(),
+            crate::parser::options::ParseOptions {
+                limits: crate::parser::options::Limits {
+                    max_depth: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let root = shallow.begin_loading_with_budget(first, &pool).unwrap();
+        assert!(matches!(
+            shallow.begin_loading_with_budget(second, &pool),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        drop(root);
+        assert_eq!(pool.live_bytes(), 0);
+        assert!(shallow.loading_objects.borrow().is_empty());
+    }
+    #[test]
+    fn budgeted_compressed_source_validates_before_cache_publication() {
+        use crate::budget::OperationBudget;
+        let fixture = |bad_index| {
+            let source = b"10 0 obj << /Type /ObjStm /N 2 /First 8 /Length 18 >> stream\n1 0 2 5 true false\nendstream endobj".to_vec();
+            let xref = CrossRefTable::new(
+                HashMap::from([
+                    (10, ObjectInfo::new(10, 0, 0, ObjectState::Normal)),
+                    (1, ObjectInfo::new(1, 10, 0, ObjectState::Compressed)),
+                    (
+                        2,
+                        ObjectInfo::new(
+                            2,
+                            10,
+                            if bad_index { 9 } else { 1 },
+                            ObjectState::Compressed,
+                        ),
+                    ),
+                ]),
+                PdfDict::default(),
+            );
+            let syntax =
+                SyntaxParser::new(StreamReader::try_new(std::io::Cursor::new(source)).unwrap())
+                    .with_xref_table(xref.clone());
+            PDFContext::try_new(PdfParser::new(syntax), xref).unwrap()
+        };
+        let reference = PdfObject::PdfReference(PdfReference::from_id(ObjectId::new(1, 0)));
+        let pool = OperationBudget::new(1024 * 1024);
+        let expected = fixture(false).resolve_owned(&reference).unwrap();
+        let ctx = fixture(false);
+        let (copy, lease) = ctx.resolve_owned_with_budget(&reference, &pool).unwrap();
+        assert_eq!(copy, expected);
+        assert_eq!(pool.live_bytes(), lease.bytes());
+        let peak = pool.peak_bytes();
+        drop((copy, lease));
+        assert_eq!(pool.live_bytes(), 0);
+        assert!(ctx.loading_objects.borrow().is_empty());
+        let small = OperationBudget::new(peak - 1);
+        let denied = fixture(false);
+        assert!(matches!(
+            denied.resolve_owned_with_budget(&reference, &small),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(small.live_bytes(), 0);
+        assert!(denied.loading_objects.borrow().is_empty());
+        let (copy, lease) = denied.resolve_owned_with_budget(&reference, &pool).unwrap();
+        assert_eq!(copy, expected);
+        drop((copy, lease));
+        assert_eq!(pool.live_bytes(), 0);
+        for _ in 0..2 {
+            let invalid = fixture(true);
+            assert!(matches!(
+                invalid.resolve_owned_with_budget(&reference, &pool),
+                Err(PdfError::InvalidReference(_))
+            ));
+            assert_eq!(pool.live_bytes(), 0);
+            assert!(invalid.loading_objects.borrow().is_empty());
+            assert_eq!(invalid.cached_stream_bytes.get(), 0);
+            for number in [1, 2, 10] {
+                assert!(invalid.indirect_objects[&ObjectId::new(number, 0)]
+                    .get()
+                    .is_none());
+            }
+        }
+    }
+    #[test]
+    fn cold_normal_source_budget_covers_parse_copy_and_cache_publication() {
+        use crate::budget::OperationBudget;
+        let fixture = |bytes: Vec<u8>| {
+            let xref = CrossRefTable::new(
+                HashMap::from([(1, ObjectInfo::new(1, 0, 0, ObjectState::Normal))]),
+                PdfDict::default(),
+            );
+            let syntax =
+                SyntaxParser::new(StreamReader::try_new(std::io::Cursor::new(bytes)).unwrap())
+                    .with_xref_table(xref.clone());
+            PDFContext::try_new(PdfParser::new(syntax), xref).unwrap()
+        };
+        let id = ObjectId::new(1, 0);
+        let reference = PdfObject::PdfReference(PdfReference::from_id(id));
+        let stream_source = format!(
+            "1 0 obj << /Length 16384 /Private (kept) >> stream\n{}\nendstream endobj",
+            "x".repeat(16384)
+        )
+        .into_bytes();
+        for source in [
+            b"1 0 obj (hello) endobj".to_vec(),
+            b"1 0 obj << /A [(one) /Two 3] /B true >> endobj".to_vec(),
+            stream_source,
+        ] {
+            let ordinary = fixture(source.clone()).resolve_owned(&reference).unwrap();
+            let ctx = fixture(source.clone());
+            let pool = OperationBudget::new(1024 * 1024);
+            let (copy, lease) = ctx.resolve_owned_with_budget(&reference, &pool).unwrap();
+            assert_eq!(copy, ordinary);
+            assert_eq!(pool.live_bytes(), lease.bytes());
+            assert!(ctx.indirect_objects.get(&id).unwrap().get().is_some());
+            assert!(ctx.loading_objects.borrow().is_empty());
+            let peak = pool.peak_bytes();
+            let retained = lease.bytes();
+            if copy.as_stream().is_some() {
+                assert!(peak > retained * 3 / 2);
+            }
+            drop((copy, lease));
+            assert_eq!(pool.live_bytes(), 0);
+            let denied = fixture(source.clone());
+            let small = OperationBudget::new(peak - 1);
+            assert!(matches!(
+                denied.resolve_owned_with_budget(&reference, &small),
+                Err(PdfError::ResourceLimit(_))
+            ));
+            assert_eq!(small.live_bytes(), 0);
+            assert!(denied.indirect_objects.get(&id).unwrap().get().is_none());
+            assert_eq!(denied.cached_stream_bytes.get(), 0);
+            assert!(denied.loading_objects.borrow().is_empty());
+            let (copy, lease) = denied.resolve_owned_with_budget(&reference, &pool).unwrap();
+            assert_eq!(copy, ordinary);
+            drop((copy, lease));
+            assert_eq!(pool.live_bytes(), 0);
+            // Cache residency is persistent; only the next owned copy is paid.
+            let warm = OperationBudget::new(peak);
+            let (copy, lease) = denied.resolve_owned_with_budget(&reference, &warm).unwrap();
+            assert_eq!(copy, ordinary);
+            assert_eq!(warm.live_bytes(), lease.bytes());
+            if copy.as_stream().is_some() {
+                assert!(warm.peak_bytes() < peak);
+            }
+            drop((copy, lease));
+            assert_eq!(warm.live_bytes(), 0);
+            let ctx = fixture(source);
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _owned = ctx.resolve_owned_with_budget(&reference, &pool).unwrap();
+                panic!("cold source copy unwind");
+            }));
+            assert!(caught.is_err());
+            assert_eq!(pool.live_bytes(), 0);
+            assert!(ctx.loading_objects.borrow().is_empty());
+        }
+        for source in [
+            b"2 0 obj (bad id) endobj".as_slice(),
+            b"1 0 obj (bad end) nope".as_slice(),
+        ] {
+            let ctx = fixture(source.to_vec());
+            let pool = OperationBudget::new(65536);
+            assert!(ctx.resolve_owned_with_budget(&reference, &pool).is_err());
+            assert_eq!(pool.live_bytes(), 0);
+            assert!(ctx.indirect_objects.get(&id).unwrap().get().is_none());
+            assert!(ctx.loading_objects.borrow().is_empty());
+        }
+    }
+
     #[test]
     fn budgeted_owned_resolution_preserves_store_deletion_and_source_scope() {
         use crate::{
@@ -337,7 +630,13 @@ mod loading_tests {
             flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(b"1 0 11").unwrap();
         let encoded = encoder.finish().unwrap();
-        for (delete, array) in [(false, false), (true, false), (false, true), (true, true)] {
+        for (delete, array, use_budget) in
+            [(false, false), (true, false), (false, true), (true, true)]
+                .into_iter()
+                .flat_map(|(delete, array)| {
+                    [false, true].map(move |use_budget| (delete, array, use_budget))
+                })
+        {
             let (filter, params) = if array {
                 ("[7 0 R]", "[6 0 R]")
             } else {
@@ -384,14 +683,22 @@ mod loading_tests {
                 ctx.update_object(params_id, PdfObject::PdfDict(params))
                     .unwrap();
             }
-            assert_eq!(
-                ctx.resolve_object_owned(ObjectId::new(1, 0))
-                    .unwrap()
-                    .as_number()
-                    .unwrap()
-                    .lexeme(),
-                "11"
-            );
+            let pool = crate::budget::OperationBudget::new(1024 * 1024);
+            let (lease, object) = if use_budget {
+                let (object, lease) = ctx
+                    .resolve_owned_with_budget(
+                        &PdfObject::PdfReference(PdfReference::from_id(ObjectId::new(1, 0))),
+                        &pool,
+                    )
+                    .unwrap();
+                (Some(lease), object)
+            } else {
+                (None, ctx.resolve_object_owned(ObjectId::new(1, 0)).unwrap())
+            };
+            assert_eq!(object.as_number().unwrap().lexeme(), "11");
+            drop(object);
+            drop(lease);
+            assert_eq!(pool.live_bytes(), 0);
             // Decoding the same stream normally still uses the latest view.
             let stream = ctx.resolve_object_owned(ObjectId::new(10, 0)).unwrap();
             assert!(stream.as_stream().unwrap().decode_data(&ctx).is_err());
@@ -439,6 +746,48 @@ mod loading_tests {
 }
 
 impl<R: Seek + Read> PDFContext<R> {
+    fn begin_loading_with_budget(
+        &self,
+        id: ObjectId,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<BudgetedLoadingGuard<'_>> {
+        let mut loading = self.loading_objects.borrow_mut();
+        if loading.contains(&id) {
+            return Err(PdfError::InvalidReference(format!(
+                "cycle loading object {id:?}"
+            )));
+        }
+        if loading.len() >= self.limits.max_depth {
+            return Err(PdfError::ResourceLimit(format!(
+                "object loading depth at {id:?}"
+            )));
+        }
+        let count = loading.len() + 1;
+        let mut lease = budget.reserve(
+            count
+                .checked_mul(std::mem::size_of::<ObjectId>())
+                .ok_or_else(|| PdfError::ResourceLimit("object loading stack size".into()))?,
+        )?;
+        let mut replacement = Vec::new();
+        replacement
+            .try_reserve_exact(count)
+            .map_err(|_| PdfError::ResourceLimit("object loading stack allocation".into()))?;
+        lease.resize(
+            replacement
+                .capacity()
+                .checked_mul(std::mem::size_of::<ObjectId>())
+                .ok_or_else(|| PdfError::ResourceLimit("object loading stack capacity".into()))?,
+        )?;
+        replacement.extend_from_slice(&loading);
+        replacement.push(id);
+        let previous = std::mem::replace(&mut *loading, replacement);
+        drop(loading);
+        Ok(BudgetedLoadingGuard {
+            previous: Some(previous),
+            stack: &self.loading_objects,
+            _lease: lease,
+        })
+    }
     /// Initialize owned document state without constructing or parsing an input source.
     pub(crate) fn new_without_source(
         trailer: PdfDict,
@@ -673,6 +1022,61 @@ impl<R: Seek + Read> PDFContext<R> {
         Ok(())
     }
 
+    pub(crate) fn object_ids_with_budget(
+        &self,
+        include_edits: bool,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<(Vec<ObjectId>, crate::budget::MemoryLease)> {
+        let store = self.state.store.borrow();
+        let count = self
+            .indirect_objects
+            .len()
+            .checked_add(if include_edits {
+                store.entries().len()
+            } else {
+                0
+            })
+            .ok_or_else(|| PdfError::ResourceLimit("save object ID count".into()))?;
+        let mut lease = budget.reserve(
+            count
+                .checked_mul(std::mem::size_of::<ObjectId>())
+                .ok_or_else(|| PdfError::ResourceLimit("save object ID table size".into()))?,
+        )?;
+        let mut ids = Vec::new();
+        ids.try_reserve_exact(count)
+            .map_err(|_| PdfError::ResourceLimit("save object ID allocation".into()))?;
+        lease.resize(
+            ids.capacity()
+                .checked_mul(std::mem::size_of::<ObjectId>())
+                .ok_or_else(|| PdfError::ResourceLimit("save object ID capacity".into()))?,
+        )?;
+        ids.extend(self.indirect_objects.keys().copied());
+        if include_edits {
+            ids.extend(store.entries().keys().copied());
+        }
+        ids.sort_unstable_by_key(|id| (id.obj_num(), id.gen_num()));
+        ids.dedup();
+        if ids.len() > self.limits.max_objects {
+            return Err(PdfError::ResourceLimit("save object count".into()));
+        }
+        Ok((ids, lease))
+    }
+
+    pub(crate) fn materialize_all_objects_with_budget(
+        &self,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<()> {
+        let (_lease, ids) = {
+            let (ids, lease) = self.object_ids_with_budget(false, budget)?;
+            (lease, ids)
+        };
+        for id in ids {
+            let owned = self.resolve_source_owned_with_budget(id, budget)?;
+            drop(owned);
+        }
+        Ok(())
+    }
+
     pub fn resolve(&self, obj: &PdfObject) -> PdfResult<PdfObject> {
         match obj {
             PdfObject::PdfReference(reference) => self.resolve_object_id(reference.id()),
@@ -688,7 +1092,9 @@ impl<R: Seek + Read> PDFContext<R> {
     }
 
     /// Budget the owned copy without first making an untracked Clone.
-    /// Loading/caching an uncached source object remains a separate allocation.
+    /// Normal source objects reserve while parsing and while the source and
+    /// returned copy coexist. Object-stream decoding, tables and payloads use
+    /// the same pool, including scoped replacement loading stacks.
     pub(crate) fn resolve_owned_with_budget(
         &self,
         obj: &PdfObject,
@@ -713,12 +1119,81 @@ impl<R: Seek + Read> PDFContext<R> {
                 None => {}
             }
         }
-        crate::objects::clone_object_with_budget(
-            self.load_indirect_object(id)?,
-            budget,
-            self.limits,
-            0,
-        )
+        self.resolve_source_owned_with_budget(id, budget)
+    }
+
+    fn resolve_source_owned_with_budget(
+        &self,
+        id: ObjectId,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<(PdfObject, crate::budget::MemoryLease)> {
+        let cell = self.indirect_objects.get(&id).ok_or_else(|| {
+            PdfError::ObjectError(format!("indirect object does not exist: {id:?}"))
+        })?;
+        if let Some(object) = cell.get() {
+            return crate::objects::clone_object_with_budget(object, budget, self.limits, 0);
+        }
+        let info = self
+            .cross_ref_table
+            .lookup_id(id)
+            .ok_or_else(|| PdfError::ObjectError(format!("xref entry does not exist: {id:?}")))?;
+        if matches!(info.state(), ObjectState::Compressed) {
+            let _guard = self.begin_loading_with_budget(id, budget)?;
+            let stream_number = u32::try_from(info.offset()).map_err(|_| {
+                PdfError::InvalidReference("object stream number exceeds u32".into())
+            })?;
+            let stream_id = ObjectId::new(stream_number, 0);
+            let (_stream_lease, stream) = {
+                let (stream, lease) = self.resolve_source_owned_with_budget(stream_id, budget)?;
+                (lease, stream)
+            };
+            if cell.get().is_none() {
+                self.populate_object_stream_entries_with_budget(&stream, stream_id, budget)?;
+            }
+            let object = cell.get().ok_or_else(|| {
+                PdfError::ObjectError(format!(
+                    "compressed object was not populated from object stream: {id:?}"
+                ))
+            })?;
+            return crate::objects::clone_object_with_budget(object, budget, self.limits, 0);
+        }
+        if !matches!(info.state(), ObjectState::Normal) {
+            return Err(PdfError::ObjectError(format!(
+                "attempted to resolve free object: {id:?}"
+            )));
+        }
+        let _guard = self.begin_loading_with_budget(id, budget)?;
+        let (_source_lease, source) = {
+            let (source, lease) = self
+                .parser
+                .as_ref()
+                .ok_or_else(|| PdfError::InvalidReference("document has no source objects".into()))?
+                .borrow_mut()
+                .parse_indirect_obj_checked_with_budget(info.offset(), id, budget)?;
+            (lease, source)
+        };
+        let bytes = source
+            .as_stream()
+            .map(|stream| stream.raw_data().len())
+            .unwrap_or(0);
+        crate::filter::check_output_size(
+            self.cached_stream_bytes.get(),
+            bytes,
+            self.limits.max_cached_stream_bytes,
+            "cached raw streams",
+        )?;
+        let (copy_lease, copy) = {
+            let (copy, lease) =
+                crate::objects::clone_object_with_budget(&source, budget, self.limits, 0)?;
+            (lease, copy)
+        };
+        self.populate_object_stream_entries_with_budget(&source, id, budget)?;
+        // Publish only after both parse and owned-copy reservations succeed.
+        // Persistent cache residency is not charged to the operation pool.
+        let _ = cell.set(source);
+        self.cached_stream_bytes
+            .set(self.cached_stream_bytes.get() + bytes);
+        Ok((copy, copy_lease))
     }
 
     pub fn resolve_object_id(&self, object_id: ObjectId) -> PdfResult<PdfObject> {
@@ -759,6 +1234,30 @@ impl<R: Seek + Read> PDFContext<R> {
             )));
         }
         Ok(Some(self.resolve_object_id(object_id)?.clone()))
+    }
+
+    pub(crate) fn object_for_write_with_budget(
+        &self,
+        id: ObjectId,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<Option<(PdfObject, crate::budget::MemoryLease)>> {
+        {
+            let store = self.state.store.borrow();
+            match store.entry(id) {
+                Some(StoreEntry::Upsert(object)) => {
+                    return crate::objects::clone_object_with_budget(object, budget, self.limits, 0)
+                        .map(Some)
+                }
+                Some(StoreEntry::Deleted) => return Ok(None),
+                None => {}
+            }
+        }
+        if !self.indirect_objects.contains_key(&id) {
+            return Err(PdfError::ObjectError(format!(
+                "object does not exist in document store: {id:?}"
+            )));
+        }
+        self.resolve_source_owned_with_budget(id, budget).map(Some)
     }
 
     pub fn insert_object(&self, object: PdfObject) -> ObjectId {
@@ -962,6 +1461,85 @@ impl<R: Seek + Read> PDFContext<R> {
                 let _ = cell.set(obj);
             }
         }
+        Ok(())
+    }
+
+    fn populate_object_stream_entries_with_budget(
+        &self,
+        object: &PdfObject,
+        source: ObjectId,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<()> {
+        let Some(stream) = object.as_stream() else {
+            return Ok(());
+        };
+        if stream
+            .dict()
+            .get("Type")
+            .and_then(PdfObject::as_name)
+            .map(|name| name.name())
+            != Some("ObjStm")
+        {
+            return Ok(());
+        }
+        let data = self.with_source_resolution(|| stream.decode_data_with_budget(self, budget))?;
+        let mut parser = ObjectStreams::try_new_with_budget(
+            stream.dict(),
+            data,
+            crate::parser::options::ParseOptions {
+                mode: self.mode,
+                limits: self.limits,
+            },
+            budget,
+        )?;
+        let objects = parser.parse_objects()?;
+        let count = objects.objects.len();
+        let mut pending_lease = budget.reserve(
+            count
+                .checked_mul(std::mem::size_of::<(ObjectId, PdfObject)>())
+                .ok_or_else(|| {
+                    PdfError::ResourceLimit("object stream pending table size".into())
+                })?,
+        )?;
+        let mut pending = Vec::new();
+        pending
+            .try_reserve_exact(count)
+            .map_err(|_| PdfError::ResourceLimit("object stream pending allocation".into()))?;
+        pending_lease.resize(
+            pending
+                .capacity()
+                .checked_mul(std::mem::size_of::<(ObjectId, PdfObject)>())
+                .ok_or_else(|| {
+                    PdfError::ResourceLimit("object stream pending table capacity".into())
+                })?,
+        )?;
+        for (index, (number, object)) in objects.objects.into_iter().enumerate() {
+            let id = ObjectId::new(number, 0);
+            let Some(info) = self.cross_ref_table.lookup_id(id) else {
+                continue;
+            };
+            if !matches!(info.state(), ObjectState::Compressed)
+                || info.offset() != u64::from(source.obj_num())
+                || source.gen_num() != 0
+            {
+                continue;
+            }
+            if info.gennum() as usize != index {
+                return Err(PdfError::InvalidReference(format!(
+                    "compressed object {id:?} index {} does not match {index}",
+                    info.gennum()
+                )));
+            }
+            pending.push((id, object));
+        }
+        // The parsed payload lease remains held while pending takes ownership.
+        // Publish only after all selected entries have been validated.
+        for (id, object) in pending {
+            if let Some(cell) = self.indirect_objects.get(&id) {
+                let _ = cell.set(object);
+            }
+        }
+        drop(objects.lease);
         Ok(())
     }
 

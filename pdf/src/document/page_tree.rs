@@ -19,6 +19,73 @@ mod budget_tests {
     };
 
     #[test]
+    fn budgeted_page_location_validates_whole_tree_and_retains_target() {
+        let doc = Document::new().unwrap();
+        for index in 0..3 {
+            doc.add_page(index).unwrap();
+        }
+        let normal = PageTree::entries(doc.ctx()).unwrap();
+        for index in 0..3 {
+            let pool = OperationBudget::new(1024 * 1024);
+            let owned = PageTree::page_at_with_budget(doc.ctx(), index, &pool).unwrap();
+            let expected = &normal[index as usize];
+            assert_eq!(owned.entry.page_id, expected.page_id);
+            assert_eq!(owned.entry.page_dict, expected.page_dict);
+            assert_eq!(owned.entry.parent_id, expected.parent_id);
+            assert_eq!(owned.entry.kid_index, expected.kid_index);
+            assert_eq!(owned.entry.ancestor_ids, expected.ancestor_ids);
+            assert_eq!(pool.live_bytes(), owned._lease.bytes());
+            assert!(
+                pool.live_bytes()
+                    > owned.entry.ancestor_ids.capacity() * std::mem::size_of::<ObjectId>()
+            );
+            let peak = pool.peak_bytes();
+            drop(owned);
+            assert_eq!(pool.live_bytes(), 0);
+            let small = OperationBudget::new(peak - 1);
+            assert!(matches!(
+                PageTree::page_at_with_budget(doc.ctx(), index, &small),
+                Err(PdfError::ResourceLimit(_))
+            ));
+            assert_eq!(small.live_bytes(), 0);
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _owned = PageTree::page_at_with_budget(doc.ctx(), index, &pool).unwrap();
+                panic!("page location owner unwind");
+            }));
+            assert!(caught.is_err());
+            assert_eq!(pool.live_bytes(), 0);
+        }
+        let pool = OperationBudget::new(1024 * 1024);
+        assert!(matches!(
+            PageTree::page_at_with_budget(doc.ctx(), 3, &pool),
+            Err(PdfError::PageNotExist)
+        ));
+        assert_eq!(pool.live_bytes(), 0);
+        // A later invalid sibling must still reject a query for page zero.
+        let last = &normal[2];
+        doc.update_object(last.page_id, PdfObject::PdfNull).unwrap();
+        assert!(PageTree::entries(doc.ctx()).is_err());
+        assert!(PageTree::page_at_with_budget(doc.ctx(), 0, &pool).is_err());
+        assert_eq!(pool.live_bytes(), 0);
+        doc.update_object(last.page_id, PdfObject::PdfDict(last.page_dict.clone()))
+            .unwrap();
+        let mut branch = doc
+            .resolve_object(last.parent_id)
+            .unwrap()
+            .into_dict()
+            .unwrap();
+        branch.insert(
+            "Count".into(),
+            PdfObject::PdfNumber(crate::objects::pdf_number::PdfNumber::new(99.0)),
+        );
+        doc.update_object(last.parent_id, PdfObject::PdfDict(branch))
+            .unwrap();
+        assert!(PageTree::entries(doc.ctx()).is_err());
+        assert!(PageTree::page_at_with_budget(doc.ctx(), 0, &pool).is_err());
+        assert_eq!(pool.live_bytes(), 0);
+    }
+
+    #[test]
     fn inheritance_budget_releases_missing_invalid_and_depth_limited_queries() {
         use crate::parser::options::{Limits, ParseOptions};
         let doc = Document::new_with_options(ParseOptions {
@@ -153,7 +220,270 @@ pub(crate) struct PageTreeEntry {
     pub ancestor_ids: Vec<ObjectId>,
 }
 
+/// Data precedes its lease so the allocation is released first.
+pub(crate) struct BudgetedPageTreeEntry {
+    entry: PageTreeEntry,
+    _lease: crate::budget::MemoryLease,
+}
+
+impl BudgetedPageTreeEntry {
+    pub(crate) fn into_parts(self) -> (PageTreeEntry, crate::budget::MemoryLease) {
+        (self.entry, self._lease)
+    }
+}
+
+struct TreeVector<T> {
+    data: Vec<T>,
+    lease: crate::budget::MemoryLease,
+}
+
+impl<T> TreeVector<T> {
+    fn new(pool: &crate::budget::OperationBudget) -> PdfResult<Self> {
+        Ok(Self {
+            data: Vec::new(),
+            lease: pool.reserve(0)?,
+        })
+    }
+
+    fn ensure_slot(
+        &mut self,
+        pool: &crate::budget::OperationBudget,
+        maximum: usize,
+    ) -> PdfResult<()> {
+        if self.data.len() >= maximum {
+            return Err(PdfError::ResourceLimit(
+                "page tree resource limit exceeded".into(),
+            ));
+        }
+        if self.data.len() < self.data.capacity() {
+            return Ok(());
+        }
+        let capacity = self.data.capacity().saturating_mul(2).max(1).min(maximum);
+        let bytes = capacity
+            .checked_mul(std::mem::size_of::<T>())
+            .ok_or_else(|| PdfError::ResourceLimit("page tree vector size".into()))?;
+        let mut lease = pool.reserve(bytes)?;
+        let mut replacement = Vec::new();
+        replacement
+            .try_reserve_exact(capacity)
+            .map_err(|_| PdfError::ResourceLimit("page tree vector allocation".into()))?;
+        lease.resize(
+            replacement
+                .capacity()
+                .checked_mul(std::mem::size_of::<T>())
+                .ok_or_else(|| PdfError::ResourceLimit("page tree vector capacity".into()))?,
+        )?;
+        replacement.append(&mut self.data);
+        self.data = replacement;
+        self.lease = lease;
+        Ok(())
+    }
+}
+
+struct BudgetedTreeWalk<'a> {
+    pool: &'a crate::budget::OperationBudget,
+    ancestors: TreeVector<ObjectId>,
+    visited: TreeVector<ObjectId>,
+    target_index: usize,
+    pages: usize,
+    target: Option<BudgetedPageTreeEntry>,
+}
+
+impl BudgetedTreeWalk<'_> {
+    fn visit(&mut self, id: ObjectId, maximum: usize) -> PdfResult<()> {
+        self.visited.ensure_slot(self.pool, maximum)?;
+        let position = self
+            .visited
+            .data
+            .binary_search_by_key(&(id.obj_num(), id.gen_num()), |id| {
+                (id.obj_num(), id.gen_num())
+            })
+            .map_or_else(
+                |position| Ok(position),
+                |_| {
+                    Err(PdfError::DocumentError(format!(
+                        "cycle or duplicate page tree node: {id:?}"
+                    )))
+                },
+            )?;
+        self.visited.data.insert(position, id);
+        Ok(())
+    }
+
+    fn walk<R: Read + Seek>(&mut self, ctx: &PDFContext<R>, id: ObjectId) -> PdfResult<usize> {
+        let limits = ctx.limits();
+        if self.ancestors.data.len() >= limits.max_depth {
+            return Err(PdfError::ResourceLimit(
+                "page tree resource limit exceeded".into(),
+            ));
+        }
+        self.visit(id, limits.max_objects)?;
+        let (_dict_lease, dict) = {
+            let (object, lease) = ctx.resolve_owned_with_budget(
+                &PdfObject::PdfReference(crate::objects::pdf_reference::PdfReference::from_id(id)),
+                self.pool,
+            )?;
+            (
+                lease,
+                object.into_dict().ok_or_else(|| {
+                    PdfError::DocumentError("page tree node is not a dictionary".into())
+                })?,
+            )
+        };
+        if dict
+            .get("Type")
+            .and_then(PdfObject::as_name)
+            .map(|name| name.name())
+            != Some("Pages")
+        {
+            return Err(PdfError::DocumentError(
+                "page tree branch must have Type /Pages".into(),
+            ));
+        }
+        let kids = dict
+            .get("Kids")
+            .and_then(PdfObject::as_array)
+            .ok_or_else(|| PdfError::DocumentError("Pages Kids must be an array".into()))?;
+        self.ancestors.ensure_slot(self.pool, limits.max_depth)?;
+        self.ancestors.data.push(id);
+        let mut count = 0usize;
+        for (kid_index, kid) in kids.into_iter().enumerate() {
+            if self.visited.data.len() >= limits.max_objects {
+                return Err(PdfError::ResourceLimit(
+                    "page tree resource limit exceeded".into(),
+                ));
+            }
+            let kid_id = kid
+                .as_reference()
+                .ok_or_else(|| {
+                    PdfError::DocumentError("page tree Kids must be indirect references".into())
+                })?
+                .id();
+            let (mut kid_lease, kid_dict) = {
+                let (object, lease) = ctx.resolve_owned_with_budget(kid, self.pool)?;
+                (
+                    lease,
+                    object.into_dict().ok_or_else(|| {
+                        PdfError::DocumentError("page tree kid must be a dictionary".into())
+                    })?,
+                )
+            };
+            match kid_dict
+                .get("Type")
+                .and_then(PdfObject::as_name)
+                .map(|name| name.name())
+            {
+                Some("Pages") => {
+                    count = count
+                        .checked_add(self.walk(ctx, kid_id)?)
+                        .ok_or_else(|| PdfError::ResourceLimit("page tree count".into()))?;
+                }
+                Some("Page") => {
+                    self.visit(kid_id, limits.max_objects)?;
+                    if self.pages == self.target_index {
+                        let length = self.ancestors.data.len();
+                        let mut lease = self.pool.reserve(
+                            length
+                                .checked_mul(std::mem::size_of::<ObjectId>())
+                                .ok_or_else(|| {
+                                    PdfError::ResourceLimit("page ancestors size".into())
+                                })?,
+                        )?;
+                        let mut ancestors = Vec::new();
+                        ancestors.try_reserve_exact(length).map_err(|_| {
+                            PdfError::ResourceLimit("page ancestors allocation".into())
+                        })?;
+                        lease.resize(
+                            ancestors
+                                .capacity()
+                                .checked_mul(std::mem::size_of::<ObjectId>())
+                                .ok_or_else(|| {
+                                    PdfError::ResourceLimit("page ancestors capacity".into())
+                                })?,
+                        )?;
+                        ancestors.extend_from_slice(&self.ancestors.data);
+                        kid_lease.absorb(&mut lease)?;
+                        self.target = Some(BudgetedPageTreeEntry {
+                            entry: PageTreeEntry {
+                                page_id: kid_id,
+                                page_dict: kid_dict,
+                                parent_id: id,
+                                kid_index,
+                                ancestor_ids: ancestors,
+                            },
+                            _lease: kid_lease,
+                        });
+                    }
+                    self.pages = self
+                        .pages
+                        .checked_add(1)
+                        .ok_or_else(|| PdfError::ResourceLimit("page tree count".into()))?;
+                    count = count
+                        .checked_add(1)
+                        .ok_or_else(|| PdfError::ResourceLimit("page tree count".into()))?;
+                }
+                _ => {
+                    return Err(PdfError::DocumentError(
+                        "page tree node missing valid Type".into(),
+                    ))
+                }
+            }
+        }
+        self.ancestors.data.pop();
+        let declared = dict
+            .get("Count")
+            .and_then(PdfObject::as_number)
+            .ok_or_else(|| PdfError::DocumentError("Pages Count must be an integer".into()))?
+            .as_u64_checked()?;
+        if declared != count as u64 {
+            return Err(PdfError::DocumentError(format!(
+                "incorrect Pages Count for {id:?}: declared {declared}, found {count}"
+            )));
+        }
+        Ok(count)
+    }
+}
+
 impl PageTree {
+    /// Validate the entire tree but retain only the requested page. Owned
+    /// dictionaries and traversal vectors reserve before allocation.
+    pub(crate) fn page_at_with_budget<R: Read + Seek>(
+        ctx: &PDFContext<R>,
+        page: u32,
+        pool: &crate::budget::OperationBudget,
+    ) -> PdfResult<BudgetedPageTreeEntry> {
+        let id = {
+            let trailer = ctx.trailer();
+            let root = trailer
+                .get("Root")
+                .ok_or_else(|| PdfError::DocumentError("Root not found".into()))?;
+            let (_root_lease, root) = {
+                let (root, lease) = ctx.resolve_owned_with_budget(root, pool)?;
+                (
+                    lease,
+                    root.into_dict()
+                        .ok_or_else(|| PdfError::DocumentError("Root is not a Dict".into()))?,
+                )
+            };
+            root.get("Pages")
+                .and_then(PdfObject::as_reference)
+                .ok_or_else(|| {
+                    PdfError::DocumentError("Pages root must be an indirect reference".into())
+                })?
+                .id()
+        };
+        let mut walk = BudgetedTreeWalk {
+            pool,
+            ancestors: TreeVector::new(pool)?,
+            visited: TreeVector::new(pool)?,
+            target_index: page as usize,
+            pages: 0,
+            target: None,
+        };
+        walk.walk(ctx, id)?;
+        walk.target.take().ok_or(PdfError::PageNotExist)
+    }
+
     pub(crate) fn inherited_attribute_with_budget<R: Read + Seek>(
         ctx: &PDFContext<R>,
         node: &PdfObject,

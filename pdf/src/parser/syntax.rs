@@ -260,6 +260,14 @@ impl<R: Seek + Read> SyntaxParser<R> {
             .map(|(object, _)| object)
     }
 
+    pub(crate) fn get_indirect_object_with_budget(
+        &mut self,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<(PdfIndirect, crate::budget::MemoryLease)> {
+        let (object, lease) = self.get_indirect_object_inner(Some(budget))?;
+        Ok((object, lease.unwrap()))
+    }
+
     fn get_indirect_object_inner(
         &mut self,
         budget: Option<&crate::budget::OperationBudget>,
@@ -290,11 +298,11 @@ impl<R: Seek + Read> SyntaxParser<R> {
                 "get_indirect_object obj keyword is expected".to_string(),
             ));
         }
-        let (obj, lease) = if let Some(budget) = budget {
+        let (lease, obj) = if let Some(budget) = budget {
             let (object, lease) = self.get_content_object_with_budget(budget)?;
-            (object, Some(lease))
+            (Some(lease), object)
         } else {
-            (self.get_object()?, None)
+            (None, self.get_object()?)
         };
         let end_word = self.get_next_word_inner(budget)?;
         if !end_word.is_equal(b"endobj") {
@@ -340,6 +348,24 @@ impl<R: Seek + Read> SyntaxParser<R> {
     }
 
     pub(crate) fn get_object_until(&mut self, end: u64) -> PdfResult<PdfObject> {
+        self.get_object_until_inner(end, None)
+            .map(|(object, _)| object)
+    }
+
+    pub(crate) fn get_object_until_with_budget(
+        &mut self,
+        end: u64,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<(PdfObject, crate::budget::MemoryLease)> {
+        let (object, lease) = self.get_object_until_inner(end, Some(budget))?;
+        Ok((object, lease.unwrap()))
+    }
+
+    fn get_object_until_inner(
+        &mut self,
+        end: u64,
+        budget: Option<&crate::budget::OperationBudget>,
+    ) -> PdfResult<(PdfObject, Option<crate::budget::MemoryLease>)> {
         if end <= self.pos || end > self.input_end {
             return Err(PdfError::ParserError(
                 "invalid object input boundary".into(),
@@ -348,7 +374,12 @@ impl<R: Seek + Read> SyntaxParser<R> {
         let saved_end = self.input_end;
         self.input_end = end;
         let result = (|| {
-            let object = self.get_object()?;
+            let (lease, object) = if let Some(budget) = budget {
+                let (object, lease) = self.get_content_object_with_budget(budget)?;
+                (Some(lease), object)
+            } else {
+                (None, self.get_object()?)
+            };
             let mut in_comment = false;
             while !self.is_eof() {
                 let ch = self.get_next_char()?;
@@ -365,7 +396,7 @@ impl<R: Seek + Read> SyntaxParser<R> {
                     )));
                 }
             }
-            Ok(object)
+            Ok((object, lease))
         })();
         self.input_end = saved_end;
         result
@@ -868,6 +899,12 @@ impl<R: Seek + Read> SyntaxParser<R> {
         let name = word.start_width(b"/");
         let string = word.is_equal(b"(") || word.is_equal(b"<");
         drop(word);
+        if !(array || dictionary || number || name || string) {
+            return Err(PdfError::ParserError(format!(
+                "invalid object token ending at byte {}",
+                self.pos
+            )));
+        }
         self.set_pos(start)?;
         if number {
             return self.get_number_with_budget(budget);
@@ -932,9 +969,6 @@ impl<R: Seek + Read> SyntaxParser<R> {
             })();
             self.object_depth -= 1;
             return result;
-        }
-        if !array {
-            return Ok((self.get_object()?, budget.reserve(0)?));
         }
         drop(self.get_next_word_with_budget(budget)?);
         self.object_depth += 1;
@@ -1417,6 +1451,51 @@ mod tests {
         let inner = Cursor::new(buffer);
         let reader = StreamReader::try_new(inner).unwrap();
         SyntaxParser::new(reader)
+    }
+
+    #[test]
+    fn invalid_budgeted_object_tokens_match_ordinary_errors_without_fallback() {
+        use crate::budget::OperationBudget;
+        for mode in [ParseMode::Strict, ParseMode::Compatible] {
+            for source in [
+                "unknown",
+                "obj",
+                "endobj",
+                "]",
+                ")",
+                ">>",
+                " % comment\nunsupported",
+            ] {
+                let make = || {
+                    SyntaxParser::with_mode(
+                        StreamReader::try_new(Cursor::new(source)).unwrap(),
+                        mode,
+                    )
+                };
+                let mut ordinary = make();
+                let expected = ordinary.get_object().unwrap_err().to_string();
+                let pool = OperationBudget::new(65536);
+                let mut budgeted = make();
+                assert_eq!(
+                    budgeted
+                        .get_content_object_with_budget(&pool)
+                        .unwrap_err()
+                        .to_string(),
+                    expected
+                );
+                assert_eq!(budgeted.position(), ordinary.position());
+                assert_eq!(pool.live_bytes(), 0);
+                assert!(pool.peak_bytes() > 0);
+            }
+        }
+        let source = "unsupported".repeat(128);
+        let pool = OperationBudget::new(32);
+        let mut parser = new_parser(&source);
+        assert!(matches!(
+            parser.get_content_object_with_budget(&pool),
+            Err(crate::error::PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(pool.live_bytes(), 0);
     }
 
     #[test]

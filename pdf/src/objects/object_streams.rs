@@ -3,7 +3,7 @@ use std::io::Cursor;
 use crate::{
     error::{PdfError, PdfResult},
     io::stream_reader::StreamReader,
-    objects::{PdfObject, pdf_dict::PdfDict},
+    objects::{pdf_dict::PdfDict, PdfObject},
     parser::syntax::{ParseMode, SyntaxParser},
 };
 
@@ -13,11 +13,76 @@ pub struct ObjectStreams<'a> {
     data_length: u64,
 }
 
+pub(crate) struct BudgetedObjectStreams<'a> {
+    stream: ObjectStreams<'a>,
+    _data_lease: crate::budget::MemoryLease,
+    budget: crate::budget::OperationBudget,
+}
+
+pub(crate) struct BudgetedStreamObjects {
+    pub(crate) objects: Vec<(u32, PdfObject)>,
+    pub(crate) lease: crate::budget::MemoryLease,
+}
+
+impl BudgetedObjectStreams<'_> {
+    pub(crate) fn parse_objects(&mut self) -> PdfResult<BudgetedStreamObjects> {
+        let (objects, lease) = self.stream.parse_objects_inner(Some(&self.budget))?;
+        Ok(BudgetedStreamObjects {
+            objects,
+            lease: lease.unwrap(),
+        })
+    }
+}
+
+fn reserve_table<T>(
+    count: usize,
+    budget: Option<&crate::budget::OperationBudget>,
+) -> PdfResult<(Vec<T>, Option<crate::budget::MemoryLease>)> {
+    let Some(budget) = budget else {
+        return Ok((Vec::new(), None));
+    };
+    let mut lease = budget.reserve(
+        count
+            .checked_mul(std::mem::size_of::<T>())
+            .ok_or_else(|| PdfError::ResourceLimit("object stream table size".into()))?,
+    )?;
+    let mut table = Vec::new();
+    table
+        .try_reserve_exact(count)
+        .map_err(|_| PdfError::ResourceLimit("object stream table allocation".into()))?;
+    lease.resize(
+        table
+            .capacity()
+            .checked_mul(std::mem::size_of::<T>())
+            .ok_or_else(|| PdfError::ResourceLimit("object stream table capacity".into()))?,
+    )?;
+    Ok((table, Some(lease)))
+}
+
 fn object_stream_entry_is_forbidden_in_strict(obj: &PdfObject) -> bool {
     matches!(obj, PdfObject::PdfStream(_) | PdfObject::PdfReference(_))
 }
 
 impl<'a> ObjectStreams<'a> {
+    pub(crate) fn try_new_with_budget(
+        dict: &'a PdfDict,
+        data: crate::budget::BudgetedBytes,
+        options: crate::parser::options::ParseOptions,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<BudgetedObjectStreams<'a>> {
+        let mut retained = budget.reserve(0)?;
+        let (data, mut lease) = data.into_reserved_parts();
+        if let Err(error) = retained.absorb(&mut lease) {
+            drop(data);
+            return Err(error);
+        }
+        let stream = Self::try_new_with_options(dict, data, options)?;
+        Ok(BudgetedObjectStreams {
+            stream,
+            _data_lease: retained,
+            budget: budget.clone(),
+        })
+    }
     pub fn try_new(dict: &'a PdfDict, data: Vec<u8>) -> PdfResult<Self> {
         Self::try_new_with_mode(dict, data, ParseMode::Compatible)
     }
@@ -52,6 +117,13 @@ impl<'a> ObjectStreams<'a> {
         })
     }
     pub fn parse_objects(&mut self) -> PdfResult<Vec<(u32, PdfObject)>> {
+        self.parse_objects_inner(None).map(|(objects, _)| objects)
+    }
+
+    fn parse_objects_inner(
+        &mut self,
+        budget: Option<&crate::budget::OperationBudget>,
+    ) -> PdfResult<(Vec<(u32, PdfObject)>, Option<crate::budget::MemoryLease>)> {
         let first = self
             .dict
             .get("First")
@@ -76,27 +148,53 @@ impl<'a> ObjectStreams<'a> {
         if n as usize > self.syntax.limits().max_objects {
             return Err(PdfError::ResourceLimit("object stream N".into()));
         }
-        let mut objs = Vec::new();
+        let (_index_lease, mut objs) = {
+            let (table, lease) = reserve_table(n as usize, budget)?;
+            (lease, table)
+        };
+        let (_numbers_lease, mut sorted_numbers) = {
+            let (table, lease) = reserve_table(n as usize, budget)?;
+            (lease, table)
+        };
         let mut object_numbers = std::collections::HashSet::new();
         let mut last_offset = 0;
         for i in 0..n {
-            let objnum = self
-                .syntax
-                .get_object()?
+            let (_number_lease, number) = if let Some(budget) = budget {
+                let (number, lease) = self.syntax.get_number_with_budget(budget)?;
+                (Some(lease), number)
+            } else {
+                (None, self.syntax.get_object()?)
+            };
+            let objnum = number
                 .as_number()
                 .ok_or(PdfError::ParserError(
                     "object stream object number must be an integer".to_string(),
                 ))?
                 .as_u32_checked()?;
-            let relative_offset = self
-                .syntax
-                .get_object()?
+            let (_offset_lease, offset_object) = if let Some(budget) = budget {
+                let (offset, lease) = self.syntax.get_number_with_budget(budget)?;
+                (Some(lease), offset)
+            } else {
+                (None, self.syntax.get_object()?)
+            };
+            let relative_offset = offset_object
                 .as_number()
                 .ok_or(PdfError::ParserError(
                     "object stream offset must be an integer".to_string(),
                 ))?
                 .as_u64_checked()?;
-            if objnum == 0 || !object_numbers.insert(objnum) {
+            let unique = if budget.is_some() {
+                match sorted_numbers.binary_search(&objnum) {
+                    Ok(_) => false,
+                    Err(position) => {
+                        sorted_numbers.insert(position, objnum);
+                        true
+                    }
+                }
+            } else {
+                object_numbers.insert(objnum)
+            };
+            if objnum == 0 || !unique {
                 return Err(PdfError::ParserError(
                     "object stream object numbers must be nonzero and unique".into(),
                 ));
@@ -129,14 +227,26 @@ impl<'a> ObjectStreams<'a> {
             }
             last_offset = offset;
         }
-        let mut res = Vec::new();
+        let mut retained = budget.map(|budget| budget.reserve(0)).transpose()?;
+        let mut res = {
+            let (table, lease) = reserve_table(n as usize, budget)?;
+            if let Some(mut lease) = lease {
+                retained.as_mut().unwrap().absorb(&mut lease)?;
+            }
+            table
+        };
         for (index, (objnum, offset)) in objs.iter().enumerate() {
             self.syntax.set_pos(offset.to_owned())?;
             let end = objs
                 .get(index + 1)
                 .map(|(_, offset)| *offset)
                 .unwrap_or(self.data_length);
-            let obj = self.syntax.get_object_until(end)?;
+            let (mut lease, obj) = if let Some(budget) = budget {
+                let (obj, lease) = self.syntax.get_object_until_with_budget(end, budget)?;
+                (Some(lease), obj)
+            } else {
+                (None, self.syntax.get_object_until(end)?)
+            };
             if self.syntax.mode() == ParseMode::Strict
                 && object_stream_entry_is_forbidden_in_strict(&obj)
             {
@@ -145,8 +255,11 @@ impl<'a> ObjectStreams<'a> {
                 )));
             }
             res.push((objnum.to_owned(), obj));
+            if let Some(lease) = lease.as_mut() {
+                retained.as_mut().unwrap().absorb(lease)?;
+            }
         }
-        return Ok(res);
+        Ok((res, retained))
     }
 }
 
@@ -154,9 +267,99 @@ impl<'a> ObjectStreams<'a> {
 mod tests {
     use super::ObjectStreams;
     use crate::{
-        objects::{PdfObject, pdf_dict::PdfDict, pdf_number::PdfNumber},
+        objects::{pdf_dict::PdfDict, pdf_number::PdfNumber, PdfObject},
         parser::syntax::ParseMode,
     };
+
+    #[test]
+    fn budgeted_object_stream_tables_payloads_and_boundaries() {
+        use crate::{
+            budget::{BudgetedBytes, OperationBudget},
+            parser::options::ParseOptions,
+        };
+        let first = b"[(one) /Two] ";
+        let header = format!("1 0 2 {} ", first.len());
+        let mut data = header.as_bytes().to_vec();
+        data.extend_from_slice(first);
+        data.extend_from_slice(b"<< /Keep (two) >>");
+        let mut dict = PdfDict::default();
+        dict.insert(
+            "First".into(),
+            PdfObject::PdfNumber(PdfNumber::new(header.len() as f32)),
+        );
+        dict.insert("N".into(), PdfObject::PdfNumber(PdfNumber::new(2.0)));
+        for mode in [ParseMode::Strict, ParseMode::Compatible] {
+            let options = ParseOptions {
+                mode,
+                ..Default::default()
+            };
+            let expected = ObjectStreams::try_new_with_options(&dict, data.clone(), options)
+                .unwrap()
+                .parse_objects()
+                .unwrap();
+            let pool = OperationBudget::new(1024 * 1024);
+            let bytes = BudgetedBytes::copy_from_slice(&pool, &data).unwrap();
+            let capacity = bytes.capacity();
+            let mut stream =
+                ObjectStreams::try_new_with_budget(&dict, bytes, options, &pool).unwrap();
+            let parsed = stream.parse_objects().unwrap();
+            assert_eq!(parsed.objects, expected);
+            assert_eq!(pool.live_bytes(), capacity + parsed.lease.bytes());
+            let peak = pool.peak_bytes();
+            drop(stream);
+            assert_eq!(pool.live_bytes(), parsed.lease.bytes());
+            drop(parsed);
+            assert_eq!(pool.live_bytes(), 0);
+            let small = OperationBudget::new(peak - 1);
+            let bytes = BudgetedBytes::copy_from_slice(&small, &data).unwrap();
+            let mut stream =
+                ObjectStreams::try_new_with_budget(&dict, bytes, options, &small).unwrap();
+            assert!(matches!(
+                stream.parse_objects(),
+                Err(crate::error::PdfError::ResourceLimit(_))
+            ));
+            drop(stream);
+            assert_eq!(small.live_bytes(), 0);
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let bytes = BudgetedBytes::copy_from_slice(&pool, &data).unwrap();
+                let mut stream =
+                    ObjectStreams::try_new_with_budget(&dict, bytes, options, &pool).unwrap();
+                let _parsed = stream.parse_objects().unwrap();
+                panic!("object stream owner unwind");
+            }));
+            assert!(caught.is_err());
+            assert_eq!(pool.live_bytes(), 0);
+            let mut invalid = PdfDict::default();
+            invalid.insert("First".into(), PdfObject::PdfNumber(PdfNumber::new(8.0)));
+            invalid.insert("N".into(), PdfObject::PdfNumber(PdfNumber::new(2.0)));
+            for data in [
+                b"1 0 1 5 true false".as_slice(),
+                b"1 0 2 3 (a )".as_slice(),
+                b"1 0 2 5 true false extra".as_slice(),
+            ] {
+                assert!(
+                    ObjectStreams::try_new_with_options(&invalid, data.to_vec(), options)
+                        .unwrap()
+                        .parse_objects()
+                        .is_err()
+                );
+                let bytes = BudgetedBytes::copy_from_slice(&pool, data).unwrap();
+                let mut stream =
+                    ObjectStreams::try_new_with_budget(&invalid, bytes, options, &pool).unwrap();
+                assert!(stream.parse_objects().is_err());
+                drop(stream);
+                assert_eq!(pool.live_bytes(), 0);
+            }
+        }
+        let pool = OperationBudget::new(65536);
+        let foreign = OperationBudget::new(65536);
+        let bytes = BudgetedBytes::copy_from_slice(&foreign, &data).unwrap();
+        assert!(
+            ObjectStreams::try_new_with_budget(&dict, bytes, Default::default(), &pool).is_err()
+        );
+        assert_eq!(pool.live_bytes(), 0);
+        assert_eq!(foreign.live_bytes(), 0);
+    }
 
     #[test]
     fn malformed_object_stream_headers_return_errors() {

@@ -41,7 +41,7 @@
       - [x] 字体构造双结果共存：Courier/Helvetica分别在共享门槛内成功，保留Courier再构造Helvetica时合计峰值超限拒绝；仅保留首字体额度，释放后第二字体重试成功。此项不代替资源/顶层编辑共存与全链路unwind验收。
       - [x] 页面资源字体结果共存与unwind：两页Courier/Helvetica经资源解析在同池共存，合计超限不影响首结果，释放后重试恢复；两个结果同时unwind归零，页面内容不变。此项不代替顶层编辑提交失败及全链路验收。
       - [x] 字体/编码所有者跨内容提交与外层回滚：Tj/TJ同池保留编码字体所有者直到提交返回，外层错误/unwind恢复源字节及流对象，邻居额度不变，旧快照失效后新快照同池重试成功。覆盖共享内部提交路径，不代表所有公开入口及全部失败点完成。
-    - [ ] 嵌套Form文字编辑同池贯通：准备链/循环检测槽位、XObject/Form拥有副本及预检、原始Form解码/程序解析、页面资源与继承字体、prepared副本、局部XObject绑定/Form.Resources重建、编码、叶节点重建已同池，首次源缓存、页根资源注册增长、父Form复制/根内容重建与事务快照尚未贯通；继续接入并验证共享峰值拒绝、失败/unwind恢复及新快照重试。
+    - [ ] 嵌套Form文字编辑同池贯通：准备链/循环检测槽位、XObject/Form拥有副本及预检、原始Form解码/程序解析、页面资源与继承字体、prepared副本、局部绑定及页根Form注册增长、编码、叶/父/根程序重建、复制流载荷/字典与事务快照载荷已接入同池。预算页定位保留单目标但校验整树，已用于页根Form注册和内容提交来源页/工作页；内部get_page_with_budget已用于四类顶层Unicode替换、嵌套Unicode准备及预算当前程序读取。Normal/Compressed源加载、ObjStm预算解码/表/载荷、作用域加载栈数组共存已接入，成功缓存后转为持久内存；未知对象token直接预算读取后报错，不普通重读。预算store快照改为计费数组并复用既有桶回滚；编辑中新对象引发工作store桶增长、诊断/共享控制结构及其他容器/原生分配仍有未计费边界，普通公共get_page/非预算入口不在此接入范围，不能视为完整贯通。
       - [x] 嵌套文字叶节点重建：整字符串/单TJ项/字符串范围/TJ跨项范围重建同池返回BudgetedContentProgram，commit_nested_edit借用所有者保留租约至事务结束；精确峰值少1拒绝且文档/资源不变，释放后短文本重试恢复。此项不代表父Form复制与完整提交预算。
       - [x] 嵌套继承字体所有者：页面资源同池解析，BudgetedFont逐流移动并合并新前缀构造额度，q/Q恢复继承字体不深Clone；错误/异池拒绝/unwind释放，结果持有期间额度保留。原始Form链及prepared资源副本仍未计费。
       - [x] 原始Form解码/程序解析：预算解码字节直接移交ContentProgram预算解析，PreparedProgram保留源码/边界表/操作表/递归操作数租约，Unicode准备链实际接入；异池拒绝、精确峰值门槛、解析失败及unwind清理已验证。此项不覆盖链槽位、Form字典/资源复制及首次源缓存。
@@ -50,7 +50,7 @@
       - [x] Form预检与拥有副本：普通/预算共享字段验证核心，预算对象/引用数组/数值/Resources/Group分配前预留，BBox/Matrix数值采用栈数组；返回仅保留资源/Group租约。准备链XObject/Form对象解析已同池，首次源缓存仍未计费；间接字段、null语义、错误类型、峰值拒绝及unwind清理已验收。
       - [x] 局部XObject绑定/Form.Resources重建：预算字典替换先克隆保留值与新值、再原子交换，覆盖键/表扩容旧新共存；FmEdit名称由栈缓冲生成后预算复制，返回租约保留至事务返回。验证碰撞命名、峰值拒绝原字典不变、释放恢复/unwind及深度/键长/条目限制；页根注册、父/根程序和流输出仍待接入。
   - [ ] 解码/图片/事务克隆按容量与共存峰值计费，明确持久缓存转移及保留额度。
-  - [ ] 保存/渲染接入，验证返回转移、扩容共存、失败/unwind释放及原生后端未计费边界。顺序与验收细节见docs/architecture.md的AR-03小节。
+  - [ ] 保存/渲染接入，验证返回转移、扩容共存、失败/unwind释放及原生后端未计费边界。内部预算保存已接入对象序列化、最终输出、源物化副本、对象ID表、xref槽位及待写对象副本；预检/trailer/压缩和持久容器增长等仍待计费，尚不开放完整预算保存公共接口。顺序与验收细节见docs/architecture.md的AR-03小节。
 - [ ] AR-04（A3 / P1-06、P1-08）明确原始编码流与修改后解码内容的状态转换，统一 Filter/DecodeParms/Length 和有效版本策略。验收：未修改流保留编码，修改流字典与字节一致，Header/Catalog/功能最低版本无冲突。
 - [ ] AR-05（A3 / P2-04）实现文档身份校验、对象图复制及资源复制后修改。验收：跨文档同号对象不误复用、循环与共享关系保留、目标页修改不影响其他页、导入失败整体回滚。
 - [ ] AR-06（A4 / P3-01）设计 ContentProgram、流边界和来源映射，再实现内容编辑。验收：未知操作可保留、目标内容可定位、未修改片段不被无意重写；DisplayList 仅用于绘制/提取。
@@ -89,6 +89,26 @@ P0 的普通回归、错误处理、预算和真实样本登记贯穿上述工�
 执行约束：不新增或运行 fuzz，不接入 fuzz CI，不删除已有 fuzz 文件；常规单元、集成、像素回归和合法样本验证继续。每项仅在其验收条件达成后勾选，不因暂缓 fuzz 将完整项目标记完成。
 
 ### 实施记录
+
+- 2026-10-07 本地提交验证：pdf单元483项，以及content_edit_transaction、nested_text_edit、nested_path_edit、nested_image_edit集成合计19项全部通过，0失败、0忽略；git diff --check通过。提交包含预算接入代码与计划/架构文档，不包含来源未确认的test.png，不推送远端；未运行全工作区测试及fuzz，AR-03仍未完成。
+
+- 2026-10-07 完整保存流程的内部预算接入：新增内部write_document_with_budget，与普通保存共享版本检查、源对象校验和写出流程；最终输出容量、源对象物化副本、对象ID表、xref槽位及待写对象拥有副本接入同池。预检、trailer构造、压缩、格式化临时缓冲和持久容器增长仍有未计费边界，尚不开放完整预算保存公共接口，AR-03保持未完成；新增保存字节一致、重开、预算拒绝和释放测试，fuzz继续暂缓。
+
+- 2026-10-07 保存对象输出预算基础：普通/预算write_object_limited共用规则，新增内部serialize_object_with_budget返回BudgetedBytes并保留实际capacity额度；输出几何扩容计入旧新缓冲共存，标量token、转义键缓冲、排序引用表与流Length栈十进制/预算词法字符串/替换字典同池，数字直接写借用lexeme。有限字典写出统一按键排序，普通保存键顺序同步规范化，避免HashMap与预算字典流输出差异。新增普通/预算字节一致（全字节字符串、转义Unicode名称、精确大整数、引用及流）、结果持有/峰值少1/长度拒绝/unwind、显式容量增长共存及拒绝原缓冲保持测试。所选pdf单元481项及内容事务/嵌套文字/路径/图片集成19项全部通过、0忽略，git diff --check通过。此为保存预算基础，内部入口尚未接入完整save；图预检、引用/诊断格式缓冲及保存对象准备/xref/trailer/压缩/最终输出仍有缺口，AR-03未完成、全工作区未验收；fuzz暂缓，本轮未提交。
+
+- 2026-10-07 预算快照容器计费：预算DocumentStore快照改为StoreSnapshot数组，分配前预留(ObjectId, StoreEntry)槽位并校准实际Vec容量，递归载荷同池，纯Deleted元数据亦计费；不再新增快照HashMap桶。回滚清空工作store、将数组条目移回既有桶并恢复next_obj_num，依赖键不移除/桶不缩的写入契约，混合嵌套回滚亦保留足够容量；成功提交丢弃数组，普通事务及公共entries接口不变。Trailer准备失败路径的租约声明顺序同步修正。新增元数据峰值少1拒绝、数组unwind/对象数限制、增长后回滚容量保持与编号恢复、普通/预算混合嵌套；原嵌套快照精确额度测试按实际表槽＋载荷更新。cargo check -p pdf --locked --quiet退出0；pdf单元479项及内容事务/嵌套文字/路径/图片集成19项全部通过、0忽略，git diff --check通过。新对象引发工作store桶增长、诊断/共享控制结构及原生后端仍有未计费边界，AR-03未完成、全工作区未验收；fuzz暂缓，本轮未提交。
+
+- 2026-10-07 加载栈和未知token预算收口：BudgetedLoadingGuard每层预留新ID数组/实际容量后交换路径，上一数组保留在守卫中，嵌套时旧新同时计费；退出、错误和unwind先释放当前数组/恢复上一数组，再释放租约，原普通路径已有容量原样恢复。Normal/Compressed预算加载均接入，Free诊断不再普通加载；未知对象token原本即拒绝，预算解析直接用首次计费位置生成同普通路径的错误，不再普通重读。新增栈/额度共存、峰值少1拒绝原栈保持、循环/深度拒绝和panic恢复，严格/兼容未知token错误/位置一致及token超限释放测试。cargo check -p pdf --locked --quiet退出0；pdf单元477项及内容事务/嵌套文字/路径/图片集成19项全部通过、0忽略，git diff --check通过。事务HashMap桶、诊断/共享控制结构及原生后端仍未计费，AR-03未完成、全工作区未验收；fuzz暂缓，本轮未提交。
+
+- 2026-10-07 对象流展开预算：普通/预算ObjectStreams共用索引、偏移、对象边界/尾部及严格禁用项校验；BudgetedObjectStreams拥有解码输入租约，预算索引/排序去重/结果表容量，递归对象载荷租约随BudgetedStreamObjects返回。PDFContext预算源路径接入ObjStm同池解码与待发布表，全部选中条目通过最新xref所属流/索引检查后才发布；Compressed请求读取源流而非编辑视图，解码依赖保持source-resolution隔离。新增普通/预算复合对象一致、输入/结果持有额度、峰值少1拒绝/unwind/异池清理、重复/越界/多余数据拒绝、压缩索引错误全部缓存不发布及重试；间接解码参数编辑/删除隔离同时覆盖普通和预算路径。cargo check -p pdf --locked --quiet退出0；pdf单元475项及内容事务/嵌套文字/路径/图片集成19项全部通过、0忽略，git diff --check通过。合法源缓存发布后返回副本拒绝可以保留缓存，但不改变编辑视图；加载栈、非标准token回退、HashMap控制桶及原生分配仍未贯通，AR-03未完成、全工作区未验收，fuzz暂缓，本轮未提交。
+
+- 2026-10-07 普通源对象冷缓存预算：SyntaxParser/PdfParser新增间接对象预算入口，复用预算对象/数组/字典/流与token读取，校验对象ID并保留载荷租约；PDFContext未缓存Normal源对象预算解析后检查既有raw-stream缓存上限，在源额度仍持有时预算克隆返回副本，预算拒绝不发布缓存/不增加缓存流字节，成功源缓存转为持久内存、只保留返回副本租约。新增字符串、复合字典、大流与普通结果一致，冷缓存峰值少1拒绝且缓存/加载栈清理、重试、暖缓存持有额度与大流较低峰值、unwind和ID/结束标记错误释放回归；暖缓存仍需支付字典构建临时表，不能用最终副本容量替代峰值。cargo check -p pdf --locked --quiet退出0；选定pdf单元473项及内容事务/嵌套文字/路径/图片集成19项全部通过、0忽略，git diff --check通过。Compressed/ObjStm展开、加载栈容量、非标准解析回退及控制结构仍未预算化，AR-03未完成、全工作区未验收，fuzz暂缓，本轮未提交。
+
+- 2026-10-07 操作内部预算取页：新增get_page_with_budget复用预算定位，在返回前释放临时目标页字典/祖先及其额度，PdfPage仅持有同普通入口的内联间接引用。四类顶层Unicode替换、嵌套Unicode准备及预算内容提交当前程序读取改用此入口，消除这些路径的普通整树临时副本。新增两页取目标、来源页/修订号/流对象与普通程序一致、邻居额度保持、零额度拒绝/越界不改修订和内容、unwind清理回归。cargo test -p pdf --lib --test content_edit_transaction --test nested_text_edit --test nested_path_edit --test nested_image_edit --locked --quiet退出0，472单元＋19集成通过、0忽略；git diff --check通过。首次源对象加载/缓存、事务HashMap桶及其他容器/原生后端仍有未计费边界，AR-03未完成；普通公共get_page及非预算路径兼容不变，未验收全工作区，fuzz暂缓，本轮未提交。
+
+- 2026-10-07 预算页树定位：新增page_at_with_budget/page_location_with_budget，同池解析Catalog及Pages/Page拥有副本；预算祖先栈和排序已访问ID表按实际容量计费，扩容旧新共存，只保留目标页及祖先所有者，但仍校验全树Type/Kids/Count、重复节点与深度/对象数限制。页根Form注册移除普通全页收集及二次目标字典克隆，预算内容提交的来源页/工作页定位亦接入。新增三个目标页与普通路径一致、结果持有额度、精确峰值少1拒绝及unwind清理、越界/后续非法兄弟/错误Count拒绝回归；既有内容提交门槛探测改用实际预算定位。cargo check -p pdf --locked --quiet退出0；cargo test -p pdf --lib --test content_edit_transaction --test nested_text_edit --test nested_path_edit --test nested_image_edit --locked --quiet退出0，471单元＋19集成通过、0忽略；git diff --check通过。get_page等其他普通入口、首次缓存及事务HashMap桶仍未计费，未验收完整AR-03或全工作区；fuzz暂缓，本轮未提交。
+
+- 2026-10-07 页根Form注册预算：新增内部register_form_with_budget，预算拥有解析/预检Form、继承资源与XObject，栈Fm名称查重后预算复制；绑定表、资源及页面Resources字段使用预算替换构建器，最终页面/名称租约返回并汇入嵌套提交retained_copies，注册自身快照载荷亦同池。保留普通入口命名/同ID复用规则；新增Fm1碰撞/Fm2匹配、重复注册仅保留名称额度、邻居占满拒绝及释放后同池成功、外层panic回滚和非法Form清理测试。cargo check -p pdf --locked --quiet退出0；pdf单元470项及选定内容事务/嵌套文字/路径/图片集成19项全部通过、0忽略，git diff --check通过。页面定位仍普通收集整棵页树，首次源缓存、HashMap桶等未计费，AR-03仍未完成；fuzz暂缓，本轮尚未提交。
 
 - 2026-10-07 本次提交验证：pdf单元469项及content_edit_transaction、nested_text_edit、nested_path_edit、nested_image_edit合计19项集成全部通过，0忽略；git diff --check通过。未运行全工作区测试或fuzz，不代表完整AR-03验收。
 

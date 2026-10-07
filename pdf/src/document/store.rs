@@ -14,6 +14,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn budgeted_snapshot_counts_empty_payload_slots_and_reuses_restore_buckets() {
+        use crate::{budget::OperationBudget, parser::options::Limits};
+        let mut store = DocumentStore::new(10);
+        let first = ObjectId::new(1, 0);
+        let second = ObjectId::new(2, 0);
+        store.delete_object(first).unwrap();
+        store.delete_object(second).unwrap();
+        let bytes = 2 * std::mem::size_of::<(ObjectId, StoreEntry)>();
+        let small = OperationBudget::new(bytes - 1);
+        assert!(matches!(
+            store.snapshot_with_budget(&small, Limits::default()),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(small.live_bytes(), 0);
+        assert_eq!(store.entries.len(), 2);
+        let pool = OperationBudget::new(bytes);
+        let (snapshot, lease) = store
+            .snapshot_with_budget(&pool, Limits::default())
+            .unwrap();
+        assert_eq!(pool.live_bytes(), bytes);
+        assert_eq!(
+            lease.bytes(),
+            snapshot.entries.capacity() * std::mem::size_of::<(ObjectId, StoreEntry)>()
+        );
+        store.update_object(first, PdfObject::PdfNull).unwrap();
+        for _ in 0..32 {
+            store.try_insert_object(PdfObject::PdfNull).unwrap();
+        }
+        let capacity = store.entries.capacity();
+        store.restore_snapshot(snapshot);
+        assert_eq!(store.entries.capacity(), capacity);
+        assert_eq!(store.entries.len(), 2);
+        assert!(matches!(store.entry(first), Some(StoreEntry::Deleted)));
+        assert!(matches!(store.entry(second), Some(StoreEntry::Deleted)));
+        assert_eq!(store.next_obj_num, 10);
+        drop(lease);
+        assert_eq!(pool.live_bytes(), 0);
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let owned = store
+                .snapshot_with_budget(&pool, Limits::default())
+                .unwrap();
+            let _owned = owned;
+            panic!("snapshot array unwind");
+        }));
+        assert!(caught.is_err());
+        assert_eq!(pool.live_bytes(), 0);
+        assert!(store
+            .snapshot_with_budget(
+                &pool,
+                Limits {
+                    max_objects: 1,
+                    ..Default::default()
+                }
+            )
+            .is_err());
+        assert_eq!(pool.live_bytes(), 0);
+    }
+
+    #[test]
     fn update_delete_and_restore_reuse_one_entry_without_advancing_ids() {
         let mut store = DocumentStore::new(10);
         let id = ObjectId::new(3, 2);
@@ -81,40 +140,74 @@ pub struct DocumentStore {
     next_obj_num: u32,
 }
 
+/// Contiguous rollback data. The transaction retains its separate lease until
+/// this table is discarded or moved back into existing store buckets.
+pub(crate) struct StoreSnapshot {
+    entries: Vec<(ObjectId, StoreEntry)>,
+    next_obj_num: u32,
+}
+
 impl DocumentStore {
-    /// Track recursively owned snapshot payloads, not HashMap bucket allocation.
-    pub(crate) fn clone_payloads_with_budget(
+    /// Snapshot table slots and recursively owned payloads reserve before
+    /// allocation; no additional HashMap buckets are created.
+    pub(crate) fn snapshot_with_budget(
         &self,
         budget: &crate::budget::OperationBudget,
         limits: crate::parser::options::Limits,
-    ) -> PdfResult<(Self, crate::budget::MemoryLease)> {
+    ) -> PdfResult<(StoreSnapshot, crate::budget::MemoryLease)> {
         if self.entries.len() > limits.max_objects {
             return Err(PdfError::ResourceLimit("snapshot object count".into()));
         }
-        let mut lease = budget.reserve(0)?;
-        let mut entries = HashMap::new();
+        let mut lease = budget.reserve(
+            self.entries
+                .len()
+                .checked_mul(std::mem::size_of::<(ObjectId, StoreEntry)>())
+                .ok_or_else(|| PdfError::ResourceLimit("snapshot store table size".into()))?,
+        )?;
+        let mut entries = Vec::new();
         entries
-            .try_reserve(self.entries.len())
+            .try_reserve_exact(self.entries.len())
             .map_err(|_| PdfError::ResourceLimit("snapshot store allocation".into()))?;
+        lease.resize(
+            entries
+                .capacity()
+                .checked_mul(std::mem::size_of::<(ObjectId, StoreEntry)>())
+                .ok_or_else(|| PdfError::ResourceLimit("snapshot store table capacity".into()))?,
+        )?;
         for (&id, entry) in &self.entries {
             let copy = match entry {
                 StoreEntry::Deleted => StoreEntry::Deleted,
                 StoreEntry::Upsert(object) => {
-                    let (object, mut child) =
-                        crate::objects::clone_object_with_budget(object, budget, limits, 0)?;
+                    let (mut child, object) = {
+                        let (object, child) =
+                            crate::objects::clone_object_with_budget(object, budget, limits, 0)?;
+                        (child, object)
+                    };
                     lease.absorb(&mut child)?;
                     StoreEntry::Upsert(object)
                 }
             };
-            entries.insert(id, copy);
+            entries.push((id, copy));
         }
         Ok((
-            Self {
+            StoreSnapshot {
                 entries,
                 next_obj_num: self.next_obj_num,
             },
             lease,
         ))
+    }
+
+    pub(crate) fn restore_snapshot(&mut self, snapshot: StoreSnapshot) {
+        // Store writes never remove keys or shrink buckets (deletion is a
+        // tombstone). Nested rollback preserves at least its captured length,
+        // so this restore needs no allocation, including mixed transactions.
+        debug_assert!(self.entries.capacity() >= snapshot.entries.len());
+        self.entries.clear();
+        for (id, entry) in snapshot.entries {
+            self.entries.insert(id, entry);
+        }
+        self.next_obj_num = snapshot.next_obj_num;
     }
 
     pub fn new(next_obj_num: u32) -> Self {

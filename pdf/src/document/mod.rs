@@ -400,9 +400,10 @@ impl<R: Seek + Read> PdfDocument<R> {
         self.ctx.transaction(|| edit(self))
     }
 
-    /// Atomically edit with budgeted savepoint payload copies and Trailer.
-    /// HashMap buckets, source caches and allocations made by `edit` are not
-    /// automatically tracked. Use the same pool for budget-aware edit APIs.
+    /// Atomically edit with budgeted savepoint table slots, payloads and Trailer.
+    /// Rollback reuses existing store buckets. Working-store growth, source
+    /// caches and allocations made by `edit` are not automatically tracked;
+    /// use the same pool for budget-aware edit APIs.
     pub fn edit_transaction_with_budget<T>(
         &self,
         budget: &crate::budget::OperationBudget,
@@ -539,12 +540,82 @@ impl<R: Seek + Read> PdfDocument<R> {
         }
         Err(PdfError::PageNotExist)
     }
+
+    /// Operation-internal page lookup. The returned page owns only an inline
+    /// indirect reference; traversal copies are released before returning.
+    fn get_page_with_budget(
+        &self,
+        page: u32,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<PdfPage<'_, R>> {
+        let (_lease, location) = {
+            let (location, lease) = self.page_location_with_budget(page, budget)?.into_parts();
+            (lease, location)
+        };
+        Ok(PdfPage::new(
+            PdfObject::PdfReference(PdfReference::from_id(location.page_id)),
+            &self.ctx,
+        ))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::PdfDocument;
     use crate::parser::syntax::ParseMode;
+
+    #[test]
+    fn budgeted_page_lookup_releases_traversal_and_matches_source_identity() {
+        use crate::{budget::OperationBudget, error::PdfError};
+        let doc = PdfDocument::new().unwrap();
+        doc.add_page(0).unwrap();
+        doc.add_page(1).unwrap();
+        doc.replace_page_contents(1, b"q Q".to_vec()).unwrap();
+        let expected = doc.get_page(1).unwrap().content_program().unwrap();
+        let revision = doc.revision();
+        let pool = OperationBudget::new(1024 * 1024);
+        let neighbor = pool.reserve(11).unwrap();
+        let page = doc.get_page_with_budget(1, &pool).unwrap();
+        assert_eq!(pool.live_bytes(), 11);
+        let current = page.content_program_with_budget(&pool).unwrap();
+        assert_eq!(current.program().source_page_id, expected.source_page_id);
+        assert_eq!(current.program().source_bytes(), expected.source_bytes());
+        assert_eq!(current.program().source_stamp(), expected.source_stamp());
+        assert_eq!(
+            current.program().stream_object_id(0),
+            expected.stream_object_id(0)
+        );
+        drop(current);
+        assert_eq!(pool.live_bytes(), 11);
+        drop(neighbor);
+        assert_eq!(pool.live_bytes(), 0);
+        let blocked = OperationBudget::new(0);
+        assert!(matches!(
+            doc.get_page_with_budget(1, &blocked),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(blocked.live_bytes(), 0);
+        assert!(matches!(
+            doc.get_page_with_budget(2, &pool),
+            Err(PdfError::PageNotExist)
+        ));
+        assert_eq!(pool.live_bytes(), 0);
+        assert_eq!(doc.revision(), revision);
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _page = doc.get_page_with_budget(1, &pool).unwrap();
+            panic!("budgeted page lookup unwind");
+        }));
+        assert!(caught.is_err());
+        assert_eq!(pool.live_bytes(), 0);
+        assert_eq!(
+            doc.get_page(1)
+                .unwrap()
+                .content_program()
+                .unwrap()
+                .source_bytes(),
+            expected.source_bytes()
+        );
+    }
 
     #[test]
     fn explicit_creation_versions_work_in_legacy_and_owned_facades() {
@@ -679,6 +750,14 @@ impl<R: Seek + Read> PdfDocument<R> {
             .into_iter()
             .nth(pagenum as usize)
             .ok_or(PdfError::PageNotExist)
+    }
+
+    fn page_location_with_budget(
+        &self,
+        page: u32,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<page_tree::BudgetedPageTreeEntry> {
+        page_tree::PageTree::page_at_with_budget(&self.ctx, page, budget)
     }
 
     fn collect_page_entries(&self) -> PdfResult<Vec<PageTreeEntry>> {

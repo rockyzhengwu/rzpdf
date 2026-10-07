@@ -66,17 +66,25 @@ impl DocumentState {
         // Declared before the guard: quota outlives snapshot disposal/restoration.
         let mut snapshot_lease = None;
         let (trailer_snapshot, snapshot) = if let Some((budget, limits)) = budget {
-            let (trailer, mut lease) =
-                crate::objects::clone_dict_with_budget(&self.trailer.borrow(), budget, limits, 0)?;
-            let (store, mut store_lease) = self
-                .store
-                .borrow()
-                .clone_payloads_with_budget(budget, limits)?;
+            let (mut lease, trailer) = {
+                let (trailer, lease) = crate::objects::clone_dict_with_budget(
+                    &self.trailer.borrow(),
+                    budget,
+                    limits,
+                    0,
+                )?;
+                (lease, trailer)
+            };
+            let (store, mut store_lease) =
+                self.store.borrow().snapshot_with_budget(budget, limits)?;
             lease.absorb(&mut store_lease)?;
             snapshot_lease = Some(lease);
-            (trailer, store)
+            (trailer, TransactionSnapshot::Budgeted(store))
         } else {
-            (self.trailer.borrow().clone(), self.store.borrow().clone())
+            (
+                self.trailer.borrow().clone(),
+                TransactionSnapshot::Plain(self.store.borrow().clone()),
+            )
         };
         let _snapshot_lease = snapshot_lease;
         let mut rollback = StoreRollback {
@@ -128,6 +136,11 @@ impl DocumentState {
     }
 }
 
+enum TransactionSnapshot {
+    Plain(DocumentStore),
+    Budgeted(crate::document::store::StoreSnapshot),
+}
+
 struct StoreRollback<'a> {
     commit_revision: &'a Cell<u64>,
     dirty: &'a Cell<bool>,
@@ -137,7 +150,7 @@ struct StoreRollback<'a> {
     trailer: &'a RefCell<PdfDict>,
     trailer_snapshot: Option<PdfDict>,
     store: &'a RefCell<DocumentStore>,
-    snapshot: Option<DocumentStore>,
+    snapshot: Option<TransactionSnapshot>,
 }
 
 impl Drop for StoreRollback<'_> {
@@ -147,7 +160,12 @@ impl Drop for StoreRollback<'_> {
             *self.trailer.borrow_mut() = snapshot;
         }
         if let Some(snapshot) = self.snapshot.take() {
-            *self.store.borrow_mut() = snapshot;
+            match snapshot {
+                TransactionSnapshot::Plain(snapshot) => *self.store.borrow_mut() = snapshot,
+                TransactionSnapshot::Budgeted(snapshot) => {
+                    self.store.borrow_mut().restore_snapshot(snapshot)
+                }
+            }
         }
         if restoring {
             // Each active savepoint reserves one rollback revision in advance.
@@ -168,6 +186,80 @@ mod tests {
     use crate::objects::{object_id::ObjectId, PdfObject};
 
     #[test]
+    fn array_snapshot_rollback_handles_mixed_nested_transactions_and_growth() {
+        use crate::{budget::OperationBudget, parser::options::Limits};
+        for outer_budgeted in [false, true] {
+            let state = DocumentState::new(PdfDict::default(), 10, "1.7".into());
+            let old = ObjectId::new(1, 0);
+            state
+                .store
+                .borrow_mut()
+                .update_object(old, PdfObject::PdfNull)
+                .unwrap();
+            let pool = OperationBudget::new(1024 * 1024);
+            let outer = || -> PdfResult<()> {
+                state.store.borrow_mut().delete_object(old)?;
+                let first_new = state
+                    .store
+                    .borrow_mut()
+                    .try_insert_object(PdfObject::PdfNull)?;
+                assert_eq!(first_new, ObjectId::new(10, 0));
+                let inner = || -> PdfResult<()> {
+                    for _ in 0..32 {
+                        state
+                            .store
+                            .borrow_mut()
+                            .try_insert_object(PdfObject::PdfNull)?;
+                    }
+                    Err(PdfError::DocumentError("inner rollback".into()))
+                };
+                let result = if outer_budgeted {
+                    state.transaction(inner)
+                } else {
+                    state.transaction_with_budget(&pool, Limits::default(), inner)
+                };
+                assert!(result.is_err());
+                assert_eq!(state.store.borrow().entries().len(), 2);
+                assert!(matches!(
+                    state.store.borrow().entry(old),
+                    Some(crate::document::store::StoreEntry::Deleted)
+                ));
+                assert_eq!(
+                    state
+                        .store
+                        .borrow_mut()
+                        .try_insert_object(PdfObject::PdfNull)?,
+                    ObjectId::new(11, 0)
+                );
+                Err(PdfError::DocumentError("outer rollback".into()))
+            };
+            let result = if outer_budgeted {
+                state.transaction_with_budget(&pool, Limits::default(), outer)
+            } else {
+                state.transaction(outer)
+            };
+            assert!(result.is_err());
+            assert_eq!(pool.live_bytes(), 0);
+            assert_eq!(state.transaction_depth.get(), 0);
+            assert_eq!(state.store.borrow().entries().len(), 1);
+            assert!(matches!(
+                state.store.borrow().entry(old),
+                Some(crate::document::store::StoreEntry::Upsert(
+                    PdfObject::PdfNull
+                ))
+            ));
+            assert_eq!(
+                state
+                    .store
+                    .borrow_mut()
+                    .try_insert_object(PdfObject::PdfNull)
+                    .unwrap(),
+                ObjectId::new(10, 0)
+            );
+        }
+    }
+
+    #[test]
     fn nested_savepoints_restore_each_payload_and_retain_outer_quota() {
         use crate::{
             budget::OperationBudget, objects::pdf_number::PdfNumber, parser::options::Limits,
@@ -179,10 +271,12 @@ mod tests {
             .borrow_mut()
             .update_object(id, PdfObject::PdfNumber(PdfNumber::new(123.0)))
             .unwrap();
-        let pool = OperationBudget::new(6);
+        let snapshot_bytes =
+            3 + std::mem::size_of::<(ObjectId, crate::document::store::StoreEntry)>();
+        let pool = OperationBudget::new(snapshot_bytes * 2);
         let limits = Limits::default();
         let result: PdfResult<()> = state.transaction_with_budget(&pool, limits, || {
-            assert_eq!(pool.live_bytes(), 3);
+            assert_eq!(pool.live_bytes(), snapshot_bytes);
             let next = state.next_revision()?;
             state
                 .store
@@ -190,14 +284,14 @@ mod tests {
                 .update_object(id, PdfObject::PdfNumber(PdfNumber::new(456.0)))?;
             state.did_mutate(next);
             let inner: PdfResult<()> = state.transaction_with_budget(&pool, limits, || {
-                assert_eq!(pool.live_bytes(), 6);
+                assert_eq!(pool.live_bytes(), snapshot_bytes * 2);
                 let next = state.next_revision()?;
                 state.store.borrow_mut().delete_object(id)?;
                 state.did_mutate(next);
                 Err(PdfError::DocumentError("inner rollback".into()))
             });
             assert!(inner.is_err());
-            assert_eq!(pool.live_bytes(), 3);
+            assert_eq!(pool.live_bytes(), snapshot_bytes);
             assert_eq!(state.transaction_depth.get(), 1);
             match state.store.borrow().entry(id).unwrap() {
                 crate::document::store::StoreEntry::Upsert(PdfObject::PdfNumber(number)) => {
@@ -208,7 +302,7 @@ mod tests {
             Err(PdfError::DocumentError("outer rollback".into()))
         });
         assert!(result.is_err());
-        assert_eq!(pool.peak_bytes(), 6);
+        assert_eq!(pool.peak_bytes(), snapshot_bytes * 2);
         assert_eq!(pool.live_bytes(), 0);
         assert_eq!(state.transaction_depth.get(), 0);
         assert_eq!(state.commit_revision.get(), 0);
@@ -238,7 +332,9 @@ mod tests {
             .delete_object(ObjectId::new(4, 0))
             .unwrap();
         let limits = Limits::default();
-        let pool = OperationBudget::new(3);
+        let snapshot_bytes =
+            3 + 2 * std::mem::size_of::<(ObjectId, crate::document::store::StoreEntry)>();
+        let pool = OperationBudget::new(snapshot_bytes);
         let neighbor = pool.reserve(1).unwrap();
         let mut called = false;
         assert!(state
@@ -254,7 +350,7 @@ mod tests {
         drop(neighbor);
         state
             .transaction_with_budget(&pool, limits, || {
-                assert_eq!(pool.live_bytes(), 3);
+                assert_eq!(pool.live_bytes(), snapshot_bytes);
                 assert!(state
                     .transaction_with_budget(&pool, limits, || Ok(()))
                     .is_err());

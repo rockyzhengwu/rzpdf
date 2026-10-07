@@ -117,6 +117,27 @@ pub struct BudgetedBytes {
 }
 
 impl BudgetedBytes {
+    pub(crate) fn operation_budget(&self) -> OperationBudget {
+        OperationBudget {
+            state: self.lease.state.clone(),
+        }
+    }
+
+    /// Reserve a new buffer while the old allocation remains charged.
+    pub(crate) fn try_reserve_capacity(&mut self, capacity: usize) -> PdfResult<()> {
+        if capacity <= self.data.capacity() {
+            return Ok(());
+        }
+        let budget = self.operation_budget();
+        let mut lease = budget.reserve(capacity)?;
+        let mut data = Vec::new();
+        data.try_reserve_exact(capacity)
+            .map_err(|_| PdfError::ResourceLimit("budgeted byte allocation".into()))?;
+        lease.resize(data.capacity())?;
+        data.extend_from_slice(&self.data);
+        *self = Self { data, lease };
+        Ok(())
+    }
     /// Internal ownership transfer: the receiving owner must keep the lease
     /// beside the allocation. This is deliberately not a public Vec export.
     pub(crate) fn into_reserved_parts(self) -> (Vec<u8>, MemoryLease) {
@@ -222,6 +243,28 @@ pub(crate) fn copy_string(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn explicit_capacity_growth_counts_overlap_and_preserves_rejected_buffer() {
+        let pool = super::OperationBudget::new(24);
+        let mut bytes = super::BudgetedBytes::copy_from_slice(&pool, b"abc").unwrap();
+        bytes.try_reserve_capacity(8).unwrap();
+        assert_eq!(pool.live_bytes(), 8);
+        assert_eq!(bytes.as_slice(), b"abc");
+        bytes.try_reserve_capacity(16).unwrap();
+        assert_eq!(pool.peak_bytes(), 24);
+        assert_eq!(pool.live_bytes(), 16);
+        drop(bytes);
+        assert_eq!(pool.live_bytes(), 0);
+        let small = super::OperationBudget::new(23);
+        let mut bytes = super::BudgetedBytes::copy_from_slice(&small, b"abc").unwrap();
+        bytes.try_reserve_capacity(8).unwrap();
+        assert!(bytes.try_reserve_capacity(16).is_err());
+        assert_eq!(bytes.capacity(), 8);
+        assert_eq!(bytes.as_slice(), b"abc");
+        assert_eq!(small.live_bytes(), 8);
+        drop(bytes);
+        assert_eq!(small.live_bytes(), 0);
+    }
     #[test]
     fn shared_peak_tracks_successful_overlap_without_reset_on_release() {
         let budget = OperationBudget::new(8);
