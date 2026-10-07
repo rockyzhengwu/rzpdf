@@ -295,6 +295,24 @@ fn type4_type5_and_type6_resources_import_and_both_stream_strategies() {
                 assert_eq!([color.r(), color.g(), color.b()], [expected; 3]);
             }
             assert!(object.shading.color_at_point(41.0, 10.0).unwrap().is_none());
+            if kind == 6 {
+                // Verify the certified-corner path in original/imported
+                // resources and after both strict save/reopen strategies.
+                for (point, expected) in [([0.0, 0.0], 0), ([0.0, 20.0], 0),
+                    ([40.0, 0.0], 255), ([40.0, 20.0], 255)] {
+                    let color = object.shading.color_at_point(point[0], point[1])
+                        .unwrap().unwrap();
+                    assert_eq!([color.r(), color.g(), color.b()], [expected; 3]);
+                }
+                for (point, direct, squared) in [([0.0, 10.0], 0, 0),
+                    ([40.0, 10.0], 255, 255), ([10.0, 0.0], 64, 16),
+                    ([30.0, 20.0], 191, 143)] {
+                    let color = object.shading.color_at_point(point[0], point[1])
+                        .unwrap().unwrap();
+                    let expected = if nonlinear { squared } else { direct };
+                    assert_eq!([color.r(), color.g(), color.b()], [expected; 3]);
+                }
+            }
         };
         verify(&doc);
         let imported = PdfDocument::new().unwrap();

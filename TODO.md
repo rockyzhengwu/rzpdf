@@ -93,6 +93,42 @@ P0 的普通回归、错误处理、预算和真实样本登记贯穿上述工�
 
 ### 实施记录
 
+- 2026-10-08 直边流程断言确认：原session35593退出0，shading_workflow 7项通过，日志 `/tmp/rzpdf-coons-edge-roundtrip.log`；Type6矩阵四边非角点新增直接/平方函数颜色断言，覆盖原文档、导入及两个文档Preserve/FlateUnencoded严格重开。证据限定固定轴向矩形，任意方向/弯曲边界与折叠仍未完成；当前直边修订像素和全量复验仍待验证，未自动提交、未运行fuzz。
+
+- 2026-10-08 直边证书生产接入确认：角点分支之后尝试常坐标直边IVT存在及全域唯一根认证，失败继续完整搜索，不将失败当域外。矩形四边中点现在验证正确颜色和包围区间。shading专项原session34705退出0，82项通过、541项筛选，日志 `/tmp/rzpdf-coons-production-edges.log`；当前直边修订尚需流程/像素/全量复验，不能沿用前版925项结果。任意方向直边、弯曲边界、连续根及折叠仍未完成，未自动提交、未运行fuzz。
+
+- 2026-10-08 直边非角点证书基础：边界一个坐标的四控制区间均精确等于目标，另一坐标端点严格夹住目标时，连续性证明原域边上存在根；再用包含整个原域的延拓唯一性证书排除竞争根，固定边参数并与原域相交保留根区间。专项session74483退出0，1项通过、622项筛选，日志 `/tmp/rzpdf-coons-straight-edge.log`，覆盖四边非角点、邻近域外及零工作额度。尚未生产接通，不代表弯曲边界或折叠完整交付；未自动提交、未运行fuzz。
+
+- 2026-10-08 角点修订版全量终态：原session43908最终退出0，`cargo test --workspace --locked --quiet` 共46组结果、925项通过、0失败、0忽略，含622项PDF单元和37项render测试，日志 `/tmp/rzpdf-coons-corner-full-workspace.log`；验收期间Rust源码冻结，结果取代下方该轮等待状态，不与ba4ac29旧版920项混用。唯一角点证书与四角导入/保存断言修订无全量回归；一般边界、连续根、任意折叠、Type7/Pattern及整个TODO仍未完成。未自动提交或推送、未运行fuzz。
+
+- 2026-10-08 角点修订全工作区复验启动：差异检查通过后启动`cargo test --workspace --locked --quiet`，session43908、Cargo PID97927，日志 `/tmp/rzpdf-coons-corner-full-workspace.log`；ps确认原Cargo及rustc子进程存活。本轮验收为ba4ac29之后的角点证书/边界区间及流程断言修订，冻结Rust源码直到取得终态，不套用旧session5708的920项结果。完整TODO仍未完成，未自动提交、未运行fuzz。
+
+- 2026-10-08 格式修订专项确认：原session3545退出0，shading相关81项通过、541项筛选，日志 `/tmp/rzpdf-coons-formatted-corners.log`；仅格式整理后复验，生产角点能力和未完成边界范围不变。新增修订仍未工作区全量复验，未自动提交、未运行fuzz。
+
+- 2026-10-08 角点修订工作区编译确认：格式整理后`cargo check --workspace --locked --quiet` 原session28171退出0，日志 `/tmp/rzpdf-coons-corner-workspace-check.log`；git diff --check通过。这是编译门禁而非全量测试；完整边界需将一般边界参数候选的存在证明与覆盖整个原域的根枚举/唯一性相结合，Newton近似不能单独作为根证书。未自动提交、未运行fuzz。
+
+- 2026-10-08 角点修订像素复验：原session60537退出0，既有Skia网格专项1项通过、36项筛选，日志 `/tmp/rzpdf-coons-corners-pixels.log`；单测试含Type4/5/6共12组合及两保存策略整页像素不变。证明角点修订未破坏该固定矩形像素矩阵，不是新增边界像素或独立阅读器验收；当前新增修改尚未全工作区复验，未自动提交、未运行fuzz。
+
+- 2026-10-08 角点导入/保存断言确认：修订shading_workflow原session80412退出0，7项通过，日志 `/tmp/rzpdf-coons-corner-roundtrip.log`；Type6矩阵新增四角颜色断言，直接灰度/平方函数均覆盖原文档、导入及两个文档的Preserve/FlateUnencoded严格重开。取代前条“尚未加入独立角点保存断言”状态；固定矩形角点证据不证明一般边界、折叠或独立阅读器完整验收，未自动提交、未运行fuzz。
+
+- 2026-10-08 角点修订流程复验：`cargo test -p pdf --test shading_workflow --locked --quiet` 原session85788退出0，7项通过，日志 `/tmp/rzpdf-coons-corners-workflow.log`；既有Type4/5/6导入、保存策略严格重开和注册失败恢复流程无回归。该矩阵尚未加入独立角点保存断言，不能据此认定角点完整流程验收；像素及当前修订全量仍待验证，未自动提交、未运行fuzz。
+
+- 2026-10-08 唯一角点生产接入：非恒定补丁先尝试精确角点见证及全原域延拓唯一性，成功才使用精确角参数插值，认证不成功继续既有完整搜索，不当域外。矩形四角采样回归改为成功、一般四边中点仍明确Unresolved且输出不变。shading专项session12356退出0，81项通过、541项筛选，日志 `/tmp/rzpdf-coons-production-corners.log`；取代下方“尚未接通”的该角点分支状态。仅通过证书的角点可用，不是一般边界/折叠完整交付；仍需流程、像素及全量复验，未自动提交、未运行fuzz。
+
+- 2026-10-08 唯一角点组合证书：精确参数见证与覆盖整个原域的延拓唯一根证书组合，成功时返回精确角参数；不认证时返回候选未解决而非域外。首次session47917因测试assert_eq要求Interval实现PartialEq而编译失败，改为匹配错误后专项session66347退出0，1项通过、621项筛选，日志 `/tmp/rzpdf-coons-unique-corner-recheck.log`；四角、连续根退化拒绝、非角点与零工作额度验证通过。尚未接通生产采样，完整边界/折叠/排序仍待实现，未自动提交、未运行fuzz。
+
+- 2026-10-08 精确角点存在见证及边界区间修订：首次专项session71504退出101，暴露张量转换在边界产生多余抵消区间；修订为四边直接保留原边界控制点区间，不放宽断言。修订Coons模块/适配器专项session8793退出0，58项通过、563项筛选，日志 `/tmp/rzpdf-coons-boundary-identity.log`，含角点精确见证、邻近/不确定点拒绝、延拓和既有搜索回归。见证仅证明存在，仍需唯一性、域归属和全覆盖排序；未接通生产边界路径，新增修改未全工作区复验、未自动提交、未运行fuzz。
+
+- 2026-10-08 非直边延拓验证：专项session94399退出0，2项通过、618项筛选，日志 `/tmp/rzpdf-coons-curved-continuation.log`；新增非直边曲面81个二进制精确参数点的区间包围检查，含四边和角点，不用epsilon放宽断言。该采样回归验证重参数化实现，不证明任意曲面边界根存在或全域覆盖；生产边界路径仍未接通，完整Type6保持未完成。
+
+- 2026-10-08 延拓基础回归确认：`cargo test -p pdf --lib color::shading_patch --locked --quiet` 原session69894退出0，56项通过、563项筛选，日志 `/tmp/rzpdf-coons-continuation-regression.log`；包含新增边界失败契约及延拓认证检查，git diff --check通过。此为Coons模块/资源适配器专项，不代替新增修改后的工作区全量验收；完整Type6仍未完成。
+
+- 2026-10-08 边界认证基础：抽取有限矩形上的区间Bernstein重参数化，允许多项式延拓；原restrict入口仍拒绝原单位域外参数，生产采样覆盖判定不变。专项session88613退出0，1项通过、618项筛选，日志 `/tmp/rzpdf-coons-continuation-tests.log`，验证矩形角根在延拓域内可严格认证，同时原域外根也可认证，故延拓证书不能替代原域成员证明。需继续边界存在证明、重复根去重与全覆盖排序；完整Type6仍未完成，当前新增修改尚未全量复验。未运行fuzz、未自动提交。
+
+- 2026-10-08 Type6边界缺口回归：新增矩形四边中点及四角的采样行为检查，当前严格内部根认证明确返回Unresolved，保留输出值/区间不变，并验证随后内部点仍可成功采样。专项session4171退出0，1项通过、617项筛选，日志 `/tmp/rzpdf-coons-boundary-contract.log`；这仅固定当前失败契约，不是边界支持验收。下一步仍需证明边界根存在及完整覆盖/排序，不能靠放宽严格包含或误报域外绕过。未运行fuzz、未自动提交。
+
+- 2026-10-08 Type6部分接入全量门禁确认：原session5708最终退出0，`cargo test --workspace --locked --quiet` 日志 `/tmp/rzpdf-coons-workspace-tests.log` 共46组结果、920项通过、0失败、0忽略，含617项PDF单元、37项render测试及集成/文档目标。验收源码对应提交ba4ac29；本记录取代下方该轮“仍待终态”状态。完整Type6边界根、连续根、任意折叠与独立阅读器验收仍未完成，相关TODO不勾选；未运行fuzz。本轮仅补文档，未自动提交或推送。
+
 - 2026-10-08 全量过程结果：同一工作区门禁session5708日志已确认617项PDF单元全部通过（0失败/忽略），日志 `/tmp/rzpdf-coons-workspace-tests.log`；原Cargo仍运行，集成/render/doc目标及最终退出码未返回，不将此阶段结果当全工作区通过。本轮未改Rust源码、未重启、未提交、未运行fuzz，整体目标保持未完成。
 
 - 2026-10-08 测试文档同步与全量观察：docs/testing补函数域76项、注册恢复7项与Skia12组合单项终态证据，明确固定矩形不证明完整Type6。全工作区session5708同句柄轮询仍运行，ps确认Cargo PID40699及其rustc集成目标编译子进程存活，尚无终态；本轮未改Rust源码、未重启测试，git diff --check通过。保持当前门禁观察，不把编译警告/存活当测试通过；未提交、未运行fuzz。

@@ -2,6 +2,12 @@
 
 ## Type6 部分接入检查点（2026-10-08）
 
+角点修订版全量终态：原session43908退出0，`cargo test --workspace --locked --quiet` 共46组结果、925项通过、0失败、0忽略，含622项PDF单元和37项render测试，日志 `/tmp/rzpdf-coons-corner-full-workspace.log`。此结果取代下方角点修订“尚未全工作区复验”的状态；仍不表示一般边界、连续根、任意折叠或完整Type6验收完成。
+
+提交ba4ac29之后的角点修订：张量转换直接保留边界控制点区间；精确角点见证结合覆盖整个原域的延拓唯一性证书，认证成功才用于生产采样，失败继续原完整搜索。shading单元81项（`/tmp/rzpdf-coons-production-corners.log`）、加入四角原文档/导入/两保存策略严格重开断言的流程7项（`/tmp/rzpdf-coons-corner-roundtrip.log`）及既有12组合Skia像素专项1项（`/tmp/rzpdf-coons-corners-pixels.log`）均退出0。仅证明可认证角点及固定样本无回归；一般边界、连续根、任意折叠和独立阅读器验收仍未完成，后续修订尚未全工作区复验，不能套用下方920项旧源码结果。
+
+全工作区终态补充：原session5708最终退出0，`cargo test --workspace --locked --quiet` 共46组结果、920项通过、0失败、0忽略，日志 `/tmp/rzpdf-coons-workspace-tests.log`。验收源码对应提交ba4ac29，包含617项PDF单元与37项render测试；本段取代下方该轮“尚待终态”状态，但不代表完整Type6或整个实施计划完成。
+
 生产 Shading 构造/点采样已接入 Coons 补丁。预算修订版 `cargo test -p pdf --lib color::shading --locked --quiet` 退出0，76项相关单元通过、541项筛选，日志 `/tmp/rzpdf-coons-sample-budget-tests.log`；包含直接分量/非线性函数顺序、域外及采样内存/工作额度拒绝后恢复。`cargo test -p pdf --test shading_workflow --locked --quiet` 原版退出0、6项通过，日志 `/tmp/rzpdf-coons-workflow-tests.log`；资源矩阵保留Type4/5并加入Type6，覆盖显示来源、导入和两种压缩策略严格重开。随后新增截断流注册失败恢复测试，修订专项仍待确认，不能计入该6项结果。
 
 后续专项确认：函数域修订模型专项退出0、76项通过，日志 `/tmp/rzpdf-coons-function-domain-tests.log`，补过窄Domain拒绝；注册恢复修订专项退出0、7项通过，日志 `/tmp/rzpdf-coons-workflow-recovery-tests.log`，补截断流注册拒绝不修改revision/保存字节及修复后成功。前段“仍待确认”是原6项检查点状态，由本段终态取代。

@@ -103,28 +103,30 @@ impl ColoredPatch {
             ConstantCoverage::NoCoverage => return Ok(false),
             ConstantCoverage::Parameter(uv) => uv.map(Interval::exact),
             ConstantCoverage::NotConstant => {
-                // Bounded root storage. Reaching the cap is a work-limit
-                // error, not a truncated set used to choose a winner.
-                let mut roots = [[Interval::exact(0.0); 2]; 64];
-                let mut used = 0;
-                visit_certified_roots(
-                    self.geometry.tensor_control_enclosures(),
-                    point,
-                    depth,
-                    remaining,
-                    &mut |root| {
+                let controls = self.geometry.tensor_control_enclosures();
+                if let Some(corner) = certify_unique_corner(controls, point, remaining)? {
+                    corner
+                } else if let Some(edge) = certify_unique_straight_edge(controls, point, remaining)? {
+                    edge
+                } else {
+                    // Bounded root storage. Reaching the cap is a work-limit
+                    // error, not a truncated set used to choose a winner.
+                    let mut roots = [[Interval::exact(0.0); 2]; 64];
+                    let mut used = 0;
+                    visit_certified_roots(controls, point, depth, remaining, &mut |root| {
                         if used == roots.len() {
                             return Err(SearchError::WorkLimit);
                         }
                         roots[used] = root;
                         used += 1;
                         Ok(())
-                    },
-                )?;
-                let Some(root) = self.geometry.preferred_root(&roots[..used], remaining)? else {
-                    return Ok(false);
-                };
-                root
+                    })?;
+                    let Some(root) = self.geometry.preferred_root(&roots[..used], remaining)?
+                    else {
+                        return Ok(false);
+                    };
+                    root
+                }
             }
         };
         if parameters
@@ -721,6 +723,19 @@ pub(crate) fn restrict_interval_tensor(
     if !rect.iter().all(|v| unit(*v)) || rect[0] > rect[2] || rect[1] > rect[3] {
         return None;
     }
+    reparameterize_interval_tensor(controls, rect)
+}
+
+/// Polynomial continuation to a finite parameter rectangle, including
+/// outside the original square. This is geometry only: roots in the
+/// continued surface are not evidence of coverage in the PDF domain.
+fn reparameterize_interval_tensor(
+    controls: IntervalControls,
+    rect: [f64; 4],
+) -> Option<IntervalControls> {
+    if !rect.iter().all(|v| v.is_finite()) || rect[0] > rect[2] || rect[1] > rect[3] {
+        return None;
+    }
     interval_tensor_bounds(&controls)?;
     fn restrict(p: [[Interval; 2]; 4], a: f64, b: f64) -> [[Interval; 2]; 4] {
         std::array::from_fn(|index| {
@@ -758,11 +773,116 @@ pub(crate) fn restrict_interval_tensor(
             result[j][i] = restricted[j];
         }
     }
+    interval_tensor_bounds(&result)?;
     Some(result)
+}
+
+/// An exact interval evaluation supplies an existence witness, not a
+/// uniqueness or complete-coverage certificate. Callers must still prove
+/// that no other root changes PDF precedence.
+fn exact_parameter_witness(
+    controls: &IntervalControls,
+    target: [f64; 2],
+    parameters: [f64; 2],
+) -> Result<bool, SearchError> {
+    if !target.iter().all(|v| v.is_finite()) || !parameters.iter().all(|v| unit(*v)) {
+        return Err(SearchError::InvalidInput);
+    }
+    let value = interval_tensor_box(controls, parameters.map(Interval::exact))
+        .ok_or(SearchError::InvalidInput)?;
+    Ok((0..2).all(|axis| value[axis].lower == target[axis] && value[axis].upper == target[axis]))
+}
+
+/// Certify a corner only when a continuation covering the entire original
+/// domain has exactly one root. Failure to certify is not a coverage miss.
+fn certify_unique_corner(
+    controls: IntervalControls,
+    target: [f64; 2],
+    remaining: &mut usize,
+) -> Result<Option<[Interval; 2]>, SearchError> {
+    *remaining = remaining.checked_sub(1).ok_or(SearchError::WorkLimit)?;
+    let mut witness = None;
+    for uv in [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]] {
+        *remaining = remaining.checked_sub(1).ok_or(SearchError::WorkLimit)?;
+        if exact_parameter_witness(&controls, target, uv)? {
+            witness = Some(uv);
+            break;
+        }
+    }
+    let Some(uv) = witness else { return Ok(None) };
+    *remaining = remaining.checked_sub(1).ok_or(SearchError::WorkLimit)?;
+    // This rectangle strictly contains the whole PDF parameter square.
+    // A unique root here excludes every competing original-domain root.
+    let continued = reparameterize_interval_tensor(controls, [-0.25, -0.25, 1.25, 1.25])
+        .ok_or(SearchError::InvalidInput)?;
+    if matches!(
+        certify_interval_cell(&continued, target)?,
+        CellCertificate::Unique(_)
+    ) {
+        Ok(Some(uv.map(Interval::exact)))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Select only when the PDF v/u precedence is proven by root enclosures.
 /// Overlapping v intervals cannot be epsilon-tied or midpoint-sorted.
+/// Constant-coordinate edges have a one-dimensional existence proof:
+/// the other coordinate brackets the target at its endpoints. A global
+/// continuation certificate is still required to exclude competing roots.
+fn certify_unique_straight_edge(
+    controls: IntervalControls,
+    target: [f64; 2],
+    remaining: &mut usize,
+) -> Result<Option<[Interval; 2]>, SearchError> {
+    if !target.iter().all(|v| v.is_finite()) || interval_tensor_bounds(&controls).is_none() {
+        return Err(SearchError::InvalidInput);
+    }
+    let edges = [
+        (controls[0], 1, 0.0),
+        (controls[3], 1, 1.0),
+        (std::array::from_fn(|j| controls[j][0]), 0, 0.0),
+        (std::array::from_fn(|j| controls[j][3]), 0, 1.0),
+    ];
+    for (edge, fixed_parameter, endpoint) in edges {
+        *remaining = remaining.checked_sub(1).ok_or(SearchError::WorkLimit)?;
+        for axis in 0..2 {
+            if !edge.iter().all(|p| p[axis].lower == target[axis]
+                && p[axis].upper == target[axis]) {
+                continue;
+            }
+            let other = 1 - axis;
+            let a = edge[0][other];
+            let b = edge[3][other];
+            if !((a.upper < target[other] && b.lower > target[other])
+                || (b.upper < target[other] && a.lower > target[other])) {
+                continue;
+            }
+            *remaining = remaining.checked_sub(1).ok_or(SearchError::WorkLimit)?;
+            let continued = reparameterize_interval_tensor(controls,
+                [-0.25, -0.25, 1.25, 1.25]).ok_or(SearchError::InvalidInput)?;
+            let CellCertificate::Unique(local) = certify_interval_cell(&continued, target)?
+            else { return Ok(None) };
+            let mut root = local.map(|v| Interval::exact(-0.25).add(
+                Interval::exact(1.5).mul(v)));
+            // IVT proves an original-domain edge root. Global uniqueness
+            // identifies it with the certified root, so intersecting with
+            // the original domain and exact edge parameter preserves proof.
+            let variable = 1 - fixed_parameter;
+            root[variable].lower = root[variable].lower.max(0.0);
+            root[variable].upper = root[variable].upper.min(1.0);
+            if root[variable].lower > root[variable].upper
+                || root[fixed_parameter].lower > endpoint
+                || root[fixed_parameter].upper < endpoint {
+                return Err(SearchError::Unresolved);
+            }
+            root[fixed_parameter] = Interval::exact(endpoint);
+            return Ok(Some(root));
+        }
+    }
+    Ok(None)
+}
+
 pub(crate) fn preferred_certified_root(
     roots: &[[Interval; 2]],
     remaining: &mut usize,
@@ -1704,6 +1824,21 @@ impl CoonsPatch {
             let v = Interval::third(j);
             let nv = one.sub(v);
             std::array::from_fn(|i| {
+                // Coons interpolation reproduces each boundary cubic
+                // exactly. Preserve its original enclosure rather than
+                // introducing cancellation uncertainty in the formula.
+                if j == 0 {
+                    return bottom[i];
+                }
+                if j == 3 {
+                    return top[i];
+                }
+                if i == 0 {
+                    return left[j];
+                }
+                if i == 3 {
+                    return right[j];
+                }
                 let u = Interval::third(i);
                 let nu = one.sub(u);
                 std::array::from_fn(|axis| {
@@ -1974,23 +2109,19 @@ mod tests {
         let mut value = [-99.0];
         let mut bounds = [Interval::exact(-99.0)];
         let mut budget = 10000;
-        assert!(
-            mesh.sample([1.5, 1.5], 12, &mut budget, &mut value, &mut bounds)
-                .unwrap()
-        );
+        assert!(mesh
+            .sample([1.5, 1.5], 12, &mut budget, &mut value, &mut bounds)
+            .unwrap());
         assert_eq!(value, [0.8]);
         mesh.patches[1].geometry =
             CoonsPatch::try_new(rectangle().map(|p| [p[0] + 6.0, p[1]])).unwrap();
-        assert!(
-            mesh.sample([1.5, 1.5], 12, &mut budget, &mut value, &mut bounds)
-                .unwrap()
-        );
+        assert!(mesh
+            .sample([1.5, 1.5], 12, &mut budget, &mut value, &mut bounds)
+            .unwrap());
         assert_eq!(value, [0.2]);
-        assert!(
-            !mesh
-                .sample([99.0, 99.0], 12, &mut budget, &mut value, &mut bounds)
-                .unwrap()
-        );
+        assert!(!mesh
+            .sample([99.0, 99.0], 12, &mut budget, &mut value, &mut bounds)
+            .unwrap());
         assert_eq!(value, [0.2]);
         let mut zero = 0;
         assert_eq!(
@@ -2010,6 +2141,53 @@ mod tests {
         assert_eq!(value, [0.2]);
     }
     #[test]
+    fn certified_rectangle_corners_and_edges_preserve_sample_contract() {
+        let patch = ColoredPatch {
+            geometry: CoonsPatch::try_new(rectangle()).unwrap(),
+            values: vec![0.0, 0.0, 1.0, 1.0],
+            bounds: vec![
+                Interval::exact(0.0),
+                Interval::exact(0.0),
+                Interval::exact(1.0),
+                Interval::exact(1.0),
+            ],
+        };
+        // These straight edges have IVT existence and global uniqueness.
+        for (point, expected) in [
+            ([0.0, 0.0], 0.0),
+            ([0.0, 3.0], 0.0),
+            ([3.0, 0.0], 1.0),
+            ([3.0, 3.0], 1.0),
+        ] {
+            let mut values = [-99.0];
+            let mut bounds = [Interval::exact(-99.0)];
+            assert!(patch
+                .sample(point, 2, &mut 10000, &mut values, &mut bounds)
+                .unwrap());
+            assert_eq!(values, [expected]);
+            assert!(
+                bounds[0].lower <= f64::from(expected) && bounds[0].upper >= f64::from(expected)
+            );
+        }
+        for (point, expected) in [([0.0, 1.5], 0.0), ([3.0, 1.5], 1.0),
+            ([1.5, 0.0], 0.5), ([1.5, 3.0], 0.5)] {
+            let mut values = [-99.0];
+            let mut bounds = [Interval::exact(-99.0)];
+            let mut remaining = 10000;
+            assert!(patch.sample(point, 2, &mut remaining, &mut values, &mut bounds).unwrap());
+            assert_eq!(values, [expected]);
+            assert!(bounds[0].lower <= f64::from(expected)
+                && bounds[0].upper >= f64::from(expected));
+            assert!(remaining < 10000);
+            remaining = 10000;
+            assert!(patch
+                .sample([0.75, 2.25], 12, &mut remaining, &mut values, &mut bounds)
+                .unwrap());
+            assert!((values[0] - 0.25).abs() < 1e-6);
+        }
+    }
+
+    #[test]
     fn patch_sampling_connects_certified_geometry_to_parameters_and_preserves_misses() {
         let values = vec![0.0, 0.0, 1.0, 1.0];
         let patch = ColoredPatch {
@@ -2023,19 +2201,15 @@ mod tests {
         let mut value = [-99.0];
         let mut bounds = [Interval::exact(-99.0)];
         let mut budget = 10000;
-        assert!(
-            patch
-                .sample([0.75, 2.25], 12, &mut budget, &mut value, &mut bounds)
-                .unwrap()
-        );
+        assert!(patch
+            .sample([0.75, 2.25], 12, &mut budget, &mut value, &mut bounds)
+            .unwrap());
         assert!((value[0] - 0.25).abs() < 1e-6);
         assert!(bounds[0].lower <= 0.25 && bounds[0].upper >= 0.25);
         let old = value;
-        assert!(
-            !patch
-                .sample([10.0, 10.0], 12, &mut budget, &mut value, &mut bounds)
-                .unwrap()
-        );
+        assert!(!patch
+            .sample([10.0, 10.0], 12, &mut budget, &mut value, &mut bounds)
+            .unwrap());
         assert_eq!(value, old);
         let mut zero = 0;
         assert_eq!(
@@ -2054,11 +2228,9 @@ mod tests {
                 Interval::exact(1.0),
             ],
         };
-        assert!(
-            collapsed
-                .sample([2.0, 3.0], 12, &mut budget, &mut value, &mut bounds)
-                .unwrap()
-        );
+        assert!(collapsed
+            .sample([2.0, 3.0], 12, &mut budget, &mut value, &mut bounds)
+            .unwrap());
         assert_eq!(value, [0.75]);
     }
     #[test]
@@ -2098,14 +2270,12 @@ mod tests {
             }
         }
         let old = result[0];
-        assert!(
-            interpolate_corner_bounds(
-                [corners[0], corners[1], &[], corners[3]],
-                parameters,
-                &mut result
-            )
-            .is_none()
-        );
+        assert!(interpolate_corner_bounds(
+            [corners[0], corners[1], &[], corners[3]],
+            parameters,
+            &mut result
+        )
+        .is_none());
         assert_eq!(result[0].lower, old.lower);
         assert_eq!(result[0].upper, old.upper);
     }
@@ -2241,17 +2411,15 @@ mod tests {
         let mut missing = bits;
         let mut new_values = [-99.0; 2];
         let mut new_bounds = [Interval::exact(-99.0); 2];
-        assert!(
-            missing
-                .decoded_record(
-                    &encoding,
-                    None,
-                    &mut scratch[..2],
-                    &mut new_values,
-                    &mut new_bounds
-                )
-                .is_none()
-        );
+        assert!(missing
+            .decoded_record(
+                &encoding,
+                None,
+                &mut scratch[..2],
+                &mut new_values,
+                &mut new_bounds
+            )
+            .is_none());
         assert_eq!(missing.remaining(), Some(26));
         assert_eq!(new_values, [-99.0; 2]);
         let (flag, next) = bits
@@ -2275,10 +2443,9 @@ mod tests {
         let mut bits = PatchBits::new(&bytes);
         values = [-99.0; 4];
         bounds = [Interval::exact(-99.0); 4];
-        assert!(
-            bits.decoded_record(&invalid, None, &mut scratch, &mut values, &mut bounds)
-                .is_none()
-        );
+        assert!(bits
+            .decoded_record(&invalid, None, &mut scratch, &mut values, &mut bounds)
+            .is_none());
         assert_eq!(bits.remaining(), Some(56));
         assert_eq!(values, [-99.0; 4]);
         assert!(bounds.iter().all(|b| b.lower == -99.0 && b.upper == -99.0));
@@ -2352,17 +2519,15 @@ mod tests {
             assert_eq!(bounds[i].upper, old_bounds[i].upper);
         }
         assert!(decode_patch_components(&raw, 8, &decode, 4, &mut values, &mut bounds).is_none());
-        assert!(
-            decode_patch_components(
-                &[255, 255],
-                8,
-                &[[0.0, f64::MAX]],
-                2,
-                &mut values[..2],
-                &mut bounds[..2]
-            )
-            .is_none()
-        );
+        assert!(decode_patch_components(
+            &[255, 255],
+            8,
+            &[[0.0, f64::MAX]],
+            2,
+            &mut values[..2],
+            &mut bounds[..2]
+        )
+        .is_none());
         assert_eq!(values, old_values);
     }
     #[test]
@@ -2374,11 +2539,9 @@ mod tests {
         assert_eq!(patch.points[4][1], patch.points[3][1]);
         assert!(!patch.proves_common_v());
         assert!(patch.continue_decoded(1, [[1; 2]; 8], 16, decode).is_none());
-        assert!(
-            patch
-                .continue_decoded(1, [[1; 2]; 8], 8, [0.0, 4.0, 1.0, 1.0_f64.next_up()])
-                .is_none()
-        );
+        assert!(patch
+            .continue_decoded(1, [[1; 2]; 8], 8, [0.0, 4.0, 1.0, 1.0_f64.next_up()])
+            .is_none());
         let next = patch.continue_decoded(3, [[1; 2]; 8], 8, decode).unwrap();
         let source = next.encoded.unwrap();
         for i in 0..4 {
@@ -2409,16 +2572,12 @@ mod tests {
                 assert!(bounds[i][1].lower < 2.0 && bounds[i][1].upper > 2.0);
             }
         }
-        assert!(
-            patch
-                .continue_decoded(0, [[85, 170]; 8], 8, [0.0, 3.0, 0.0, 3.0])
-                .is_none()
-        );
-        assert!(
-            patch
-                .continue_decoded(1, [[256, 170]; 8], 8, [0.0, 3.0, 0.0, 3.0])
-                .is_none()
-        );
+        assert!(patch
+            .continue_decoded(0, [[85, 170]; 8], 8, [0.0, 3.0, 0.0, 3.0])
+            .is_none());
+        assert!(patch
+            .continue_decoded(1, [[256, 170]; 8], 8, [0.0, 3.0, 0.0, 3.0])
+            .is_none());
         assert_eq!(patch.points, rectangle());
     }
     #[test]
@@ -2584,16 +2743,12 @@ mod tests {
         }
         assert!(patch.continued_components(0, previous, new_refs).is_none());
         assert!(patch.continued_components(4, previous, new_refs).is_none());
-        assert!(
-            patch
-                .continued_components(1, previous, [&[], new_refs[1]])
-                .is_none()
-        );
-        assert!(
-            patch
-                .continued_components(1, previous, [&[f32::NAN, 0.0], new_refs[1]])
-                .is_none()
-        );
+        assert!(patch
+            .continued_components(1, previous, [&[], new_refs[1]])
+            .is_none());
+        assert!(patch
+            .continued_components(1, previous, [&[f32::NAN, 0.0], new_refs[1]])
+            .is_none());
     }
     #[test]
     fn constant_surface_selects_maximum_v_and_u_for_continuous_roots() {
@@ -2918,6 +3073,161 @@ mod tests {
         ));
     }
     #[test]
+    fn polynomial_continuation_moves_corner_root_inside_without_claiming_coverage() {
+        let controls = CoonsPatch::try_new(rectangle())
+            .unwrap()
+            .tensor_control_enclosures();
+        let domain = [-0.25, -0.25, 1.25, 1.25];
+        assert!(restrict_interval_tensor(controls, domain).is_none());
+        let continued = reparameterize_interval_tensor(controls, domain).unwrap();
+        let CellCertificate::Unique(root) = certify_interval_cell(&continued, [0.0, 0.0]).unwrap()
+        else {
+            panic!("continued affine corner should be an interior root")
+        };
+        for axis in 0..2 {
+            let mapped = Interval::exact(domain[axis])
+                .add(Interval::exact(domain[axis + 2] - domain[axis]).mul(root[axis]));
+            assert!(mapped.lower <= 0.0 && mapped.upper >= 0.0);
+        }
+        // A root outside the PDF domain also certifies in the continuation:
+        // domain membership therefore requires a separate proof.
+        assert!(matches!(
+            certify_interval_cell(&continued, [-0.3, 1.5]).unwrap(),
+            CellCertificate::Unique(_)
+        ));
+        for invalid in [
+            [f64::NAN, 0.0, 1.0, 1.0],
+            [0.0, 0.0, f64::INFINITY, 1.0],
+            [1.0, 0.0, 0.0, 1.0],
+        ] {
+            assert!(reparameterize_interval_tensor(controls, invalid).is_none());
+        }
+    }
+    #[test]
+    fn polynomial_continuation_encloses_curved_surface_on_original_domain() {
+        let mut points = rectangle();
+        points[1] = [-0.5, 0.75];
+        points[2] = [0.5, 2.25];
+        points[4] = [0.75, 4.0];
+        points[5] = [2.25, 2.0];
+        points[7] = [4.0, 2.25];
+        points[8] = [2.0, 0.75];
+        let patch = CoonsPatch::try_new(points).unwrap();
+        // Width two maps original dyadic samples to exact dyadic samples
+        // in the continuation, so this check needs no epsilon allowance.
+        let extended = reparameterize_interval_tensor(
+            patch.tensor_control_enclosures(),
+            [-0.5, -0.5, 1.5, 1.5],
+        )
+        .unwrap();
+        for i in 0..=8 {
+            for j in 0..=8 {
+                let u = f64::from(i) / 8.0;
+                let v = f64::from(j) / 8.0;
+                let expected = patch.point(u, v).unwrap();
+                let actual = interval_tensor_box(
+                    &extended,
+                    [
+                        Interval::exact((u + 0.5) / 2.0),
+                        Interval::exact((v + 0.5) / 2.0),
+                    ],
+                )
+                .unwrap();
+                for axis in 0..2 {
+                    assert!(
+                        actual[axis].lower <= expected[axis]
+                            && actual[axis].upper >= expected[axis],
+                        "u={u}, v={v}, axis={axis}"
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn exact_corner_witness_rejects_nearby_and_uncertain_coordinates() {
+        let controls = CoonsPatch::try_new(rectangle())
+            .unwrap()
+            .tensor_control_enclosures();
+        for (uv, point) in [
+            ([0.0, 0.0], [0.0, 0.0]),
+            ([1.0, 0.0], [3.0, 0.0]),
+            ([1.0, 1.0], [3.0, 3.0]),
+            ([0.0, 1.0], [0.0, 3.0]),
+        ] {
+            assert!(exact_parameter_witness(&controls, point, uv).unwrap());
+        }
+        assert!(!exact_parameter_witness(&controls, [f64::MIN_POSITIVE, 0.0], [0.0, 0.0]).unwrap());
+        let mut uncertain = controls;
+        uncertain[0][0][0] = Interval {
+            lower: -0.001,
+            upper: 0.001,
+        };
+        assert!(!exact_parameter_witness(&uncertain, [0.0, 0.0], [0.0, 0.0]).unwrap());
+        assert_eq!(
+            exact_parameter_witness(&controls, [0.0, 0.0], [-0.1, 0.0]),
+            Err(SearchError::InvalidInput)
+        );
+        assert_eq!(
+            exact_parameter_witness(&controls, [f64::NAN, 0.0], [0.0, 0.0]),
+            Err(SearchError::InvalidInput)
+        );
+    }
+    #[test]
+    fn unique_corner_requires_global_certificate_and_work_allowance() {
+        let controls = CoonsPatch::try_new(rectangle())
+            .unwrap()
+            .tensor_control_enclosures();
+        for (point, uv) in [
+            ([0.0, 0.0], [0.0, 0.0]),
+            ([3.0, 0.0], [1.0, 0.0]),
+            ([3.0, 3.0], [1.0, 1.0]),
+            ([0.0, 3.0], [0.0, 1.0]),
+        ] {
+            let mut remaining = 100;
+            let root = certify_unique_corner(controls, point, &mut remaining)
+                .unwrap()
+                .unwrap();
+            for axis in 0..2 {
+                assert_eq!(root[axis].lower, uv[axis]);
+                assert_eq!(root[axis].upper, uv[axis]);
+            }
+        }
+        // Every parameter maps to this point: a corner witness alone must
+        // not suppress other roots or claim global uniqueness.
+        let collapsed = CoonsPatch::try_new([[0.0; 2]; 12])
+            .unwrap()
+            .tensor_control_enclosures();
+        assert!(certify_unique_corner(collapsed, [0.0, 0.0], &mut 100)
+            .unwrap()
+            .is_none());
+        assert!(certify_unique_corner(controls, [1.5, 1.5], &mut 100)
+            .unwrap()
+            .is_none());
+        assert!(matches!(
+            certify_unique_corner(controls, [0.0, 0.0], &mut 0),
+            Err(SearchError::WorkLimit)
+        ));
+    }
+    #[test]
+    fn straight_edge_certificate_proves_non_corner_membership() {
+        let controls = CoonsPatch::try_new(rectangle()).unwrap().tensor_control_enclosures();
+        for (point, uv) in [([0.0, 1.5], [0.0, 0.5]),
+            ([3.0, 1.5], [1.0, 0.5]), ([0.75, 0.0], [0.25, 0.0]),
+            ([0.75, 3.0], [0.25, 1.0])] {
+            let root = certify_unique_straight_edge(controls, point, &mut 100).unwrap().unwrap();
+            for axis in 0..2 {
+                assert!(root[axis].lower <= uv[axis] && root[axis].upper >= uv[axis]);
+                assert!(unit(root[axis].lower) && unit(root[axis].upper));
+            }
+        }
+        assert!(certify_unique_straight_edge(controls, [-0.001, 1.5], &mut 100)
+            .unwrap().is_none());
+        assert!(certify_unique_straight_edge(controls, [0.0, 4.0], &mut 100)
+            .unwrap().is_none());
+        assert!(matches!(certify_unique_straight_edge(controls, [0.0, 1.5], &mut 0),
+            Err(SearchError::WorkLimit)));
+    }
+    #[test]
     fn interval_evaluation_encloses_curved_points_and_preserves_endpoints() {
         let mut patch = CoonsPatch::try_new(rectangle()).unwrap();
         patch.points[4] = [4.0, 6.0];
@@ -2964,11 +3274,9 @@ mod tests {
         })
         .unwrap();
         for u in [0.5 - 3.0_f64.sqrt() / 6.0, 0.5, 0.5 + 3.0_f64.sqrt() / 6.0] {
-            assert!(
-                cells
-                    .iter()
-                    .any(|r| r[0] <= u && u <= r[2] && r[1] <= 0.5 && 0.5 <= r[3])
-            );
+            assert!(cells
+                .iter()
+                .any(|r| r[0] <= u && u <= r[2] && r[1] <= 0.5 && 0.5 <= r[3]));
         }
         let mut budget = 1;
         visit_interval_candidates(
@@ -3260,11 +3568,9 @@ mod tests {
         )
         .unwrap();
         for expected_u in [0.5 - offset, 0.5, 0.5 + offset] {
-            assert!(
-                roots
-                    .iter()
-                    .any(|uv| (uv[0] - expected_u).abs() < 1e-10 && (uv[1] - 0.5).abs() < 1e-10)
-            );
+            assert!(roots
+                .iter()
+                .any(|uv| (uv[0] - expected_u).abs() < 1e-10 && (uv[1] - 0.5).abs() < 1e-10));
         }
         // A collapsed patch has infinitely many roots for its point. A local
         // result is legitimate, but does not certify all roots were found.
@@ -3321,11 +3627,9 @@ mod tests {
         })
         .unwrap();
         for u in [0.5 - 3.0_f64.sqrt() / 6.0, 0.5, 0.5 + 3.0_f64.sqrt() / 6.0] {
-            assert!(
-                cells
-                    .iter()
-                    .any(|r| r[0] <= u && u <= r[2] && r[1] <= 0.5 && 0.5 <= r[3])
-            );
+            assert!(cells
+                .iter()
+                .any(|r| r[0] <= u && u <= r[2] && r[1] <= 0.5 && 0.5 <= r[3]));
         }
         let mut zero = 0;
         assert_eq!(
@@ -3410,15 +3714,13 @@ mod tests {
             assert_eq!(children[0][3][i], children[2][0][i]);
         }
         let huge = [[[f64::MAX; 2]; 4]; 4];
-        assert!(
-            subdivide_tensor(huge)
-                .unwrap()
-                .iter()
-                .flatten()
-                .flatten()
-                .flatten()
-                .all(|x| x.is_finite())
-        );
+        assert!(subdivide_tensor(huge)
+            .unwrap()
+            .iter()
+            .flatten()
+            .flatten()
+            .flatten()
+            .all(|x| x.is_finite()));
         let mut invalid = controls;
         invalid[0][0][0] = f64::NAN;
         assert!(subdivide_tensor(invalid).is_none());
@@ -3459,15 +3761,13 @@ mod tests {
         assert_eq!(rgb, [0.25, 0.625, 0.25]);
         let parameters = [[0.0], [1.0], [0.0], [1.0]];
         let mut t = [-1.0];
-        assert!(
-            interpolate_corners(
-                parameters.each_ref().map(|c| c.as_slice()),
-                0.25,
-                0.75,
-                &mut t
-            )
-            .is_some()
-        );
+        assert!(interpolate_corners(
+            parameters.each_ref().map(|c| c.as_slice()),
+            0.25,
+            0.75,
+            &mut t
+        )
+        .is_some());
         assert_eq!(t, [0.625]);
         assert_eq!(t[0] * t[0], 0.390625);
         assert!(interpolate_corners(references, -0.1, 0.75, &mut rgb).is_none());
@@ -3476,15 +3776,13 @@ mod tests {
         assert_eq!(t, [0.625]);
         let mut invalid = corners;
         invalid[2][1] = f32::NAN;
-        assert!(
-            interpolate_corners(
-                invalid.each_ref().map(|c| c.as_slice()),
-                0.25,
-                0.75,
-                &mut rgb
-            )
-            .is_none()
-        );
+        assert!(interpolate_corners(
+            invalid.each_ref().map(|c| c.as_slice()),
+            0.25,
+            0.75,
+            &mut rgb
+        )
+        .is_none());
         assert_eq!(rgb, [0.25, 0.625, 0.25]);
     }
     #[test]
