@@ -1,5 +1,15 @@
 # 解析回归与异常输入验证
 
+## Type6 部分接入检查点（2026-10-08）
+
+生产 Shading 构造/点采样已接入 Coons 补丁。预算修订版 `cargo test -p pdf --lib color::shading --locked --quiet` 退出0，76项相关单元通过、541项筛选，日志 `/tmp/rzpdf-coons-sample-budget-tests.log`；包含直接分量/非线性函数顺序、域外及采样内存/工作额度拒绝后恢复。`cargo test -p pdf --test shading_workflow --locked --quiet` 原版退出0、6项通过，日志 `/tmp/rzpdf-coons-workflow-tests.log`；资源矩阵保留Type4/5并加入Type6，覆盖显示来源、导入和两种压缩策略严格重开。随后新增截断流注册失败恢复测试，修订专项仍待确认，不能计入该6项结果。
+
+后续专项确认：函数域修订模型专项退出0、76项通过，日志 `/tmp/rzpdf-coons-function-domain-tests.log`，补过窄Domain拒绝；注册恢复修订专项退出0、7项通过，日志 `/tmp/rzpdf-coons-workflow-recovery-tests.log`，补截断流注册拒绝不修改revision/保存字节及修复后成功。前段“仍待确认”是原6项检查点状态，由本段终态取代。
+
+Skia专项 `cargo test -p render triangle_and_coons_mesh_pixels_follow_parameter_interpolation --locked --quiet` 退出0，1项通过、36项筛选，日志 `/tmp/rzpdf-coons-pixel-tests.log`。单测试内保留Type4/5八组合并加入Type6四组合，覆盖直接灰度/平方函数×正常/镜像、明确像素中心值、BBox外空白及两保存策略重开后整页像素相同。
+
+这些是固定矩形的定向模型/流程/像素证据，不是完整Type6支持：边界根、连续根、任意曲面折叠全覆盖及独立阅读器验收仍未完成。未解决几何返回UnsupportedFeature，工作额度耗尽返回ResourceLimit，不能把报错当作域外不绘制。逐点额度和可见Vec容量检查不等同整页OperationBudget或完整临时函数输出计账。当前版本全工作区测试已启动，日志 `/tmp/rzpdf-coons-workspace-tests.log`，尚待终态；未运行fuzz。
+
 ## 三角网格 Shading 验证检查点（2026-10-08）
 
 Flate 本库对照补充：session 90428 退出0，十四页严格读取/渲染成功；第9–14页最新 Skia PNG 均已目视检查，与同文件 Preserve 的对应六页 RGBA 逐像素相同（200×120）。连同 MuPDF 的保存策略内一致性证据，仅证明此固定网格样本的压缩保存显示不变，不消除两后端原有色阶差异。

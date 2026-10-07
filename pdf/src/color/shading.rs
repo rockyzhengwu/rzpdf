@@ -1,4 +1,5 @@
 use super::shading_mesh::TriangleMesh;
+use super::shading_patch::{Interval, PatchMesh, SearchError};
 use std::io::{Read, Seek};
 
 use crate::{
@@ -19,10 +20,12 @@ pub enum ShadingGeometry {
     Radial([f32; 6]),
     FreeformMesh,
     LatticeMesh,
+    CoonsMesh,
 }
 
-/// Function-based, axial, radial and free-form triangle shading, independent
-/// of page graphics state.
+/// Function-based, axial, radial, triangle-mesh and partial Coons-patch shading,
+/// independent of page graphics state. Coons sampling explicitly rejects
+/// unresolved geometry/coverage rather than silently treating it as a miss.
 #[derive(Debug, Clone)]
 pub struct Shading {
     geometry: ShadingGeometry,
@@ -35,6 +38,9 @@ pub struct Shading {
     anti_alias: bool,
     retained_payload_bytes: usize,
     mesh: Option<TriangleMesh>,
+    patch_mesh: Option<PatchMesh>,
+    patch_work_limit: usize,
+    patch_byte_limit: usize,
 }
 
 fn invalid(message: &str) -> PdfError {
@@ -106,6 +112,8 @@ impl Shading {
             4 => return Err(invalid("Type4 requires a stream")),
             5 if object.as_stream().is_some() => ShadingGeometry::LatticeMesh,
             5 => return Err(invalid("Type5 requires a stream")),
+            6 if object.as_stream().is_some() => ShadingGeometry::CoonsMesh,
+            6 => return Err(invalid("Type6 requires a stream")),
             _ => return Err(PdfError::UnsupportedFeature(format!("ShadingType {kind}"))),
         };
         let color_object = ctx.resolve(required("ColorSpace")?)?;
@@ -122,7 +130,7 @@ impl Shading {
         let colorspace = ColorSpace::try_new(&color_object, ctx)?;
         if matches!(colorspace, ColorSpace::Pattern(_))
             || matches!(colorspace, ColorSpace::Indexed(_))
-                && (!matches!(kind, 4 | 5) || dict.get("Function").is_some())
+                && (!matches!(kind, 4 | 5 | 6) || dict.get("Function").is_some())
         {
             return Err(invalid(
                 "axial/radial ColorSpace must not be Pattern or Indexed",
@@ -170,7 +178,7 @@ impl Shading {
                 .ok_or_else(|| invalid("AntiAlias must be boolean"))?
                 .value(),
         };
-        let function = if matches!(kind, 4 | 5) && dict.get("Function").is_none() {
+        let function = if matches!(kind, 4 | 5 | 6) && dict.get("Function").is_none() {
             None
         } else {
             Some(ctx.resolve(required("Function")?)?)
@@ -306,6 +314,39 @@ impl Shading {
         } else {
             None
         };
+        let patch_mesh = if kind == 6 {
+            if !functions.is_empty() {
+                let decode: [f32; 6] = numbers(required("Decode")?, ctx)?;
+                let low = decode[4].min(decode[5]);
+                let high = decode[4].max(decode[5]);
+                for function in &functions {
+                    let domain = function.input_domain();
+                    if domain.len() != 2 || domain[0] > low || domain[1] < high {
+                        return Err(invalid(
+                            "patch function Domain must contain Decode parameter interval",
+                        ));
+                    }
+                }
+            }
+            let mesh = super::shading_patch_resource::from_stream(
+                object
+                    .as_stream()
+                    .ok_or_else(|| invalid("Type6 requires a stream"))?,
+                if functions.is_empty() { components } else { 1 },
+                ctx,
+                retained_payload_bytes,
+            )?;
+            retained_payload_bytes = retained_payload_bytes
+                .checked_add(
+                    mesh.retained_payload_bytes()
+                        .ok_or_else(|| PdfError::ResourceLimit("patch retained capacity".into()))?,
+                )
+                .filter(|bytes| *bytes <= ctx.limits().max_decoded_bytes)
+                .ok_or_else(|| PdfError::ResourceLimit("shading patches and functions".into()))?;
+            Some(mesh)
+        } else {
+            None
+        };
         Ok(Self {
             geometry,
             colorspace,
@@ -317,6 +358,9 @@ impl Shading {
             anti_alias,
             retained_payload_bytes,
             mesh,
+            patch_mesh,
+            patch_work_limit: ctx.limits().max_content_operations,
+            patch_byte_limit: ctx.limits().max_decoded_bytes,
         })
     }
 
@@ -368,6 +412,75 @@ impl Shading {
                 && (fraction <= 1.0 || self.extend[1])
         };
         let fraction = match self.geometry {
+            ShadingGeometry::CoonsMesh => {
+                let mesh = self
+                    .patch_mesh
+                    .as_ref()
+                    .ok_or_else(|| invalid("missing patch geometry"))?;
+                let count = mesh.components;
+                let allowance = self
+                    .patch_byte_limit
+                    .checked_sub(self.retained_payload_bytes)
+                    .ok_or_else(|| {
+                        PdfError::ResourceLimit("patch sample retained storage".into())
+                    })?;
+                let storage = |values: usize, bounds: usize| {
+                    values
+                        .checked_mul(std::mem::size_of::<f32>())?
+                        .checked_add(bounds.checked_mul(std::mem::size_of::<Interval>())?)
+                };
+                if storage(count, count).is_none_or(|bytes| bytes > allowance) {
+                    return Err(PdfError::ResourceLimit("patch sample storage".into()));
+                }
+                let mut values = Vec::new();
+                let mut bounds = Vec::new();
+                values
+                    .try_reserve_exact(count)
+                    .map_err(|_| PdfError::ResourceLimit("patch sample components".into()))?;
+                if storage(values.capacity(), count).is_none_or(|bytes| bytes > allowance) {
+                    return Err(PdfError::ResourceLimit(
+                        "patch sample component capacity".into(),
+                    ));
+                }
+                bounds
+                    .try_reserve_exact(count)
+                    .map_err(|_| PdfError::ResourceLimit("patch sample bounds".into()))?;
+                if storage(values.capacity(), bounds.capacity())
+                    .is_none_or(|bytes| bytes > allowance)
+                {
+                    return Err(PdfError::ResourceLimit(
+                        "patch sample buffer capacity".into(),
+                    ));
+                }
+                values.resize(count, 0.0);
+                bounds.resize(
+                    count,
+                    Interval {
+                        lower: 0.0,
+                        upper: 0.0,
+                    },
+                );
+                // Per-sample work cap, not an operation-wide budget lease.
+                let mut work = self.patch_work_limit;
+                let hit = mesh
+                    .sample([x, y], 20, &mut work, &mut values, &mut bounds)
+                    .map_err(|error| match error {
+                        SearchError::WorkLimit => {
+                            PdfError::ResourceLimit("patch sample work limit".into())
+                        }
+                        SearchError::InvalidInput => invalid("invalid patch sample"),
+                        SearchError::Unresolved => PdfError::UnsupportedFeature(
+                            "unresolved Type6 patch geometry or coverage ordering".into(),
+                        ),
+                    })?;
+                return if !hit {
+                    Ok(None)
+                } else if self.functions.is_empty() {
+                    self.colorspace.rgb(&ColorValue::new(values)).map(Some)
+                } else {
+                    self.evaluate_color(&values).map(Some)
+                };
+            }
             ShadingGeometry::FreeformMesh | ShadingGeometry::LatticeMesh => {
                 let mesh = self
                     .mesh
@@ -480,6 +593,7 @@ impl Shading {
             ShadingGeometry::FunctionBased { .. }
                 | ShadingGeometry::FreeformMesh
                 | ShadingGeometry::LatticeMesh
+                | ShadingGeometry::CoonsMesh
         ) {
             return Err(invalid("this shading requires point sampling"));
         }
@@ -526,6 +640,78 @@ mod tests {
         SyntaxParser::new(StreamReader::try_new(Cursor::new(source.as_bytes().to_vec())).unwrap())
             .get_object()
             .unwrap()
+    }
+
+    #[test]
+    fn type6_coons_stream_interpolates_parameters_before_function() {
+        use crate::objects::pdf_stream::PdfStream;
+        let doc = PdfDocument::new().unwrap();
+        // PDF boundary order, a 3x3 rectangle, then four gray corners.
+        let mut data = vec![0];
+        for point in [
+            [0, 0],
+            [0, 85],
+            [0, 170],
+            [0, 255],
+            [85, 255],
+            [170, 255],
+            [255, 255],
+            [255, 170],
+            [255, 85],
+            [255, 0],
+            [170, 0],
+            [85, 0],
+        ] {
+            data.extend(point);
+        }
+        data.extend([0, 0, 255, 255]);
+        for function in ["", "/Function << /FunctionType 2 /Domain [0 1] /N 2 >>"] {
+            let object = PdfObject::PdfStream(PdfStream::new(
+                parse(&format!("<< /ShadingType 6 /ColorSpace /DeviceGray /BitsPerFlag 8 /BitsPerCoordinate 8 /BitsPerComponent 8 /Decode [0 3 0 3 0 1] {function} >>")).into_dict().unwrap(),
+                data.clone(),
+            ));
+            let shading = Shading::try_new(&object, doc.ctx()).unwrap();
+            assert!(matches!(shading.geometry(), ShadingGeometry::CoonsMesh));
+            assert_eq!(
+                shading.color_at_point(0.75, 2.25).unwrap().unwrap().r(),
+                if function.is_empty() { 64 } else { 16 }
+            );
+            assert!(shading.color_at_point(4.0, 1.5).unwrap().is_none());
+            assert!(shading.color_at(0.5).is_err());
+            assert!(shading.retained_payload_bytes() > 0);
+            let mut limited = shading.clone();
+            limited.patch_byte_limit = limited.retained_payload_bytes;
+            assert!(matches!(
+                limited.color_at_point(0.75, 2.25),
+                Err(PdfError::ResourceLimit(_))
+            ));
+            limited.patch_byte_limit = shading.patch_byte_limit;
+            limited.patch_work_limit = 0;
+            assert!(matches!(
+                limited.color_at_point(0.75, 2.25),
+                Err(PdfError::ResourceLimit(_))
+            ));
+            limited.patch_work_limit = shading.patch_work_limit;
+            assert_eq!(
+                limited.color_at_point(0.75, 2.25).unwrap().unwrap().r(),
+                if function.is_empty() { 64 } else { 16 }
+            );
+        }
+        let narrow = PdfObject::PdfStream(PdfStream::new(
+            parse("<< /ShadingType 6 /ColorSpace /DeviceGray /BitsPerFlag 8 /BitsPerCoordinate 8 /BitsPerComponent 8 /Decode [0 3 0 3 0 1] /Function << /FunctionType 2 /Domain [0.2 0.8] /N 2 >> >>").into_dict().unwrap(),
+            data,
+        ));
+        assert!(matches!(
+            Shading::try_new(&narrow, doc.ctx()),
+            Err(PdfError::ColorError(_))
+        ));
+        assert!(
+            Shading::try_new(
+                &parse("<< /ShadingType 6 /ColorSpace /DeviceGray >>"),
+                doc.ctx()
+            )
+            .is_err()
+        );
     }
 
     #[test]

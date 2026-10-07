@@ -729,22 +729,32 @@ impl Device for SkiaRender {
 mod tests {
     use super::*;
     #[test]
-    fn triangle_mesh_pixels_follow_parameter_interpolation() {
+    fn triangle_and_coons_mesh_pixels_follow_parameter_interpolation() {
         use pdf::{document::{PdfDocument, resource_manager::ResourceKind,
                 save_options::{SaveOptions, StreamCompression}},
             io::stream_reader::StreamReader, objects::{PdfObject, pdf_stream::PdfStream},
             page::page_builder::PageBuilder, parser::syntax::SyntaxParser};
-        for (nonlinear, mirrored, lattice) in [(false, false, false), (true, false, false),
-            (false, true, false), (true, true, false), (false, false, true),
-            (true, false, true), (false, true, true), (true, true, true)] {
+        for (nonlinear, mirrored, kind) in [(false, false, 4), (true, false, 4),
+            (false, true, 4), (true, true, 4), (false, false, 5),
+            (true, false, 5), (false, true, 5), (true, true, 5),
+            (false, false, 6), (true, false, 6), (false, true, 6), (true, true, 6)] {
             let doc = PdfDocument::new().unwrap();
             doc.add_page_with_builder(0, PageBuilder::new().size(40.0, 20.0)).unwrap();
             let function = if nonlinear { "/Function << /FunctionType 2 /Domain [0 1] /N 2 >>" } else { "" };
-            let geometry = if lattice { "/ShadingType 5 /VerticesPerRow 2" } else { "/ShadingType 4 /BitsPerFlag 8" };
+            let geometry = match kind { 5 => "/ShadingType 5 /VerticesPerRow 2",
+                6 => "/ShadingType 6 /BitsPerFlag 8", _ => "/ShadingType 4 /BitsPerFlag 8" };
             let source = format!("<< {geometry} /ColorSpace /DeviceGray /BitsPerCoordinate 8 /BitsPerComponent 8 /Decode [0 40 0 20 0 1] /BBox [4 4 36 16] {function} >>");
             let dict = SyntaxParser::new(StreamReader::try_new(std::io::Cursor::new(source.into_bytes())).unwrap())
                 .get_object().unwrap().into_dict().unwrap();
-            let data = if lattice { vec![0, 0, 0, 255, 0, 255, 0, 255, 0, 255, 255, 255] }
+            let data = if kind == 6 {
+                let mut bytes = vec![0];
+                for point in [[0, 0], [0, 85], [0, 170], [0, 255], [85, 255], [170, 255],
+                    [255, 255], [255, 170], [255, 85], [255, 0], [170, 0], [85, 0]] {
+                    bytes.extend(point);
+                }
+                bytes.extend([0, 0, 255, 255]);
+                bytes
+            } else if kind == 5 { vec![0, 0, 0, 255, 0, 255, 0, 255, 0, 255, 255, 255] }
                 else { vec![0, 0, 0, 0, 0, 255, 0, 255, 0, 0, 255, 0, 1, 255, 255, 255] };
             let id = doc.try_insert_object(PdfObject::PdfStream(PdfStream::new(dict, data))).unwrap();
             let name = doc.resources().register_existing(0, ResourceKind::Shading, id).unwrap();

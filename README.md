@@ -188,6 +188,8 @@ SaveOptions 位于 `pdf::document::save_options`；`save_to_bytes/writer/file_wi
 
 Separation 的普通专色通过替代空间/tint-transform 作显示近似；`/All` 忽略该函数并用 `1 - tint` 显示灰度（不是原生分色输出）。`/None` 直接 RGB 转换明确返回 UnsupportedFeature；直接解释/DisplayList 回放会抑制对应路径填充/描边，文字转换为有效绘制模式但保留裁剪，普通图像仍使用自身颜色空间。DisplayList 保留原对象以支持编辑与文本提取。一位 stencil XObject 已接入解析和当前填充色绘制；None 填充会抑制 stencil。None 的独立阅读器像素对照与完整图像验收未完成。
 
+Type6 Coons 补丁已有生产 Shading 构造及点采样入口：连续位流、共享控制点/角点、保留容量计账，以及认证参数搜索后插值分量/参数再求函数。此为部分实现：未解决几何或覆盖顺序明确返回 UnsupportedFeature，工作额度耗尽返回 ResourceLimit，不将候选失败当作域外；边界根、连续根、完整页面像素/独立阅读器与性能验收仍未完成，不应据此认定完整 Type6 支持。采样额度为逐点上限，并非整页共享 OperationBudget。
+
 PDF Type 3 **Stitching functions**（不同于 Type3 字体）已支持单输入分段求值、Domain 裁剪、正向/反向 Encode、可选 Range 输出裁剪及嵌套函数；构造时校验子函数输入/输出维度，并保留深度和总节点限额。Type 4 PostScript calculator 函数已有受限求值实现；具体支持边界及回归见 TODO。此功能不代表全部 Shading/Pattern 或操作级聚合内存预算已经完成。
 
 Type 4 构造支持间接 Domain/Range 及数组内间接数值，先检查非空成对、有限有序参数和每数组条目/字节上限，再解码函数流并编译受限 calculator 程序；求值时仍检查运行额度、输入输出维度和数值类型，构造成功不保证任意输入均能成功求值。数组检查仍是单项 Limits，不是两个参数数组与流解码的聚合内存预算。

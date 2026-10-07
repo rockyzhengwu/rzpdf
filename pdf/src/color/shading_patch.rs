@@ -65,6 +65,7 @@ pub(crate) fn interpolate_corner_bounds(
     Some(())
 }
 
+#[derive(Debug, Clone)]
 pub(crate) struct ColoredPatch {
     pub(crate) geometry: CoonsPatch,
     pub(crate) values: Vec<f32>,
@@ -145,12 +146,39 @@ impl ColoredPatch {
     }
 }
 
+#[derive(Debug, Clone)]
 pub(crate) struct PatchMesh {
     pub(crate) patches: Vec<ColoredPatch>,
     pub(crate) components: usize,
 }
 
 impl PatchMesh {
+    /// Retained visible heap storage, including unused Vec capacity. Inline
+    /// geometry is already included in the patch allocation. This excludes
+    /// temporary decoder storage, allocator metadata and operation leases.
+    pub(crate) fn retained_payload_bytes(&self) -> Option<usize> {
+        self.patches.iter().try_fold(
+            self.patches
+                .capacity()
+                .checked_mul(std::mem::size_of::<ColoredPatch>())?,
+            |total, patch| {
+                total
+                    .checked_add(
+                        patch
+                            .values
+                            .capacity()
+                            .checked_mul(std::mem::size_of::<f32>())?,
+                    )?
+                    .checked_add(
+                        patch
+                            .bounds
+                            .capacity()
+                            .checked_mul(std::mem::size_of::<Interval>())?,
+                    )
+            },
+        )
+    }
+
     /// Later patches paint over earlier patches. An unresolved later patch
     /// must not be skipped as if it were a proven miss.
     pub(crate) fn sample(
@@ -836,16 +864,18 @@ pub(crate) fn visit_certified_roots(
             [(rect[0] + rect[2]) * 0.5, (rect[1] + rect[3]) * 0.5]
         };
         let children = if first {
-            [
+            let domains = [
                 [0.0, 0.0, 0.375, 0.375],
                 [0.375, 0.0, 1.0, 0.375],
                 [0.0, 0.375, 0.375, 1.0],
                 [0.375, 0.375, 1.0, 1.0],
-            ]
-            .map(|domain| {
-                restrict_interval_tensor(controls, domain)
-                    .expect("validated controls and dyadic domain")
-            })
+            ];
+            let mut children = [controls; 4];
+            for (child, domain) in children.iter_mut().zip(domains) {
+                *child =
+                    restrict_interval_tensor(controls, domain).ok_or(SearchError::InvalidInput)?;
+            }
+            children
         } else {
             subdivide_interval_tensor(controls).ok_or(SearchError::InvalidInput)?
         };
@@ -1898,6 +1928,35 @@ impl CoonsPatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn retained_payload_counts_capacity_without_double_counting_geometry() {
+        let mut patches = Vec::with_capacity(3);
+        let mut values = Vec::with_capacity(12);
+        values.extend([0.5; 4]);
+        let mut bounds = Vec::with_capacity(10);
+        bounds.extend([Interval::exact(0.5); 4]);
+        let expected = patches.capacity() * std::mem::size_of::<ColoredPatch>()
+            + values.capacity() * std::mem::size_of::<f32>()
+            + bounds.capacity() * std::mem::size_of::<Interval>();
+        patches.push(ColoredPatch {
+            geometry: CoonsPatch::try_new(rectangle()).unwrap(),
+            values,
+            bounds,
+        });
+        let mut mesh = PatchMesh {
+            patches,
+            components: 1,
+        };
+        assert_eq!(mesh.retained_payload_bytes(), Some(expected));
+        mesh.patches.clear();
+        assert_eq!(
+            mesh.retained_payload_bytes(),
+            Some(mesh.patches.capacity() * std::mem::size_of::<ColoredPatch>())
+        );
+        mesh.patches.shrink_to_fit();
+        assert_eq!(mesh.retained_payload_bytes(), Some(0));
+    }
+
     #[test]
     fn mesh_sampling_respects_later_patches_and_never_skips_unresolved_geometry() {
         let make = |geometry, gray: f32| ColoredPatch {

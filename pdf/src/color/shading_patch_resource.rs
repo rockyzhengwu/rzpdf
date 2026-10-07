@@ -1,4 +1,4 @@
-//! Resource adapter under test until Type6 is wired into public Shading.
+//! Type6 stream resource adapter with explicit retained-storage accounting.
 use std::io::{Read, Seek};
 
 use super::shading_patch::{PatchEncoding, PatchMesh, PatchStreamError, decode_patch_stream};
@@ -92,7 +92,7 @@ pub(crate) fn from_stream<R: Read + Seek>(
     allowance = allowance
         .checked_sub(data.capacity() - data.len())
         .ok_or_else(|| PdfError::ResourceLimit("patch decoded input capacity".into()))?;
-    decode_patch_stream(
+    let mesh = decode_patch_stream(
         &data,
         &PatchEncoding {
             flag_bits,
@@ -109,7 +109,15 @@ pub(crate) fn from_stream<R: Read + Seek>(
         | PatchStreamError::MemoryLimit
         | PatchStreamError::Allocation => PdfError::ResourceLimit(format!("patch mesh {error:?}")),
         _ => invalid(&format!("invalid mesh stream: {error:?}")),
-    })
+    })?;
+    let payload = mesh
+        .retained_payload_bytes()
+        .and_then(|bytes| bytes.checked_add(retained))
+        .ok_or_else(|| PdfError::ResourceLimit("patch retained payload overflow".into()))?;
+    if payload > limits.max_decoded_bytes {
+        return Err(PdfError::ResourceLimit("patch retained payload".into()));
+    }
+    Ok(mesh)
 }
 
 #[cfg(test)]
@@ -137,6 +145,21 @@ mod tests {
         let mesh = from_stream(&stream(source, data.clone()), 1, doc.ctx(), 0).unwrap();
         assert_eq!(mesh.patches.len(), 2);
         assert_eq!(mesh.patches[1].values, [0.0, 1.0, 1.0, 0.0]);
+        let cloned = mesh.clone();
+        assert_eq!(cloned.patches[1].values, mesh.patches[1].values);
+        assert!(mesh.retained_payload_bytes().unwrap() > 0);
+        // Existing retained storage leaves no room for input/configuration.
+        // A rejected construction must not poison a later independent retry.
+        assert!(matches!(
+            from_stream(
+                &stream(source, data.clone()),
+                1,
+                doc.ctx(),
+                doc.ctx().limits().max_decoded_bytes
+            ),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        assert!(from_stream(&stream(source, data.clone()), 1, doc.ctx(), 0).is_ok());
         assert!(
             from_stream(
                 &stream(

@@ -18,6 +18,53 @@ fn parse(source: &str) -> PdfObject {
 }
 
 #[test]
+fn truncated_coons_registration_is_atomic_and_repairable() {
+    let doc = PdfDocument::new().unwrap();
+    doc.add_page(0).unwrap();
+    let dict = parse("<< /ShadingType 6 /ColorSpace /DeviceGray /BitsPerFlag 8 /BitsPerCoordinate 8 /BitsPerComponent 8 /Decode [0 3 0 3 0 1] >>").into_dict().unwrap();
+    // Complete flag-0 record: flag + twelve coordinate pairs + four colors.
+    let mut valid = vec![0; 29];
+    valid[25..].fill(255);
+    let id = doc
+        .try_insert_object(PdfObject::PdfStream(PdfStream::new(
+            dict.clone(),
+            valid[..28].to_vec(),
+        )))
+        .unwrap();
+    let revision = doc.revision();
+    let before = doc.save_to_bytes().unwrap();
+    assert!(
+        doc.resources()
+            .register_existing(0, ResourceKind::Shading, id)
+            .is_err()
+    );
+    assert_eq!(doc.revision(), revision);
+    assert_eq!(doc.save_to_bytes().unwrap(), before);
+    doc.update_object(id, PdfObject::PdfStream(PdfStream::new(dict, valid)))
+        .unwrap();
+    let name = doc
+        .resources()
+        .register_existing(0, ResourceKind::Shading, id)
+        .unwrap();
+    doc.replace_page_contents(0, format!("/{name} sh").into_bytes())
+        .unwrap();
+    let list = doc.get_page(0).unwrap().display_list().unwrap();
+    assert!(list.diagnostics().is_empty());
+    let [PageObject::Shading(object)] = list.objects() else {
+        panic!("expected repaired Coons shading")
+    };
+    assert_eq!(
+        object
+            .shading
+            .color_at_point(0.0, 0.0)
+            .unwrap()
+            .unwrap()
+            .r(),
+        255
+    );
+}
+
+#[test]
 fn incomplete_lattice_registration_is_atomic_and_repairable() {
     let doc = PdfDocument::new().unwrap();
     doc.add_page(0).unwrap();
@@ -170,8 +217,15 @@ fn invalid_mesh_registration_preserves_revision_and_saved_bytes() {
 }
 
 #[test]
-fn type4_and_type5_mesh_resources_import_and_both_stream_strategies() {
-    for (nonlinear, lattice) in [(false, false), (true, false), (false, true), (true, true)] {
+fn type4_type5_and_type6_resources_import_and_both_stream_strategies() {
+    for (nonlinear, kind) in [
+        (false, 4),
+        (true, 4),
+        (false, 5),
+        (true, 5),
+        (false, 6),
+        (true, 6),
+    ] {
         let doc = PdfDocument::new().unwrap();
         doc.add_page_with_builder(0, PageBuilder::new().size(40.0, 20.0))
             .unwrap();
@@ -180,12 +234,32 @@ fn type4_and_type5_mesh_resources_import_and_both_stream_strategies() {
         } else {
             ""
         };
-        let geometry = if lattice {
-            "/ShadingType 5 /VerticesPerRow 2"
-        } else {
-            "/ShadingType 4 /BitsPerFlag 8"
+        let geometry = match kind {
+            5 => "/ShadingType 5 /VerticesPerRow 2",
+            6 => "/ShadingType 6 /BitsPerFlag 8",
+            _ => "/ShadingType 4 /BitsPerFlag 8",
         };
-        let data = if lattice {
+        let data = if kind == 6 {
+            let mut bytes = vec![0];
+            for point in [
+                [0, 0],
+                [0, 85],
+                [0, 170],
+                [0, 255],
+                [85, 255],
+                [170, 255],
+                [255, 255],
+                [255, 170],
+                [255, 85],
+                [255, 0],
+                [170, 0],
+                [85, 0],
+            ] {
+                bytes.extend(point);
+            }
+            bytes.extend([0, 0, 255, 255]);
+            bytes
+        } else if kind == 5 {
             vec![0, 0, 0, 255, 0, 255, 0, 255, 0, 255, 255, 255]
         } else {
             vec![0, 0, 0, 0, 0, 255, 0, 255, 0, 0, 255, 0, 1, 255, 255, 255]

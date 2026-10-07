@@ -93,6 +93,42 @@ P0 的普通回归、错误处理、预算和真实样本登记贯穿上述工�
 
 ### 实施记录
 
+- 2026-10-08 全量过程结果：同一工作区门禁session5708日志已确认617项PDF单元全部通过（0失败/忽略），日志 `/tmp/rzpdf-coons-workspace-tests.log`；原Cargo仍运行，集成/render/doc目标及最终退出码未返回，不将此阶段结果当全工作区通过。本轮未改Rust源码、未重启、未提交、未运行fuzz，整体目标保持未完成。
+
+- 2026-10-08 测试文档同步与全量观察：docs/testing补函数域76项、注册恢复7项与Skia12组合单项终态证据，明确固定矩形不证明完整Type6。全工作区session5708同句柄轮询仍运行，ps确认Cargo PID40699及其rustc集成目标编译子进程存活，尚无终态；本轮未改Rust源码、未重启测试，git diff --check通过。保持当前门禁观察，不把编译警告/存活当测试通过；未提交、未运行fuzz。
+
+- 2026-10-08 Type6像素专项确认：session76506本轮最终轮询退出0，1项Skia测试通过（内含Type4/5/6直接/非线性×正常/镜像共12组合及两保存策略整页像素相同），日志 `/tmp/rzpdf-coons-pixel-tests.log`；取代该专项等待状态。该固定矩形/BBox证据不证明边界根、任意曲面或独立阅读器一致；全工作区session5708仍待终态。
+
+- 2026-10-08 当前工作区全量门禁启动：冻结本轮Rust源码，启动 `cargo test --workspace --locked --quiet` session5708，Cargo PID40699本轮ps确认存活，日志 `/tmp/rzpdf-coons-workspace-tests.log`，尚未计通过。像素专项session76506同句柄轮询仍运行，日志已进入running 1 test（该测试内含12组合），不是终态；保持原进程观察，不重启。该新门禁与此前退出码缺失的旧三角网格门禁不同，须分别记账。git diff --check通过，未提交、未运行fuzz，完整目标未完成。
+
+- 2026-10-08 函数域修订专项确认：session59546本轮最后轮询退出0，76项shading相关单元通过（541 filtered），日志 `/tmp/rzpdf-coons-function-domain-tests.log`，取代该专项等待状态；像素专项session76506仍待终态，不宣称全量通过。
+
+- 2026-10-08 验证等待：本轮未修改Rust源码；函数域专项session59546与像素专项session76506经原句柄多次轮询仍运行，ps同时确认Cargo及各自PDF/render测试子进程存活。日志仍为编译警告尾部，尚无测试终态，不据此报通过或重启；git diff --check通过。完整Type6与整体目标保持未完成，未提交、未运行fuzz。
+
+- 2026-10-08 Type6像素矩阵扩展：现有Skia三角网格像素测试加入Type6直接灰度/平方函数×正常/镜像四组合，保留Type4/5八组合，共12组合，验证明确像素中心值、BBox外空白，以及Preserve/FlateUnencoded严格重开后整页像素一致。启动render专项session76506，日志 `/tmp/rzpdf-coons-pixel-tests.log`，尚未计通过；函数域修订模型session59546仍待确认。注册恢复专项session81879退出0、7项集成通过，日志 `/tmp/rzpdf-coons-workflow-recovery-tests.log`；工作区编译session71418退出0，日志 `/tmp/rzpdf-coons-workspace-check.log`，不等于工作区全量测试。git diff --check通过；边界/连续根、独立阅读器、完整渲染验收未完成，未提交、未运行fuzz。
+
+- 2026-10-08 Type6函数域拒绝补充：模型回归新增Function Domain [0.2,0.8]不能包含Decode参数[0,1]时构造返回ColorError，避免采样时悄然裁剪替代原参数语义。该新断言尚未执行；启动工作区编译 `cargo check --workspace --locked --quiet` session71418，日志 `/tmp/rzpdf-coons-workspace-check.log`，本轮同句柄轮询仍运行，注册修复专项session81879亦仍运行，不重启、不计通过。git diff --check通过，未提交、未运行fuzz，完整计划保持未完成。
+
+- 2026-10-08 Type6流程专项确认：session71037退出0，6项shading_workflow集成通过，日志 `/tmp/rzpdf-coons-workflow-tests.log`，包含Type4/5保留组合与Type6直接/平方函数资源注册、显示来源、导入及两保存策略严格重开。新增注册失败恢复未包含在该启动版本中，已启动修订专项session81879，日志 `/tmp/rzpdf-coons-workflow-recovery-tests.log`，本轮同句柄轮询仍运行、尚未计通过。docs/testing同步定向证据/未完成边界，未宣称全量或完整Type6交付；未提交、未运行fuzz。
+
+- 2026-10-08 Type6注册失败恢复回归：新增截断flag0记录拒绝注册、revision及保存字节不变，修复为完整记录后同一对象可注册并生成无诊断显示事件，恒定端点补丁点采样为白色。此新测试尚未执行；既有资源/导入/两保存策略专项session71037本轮同句柄轮询仍运行，保持观察，不将新增源码算进旧专项范围。预算修订模型session47741退出0、76项通过（541 filtered），日志 `/tmp/rzpdf-coons-sample-budget-tests.log`。git diff --check通过，完整Type6边界/连续根和独立像素验收仍未完成，未提交、未运行fuzz。
+
+- 2026-10-08 Type6公共流程回归扩展：现有Type4/5资源工作流加入Type6直接灰度/平方函数矩阵，验证注册、显示来源、三个内部点、域外、跨文档导入，以及原始/导入文档的Preserve与FlateUnencoded严格保存重开；保留Type4/5所有既有组合。启动 `cargo test -p pdf --test shading_workflow --locked --quiet` session71037，日志 `/tmp/rzpdf-coons-workflow-tests.log`，尚未计通过；预算模型专项session47741本轮同句柄轮询仍运行，不重启。git diff --check通过；此流程样本不替代边界/折叠/页面像素或独立阅读器验收，P4仍未完成，未提交、未运行fuzz。
+
+- 2026-10-08 生产接入模型专项确认：session59003退出0，76项shading相关单元通过（541 filtered），日志 `/tmp/rzpdf-coons-production-tests.log`；不覆盖随后新增采样预算断言。预算修订编译检查日志无error，命令链session95702退出0、diff检查通过；启动修订版同范围测试session47741，日志 `/tmp/rzpdf-coons-sample-budget-tests.log`，尚未计通过，不宣称全量或完整Type6验收。
+
+- 2026-10-08 Type6采样临时预算：Shading记录构造时max_decoded_bytes，采样从已有保留载荷扣剩余额度，分配前检查分量/区间缓冲请求总量，每次reserve后检查实际容量；补无剩余内存/零工作额度拒绝及恢复后可采样断言。编译检查session95702运行中，日志 `/tmp/rzpdf-coons-sample-budget-check.log`；原模型专项session59003同句柄轮询仍运行，仅覆盖启动时版本，不将后加预算断言视为已通过。仍不包括函数求值输出/栈/allocator元数据或整页OperationBudget，不宣称完整AR-03；未提交、未运行fuzz。
+
+- 2026-10-08 Type6生产模型接入：去掉patch模块cfg(test)，Shading新增CoonsMesh持有入口、Function可选及参数Domain包含校验、实际容量记账与逐点工作上限，先认证/插值参数再求函数及ColorSpace；未解决几何/顺序返回UnsupportedFeature，额度耗尽ResourceLimit，不误判域外。writer不支持诊断样本改Type7。`cargo check -p pdf --locked --quiet` session19650退出0，日志 `/tmp/rzpdf-coons-production-check.log`；新增矩形直接灰度/平方函数、域外及非流拒绝模型测试，`cargo test -p pdf --lib color::shading --locked --quiet` session59003仍运行，日志 `/tmp/rzpdf-coons-production-tests.log`，未计通过。之前资源保留专项session35216退出0、54项通过（562 filtered）。README注明部分支持；边界/连续根、逐点缓冲聚合预算、完整绘制/导入保存/独立阅读器验收仍待实现，P4-03不勾选。未提交、未运行fuzz。
+
+- 2026-10-08 细分错误传播专项确认：session31628退出0，53项独立patch测试通过，日志 `/tmp/rzpdf-coons-fallible-split.log`，取代该专项运行状态；资源保留Cargo专项仍待终态，不宣称当前工作区全量通过。
+
+- 2026-10-08 Type6搜索错误传播：首次偏移细分不再expect曲面限制成功，使用固定四块缓冲并向外传播InvalidInput，保持原分区/遍历顺序和工作额度语义。独立rustc专项session31628运行中，日志 `/tmp/rzpdf-coons-fallible-split.log`；资源保留专项session35216经本轮同句柄轮询仍运行，日志 `/tmp/rzpdf-coons-retained-adapter.log`，两者均未计通过，不因启动延迟重启。git diff --check通过，生产Type6/完整边界与连续根验收仍未完成，未提交、未运行fuzz。
+
+- 2026-10-08 Type6资源保留预算接入：资源适配在完整流解析后使用PatchMesh实际容量统计，与已有载荷checked聚合并检查max_decoded_bytes；补容量有值、克隆数据及预算拒绝后独立重试回归。启动 `cargo test -p pdf --lib color::shading_patch --locked --quiet`，session35216本轮轮询仍运行，日志 `/tmp/rzpdf-coons-retained-adapter.log`，尚未计通过；git diff --check通过。后续继续观察同一句柄，不因启动延迟重跑。仍是cfg(test)范围资源适配，非生产Shading接入或全局预分配预算完成；未提交、未运行fuzz。
+
+- 2026-10-08 Type6生产接入前保留载荷统计：PatchMesh按patch容器与各角点分量/区间Vec实际capacity进行checked统计，内嵌几何不重复计费；补Debug/Clone供Shading持有。新增空余容量、clear保留容量及释放后归零回归。独立rustc专项session66388退出0，53项patch测试通过，日志 `/tmp/rzpdf-coons-retained-tests.log`，git diff --check通过。此专项不包含资源适配/Cargo全量；模块仍cfg(test)，生产接入、完整OperationBudget和Type6交付未完成。本轮未提交、未运行fuzz。
+
 - 2026-10-08 提交检查点：资源适配修正版专项 session1356 退出0，53项测试通过、562项被筛选，日志 `/tmp/rzpdf-coons-resource-adapter-recheck.log`；git diff --check通过。本次提交包含Type6几何、认证搜索、流解析/采样基础及测试范围内资源适配，仍以cfg(test)注册，未接入生产Shading/渲染，不宣称Type6完整支持或当前工作区全量通过。不包含来源未确认的 `test.png`，不推送远端、不运行 fuzz。
 
 - 2026-10-08 资源适配编译修正：session3909退出101，PdfArray不支持下标访问；已改为get并传播维度错误，重启修正版专项，日志 `/tmp/rzpdf-coons-resource-adapter-recheck.log`，尚未计通过。此前运行状态由此取代，不把编译失败当测试通过。
