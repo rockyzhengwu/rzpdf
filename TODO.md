@@ -93,6 +93,150 @@ P0 的普通回归、错误处理、预算和真实样本登记贯穿上述工�
 
 ### 实施记录
 
+- 2026-10-08 提交检查点：资源适配修正版专项 session1356 退出0，53项测试通过、562项被筛选，日志 `/tmp/rzpdf-coons-resource-adapter-recheck.log`；git diff --check通过。本次提交包含Type6几何、认证搜索、流解析/采样基础及测试范围内资源适配，仍以cfg(test)注册，未接入生产Shading/渲染，不宣称Type6完整支持或当前工作区全量通过。不包含来源未确认的 `test.png`，不推送远端、不运行 fuzz。
+
+- 2026-10-08 资源适配编译修正：session3909退出101，PdfArray不支持下标访问；已改为get并传播维度错误，重启修正版专项，日志 `/tmp/rzpdf-coons-resource-adapter-recheck.log`，尚未计通过。此前运行状态由此取代，不把编译失败当测试通过。
+
+- 2026-10-08 Type6资源字典适配：新增测试范围内的资源适配模块，校验ShadingType/整数位宽/Decode维度与有限数值，经原数值lexeme解析f64 Decode，防止先转f32损失大坐标；解析分量Decode容量、扣已有Shading载荷及解码输入Vec余量后调用持有型流解析，区分结构错误与资源限额。新增连续记录、非整数位宽/错维度及已有载荷超预算回归。启动当前 `cargo test -p pdf --lib color::shading_patch --locked --quiet`，session3909运行中，日志 `/tmp/rzpdf-coons-resource-adapter.log`，尚未计通过。仍为cfg(test)注册，未开放Type6；旧流解码器先分配后聚合检查、Decode文本到f64舍入等边界未视为完整AR-03/数学实数契约。git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 网格采样专项确认：session86907退出0、52项独立patch测试通过，日志 `/tmp/rzpdf-coons-mesh-sampling.log`，取代此前专项运行状态；Type6对外资源/显示与整体验收未完成。
+
+- 2026-10-08 Type6网格覆盖采样：新增网格逆序采样，后块命中覆盖前块、证明域外才能回退，后块未解决/超额度直接返回错误而非跳过；单patch包括恒定分支也扣采样工作额度，统一检查深度/目标有限值。新增后块覆盖、后块域外回退、整体域外/超额度保留输出、后块退化未解决不能选前块颜色回归；专项session86907运行中，日志 `/tmp/rzpdf-coons-mesh-sampling.log`，尚未计通过。仍是已编码分量/参数采样，不包含函数/ColorSpace、完整边界/连续根或Type6资源/绘制接入，完整OperationBudget未贯通。git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 单patch采样专项确认：session18837退出0、51项独立patch测试通过，日志 `/tmp/rzpdf-coons-patch-sampling.log`，取代此前运行状态；完整Type6网格/资源/绘制未完成。
+
+- 2026-10-08 Type6单patch采样串联：新增调用者缓冲的已编码分量/函数参数采样，恒定退化处理或全部根认证→证明覆盖顺序→角点值/区间插值；固定64根栈存储，达到上限显式WorkLimit，不用截断根集选色，未解决几何/顺序继续报错。仅精确单点Decode区间可恢复恒定身份，非零解码误差不凭浮点相等恢复。新增仿射参数0.25、区间包含、域外/工作限额保留输出及精确端点Decode退化采样回归；专项session18837运行中，日志 `/tmp/rzpdf-coons-patch-sampling.log`，尚未计通过。堆无隐藏分配不代表栈/全局OperationBudget已计费；网格覆盖顺序、边界/连续根、函数/ColorSpace与Type6资源/显示仍待接入。git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 角点区间专项确认：session30557退出0、50项独立patch测试通过，日志 `/tmp/rzpdf-coons-corner-intervals.log`，取代此前专项运行状态；当前Cargo全量/Type6功能验收仍未完成。
+
+- 2026-10-08 Type6认证参数→角点区间：常规Cargo session25805退出0，注册时47项patch单元通过（562 filtered），日志 `/tmp/rzpdf-coons-cargo-tests.log`；不包含随后新增单元，不宣称当前全量。新增认证u/v区间与分量误差的四角参数空间插值，输入预检后写调用者区间缓冲，不转RGB/不提前求函数；新增0.625再平方0.390625顺序、参数矩形9点包含及错误维度不改输出回归。独立专项session30557运行中，日志 `/tmp/rzpdf-coons-corner-intervals.log`，尚未计通过。非线性函数/ColorSpace区间处理、根边界/连续根和Type6资源/显示仍待实现，git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 完整流矩阵专项确认：session86064退出0、49项独立patch测试通过，日志 `/tmp/rzpdf-coons-stream-matrix.log`，取代此前专项运行状态；常规Cargo注册专项仍待终态，Type6对外功能未完成。
+
+- 2026-10-08 Type6完整流矩阵：新增8位记录的共享标志1/2/3全部几何/分量继承、flag0重新开始独立块，以及首块成功后第二块Decode失败整流拒绝、修复编码后重试成功回归。独立专项session86064运行中，日志 `/tmp/rzpdf-coons-stream-matrix.log`，尚未计通过。常规Cargo session25805本轮确认仍活跃，不重启；该先前启动目标可能只覆盖注册时47项，后加两项由此次独立专项明确验证，不混为当前完整门禁。git diff --check通过，未提交、未运行 fuzz；Type6资源/绘制接入与完整预算仍待完成。
+
+- 2026-10-08 Type6常规单元注册：color模块以cfg(test)注册shading_patch基础模块，后续可由cargo测试统一执行，不再只依赖独立rustc。启动 `cargo test -p pdf --lib color::shading_patch --locked --quiet`，session25805运行中，日志 `/tmp/rzpdf-coons-cargo-tests.log`，尚未计通过。仅测试注册，正常构建仍不暴露Type6资源/显示支持，完整功能接入仍待完成。原全量进程已确认终止但退出码缺失，不与此次新增模块范围混为全量门禁。git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 持有型流专项确认：session87199退出0、47项独立patch测试通过，日志 `/tmp/rzpdf-coons-owned-stream.log`，取代此前专项运行状态；完整Type6资源/显示/预算验收未完成。
+
+- 2026-10-08 Type6持有型流容器：新增预扫描后的完整流Decode容器，持有全部patch几何、四角分量和误差区间，共享两角数据直接复制上一块，单scratch复用；分配前以记录数/实际结构sizeof/分量规模预检输入长度与存储总量，try_reserve_exact后计实际Vec容量。新增完整两记录/共享分量区间、边界额度与计数拒绝回归；专项session87199运行中，日志 `/tmp/rzpdf-coons-owned-stream.log`，尚未计通过。仅计借用输入长度及可见Vec容量，不包括allocator元数据/栈/编码配置或全局OperationBudget，不宣称AR-03完成。Type6资源/求值/显示仍未接入。
+
+- 2026-10-08 原工作区全量进程终态观察：ps确认Cargo PID90238及其子进程已不存在，`/tmp/rzpdf-workspace-mesh-current.log`末尾为0项doc目标结果，失败关键词检查无结果。原session7123观察句柄已丢失，未取得进程退出码；不据日志末尾单独宣称门禁退出0。该运行不覆盖未注册的patch新模块。未重启同一任务、未提交、未运行 fuzz。
+
+- 2026-10-08 解码记录专项确认：session64595退出0、46项独立patch测试通过，日志 `/tmp/rzpdf-coons-decoded-record.log`，取代此前运行状态；完整流容器/预算/Type6资源与绘制仍待实现。
+
+- 2026-10-08 Type6解码记录装配：新增借用编码配置与单记录原始位读取→几何Decode/共享继承→角点Decode串联，无隐藏堆分配，全部成功才提交流游标/返回patch；工作scratch明确可在失败时改变，解码输出和游标保持原状。新增连续新块/共享块、缺前块拒绝、角点f32失败保留输出/游标回归；专项session64595运行中，日志 `/tmp/rzpdf-coons-decoded-record.log`，尚未计通过。仍须持有共享角点/区间的完整流容器、预算/资源字典与显示接入；Type6尚未支持。全量Cargo PID90238本轮确认活跃，日志已出现render 37项通过（55.22s），仍不宣称整个workspace终态；git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 流预扫描专项确认：session31420退出0、45项独立patch测试通过，日志 `/tmp/rzpdf-coons-stream-scan.log`，取代此前专项运行状态；尾位独立验证及完整Type6流/引擎接入未完成。
+
+- 2026-10-08 Type6流结构预扫描：新增无分配连续记录预扫描，校验编码/首条共享关系、完整记录位数、计数上限和checked位置；输出记录数/有效位数/最终不足一字节尾位，完整额外字节不得当任意填充。新增连续两记录、计数拒绝、截断/空流/无前patch/非法位宽与完整尾字节拒绝回归；专项session31420运行中，日志 `/tmp/rzpdf-coons-stream-scan.log`，尚未计通过。最终partial-byte尾位契约仍须独立文件兼容验证；预扫描不替代Decode/预算/装配或Type6引擎接入。全量Cargo PID90238本轮确认活跃，日志新增9项通过目标；git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 角点Decode专项确认：session25587退出0、44项独立patch测试通过，日志 `/tmp/rzpdf-coons-corner-decode.log`，取代此前专项运行状态；Type6完整流/预算/显示未完成。
+
+- 2026-10-08 Type6角点Decode缓冲：新增2/4个新编码角点的分量Decode至调用者f32/区间缓冲，整批预检尺寸/位宽/原始范围/f32有限性后才写入；不分配、不转RGB，区间同时包围精确解码实数与存储f32舍入值。新增多分量/反向Decode、舍入区间包含、末项非法输入不部分写出、角点数量及f32溢出拒绝回归；专项session25587运行中，日志 `/tmp/rzpdf-coons-corner-decode.log`，尚未计通过。共享分量区间所有权/预算、完整流装配与Type6引擎接入仍待实现。全量Cargo PID90238本轮确认活跃，日志新增5项通过目标；git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 原始身份专项确认：session44291退出0、42项通过；session99309退出0、43项通过，日志分别 `/tmp/rzpdf-coons-encoded-identity.log`、`/tmp/rzpdf-coons-identity-collision.log`，取代此前运行状态；预算/完整流与Type6显示仍待完成。
+
+- 2026-10-08 Type6原始控制身份：保存原始12点整数、坐标位宽和Decode，共享记录保留旧四点原始值并复制新八点；不允许共享记录改变同一流的编码配置。带Decode误差的同v证明改用原始整数身份与非恒定Decode，浮点相等不再替代身份；直接浮点尾部延续不保留原始身份。新增真实原始值不同却浮点相等的拒绝证明、位宽/Decode变化拒绝和共享原始值顺序回归。初始专项session44291及新增碰撞专项session99309继续观察，日志 `/tmp/rzpdf-coons-encoded-identity.log`、`/tmp/rzpdf-coons-identity-collision.log`，尚未计新专项通过。结构增长仍须未来预算按实际sizeof计费，Type6未接入。全量Cargo PID90238本轮确认活跃；git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 共享新点Decode专项确认：session63384退出0、42项独立patch测试通过，日志 `/tmp/rzpdf-coons-decoded-continuation.log`，取代此前专项运行状态；完整Type6流/引擎接入未完成。
+
+- 2026-10-08 Type6共享新点Decode：新增共享记录8个原始新控制点的Decode延续构造，继承旧四点坐标/区间并保存新八点解码区间，先验证标志和所有解码输入，不修改旧patch。新增标志1/2/3全部继承误差一致、新点内值误差保留、非法标志/超位宽失败与旧patch不变回归；专项session63384运行中，日志 `/tmp/rzpdf-coons-decoded-continuation.log`，尚未计通过。原始控制身份/同编码契约、角点Decode/预算/尾填充和流接入仍待贯通，不宣称Type6整体支持。全量Cargo PID90238本轮确认活跃；git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 解码几何专项确认：session40090退出0、41项独立patch测试通过，日志 `/tmp/rzpdf-coons-decoded-geometry.log`，取代此前运行状态；共享新点Decode、原始身份与流/引擎集成仍待完成。
+
+- 2026-10-08 Type6解码几何误差贯通：CoonsPatch新增可选12点坐标区间及整数Decode构造，转换控制网继承原Decode误差，共享边延续保留旧四点区间；直接f64构造维持精确输入语义。对带Decode误差几何禁用仅凭浮点相等的恒定/同v结构快捷证明，避免舍入碰撞误报身份；仍需原始控制身份贯通。新增Decode区间包含、转换与共享区间原样保留、超位宽拒绝回归；专项session40090运行中，日志 `/tmp/rzpdf-coons-decoded-geometry.log`，尚未计通过。结构存储增加，未来网格预算须按实际sizeof/容量计入，尚未接入流/引擎。全量Cargo PID90238本轮确认活跃；git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 Decode标量专项确认：session3366退出0、40项独立patch测试通过，日志 `/tmp/rzpdf-coons-decode-scalar.log`，取代此前运行状态；完整Type6解析/绘制仍未完成。
+
+- 2026-10-08 Type6 Decode映射：新增原始整数→加权端点f64值与精确实数区间的映射，支持1..32位、反向Decode、精确端点、超位宽原始值/非法范围拒绝；内点用端点加权避免先计算max-min溢出，区间纳入整数比例除法与每步舍入。新增32位相邻高端坐标、反向范围、极端有限端点及非法输入回归；专项session3366运行中，日志 `/tmp/rzpdf-coons-decode-scalar.log`，尚未计通过。仍须把解码区间贯通到patch控制网，并完成分量缓冲/共享记录/尾填充与预算接入；Type6未接入引擎。全量Cargo PID90238本轮确认活跃；git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 原始记录专项确认：session97178退出0、39项独立patch测试通过，日志 `/tmp/rzpdf-coons-raw-record.log`，取代此前运行状态；完整Decode/装配/Type6引擎集成仍未完成。
+
+- 2026-10-08 Type6整条原始记录读取：位读取session60839退出0、38项通过。新增非消费标志预读和控制点→全部角点分量的整数记录读取，先检查完整记录位数/输出尺寸，失败不消费游标、不写调用者缓冲；固定30位新patch+20位共享patch串联及截断/尺寸失败回归。初编译预读副本的可变借用表达式错误已改为局部cursor后重跑；专项session97178运行中，日志 `/tmp/rzpdf-coons-raw-record.log`，尚未计通过。仍待Decode映射、共享记录装配、尾填充及预算接入，不宣称Type6解析完成。全量Cargo PID90238本轮确认活跃；git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 Type6连续位读取：核对PDFium原生Type6读取路径及MeshStream，patch坐标/颜色读取无逐patch ByteAlign，三角顶点路径则显式对齐。新增连续MSB位读取器，1..32位、低两位标志、检查算术、失败不消费输入；新增30位新patch紧接20位共享patch、32位极值、保留位/尾位与失败游标回归。专项session60839运行中，日志 `/tmp/rzpdf-coons-bit-reader.log`，尚未计通过。依据 https://pdfium.googlesource.com/pdfium/+/refs/heads/main/core/fpdfapi/render/cpdf_rendershading.cpp 及 https://pdfium.googlesource.com/pdfium/+/refs/heads/main/core/fpdfapi/page/cpdf_meshstream.cpp 。仍待记录解码/尾填充契约、预算和Type6集成，不把读取器当完整解析。全量Cargo PID90238及shading_workflow子进程本轮确认活跃；git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 流布局专项确认：session9262退出0、37项独立patch测试通过，日志 `/tmp/rzpdf-coons-record-layout.log`，取代前述专项运行状态；位流解析和Type6集成未完成。
+
+- 2026-10-08 Type6流记录布局：共享分量session92184退出0、36项通过。核对PDF Reference Table4.32及Type6说明，新增新patch12点/4角、共享patch8点/2角的位数布局检查，坐标/分量/标志位宽与维度校验、全程checked算术；不在此假设字节补齐方式。新增灰度/RGB、子字节记录、非法位宽/标志/空维度与usize溢出回归；专项session9262运行中，日志 `/tmp/rzpdf-coons-record-layout.log`，尚未计通过。布局不等于位流解码，流顺序、补齐、解码误差/预算与引擎接入仍待完成。规范来源 https://chromium.googlesource.com/external/skia/+/7983cf450ea4da39f8a9bd2a27d0412fb6a2fad0/experimental/PdfViewer/PdfReference-okular-1.txt 。全量Cargo PID90238本轮确认活跃；git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 Type6共享角点分量：新增与共享边标志1/2/3相同角点索引的颜色/函数参数继承接口，返回旧两角点与新两角点的借用切片，不分配、不提前转换RGB；检查非空一致维度与有限分量。新增全部标志顺序、指针身份（不复制）、非法标志/空/NaN拒绝回归；专项session92184运行中，日志 `/tmp/rzpdf-coons-shared-components.log`，尚未计通过。流解码接入时仍需预算复制/所有权保存，借用接口不替代完整生命周期或流解析。全量Cargo PID90238本轮确认活跃，日志新增6项通过目标；git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 恒定退化专项确认：session16239退出0，35项独立patch测试通过，日志 `/tmp/rzpdf-coons-constant-coverage.log`，取代此前专项运行状态；一般连续根与Type6接入仍未完成。
+
+- 2026-10-08 Type6恒定退化曲面：新增全部12控制点精确重合的结构判断，曲面命中恒定点时连续根按最大v再最大u选择[1,1]，不命中则无覆盖；非恒定曲面不进入此分支，非法目标拒绝。新增相邻浮点点不命中、改变一个控制点后取消身份及[1,1]对应PDF角点2分量回归；专项session16239运行中，日志 `/tmp/rzpdf-coons-constant-coverage.log`，尚未计通过。这只处理点状退化连续根，不代替线状/一般连续根、单位域边缘或任意内部边界认证；尚未接入引擎。全量Cargo PID90238本轮确认活跃，日志新增14项通过目标；git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 同v结构专项确认：session20576退出0、34项独立patch测试通过，日志 `/tmp/rzpdf-coons-common-v.log`；固定折叠的全部根认证与规范最大u选择串联通过，其他未完成边界不变，取代前述专项运行状态。
+
+- 2026-10-08 Type6同v结构证明：从原12控制点的精确身份判断任一坐标是否仅为v的严格单调三次曲线；同一目标点的认证根因此具有相同v，再以分离u区间选最大u。未满足身份时仍走原区间v/u证明，不使用epsilon相等。新增固定折叠全根认证→最大u选择串联、破坏边界坐标身份后不能证明同v回归；专项session20576运行中，日志 `/tmp/rzpdf-coons-common-v.log`，尚未计通过。仅对结构可证明的同v情形成立，不代替任意同v、边界或连续根处理，Type6未接入引擎。全量Cargo PID90238本轮确认活跃；git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 中点边界专项确认：session79149退出0，33项独立patch测试通过，日志 `/tmp/rzpdf-coons-offset-split.log`；固定中点折叠三根可认证，其他边界/连续根仍未完成，取代前述专项运行状态。
+
+- 2026-10-08 Type6收紧确认与中点边界回归：session37355退出0、32项通过，修正后的收紧/统一工作额度/折叠根宽度断言均通过。认证遍历首层改在3/8切分，随后继续精确二分，避免常见u/v=1/2根始终位于子边界；新增原三参数折叠样本认证回归。专项session79149运行中，日志 `/tmp/rzpdf-coons-offset-split.log`，尚未计通过。此仅处理特定中点边界，不取代任意内部边界、单位域边缘、奇异/连续根与同v证明，Type6仍未接入。全量Cargo PID90238本轮确认活跃；git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 Type6收紧贯通与失败修正：session70391退出101（30通过/1失败），首次贯通session56860退出101（30通过/2失败），暴露重复严格存在性认证阻碍极窄根区间继续收紧；未降低收紧断言。提取Krawczyk包围与认证分类，已有唯一根证明下用包围映射交集保留根，不要求每轮重新严格内部包含；遍历接入8轮收紧，搜索/认证统一工作额度，并新增耗尽前不发出根回归及折叠根区间宽度<1e-6断言。修正专项session37355运行中，日志 `/tmp/rzpdf-coons-tightening-image.log`，尚未计通过。仍待专项终态与边界/同v/连续根处理，不宣称Type6接入；全量Cargo PID90238本轮确认活跃，git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 Type6认证根收紧：任意矩形限制session23854退出0、30项通过。新增唯一根初始认证→区间限制→重新认证→交集的收紧循环，每轮扣工作额度、最多32轮；不能继续收紧保留原认证区间，额度耗尽显式报错，不返回部分精化。新增弯曲限制块的区间不扩张/收紧及零额度回归；专项session70391运行中，日志 `/tmp/rzpdf-coons-root-tightening.log`，尚未计通过。仍须收紧与遍历/根排序贯通及同v、边界和连续根处理，Type6未接入引擎。全量Cargo PID90238本轮确认活跃；git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 Type6任意参数矩形限制：参数区间求值session1368退出0、29项通过。新增以三次blossom构造任意单位域矩形的双三次限制控制网，继承区间误差并逐步向外舍入，完整域限制保持输入控制区间原样。新增弯曲25组局部→全局参数对照、完整域身份和倒置矩形拒绝回归；专项session23854运行中，日志 `/tmp/rzpdf-coons-restriction.log`，尚未计通过。用于后续认证根收紧/非固定中点边界处理，尚未完成该链路或Type6引擎集成。全量Cargo PID90238本轮确认活跃；git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 Type6参数矩形区间求值：区间de Casteljau扩展为不确定u/v矩形求值，单点接口委托相同实现，保留严格端点身份与每步向外舍入。新增弯曲参数矩形9组点覆盖、倒置区间拒绝和仿射认证根区间映射包含目标回归；专项session1368运行中，日志 `/tmp/rzpdf-coons-parameter-box.log`，尚未计通过。为根收紧/区间结果验证提供基础，不以目标被区间包含代替根存在证明。全量Cargo PID90238本轮确认活跃，模块未注册，git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 认证顺序专项确认：session76145退出0、28项独立测试通过，日志 `/tmp/rzpdf-coons-certified-precedence.log`，取代此前运行状态。证明不足的根区间顺序继续返回未解决，不宣称Type6整体完成。
+
+- 2026-10-08 Type6认证根区间顺序：新增带比较额度的认证根选择，只有v区间严格分离、或证明v为相等单点且u顺序可证明时选赢家；区间重叠不按中点/epsilon强行排序，整体返回Unresolved。新增可证明v顺序、精确同v的u顺序、重叠未解决、零额度与空输入回归；专项session76145运行中，日志 `/tmp/rzpdf-coons-certified-precedence.log`，尚未计通过。后续仍需根区间收紧、同v结构证明及边界/连续根支持，Type6尚未接入；全量Cargo PID90238本轮确认活跃，git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 自适应认证专项确认：session39206退出0、26项通过；session10069退出0、27项通过，日志分别 `/tmp/rzpdf-coons-root-certificate.log`、`/tmp/rzpdf-coons-adaptive-certification.log`。固定非边界折叠样本三个根区间全部认证，边界/连续根仍未完成，Type6未接入引擎；前述专项运行状态由此取代。
+
+- 2026-10-08 Type6自适应认证遍历：新增区间范围排除→局部Krawczyk认证→未解决细分的完整兄弟区域遍历，认证根区间向外转换到全局参数；逐节点预算、深度限20、回调错误传播，达到限额/深度仍未解决时整体报错，暂定根不得当成功完整结果。新增非边界折叠三根区间分离、退化未解决及零额度回归；专项session10069运行中，日志 `/tmp/rzpdf-coons-adaptive-certification.log`，尚未计通过。局部认证session39206继续观察；边界/奇异连续根及覆盖顺序仍待处理，Type6尚未接入引擎。全量Cargo PID90238本轮确认活跃；git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 区间求值专项确认：session4914退出0、25项通过，日志 `/tmp/rzpdf-coons-interval-evaluation.log`；局部根认证session39206仍待终态，不计入通过数。
+
+- 2026-10-08 Type6局部区间根认证：依据Rump对Krawczyk存在性/唯一性验证的说明（https://www.tuhh.de/ti3/rump/Research_Rump/topics.shtml），新增本地单位方块的Krawczyk包围，区间残差/导数和矩阵运算向外舍入；严格内部包含且收缩上界<1才报告唯一根，包围与方块不交可排除，否则未解决。新增仿射内部根包含、外部无根、边界根及退化曲面未解决回归；专项session39206运行中，日志 `/tmp/rzpdf-coons-root-certificate.log`，尚未计通过。区间求值session4914继续观察，不重启。仍须自适应认证遍历、边界/连续根与覆盖次序处理，不宣称Type6支持。全量Cargo PID90238本轮确认活跃；git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 Type6区间求值：新增本地单位参数的区间de Casteljau曲面求值，控制点不确定性、1-t和每步乘加全部向外舍入；端点直接保留控制区间，避免不必要0×无限扩张。新增弯曲曲面25组前向值包含、不确定角点端点原样保留、非法参数拒绝回归；专项session4914运行中，日志 `/tmp/rzpdf-coons-interval-evaluation.log`，尚未计通过。为根存在性/唯一性检查提供区间残差，尚未实现完整检查或引擎集成。全量Cargo PID90238本轮确认活跃，日志新增6项通过目标；git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 区间候选专项确认：session95198退出0，24项独立patch测试通过，日志 `/tmp/rzpdf-coons-interval-search.log`，取代此前运行状态；不证明叶候选根认证或Type6完整接入。
+
+- 2026-10-08 Type6区间候选搜索贯通：新增区间控制网候选遍历，转换→细分→范围排除全部保留误差，不需手工padding；回调携带子区间网/全局参数矩形，逐节点扣额度、限制深度、传播回调未解决错误。新增不使用padding的折叠三个参数区域保留、域外单节点排除和回调错误传播回归；专项session95198运行中，日志 `/tmp/rzpdf-coons-interval-search.log`，尚未计通过。叶候选仍不是认证根，须继续唯一性/存在性和连续根处理，不绕过该契约直接显示。全量Cargo PID90238本轮确认活跃，日志新增8项通过目标；git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 区间链专项确认：session21075退出0、22项通过，session45033退出0、23项通过，日志分别 `/tmp/rzpdf-coons-interval-subdivision.log`、`/tmp/rzpdf-coons-interval-hulls.log`；此前运行状态由此取代，仍不声明完整根认证或Type6引擎支持。
+
+- 2026-10-08 Type6区间范围/导数：新增带不确定控制点的凸包范围和区间导数包围，贯通转换/细分产生的误差；明确细分块导数对应本地单位参数，不能直接当全局u/v导数。新增半块范围及1.5导数精确值、宽输入不确定性保留、倒置区间拒绝回归；专项session45033运行中，日志 `/tmp/rzpdf-coons-interval-hulls.log`，尚未计通过。细分session21075继续观察，不重启；全量Cargo PID90238本轮确认活跃。根认证与实际流/显示仍待实现，git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 Type6区间细分：转换误差session50436退出0、21项通过。新增区间控制网de Casteljau四分细分，逐步向外舍入、继承输入区间，不丢弃转换误差；先拒绝NaN/倒置区间，保守无限范围允许继续传递。新增两级细分精确矩形控制值包含、共享边区间一致与非法区间拒绝回归；专项session21075运行中，日志 `/tmp/rzpdf-coons-interval-subdivision.log`，尚未计通过。仍须区间范围/导数/根认证贯通，流解码误差与引擎显示尚未接入。全量Cargo PID90238本轮确认活跃；git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 Type6转换误差区间：新增向外舍入的加/减/乘区间原语，以及从已存f64点转换到双三次控制网的逐步误差包围，包含1/3、2/3有理系数；无效无限运算保守回退全实数范围。新增矩形精确整数控制网、弯曲浮点控制值包含及0×无限回退回归；专项session50436运行中，日志 `/tmp/rzpdf-coons-conversion-intervals.log`，尚未计通过。该转换不覆盖原始流解码误差，尚未接到细分/导数/根认证链路；不宣称完整数值认证。全量Cargo PID90238本轮确认活跃，日志新增12项通过目标；git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 未解决候选专项确认：session15328退出0，20项独立patch测试通过，日志 `/tmp/rzpdf-coons-unresolved.log`；前一记录运行状态由此更新，Type6集成与完整根认证仍未完成。
+
+- 2026-10-08 Type6未解决候选契约：SearchError新增Unresolved，回归退化候选细化失败必须向外返回未解决而非成功空结果；新增细分后折叠外侧正向、内侧反向雅可比区间排除零回归。专项session15328运行中，日志 `/tmp/rzpdf-coons-unresolved.log`，尚未计通过。全量Cargo PID90238及子进程metadata-e937ad7b8b25d73e本轮确认活跃，日志继续新增通过目标，不重启；模块未接入，未提交、未运行 fuzz。完整认证仍须处理误差传播及奇异/连续根，不把这些局部检查当Type6整体验收。
+
+- 2026-10-08 Type6雅可比范围：导数专项session28142退出0、17项通过。新增du_x*dv_y-du_y*dv_x区间包围，乘法与减法向外舍入，导数无限界或无效无限运算退回全实数范围，不误报排除奇异点。新增矩形正定、折叠变号/采样覆盖、退化零值及极端溢出回归；雅可比session32859退出0、18项通过，日志 `/tmp/rzpdf-coons-jacobian.log`。行列式区间不含零只说明局部非奇异，不证明全局单射或候选根唯一；区间求逆认证与此前构造误差仍待实现。全量Cargo PID90238本轮确认活跃，模块未接入引擎；git diff --check通过，未提交、未运行 fuzz。
+
+- 2026-10-08 Type6导数凸包：候选错误传播session18523退出0、16项通过。新增双三次控制网的du/dv、x/y导数范围，差分和乘3分别向外舍入，固定数组，不把控制网构造误差包含在此范围声明中。新增矩形精确导数、弯曲/折叠25组解析导数覆盖、导数变号与NaN拒绝回归；专项session28142运行中，日志 `/tmp/rzpdf-coons-derivative-hulls.log`，尚未计通过。后续仍需区间求逆/唯一性认证、误差传播与奇异连续根处理，不把导数凸包视为完整认证。全量Cargo PID90238本轮确认活跃；git diff --check通过。未提交、未运行 fuzz。
+
+- 2026-10-08 Type6候选回调错误传播：候选遍历回调改为返回Result，细化额度错误可通过?终止遍历，不再需要测试回调unwrap；新增回调首个候选失败后不访问后续候选、遍历自身预算仍有剩余回归。专项session18523运行中，日志 `/tmp/rzpdf-coons-fallible-search.log`，尚未计通过；git diff --check通过。已产生的回调输出仍为暂定结果，只有完整成功返回才可继续处理；未解决/奇异候选和数值认证仍待实现。全量Cargo PID90238本轮确认活跃，模块仍未注册，未提交、未运行 fuzz。
+
+- 2026-10-08 参数优先级专项确认：session5606退出0，15项独立patch测试通过，日志 `/tmp/rzpdf-coons-precedence.log`；前一记录的运行状态已由此终态取代，Type6对外支持仍未完成。
+
+- 2026-10-08 Type6参数根优先级：重新核对Adobe提供的ISO32000-2曲面规则（https://developer.adobe.com/document-services/docs/assets/5b15559b96303194340b99820d3a70fa/PDF_ISO_32000-2.pdf），新增已提供根的最大v、相同v最大u选择；不使用epsilon合并近邻v，先验证所有根有限且在单位域，非法根整体拒绝。新增顺序无关、重复/空根、相邻浮点v及非法根回归。独立专项session5606运行中，日志 `/tmp/rzpdf-coons-precedence.log`，尚未计通过；git diff --check通过。选择器不证明输入根有效/完整，仍不得绕过未解决候选直接用于显示。全量Cargo PID90238本轮确认活跃；未提交、未运行 fuzz。
+
+- 2026-10-08 Type6折叠搜索/细化串联回归：局部细化session18437退出0、13项通过。新增三个独立参数根的精确参数/残差验证及候选遍历→局部细化串联，固定折叠样本三个u根全部找回；串联专项退出0、14项通过，日志 `/tmp/rzpdf-coons-search-refinement.log`。另验证退化常量曲面可返回一个残差合格参数但不证明无限根完整性。此为特定样本证据，不是任意曲面全部根认证；覆盖顺序、误差传播、奇异根/连续根处理和Type6流/显示接入仍未完成。全量Cargo PID90238本轮确认活跃；git diff --check通过。未提交、未运行 fuzz。
+
+- 2026-10-08 Type6局部根细化：候选专项日志显示12项通过。新增候选矩形约束的Newton细化与阻尼，每次迭代/试步扣工作额度，最多32轮与每轮16试步；仅接受坐标残差达标的参数点，奇异/未收敛返回未解决，绝不等同无覆盖。初测受限区域100额度不足，正确返回WorkLimit；测试改为1024充分额度后重跑session18437，日志 `/tmp/rzpdf-coons-refinement-recheck.log`，尚未计通过，保留零额度拒绝回归。仍未证明根唯一/全部覆盖，折叠根验证及规范顺序选择、误差传播和引擎集成待实现。全量Cargo PID90238本轮确认活跃；未提交、未运行 fuzz。
+
+- 2026-10-08 Type6候选参数搜索：范围专项session38279退出0，11项通过。新增基于控制网范围/四分细分的全部候选参数矩形遍历，节点逐项扣除调用者额度，深度限制20，不分配搜索堆缓冲；显式区分非法输入和工作额度耗尽，回调结果在成功返回前不得作为完整结果。新增折叠三个u根全部保留、域外单节点排除、零额度/非法容差回归；专项session28470启动，日志 `/tmp/rzpdf-coons-candidates.log`，尚未计通过。候选不是已验证根，误差padding由调用方提供，完整数值误差/根验证/最大v再最大u选择和流集成仍待实现。全量Cargo PID90238本轮仍活跃；未提交、未运行 fuzz。
+
+- 2026-10-08 Type6控制网范围：新增16点控制凸包AABB并向外舍入一个可表示值，允许极端有限控制点产生无限外界，拒绝非有限输入。测试弯曲内部超出角点AABB、四个细分块100组采样覆盖、零/极大值边界；独立专项session38279运行中，日志 `/tmp/rzpdf-coons-bounds.log`，尚未计通过。该范围只针对当前控制网，转换/多级细分误差仍须独立计入，不作为已完成求逆的证明。全量Cargo PID90238再次确认活跃；git diff --check通过。未接入引擎、未提交、未运行 fuzz。
+
+- 2026-10-08 精确细分专项确认：session92524退出0，10项独立几何测试通过，日志 `/tmp/rzpdf-coons-subdivision.log`；仅验证未注册的patch基础模块，不声明Type6显示支持或全量完成。
+
+- 2026-10-08 Type6精确细分基础：新增双三次控制网的de Casteljau中点四分细分，固定数组、不分配堆缓冲，子块按低v/低u、低v/高u、高v/低u、高v/高u排序。新增64组子参数到父参数对照、共享边逐控制点一致、大数中点避免加法溢出及NaN拒绝回归。独立rustc专项session92524仍运行，日志 `/tmp/rzpdf-coons-subdivision.log`，尚未计通过；git diff --check通过。全量Cargo PID90238仍活跃，日志新增4项通过目标但未终态。不代替求逆/多根选择或Type6集成；未提交、未运行 fuzz。
+
+- 2026-10-08 Type6张量表示基础：Coons几何新增精确双三次Bernstein控制网（按[v][u]索引），供后续凸包范围排除和细分求逆使用，不以四角范围代替折叠内部范围。弯曲与折叠组合曲面25组参数与原Coons前向结果对照，独立rustc专项退出0，9项通过，日志 `/tmp/rzpdf-coons-tensor.log`。测试初次构造类型错误已修正后重跑；模块仍未接入引擎，尚未实现细分、逆映射、多根选择或Type6流解码。全量Cargo PID90238本轮确认仍活跃；不声称全量终态。此次改动未提交、未运行 fuzz。
+
 - 2026-10-08 提交检查点：按用户要求整理 Type4/5 网格 Shading、测试与文档，以及尚未注册到引擎的 Type6 几何基础。四角插值独立测试日志 `/tmp/rzpdf-coons-colors.log` 显示8项通过；网格注册集成6项、八组合像素专项1项通过。全量测试 Cargo PID90238 仍在运行，不宣称全量通过；Type6尚未接入，整体计划保持未完成。不包含来源未确认的 `test.png`，不推送远端、不运行 fuzz。
 
 - 2026-10-08 Type6折叠前向几何确认：session28090退出0，7项独立几何通过，日志 `/tmp/rzpdf-coons-folds.log`，包含三参数映到同一点及弯曲内部精确值；不证明逆映射/多根覆盖选择已实现，新四角颜色插值另待专项。

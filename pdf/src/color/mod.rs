@@ -15,4 +15,8 @@ pub mod pattern;
 pub mod separation;
 pub mod shading;
 mod shading_mesh;
+#[cfg(test)]
+mod shading_patch;
+#[cfg(test)]
+mod shading_patch_resource;
 pub mod value;
