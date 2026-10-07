@@ -526,7 +526,9 @@ mod tests {
             dict.insert(key.into(), PdfObject::PdfBool(PdfBool::new(b"true")));
             let image = PdfObject::PdfStream(PdfStream::new(dict, vec![1, 2, 3]));
             let result = PdfImage::try_new("image".into(), &image, doc.ctx());
-            if matches!(key, "SMask" | "Decode") {
+            // ImageMask=true forbids the ColorSpace in this fixture; valid
+            // one-bit stencils are covered by the PdfImage tests.
+            if matches!(key, "SMask" | "Decode" | "ImageMask") {
                 assert!(matches!(result, Err(PdfError::ObjectError(_))));
             } else {
                 assert!(matches!(result, Err(PdfError::UnsupportedFeature(_))));

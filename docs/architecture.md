@@ -423,7 +423,13 @@ Skia 保持独立后端；字体和图像解码的原生依赖可逐步通过 tr
 
 ## 校准颜色显示策略（2026-10-07）
 
-None 绘制控制与颜色转换分离：ColorSpace::is_nonpainting 识别 Separation /None 和全 None DeviceN；统一 PaintingDevice 适配层用于 Interpreter::run 与 DisplayList::replay，分别抑制填充/描边、保留组合绘制的可见侧，并调整文字有效绘制模式而保留裁剪位。普通图像判断自身颜色空间，stencil 模型判断当前填充色，但 stencil 的文件解析/像素绘制仍明确不支持。run_to_display_list 使用未过滤采集路径，保留原始模式、对象及来源，避免视觉不可见内容从编辑/提取结果中消失。低层直接 RGB 查询对 None 仍报不支持；适配层不改变 Device 公共回调签名，也不使 RenderDevice 尚未支持的文字裁剪成为已实现能力。
+Indexed 不再额外拒绝合法 DeviceN 基空间，调色板所有分量都先按 0..1 转为 tint，再经现有 transform 求显示近似；混合 None 分量可携带替代颜色数据，不能在求值前删除。Indexed::is_nonpainting 转发基空间判定，ColorSpace::is_nonpainting 纳入 Indexed，因此已共用的 PaintingDevice 同时覆盖路径/文字/图像，不在采集层丢对象。不新增原生色版、叠印或 Type4 求值能力。
+
+Indexed 图像的 PdfImage.data 保存 Decode 后的索引字节，而不是归一化灰度：默认端点为 [0, 2^bits-1]；显式端点按索引单位计算后取整，超出 8 位索引范围裁剪，最终 Indexed::rgb 再裁剪到 hival。与设备颜色共用逐行采样/长度/可失败分配检查，RGBA 转换走调色板，不把索引当作亮度。DeviceRGB 调色板已有回归；Lab/ICC 基空间映射精度、全色彩管理与操作级聚合预算仍待完成。
+
+Indexed::rgb 的调色板字节映射按 PDF 基空间分量范围执行，不采用统一 0..1：Lab 暴露仅 crate 内可见的固定六端点，ICCBased 复用既有 range 查询，其余已支持基空间使用 0..1。分量缓冲改为可失败预留；范围长度检查后，以 f64 中间值插值回 f32，再交给既有基空间转换。ICC 仍仅通过 Alternate 近似，未新增 profile 求值或 OutputIntent 管理；非零 Lab BlackPoint 仍不支持。
+
+None 绘制控制与颜色转换分离：ColorSpace::is_nonpainting 识别 Separation /None 和全 None DeviceN；统一 PaintingDevice 适配层用于 Interpreter::run 与 DisplayList::replay，分别抑制填充/描边、保留组合绘制的可见侧，并调整文字有效绘制模式而保留裁剪位。普通图像判断自身颜色空间，stencil 判断当前填充色；一位 ImageMask XObject 解析后以灰度作为内部样本载体（不是 PDF ColorSpace），Skia 将 Decode 后的样本转换为当前非描边颜色与覆盖 alpha。普通 rgba_buffer 不允许缺少颜色的 stencil 转换，Pattern 着色仍不支持。run_to_display_list 使用未过滤采集路径，保留原始模式、对象及来源，避免视觉不可见内容从编辑/提取结果中消失。低层直接 RGB 查询对 None 仍报不支持；适配层不改变 Device 公共回调签名，也不使 RenderDevice 尚未支持的文字裁剪成为已实现能力。
 
 颜色空间资源现在纳入ResourceKind::ColorSpace，注册使用既有页资源事务、继承读取、同对象绑定复用及类别表复制后修改，CS名称在页作用域内避让。导入沿用对象图Importer，颜色空间根可为名称/数组，不再强制所有资源根均为字典/流；Font/Image/Form原约束仍保留。跨文档必须先导入，再注册目标句柄；直接修改共享颜色对象仍影响所有引用页，不等于单页隔离编辑。解析校验与渲染能力保持分离，操作级聚合预算仍未贯通此路径。
 

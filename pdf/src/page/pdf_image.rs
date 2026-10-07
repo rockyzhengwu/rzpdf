@@ -27,6 +27,175 @@ mod tests {
     use crate::color::device_rgb::DeviceRgb;
 
     #[test]
+    fn indexed_images_preserve_indices_across_depths_rows_and_decode() {
+        use crate::{
+            io::stream_reader::StreamReader,
+            objects::{pdf_dict::PdfDict, pdf_stream::PdfStream},
+            parser::{options::ParseOptions, syntax::SyntaxParser},
+        };
+        use std::io::Cursor;
+        let ctx = PDFContext::<Cursor<Vec<u8>>>::new_without_source(
+            PdfDict::default(),
+            ParseOptions::default(),
+        );
+        let parse = |source: &str| {
+            SyntaxParser::new(
+                StreamReader::try_new(Cursor::new(source.as_bytes().to_vec())).unwrap(),
+            )
+            .get_object()
+            .unwrap()
+        };
+        let palette = [
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [0, 0, 255, 255],
+            [255, 255, 255, 255],
+        ];
+        for (bits, width, height, bytes, decode, expected) in [
+            (1, 3, 2, vec![0x40, 0xa0], "", vec![0, 1, 0, 1, 0, 1]),
+            (2, 4, 1, vec![0x1b], "", vec![0, 1, 2, 3]),
+            (4, 4, 1, vec![0x01, 0x2f], "", vec![0, 1, 2, 15]),
+            (8, 4, 1, vec![0, 1, 2, 255], "", vec![0, 1, 2, 255]),
+            (
+                16,
+                4,
+                1,
+                vec![0, 0, 0, 1, 0, 2, 255, 255],
+                "",
+                vec![0, 1, 2, 255],
+            ),
+            (
+                16,
+                4,
+                1,
+                vec![0, 0, 0x55, 0x55, 0xaa, 0xaa, 255, 255],
+                "/Decode [3 0]",
+                vec![3, 2, 1, 0],
+            ),
+            (
+                8,
+                4,
+                1,
+                vec![0, 85, 170, 255],
+                "/Decode [3 0]",
+                vec![3, 2, 1, 0],
+            ),
+            (2, 4, 1, vec![0x1b], "/Decode [-2 4]", vec![0, 0, 2, 4]),
+        ] {
+            let dict = parse(&format!("<< /Width {width} /Height {height} /BitsPerComponent {bits} /ColorSpace [/Indexed /DeviceRGB 3 <FF000000FF000000FFFFFFFF>] {decode} >>")).into_dict().unwrap();
+            let object = PdfObject::PdfStream(PdfStream::new(dict, bytes));
+            let image = PdfImage::try_new("palette".into(), &object, &ctx).unwrap();
+            assert_eq!(image.data, expected, "bits={bits}, decode={decode}");
+            let expected_rgba = expected
+                .iter()
+                .flat_map(|index| palette[(*index as usize).min(3)])
+                .collect::<Vec<_>>();
+            assert_eq!(image.rgba_buffer().unwrap(), expected_rgba);
+        }
+        for (bits, decode, bytes) in [(2, "/Decode [0]", vec![0]), (2, "", vec![])] {
+            let dict = parse(&format!("<< /Width 1 /Height 1 /BitsPerComponent {bits} /ColorSpace [/Indexed /DeviceRGB 0 <FF0000>] {decode} >>")).into_dict().unwrap();
+            let object = PdfObject::PdfStream(PdfStream::new(dict, bytes));
+            assert!(matches!(
+                PdfImage::try_new("palette".into(), &object, &ctx),
+                Err(PdfError::ObjectError(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn stencil_samples_use_current_color_and_reverse_decode() {
+        use crate::{
+            color::value::ColorRgb,
+            io::stream_reader::StreamReader,
+            objects::{pdf_dict::PdfDict, pdf_stream::PdfStream},
+            parser::options::ParseOptions,
+            parser::syntax::SyntaxParser,
+        };
+        use std::io::Cursor;
+        let parse = |source: &str| {
+            SyntaxParser::new(
+                StreamReader::try_new(Cursor::new(source.as_bytes().to_vec())).unwrap(),
+            )
+            .get_object()
+            .unwrap()
+        };
+        let ctx = PDFContext::<Cursor<Vec<u8>>>::new_without_source(
+            PdfDict::default(),
+            ParseOptions::default(),
+        );
+        for (decode, expected) in [
+            ("", vec![255, 0, 255, 0, 255, 0]),
+            ("/Decode [1 0]", vec![0, 255, 0, 255, 0, 255]),
+        ] {
+            let dict = parse(&format!(
+                "<< /Subtype /Image /Width 3 /Height 2 /ImageMask true {decode} >>"
+            ));
+            let object = PdfObject::PdfStream(PdfStream::new(
+                dict.as_dict().unwrap().clone(),
+                vec![0x40, 0xa0],
+            ));
+            let image = PdfImage::try_new("mask".into(), &object, &ctx).unwrap();
+            assert!(image.is_mask());
+            assert!(matches!(image.rgba_buffer(), Err(PdfError::ColorError(_))));
+            for color in [ColorRgb::new(1.0, 0.0, 0.0), ColorRgb::new(0.0, 1.0, 0.0)] {
+                let rgba = image.rgba_buffer_with_stencil_color(&color).unwrap();
+                assert_eq!(
+                    rgba.chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>(),
+                    expected
+                );
+                assert!(
+                    rgba.chunks_exact(4)
+                        .all(|p| p[..3] == [color.r(), color.g(), color.b()])
+                );
+            }
+            assert!(
+                image
+                    .rgba_buffer_with_stencil_color(&ColorRgb::new(f32::NAN, 0.0, 0.0))
+                    .is_err()
+            );
+        }
+        for field in [
+            "/BitsPerComponent 8",
+            "/ColorSpace /DeviceGray",
+            "/SMask << >>",
+            "/Decode [0 0.5]",
+            "/Decode [0]",
+            "/ImageMask /true",
+        ] {
+            let dict = parse(&format!("<< /Width 3 /Height 2 /ImageMask true {field} >>"));
+            let object = PdfObject::PdfStream(PdfStream::new(
+                dict.as_dict().unwrap().clone(),
+                vec![0x40, 0xa0],
+            ));
+            assert!(
+                PdfImage::try_new("mask".into(), &object, &ctx).is_err(),
+                "{field}"
+            );
+        }
+        let dict = parse("<< /Width 3 /Height 2 /ImageMask true >>");
+        for bytes in [vec![0x40], vec![0x40, 0xa0, 0]] {
+            let object =
+                PdfObject::PdfStream(PdfStream::new(dict.as_dict().unwrap().clone(), bytes));
+            assert!(matches!(
+                PdfImage::try_new("mask".into(), &object, &ctx),
+                Err(PdfError::ObjectError(_))
+            ));
+        }
+        let mut options = ParseOptions::default();
+        options.limits.max_decoded_bytes = 23;
+        let limited =
+            PDFContext::<Cursor<Vec<u8>>>::new_without_source(PdfDict::default(), options);
+        let object = PdfObject::PdfStream(PdfStream::new(
+            dict.as_dict().unwrap().clone(),
+            vec![0x40, 0xa0],
+        ));
+        assert!(matches!(
+            PdfImage::try_new("mask".into(), &object, &limited),
+            Err(PdfError::ResourceLimit(_))
+        ));
+    }
+
+    #[test]
     fn packed_samples_reset_at_rows_and_decode_before_quantization() {
         assert_eq!(
             unpack_image_samples(&[0xbf, 0x5f], 3, 2, 1, 1, None, 6).unwrap(),
@@ -300,14 +469,25 @@ impl PdfImage {
                 return Err(PdfError::ObjectError("image Subtype must be /Image".into()));
             }
         }
-        if let Some(mask) = image.get_attr("ImageMask") {
+        let is_mask = if let Some(mask) = image.get_attr("ImageMask") {
             let mask = ctx.resolve(mask)?;
             let is_mask = mask
                 .as_bool()
                 .ok_or_else(|| PdfError::ObjectError("image ImageMask must be boolean".into()))?
                 .value();
-            if is_mask {
-                return Err(PdfError::UnsupportedFeature("stencil image masks".into()));
+            is_mask
+        } else {
+            false
+        };
+        if is_mask {
+            for key in ["ColorSpace", "SMask"] {
+                if let Some(value) = image.get_attr(key) {
+                    if !matches!(ctx.resolve(value)?, PdfObject::PdfNull) {
+                        return Err(PdfError::ObjectError(format!(
+                            "stencil image must not specify {key}"
+                        )));
+                    }
+                }
             }
         }
         for key in ["Mask"] {
@@ -358,12 +538,39 @@ impl PdfImage {
                 })?;
             bits as usize
         } else {
-            8
+            if is_mask { 1 } else { 8 }
         };
-        let colorspace_obj = image
-            .get_attr("ColorSpace")
-            .ok_or_else(|| PdfError::ColorError("image ColorSpace is missing".into()))?;
-        let colorspace = ColorSpace::try_new(colorspace_obj, ctx)?;
+        if is_mask && bits != 1 {
+            return Err(PdfError::ObjectError(
+                "stencil image BitsPerComponent must be 1".into(),
+            ));
+        }
+        let stencil_decode = if is_mask {
+            let endpoints = image_decode_endpoints(Some(1), image.get_attr("Decode"), ctx)?;
+            if endpoints.is_some_and(|e| !matches!((e[0], e[1]), (0.0, 1.0) | (1.0, 0.0))) {
+                return Err(PdfError::ObjectError(
+                    "stencil image Decode must be [0 1] or [1 0]".into(),
+                ));
+            }
+            endpoints
+        } else {
+            None
+        };
+        let colorspace = if is_mask {
+            // Internal sample carrier only: a stencil has no PDF ColorSpace.
+            ColorSpace::DeviceGray(crate::color::device_gray::DeviceGray::new())
+        } else {
+            let colorspace_obj = image
+                .get_attr("ColorSpace")
+                .ok_or_else(|| PdfError::ColorError("image ColorSpace is missing".into()))?;
+            ColorSpace::try_new(colorspace_obj, ctx)?
+        };
+        let indexed = matches!(colorspace, ColorSpace::Indexed(_));
+        let indexed_decode = if indexed {
+            image_decode_endpoints(Some(1), image.get_attr("Decode"), ctx)?
+        } else {
+            None
+        };
         let mut data = stream.decode_data(ctx)?;
         let components = match &colorspace {
             ColorSpace::DeviceGray(_) => Some(1),
@@ -371,14 +578,28 @@ impl PdfImage {
             ColorSpace::DeviceCmyk(_) => Some(4),
             _ => None,
         };
-        if bits == 8 {
+        if indexed {
+            data = unpack_image_samples_inner(
+                &data,
+                width as usize,
+                height as usize,
+                1,
+                bits,
+                indexed_decode,
+                ctx.limits().max_decoded_bytes,
+                true,
+            )?;
+        } else if bits == 8 {
             apply_image_decode(&mut data, components, image.get_attr("Decode"), ctx)?;
         } else {
             let components = components.ok_or_else(|| {
                 PdfError::UnsupportedFeature("packed image samples for this color space".into())
             })?;
-            let endpoints =
-                image_decode_endpoints(Some(components), image.get_attr("Decode"), ctx)?;
+            let endpoints = if is_mask {
+                stencil_decode
+            } else {
+                image_decode_endpoints(Some(components), image.get_attr("Decode"), ctx)?
+            };
             data = unpack_image_samples(
                 &data,
                 width as usize,
@@ -491,7 +712,7 @@ impl PdfImage {
             colorspace,
             data,
             is_inline: false,
-            is_mask: false,
+            is_mask,
             pixel_count,
             max_rgba_bytes: ctx.limits().max_decoded_bytes,
             soft_mask,
@@ -531,10 +752,40 @@ impl PdfImage {
         self.is_inline
     }
     pub fn rgba_buffer(&self) -> PdfResult<Vec<u8>> {
+        self.rgba_buffer_inner(None)
+    }
+
+    /// Apply the current nonstroking color to a stencil's transparent coverage.
+    pub fn rgba_buffer_with_stencil_color(
+        &self,
+        color: &crate::color::value::ColorRgb,
+    ) -> PdfResult<Vec<u8>> {
+        if !self.is_mask
+            || [color.r, color.g, color.b]
+                .iter()
+                .any(|v| !v.is_finite() || !(0.0..=1.0).contains(v))
+        {
+            return Err(PdfError::ColorError(
+                "stencil color requires a stencil and finite RGB components in [0,1]".into(),
+            ));
+        }
+        self.rgba_buffer_inner(Some(color))
+    }
+
+    fn rgba_buffer_inner(
+        &self,
+        stencil_color: Option<&crate::color::value::ColorRgb>,
+    ) -> PdfResult<Vec<u8>> {
+        if self.is_mask && stencil_color.is_none() {
+            return Err(PdfError::ColorError(
+                "stencil RGBA conversion requires the current nonstroking color".into(),
+            ));
+        }
         let components = match &self.colorspace {
             ColorSpace::DeviceGray(_) => 1,
             ColorSpace::DeviceRgb(_) => 3,
             ColorSpace::DeviceCmyk(_) => 4,
+            ColorSpace::Indexed(_) => 1,
             _ => {
                 return Err(PdfError::UnsupportedFeature(
                     "image RGBA conversion for this color space".into(),
@@ -561,7 +812,11 @@ impl PdfImage {
         match &self.colorspace {
             ColorSpace::DeviceGray(g) => {
                 for &g in self.data.iter() {
-                    rgba.extend_from_slice(&[g, g, g, 255]);
+                    if let Some(color) = stencil_color {
+                        rgba.extend_from_slice(&[color.r(), color.g(), color.b(), 255 - g]);
+                    } else {
+                        rgba.extend_from_slice(&[g, g, g, 255]);
+                    }
                 }
             }
             ColorSpace::DeviceRgb(_) => {
@@ -581,6 +836,13 @@ impl PdfImage {
                     let g = (255.0 * (1.0 - m) * (1.0 - k)) as u8;
                     let b = (255.0 * (1.0 - y) * (1.0 - k)) as u8;
                     rgba.extend_from_slice(&[r, g, b, 255]);
+                }
+            }
+            ColorSpace::Indexed(space) => {
+                for &index in &self.data {
+                    let rgb =
+                        space.rgb(&crate::color::value::ColorValue::new(vec![index as f32]))?;
+                    rgba.extend_from_slice(&[rgb.r(), rgb.g(), rgb.b(), 255]);
                 }
             }
             _ => {}
@@ -663,6 +925,21 @@ fn unpack_image_samples(
     endpoints: Option<[f64; 8]>,
     limit: usize,
 ) -> PdfResult<Vec<u8>> {
+    unpack_image_samples_inner(
+        source, width, height, components, bits, endpoints, limit, false,
+    )
+}
+
+fn unpack_image_samples_inner(
+    source: &[u8],
+    width: usize,
+    height: usize,
+    components: usize,
+    bits: usize,
+    endpoints: Option<[f64; 8]>,
+    limit: usize,
+    indexed: bool,
+) -> PdfResult<Vec<u8>> {
     let overflow = || PdfError::ResourceLimit("image sample size overflow".into());
     let row_samples = width.checked_mul(components).ok_or_else(overflow)?;
     let row_bytes = row_samples
@@ -690,14 +967,16 @@ fn unpack_image_samples(
             } else {
                 (u32::from(row[offset / 8]) >> (8 - bits - offset % 8)) & ((1 << bits) - 1)
             };
-            let (low, high) = endpoints.map_or((0.0, 1.0), |e| {
+            let (low, high) = endpoints.map_or((0.0, if indexed { maximum } else { 1.0 }), |e| {
                 let component = index % components;
                 (e[component * 2], e[component * 2 + 1])
             });
-            output.push(
-                ((low + sample as f64 / maximum * (high - low)).clamp(0.0, 1.0) * 255.0).round()
-                    as u8,
-            );
+            let decoded = low + sample as f64 / maximum * (high - low);
+            output.push(if indexed {
+                decoded.clamp(0.0, 255.0).round() as u8
+            } else {
+                (decoded.clamp(0.0, 1.0) * 255.0).round() as u8
+            });
         }
     }
     Ok(output)

@@ -94,7 +94,11 @@ TrueType cmap 已增加 Format 12 与 `get_gid_u32`；整字体嵌入可用 `res
 
 DeviceGray/RGB/CMYK 的 PDF 图像以及同尺寸 DeviceGray SMask 支持 1/2/4/8/16 位采样：处理每行填充位、16 位大端样本，并在原始精度上应用 Decode 后量化为显示用 8 位。输入字节长度和输出大小受检查。此能力不改变 PNG 导入的 16 位拒绝策略，也不扩展其他颜色空间；新增位深的独立阅读器像素对照仍待验收。
 
-DeviceGray/RGB/CMYK 图像和灰度 SMask 已支持显式 Decode 数组，包括默认和反转映射；验证分量数量、有限数值，并按设备范围裁剪。其他颜色空间的 Decode、Matte 与嵌套蒙版仍不支持；此能力尚未完成全部独立像素对照。
+DeviceGray/RGB/CMYK 图像和灰度 SMask 已支持显式 Decode 数组，包括默认和反转映射；验证分量数量、有限数值，并按设备范围裁剪。ImageMask stencil XObject 支持一位采样（默认 BitsPerComponent=1）、逐行填充位及 Decode [0 1]/[1 0]，使用当前非描边颜色绘制；None 填充不绘制但保留对象。低层 stencil 转换需调用 `rgba_buffer_with_stencil_color`，不提供当前颜色的 `rgba_buffer` 返回错误。Pattern 着色、内联 stencil、其他颜色空间的 Decode、Matte 与嵌套蒙版仍不支持；此能力尚未完成全部独立像素对照。
+
+Indexed XObject 已增加专用索引采样路径：默认 Decode 保留原始索引，显式 Decode 按索引单位映射、取整，再经调色板范围裁剪转换为 RGBA；低位深样本逐行重置。调色板字节按基空间范围映射，Lab 使用 L=0..100 与声明的 a/b Range，ICCBased 使用声明 Range 后沿用 Alternate 显示近似。DeviceRGB 调色板已覆盖多位深及两种保存策略严格读回；Lab/ICC 范围专项及两保存策略严格读回已通过。ICC profile 色彩管理、Skia 专项像素和独立阅读器对照仍待完成，不代表全部 Indexed 组合已验收。
+
+Indexed 的 DeviceN 基空间通过现有 tint-transform/替代空间转换，不再一概拒绝；混合 None 分量仍保留并传给显示转换，不将其当作整体不绘制。Indexed 基空间为 Separation /None 或全 None DeviceN 时，绘制适配层会抑制路径、文字和普通图像，DisplayList 仍保留对象。原生专色版、叠印、Type4 函数执行与完整 DeviceN 兼容性仍未实现。
 
 `document.resources().embed_png_image(page, encoded)` 使用 png 0.18.1 解码 PNG，展开调色板/透明信息并复用 RGB/RGBA 注册；RGB、RGBA、灰度、灰度 alpha 和调色板+tRNS 已有保存/解释回归。检查原始文件字节、像素、转换输出大小及解码内部限额；校验 CRC 和结束数据，无效页号在解码前拒绝。APNG、16 位和 ICC 转换暂不支持，gamma/色彩管理未实现；多缓冲聚合峰值不在单项限额内。`create_transparency` 示例增加 `--png` 模式，基础 RGBA 导入已通过 MuPDF 中心像素对照，其他变体仍需独立验收。
 
@@ -176,7 +180,7 @@ SaveOptions 位于 `pdf::document::save_options`；`save_to_bytes/writer/file_wi
 
 > **Note:** This library is currently under active development. Several features, such as Pattern colorspaces and Type3 fonts, are not yet implemented.
 
-Separation 的普通专色通过替代空间/tint-transform 作显示近似；`/All` 忽略该函数并用 `1 - tint` 显示灰度（不是原生分色输出）。`/None` 直接 RGB 转换明确返回 UnsupportedFeature；直接解释/DisplayList 回放会抑制对应路径填充/描边，文字转换为有效绘制模式但保留裁剪，普通图像仍使用自身颜色空间。DisplayList 保留原对象以支持编辑与文本提取。Stencil image mask 的解析和像素绘制仍不支持；None 的独立像素与完整图像验收未完成。
+Separation 的普通专色通过替代空间/tint-transform 作显示近似；`/All` 忽略该函数并用 `1 - tint` 显示灰度（不是原生分色输出）。`/None` 直接 RGB 转换明确返回 UnsupportedFeature；直接解释/DisplayList 回放会抑制对应路径填充/描边，文字转换为有效绘制模式但保留裁剪，普通图像仍使用自身颜色空间。DisplayList 保留原对象以支持编辑与文本提取。一位 stencil XObject 已接入解析和当前填充色绘制；None 填充会抑制 stencil。None 的独立阅读器像素对照与完整图像验收未完成。
 
 PDF Type 3 **Stitching functions**（不同于 Type3 字体）已支持单输入分段求值、Domain 裁剪、正向/反向 Encode、可选 Range 输出裁剪及嵌套函数；构造时校验子函数输入/输出维度，并保留深度和总节点限额。Type 4 PostScript 函数求值仍明确返回不支持。此功能不代表 Shading/Pattern 或操作级聚合内存预算已经完成。
 

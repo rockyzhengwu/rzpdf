@@ -1,5 +1,43 @@
 # 解析回归与异常输入验证
 
+## Indexed DeviceN / None 回归（2026-10-07）
+
+Indexed 可使用 DeviceN 基空间，参考 [Adobe PDF Reference 1.6 的 Indexed/DeviceN 示例](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/pdfreference1.6.pdf)。混合 None 分量可能携带替代颜色数据，显示转换仍接收完整 tint 数组；本库只支持已有函数求值器和替代空间近似，不实现原生色版或 Type4 求值。
+
+`indexed_devicen_maps_all_palette_tints_including_mixed_none` 通过双输入 Sampled 函数核对白/青/品红/蓝的路径颜色和低位深图像 RGBA，分别使用 Cyan/Magenta 和 Cyan/None 名称，两种保存策略严格读回保持一致。
+
+`indexed_none_bases_suppress_paths_and_images_without_losing_objects` 覆盖 Separation None 和全 None DeviceN 基空间：DisplayList 三个对象保留，路径/图像回调抑制，后续红色路径仍绘制，两种保存严格读回相同。已有 Skia None 像素测试增加这两种 Indexed 包装，核对白色页面、文字保留及组合绘制可见侧；未新建测试函数，render 总数不因此增加。
+
+日志 `/tmp/rzpdf-indexed-devicen-none.log` 终态退出 0：528 单元、20 颜色流程通过；`/tmp/rzpdf-indexed-none-render.log` 终态退出 0：32 通过（48.47 秒）。均无失败/忽略。Indexed 图像的新独立像素/阅读器对照、全部函数/原生多色版和全链路预算仍未完成；未运行全工作区/fuzz。
+
+## Indexed 基空间范围回归（2026-10-07）
+
+调色板字节 0/255 分别映射基空间各分量范围的下/上界，不能统一除以 255 后直接作为 Lab 分量。依据 [Adobe PDF Reference 1.4，Indexed Color Spaces](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/pdfreference1.4.pdf)。Lab 使用 L=0..100 与参数 a/b Range，ICCBased 使用声明 Range；ICC 输出仍为 Alternate 近似。
+
+新增 Lab 黑/白端点及非对称 a/b 范围对照，ICC 灰度与 RGB 非默认范围的明确字节期望；另通过真实 Image 资源注册/页面解释，核对 Lab 黑白和 ICC 64/191 灰度，两种保存策略严格读回保持一致。ICC fixture 使用空 profile 流，专门验证现有 Alternate 路径，不声称 profile 管理验收。
+
+Lab 专项 `/tmp/rzpdf-indexed-lab-range.log` 退出 0：1 通过、526 filtered；早于 ICC 新增测试。最终 PDF 回归 `/tmp/rzpdf-indexed-base-ranges-final.log` 退出 0：528 单元、18 颜色流程通过；render 回归 `/tmp/rzpdf-indexed-base-render.log` 退出 0：32 通过（47.23 秒）。均无失败/忽略。分量缓冲改为可失败预留，映射采用 f64 中间值；不是全链路 OperationBudget 贯通。独立阅读器/Skia 新专项、全 ICC 与非零 Lab BlackPoint 仍未完成；未运行 fuzz。
+
+## Indexed image 采样回归（2026-10-07）
+
+Indexed 的默认 Decode 让原采样索引保持不变，不是 [0 1] 灰度归一化；参考 [Adobe PDF Reference 1.3，Decode Arrays](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/pdfreference1.3.pdf)。显式 Decode 映射后取整，再通过 hival 裁剪访问调色板。逐行位填充、1/2/4/8 位及 legacy 16 位采样、反转/越界端点与错误长度都有确定性字节测试；不表示已实现 PDF 2.0 严格合规判定。
+
+`indexed_images_preserve_indices_across_depths_rows_and_decode` 专项首轮退出 0：1 通过、525 filtered（该轮早于 16 位追加用例）。`indexed_image_palette_and_decode_survive_strict_save` 经真实 Image 资源注册/页面解释，覆盖两行低位深、反转 Decode 与 Preserve/FlateUnencoded 严格读回相同 RGBA。
+
+首轮 `/tmp/rzpdf-indexed-image-regressions.log` 退出 0：526 单元、17 颜色流程通过，0 失败/忽略；16 位追加后的最终 `/tmp/rzpdf-indexed-image-final.log` 同样退出 0：526 单元、17 颜色流程通过，0 失败/忽略。此轮没有新增 Skia 像素或独立阅读器验收，Lab/ICC 基空间映射、其他颜色空间图像及聚合预算仍待补齐，未运行 fuzz。
+
+## Stencil image mask 回归（2026-10-07）
+
+一位 ImageMask XObject 用当前非描边颜色绘制；默认 Decode [0 1] 的零采样覆盖、一采样透明，[1 0] 反转。规则依据 [Adobe PDF Reference 1.4，Stencil Masking](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/pdfreference1.4.pdf)。无 ColorSpace，BitsPerComponent 缺省为 1；非法位深/颜色空间/SMask/Decode、错误数据长度与 RGBA 预算不足均拒绝。
+
+`stencil_samples_use_current_color_and_reverse_decode` 检查逐行填充位、默认/反转 alpha、同一图像红/绿重着色及非有限颜色拒绝。专项日志 `/tmp/rzpdf-stencil-unit.log`：退出 0，1 通过、524 filtered。
+
+`stencil_pixels_use_current_fill_decode_and_none_after_save` 在蓝背景绘制同一 mask 的红/绿实例，检查默认/反转覆盖像素、None 不绘制，两保存策略严格读回逐字节一致。日志 `/tmp/rzpdf-stencil-pixels.log`：退出 0，1 通过、31 filtered。是本库 Skia 像素验证，非独立阅读器对照。
+
+完整 PDF 单元与 color_workflow 回归日志 `/tmp/rzpdf-stencil-regressions-final.log`：退出 0，525 单元、16 颜色流程通过；render 单元日志 `/tmp/rzpdf-stencil-render-all.log`：退出 0，32 通过（52.69 秒）。均无失败/忽略，未重跑整个工作区。首轮旧错误类型预期已更新：带 ColorSpace 的 ImageMask=true 属参数错误，而非所有 stencil 一概不支持。
+
+普通灰度是 stencil 的内部样本载体，不表示 stencil 有 PDF ColorSpace。`rgba_buffer_with_stencil_color` 必须显式提供有限 RGB；无颜色转换报错。Pattern 着色、内联图像、独立读者对照与完整 P4 未完成；未运行 fuzz。
+
 ## 运行
 
 ```sh

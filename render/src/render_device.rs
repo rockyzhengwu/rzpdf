@@ -567,7 +567,13 @@ impl Device for SkiaRender {
         let matrix = &imageobject.matrix;
         let ctm = matrix.checked_mul(&self.matrix)?;
         let m44 = self.pdf_to_skia_m44(ctm.a(), ctm.b(), ctm.c(), ctm.d(), ctm.e(), ctm.f());
-        let rgba = imageobject.image.rgba_buffer()?;
+        let rgba = if imageobject.image.is_mask() {
+            let state = &imageobject.graphic_state.color_state;
+            let color = state.fill_color_space.rgb(&state.fill_color_value)?;
+            imageobject.image.rgba_buffer_with_stencil_color(&color)?
+        } else {
+            imageobject.image.rgba_buffer()?
+        };
         let (width, height) = imageobject.image.pixel_dimensions();
         let width = i32::try_from(width)
             .map_err(|_| PdfError::ResourceLimit("image width exceeds backend range".into()))?;
@@ -3055,6 +3061,8 @@ mod tests {
         for source in [
             "[/Separation /None /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 /C0 [0] /C1 [0] >>]",
             "[/DeviceN [/None] /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 /C0 [0] /C1 [0] >>]",
+            "[/Indexed [/Separation /None /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 /C0 [0] /C1 [0] >>] 1 <00FF>]",
+            "[/Indexed [/DeviceN [/None] /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 /C0 [0] /C1 [0] >>] 1 <00FF>]",
         ] {
             let doc = PdfDocument::new().unwrap();
             doc.add_page_with_builder(0, PageBuilder::new().size(40.0, 40.0))
@@ -3124,6 +3132,100 @@ mod tests {
                     .display(&mut renderer)
                     .unwrap();
                 assert_eq!(pixels(&mut renderer), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn stencil_pixels_use_current_fill_decode_and_none_after_save() {
+        use pdf::{
+            document::{
+                PdfDocument,
+                resource_manager::ResourceKind,
+                save_options::{SaveOptions, StreamCompression},
+            },
+            io::stream_reader::StreamReader,
+            objects::{PdfObject, pdf_stream::PdfStream},
+            page::page_builder::PageBuilder,
+            parser::syntax::{ParseMode, SyntaxParser},
+        };
+        let parse = |source: &str| {
+            SyntaxParser::new(
+                StreamReader::try_new(std::io::Cursor::new(source.as_bytes().to_vec())).unwrap(),
+            )
+            .get_object()
+            .unwrap()
+        };
+        for reversed in [false, true] {
+            let doc = PdfDocument::new().unwrap();
+            doc.add_page_with_builder(0, PageBuilder::new().size(40.0, 40.0))
+                .unwrap();
+            let dict = parse(&format!(
+                "<< /Type /XObject /Subtype /Image /Width 2 /Height 1 /ImageMask true {} >>",
+                if reversed { "/Decode [1 0]" } else { "" }
+            ))
+            .into_dict()
+            .unwrap();
+            let object = doc
+                .try_insert_object(PdfObject::PdfStream(PdfStream::new(dict, vec![0x40])))
+                .unwrap();
+            let name = doc
+                .resources()
+                .register_existing(0, ResourceKind::Image, object)
+                .unwrap();
+            let none = doc
+                .resources()
+                .register_color_space(
+                    0,
+                    parse(
+                        "[/Separation /None /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 >>]",
+                    ),
+                )
+                .unwrap();
+            doc.replace_page_contents(0, format!("0 0 1 rg 0 0 40 40 re f q 20 0 0 10 5 5 cm 1 0 0 rg /{name} Do Q q 20 0 0 10 5 20 cm 0 1 0 rg /{name} Do Q /{none} cs q 40 0 0 40 0 0 cm /{name} Do Q").into_bytes()).unwrap();
+            let render = |doc: &PdfDocument<std::io::Cursor<Vec<u8>>>| {
+                let mut renderer = SkiaRender::new(72.0, 72.0).unwrap();
+                doc.get_page(0).unwrap().display(&mut renderer).unwrap();
+                let info = skia_safe::ImageInfo::new(
+                    (40, 40),
+                    skia_safe::ColorType::RGBA8888,
+                    skia_safe::AlphaType::Unpremul,
+                    None,
+                );
+                let mut bytes = vec![0; 40 * 40 * 4];
+                assert!(
+                    renderer
+                        .surface
+                        .read_pixels(&info, &mut bytes, 40 * 4, (0, 0))
+                );
+                bytes
+            };
+            let expected = render(&doc);
+            for (y, painted) in [(30, [255, 0, 0, 255]), (15, [0, 255, 0, 255])] {
+                for (x, left) in [(10, true), (20, false)] {
+                    let offset = (y * 40 + x) * 4;
+                    assert_eq!(
+                        &expected[offset..offset + 4],
+                        if left != reversed {
+                            &painted
+                        } else {
+                            &[0, 0, 255, 255]
+                        }
+                    );
+                }
+            }
+            for compression in [
+                StreamCompression::Preserve,
+                StreamCompression::FlateUnencoded,
+            ] {
+                let bytes = doc
+                    .save_to_bytes_with_options(SaveOptions {
+                        compression,
+                        ..Default::default()
+                    })
+                    .unwrap();
+                let reopened = PdfDocument::from_bytes_with_mode(bytes, ParseMode::Strict).unwrap();
+                assert_eq!(render(&reopened), expected);
             }
         }
     }

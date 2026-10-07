@@ -99,10 +99,7 @@ impl Indexed {
                 "Indexed index must be finite".to_string(),
             ));
         }
-        if matches!(
-            *self.base,
-            ColorSpace::Pattern(_) | ColorSpace::DeviceN(_) | ColorSpace::Indexed(_)
-        ) {
+        if matches!(*self.base, ColorSpace::Pattern(_) | ColorSpace::Indexed(_)) {
             return Err(PdfError::UnsupportedFeature(
                 "Indexed base color space".to_string(),
             ));
@@ -114,7 +111,31 @@ impl Indexed {
             .lookup
             .get(pos..pos + components)
             .ok_or_else(|| PdfError::ColorError("Indexed lookup table is truncated".to_string()))?;
-        let cvs = entry.iter().map(|n| *n as f32 / 255.0).collect();
+        let lab_ranges = match self.base.as_ref() {
+            ColorSpace::Lab(lab) => Some(lab.component_ranges()),
+            _ => None,
+        };
+        let ranges = match self.base.as_ref() {
+            ColorSpace::IccBased(icc) => Some(icc.range()),
+            _ => lab_ranges.as_ref().map(|ranges| ranges.as_slice()),
+        };
+        if ranges.is_some_and(|range| range.len() != components * 2) {
+            return Err(PdfError::ColorError(
+                "Indexed base component range mismatch".into(),
+            ));
+        }
+        let mut cvs = Vec::new();
+        cvs.try_reserve_exact(components)
+            .map_err(|_| PdfError::ResourceLimit("Indexed component allocation".into()))?;
+        for (index, &sample) in entry.iter().enumerate() {
+            let (low, high) =
+                ranges.map_or((0.0, 1.0), |range| (range[index * 2], range[index * 2 + 1]));
+            // Use wide intermediates for finite, widely separated endpoints.
+            cvs.push(
+                (f64::from(low) + f64::from(sample) / 255.0 * (f64::from(high) - f64::from(low)))
+                    as f32,
+            );
+        }
         let value = ColorValue::new(cvs);
         self.base.rgb(&value)
     }
@@ -122,12 +143,110 @@ impl Indexed {
     pub fn number_of_components(&self) -> usize {
         1
     }
+    pub fn is_nonpainting(&self) -> bool {
+        self.base.is_nonpainting()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::color::device_rgb::DeviceRgb;
+
+    #[test]
+    fn icc_palette_bytes_use_declared_ranges_before_alternate_conversion() {
+        use crate::{
+            color::icc_based::IccBased,
+            io::stream_reader::StreamReader,
+            objects::{pdf_dict::PdfDict, pdf_stream::PdfStream},
+            parser::{options::ParseOptions, syntax::SyntaxParser},
+        };
+        use std::io::Cursor;
+        let ctx = PDFContext::<Cursor<Vec<u8>>>::new_without_source(
+            PdfDict::default(),
+            ParseOptions::default(),
+        );
+        for (source, lookup, expected) in [
+            (
+                "<< /N 1 /Range [0.25 0.75] >>",
+                vec![0, 255],
+                [[64, 64, 64], [191, 191, 191]],
+            ),
+            (
+                "<< /N 3 /Range [0 0.5 0 1 0 0.25] >>",
+                vec![0, 0, 0, 255, 128, 255],
+                [[0, 0, 0], [128, 128, 64]],
+            ),
+        ] {
+            let dict = SyntaxParser::new(
+                StreamReader::try_new(Cursor::new(source.as_bytes().to_vec())).unwrap(),
+            )
+            .get_object()
+            .unwrap()
+            .into_dict()
+            .unwrap();
+            let icc = IccBased::try_new(&PdfObject::PdfStream(PdfStream::new(dict, vec![])), &ctx)
+                .unwrap();
+            let indexed = Indexed {
+                base: Box::new(ColorSpace::IccBased(icc)),
+                hival: 1,
+                lookup,
+            };
+            for (index, expected) in expected.into_iter().enumerate() {
+                let actual = indexed.rgb(&ColorValue::new(vec![index as f32])).unwrap();
+                assert_eq!([actual.r(), actual.g(), actual.b()], expected);
+            }
+        }
+    }
+
+    #[test]
+    fn lab_palette_bytes_map_to_l_and_declared_ab_ranges() {
+        use crate::{
+            io::stream_reader::StreamReader,
+            objects::pdf_dict::PdfDict,
+            parser::{options::ParseOptions, syntax::SyntaxParser},
+        };
+        use std::io::Cursor;
+        let ctx = PDFContext::<Cursor<Vec<u8>>>::new_without_source(
+            PdfDict::default(),
+            ParseOptions::default(),
+        );
+        for (range, lookup, expected) in [
+            (
+                "[0 0 0 0]",
+                "000000FFFFFF",
+                [[0.0, 0.0, 0.0], [100.0, 0.0, 0.0]],
+            ),
+            (
+                "[-20 40 -30 60]",
+                "00FF00FF00FF",
+                [[0.0, 40.0, -30.0], [100.0, -20.0, 60.0]],
+            ),
+        ] {
+            let source = format!(
+                "[/Indexed [/Lab << /WhitePoint [0.95047 1 1.08883] /Range {range} >>] 1 <{lookup}>]"
+            );
+            let object =
+                SyntaxParser::new(StreamReader::try_new(Cursor::new(source.into_bytes())).unwrap())
+                    .get_object()
+                    .unwrap();
+            let indexed = Indexed::try_new(object.as_array().unwrap(), &ctx).unwrap();
+            for (index, values) in expected.into_iter().enumerate() {
+                let actual = indexed.rgb(&ColorValue::new(vec![index as f32])).unwrap();
+                let expected = indexed.base.rgb(&ColorValue::new(values.to_vec())).unwrap();
+                assert_eq!(
+                    [actual.r(), actual.g(), actual.b()],
+                    [expected.r(), expected.g(), expected.b()]
+                );
+            }
+            if range == "[0 0 0 0]" {
+                let black = indexed.rgb(&ColorValue::new(vec![0.0])).unwrap();
+                let white = indexed.rgb(&ColorValue::new(vec![1.0])).unwrap();
+                assert_eq!([black.r(), black.g(), black.b()], [0, 0, 0]);
+                assert_eq!([white.r(), white.g(), white.b()], [255, 255, 255]);
+            }
+        }
+    }
 
     #[test]
     fn indexed_constructor_checks_integer_bounds_and_lookup_length() {

@@ -481,6 +481,16 @@ impl Lab {
     pub fn number_of_components(&self) -> usize {
         3
     }
+    pub(crate) fn component_ranges(&self) -> [f32; 6] {
+        [
+            0.0,
+            100.0,
+            self.range[0],
+            self.range[1],
+            self.range[2],
+            self.range[3],
+        ]
+    }
     pub fn rgb(&self, value: &ColorValue) -> PdfResult<ColorRgb> {
         if value.value_size() != 3 || value.values().iter().any(|v| !v.is_finite()) {
             return Err(PdfError::ColorError(

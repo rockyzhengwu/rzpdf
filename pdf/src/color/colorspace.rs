@@ -35,6 +35,7 @@ impl ColorSpace {
         match self {
             Self::Separation(space) => space.is_nonpainting(),
             Self::DeviceN(space) => space.is_nonpainting(),
+            Self::Indexed(space) => space.is_nonpainting(),
             _ => false,
         }
     }
