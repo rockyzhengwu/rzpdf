@@ -252,6 +252,111 @@ impl<R: Read + Seek> PdfDocument<R> {
         self.replace_nested_unicode(page, root, source, NestedTextEdit::ArrayRange(range), text, true)
     }
 
+    /// Replace a range of events in one selected leaf Form invocation without
+    /// compensating advance. The source must anchor the range's start event.
+    pub fn replace_nested_text_event_range(
+        &self, page: u32, root: &ContentProgram, source: &NestedDrawSource,
+        range: std::ops::Range<crate::page::content_program::TextCodePosition>, text: &str,
+    ) -> PdfResult<()> {
+        self.replace_nested_text_event_range_inner(page, root, source, range, text, false, None)
+    }
+
+    /// Preserve each selected event's advance using its inherited original state.
+    /// Endpoints belong to the same selected leaf, not different Form invocations.
+    pub fn replace_nested_text_event_range_preserving_advance(
+        &self, page: u32, root: &ContentProgram, source: &NestedDrawSource,
+        range: std::ops::Range<crate::page::content_program::TextCodePosition>, text: &str,
+    ) -> PdfResult<()> {
+        self.replace_nested_text_event_range_inner(page, root, source, range, text, true, None)
+    }
+
+    /// Source-qualified endpoints. Different leaf invocations are explicitly
+    /// rejected rather than interpreting the end index in the start's scope.
+    pub fn replace_nested_text_span(
+        &self, page: u32, root: &ContentProgram,
+        range: std::ops::Range<crate::page::source_provenance::NestedTextCodePosition<'_>>,
+        text: &str,
+    ) -> PdfResult<()> {
+        self.replace_nested_text_span_inner(page, root, range, text, false)
+    }
+
+    pub fn replace_nested_text_span_preserving_advance(
+        &self, page: u32, root: &ContentProgram,
+        range: std::ops::Range<crate::page::source_provenance::NestedTextCodePosition<'_>>,
+        text: &str,
+    ) -> PdfResult<()> {
+        self.replace_nested_text_span_inner(page, root, range, text, true)
+    }
+
+    fn replace_nested_text_span_inner(
+        &self, page: u32, root: &ContentProgram,
+        range: std::ops::Range<crate::page::source_provenance::NestedTextCodePosition<'_>>,
+        text: &str, preserve_advance: bool,
+    ) -> PdfResult<()> {
+        range.start.source.validate_limits(&self.ctx.limits())?;
+        range.end.source.validate_limits(&self.ctx.limits())?;
+        if range.start.source.invocations != range.end.source.invocations {
+            return Err(PdfError::UnsupportedFeature("text span across different Form invocations".into()));
+        }
+        if !range.start.source.geometry_operation_indices.is_empty()
+            || !range.end.source.geometry_operation_indices.is_empty() {
+            return Err(PdfError::ObjectError("text span endpoint has path geometry".into()));
+        }
+        let position = |endpoint: crate::page::source_provenance::NestedTextCodePosition<'_>| {
+            crate::page::content_program::TextCodePosition {
+                operation: endpoint.source.operation_index,
+                array_item: endpoint.array_item,
+                offset: endpoint.offset,
+            }
+        };
+        self.replace_nested_text_event_range_inner(page, root, range.start.source,
+            position(range.start)..position(range.end), text, preserve_advance, Some(range.end.source))
+    }
+
+    fn replace_nested_text_event_range_inner(
+        &self, page: u32, root: &ContentProgram, source: &NestedDrawSource,
+        range: std::ops::Range<crate::page::content_program::TextCodePosition>, text: &str,
+        preserve_advance: bool,
+        end_source: Option<&NestedDrawSource>,
+    ) -> PdfResult<()> {
+        if source.operation_index != range.start.operation {
+            return Err(PdfError::ObjectError("nested range source must anchor its start event".into()));
+        }
+        let budget = self.ctx.limits().operation_budget();
+        let current_page = self.get_page_with_budget(page, &budget)?;
+        let chain = current_page.prepare_form_chain_with_budget(root, source, &budget)?;
+        let leaf = chain.last().ok_or_else(|| PdfError::PageResourceError("Nested leaf absent".into()))?;
+        if let Some(end_source) = end_source {
+            let end = leaf.program.operations().get(end_source.operation_index)
+                .ok_or_else(|| PdfError::PageResourceError("Nested span end index missing".into()))?;
+            if end.operator.byte_offset() != end_source.operator_byte_offset {
+                return Err(PdfError::PageResourceError("Nested span end byte position mismatch".into()));
+            }
+        }
+        let (page_scope, _page_scope_lease) = current_page.resource_with_budget(&budget)?;
+        let edited = self.build_text_event_edit_plan(
+            &leaf.program, range, text, preserve_advance, &budget, |target| {
+                // Reconstruct each original prefix; no bare font clone, no
+                // prior event commit that changes indices or inherited state.
+                let mut state = Default::default();
+                for (index, call) in source.invocations.iter().enumerate() {
+                    let (program, scope) = if index == 0 {
+                        (root, &page_scope)
+                    } else {
+                        (&*chain[index - 1].program, &chain[index - 1].resource_scope)
+                    };
+                    state = current_page.text_state_before_operation_in_scope_with_budget(
+                        program, call.operation_index, scope, state, &budget,
+                    )?;
+                }
+                current_page.text_state_before_operation_in_scope_with_budget(
+                    &leaf.program, target, &leaf.resource_scope, state, &budget,
+                )?.into_metrics()
+            },
+        )?;
+        self.commit_nested_edit_with_budget(page, root, source, chain, edited, &budget)
+    }
+
     fn replace_nested_unicode(
         &self,
         page: u32,

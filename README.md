@@ -18,6 +18,14 @@ Unicode 文档替换可用 `replace_page_text` / `replace_page_text_array_item`�
 
 `replace_page_operation_sequences(page, &snapshot, replacements)`可按原快照一次原子提交多段操作替换；使用`OperationReplacement { index, source, operation_count }`，可展开或删除操作，保留其他操作及流边界并验证最终结果。它接受调用方构建的原始内容片段，不负责跨事件Unicode范围/字体分段或自动布局补偿。详见[批量内容提交](docs/content-editing.md)。
 
+`replace_page_text_event_range_preserving_advance(page, &snapshot, start..end, text)`按`TextCodePosition`字符码字节端点提供跨顶层文字事件Unicode编辑：在起点字体中编码新文字，按各事件原有效度量补偿，保留状态操作与结束后缀位置，最后一次事务提交。固定字体切换/引号/TJ、共享隔离及回滚已有回归；不跨Form、不重新排版，复杂字体和独立阅读器验收仍待完成。端点和额度约束见[内容编辑接口](docs/content-editing.md)。
+
+普通入口`replace_page_text_event_range`使用相同端点和事务，但不补偿推进，保留Tj/引号操作与TJ项数，允许零字号。普通/补偿模式及既有解析定向687项测试通过；不代表跨Form、完整字体矩阵或独立阅读器验收。
+
+嵌套入口`replace_nested_text_event_range`及其`_preserving_advance`版本支持同一次叶Form调用内的多事件范围，端点为叶程序位置、source锚定起始事件，保留其他调用和共享页。继承字体与事务回滚已有固定回归；尚不支持跨不同Form或不同调用的选择，详见内容编辑接口。
+
+`replace_nested_text_span`及其`_preserving_advance`版本接受两端带借用来源的`NestedTextCodePosition`，明确拒绝不同调用链并核对结束操作原字节位置；仍须配对当前root快照，不是持久句柄。当前单元/顶层/嵌套定向654项通过，跨不同Form编辑仍待实现。
+
 `remove_page_text_draw(page, &snapshot, operation)` 清空整个顶层文字事件的字符串，支持Tj/TJ/两类引号，不依赖字体编码；保留引号状态与TJ数值/注释，批量TJ仅一次扫描和程序重解析。它取消原字形推进，不保证连续文本布局保持，也不清除旧内容对象中的残留数据。
 
 顶层文字、图片及路径绘制带来源操作位置；文字字符另带 TJ 项索引和解码字符码范围。图片/文字报告及 DisplayList 可检查同文档/同页/同修订配对与当前性。`image_geometry_hits` 提供显示空间的图片几何候选，`transform_page_image_draw_display` 支持显示空间仿射编辑；不判断裁剪、透明和遮挡，也不覆盖 Form/内联来源或文字路径命中。
@@ -153,6 +161,8 @@ cargo run -p pdf --example edit_page_order --locked -- INPUT.pdf OUTPUT.pdf
 固定真实字体补偿对照：`cargo run -p pdf --example compare_cjk_advance --locked -- INPUT.pdf OUTPUT.pdf`，输入为两页`create_cjk --images`文件。输出四页基线/原第二页/补偿/无补偿，独立MuPDF坐标检查及目视确认后续PDF仅在补偿页保持原位；可运行 `bash docs/check-cjk-advance.sh OUTPUT.pdf` 复验。范围、负例和渲染记录见[中文构建验证](docs/cjk-creation-validation.md)。合成Identity-V/W2度量回归也已通过，但真实竖排字形和完整字体矩阵仍未验收。
 
 同一示例支持末尾`--nested`，将第一页包装为两层Form后使用嵌套补偿入口；对应检查命令为`bash docs/check-cjk-advance.sh OUTPUT.pdf --nested`。固定真实中文样本的独立坐标/文本、四页目视和同分辨率顶层PNG对照已通过，详见上述验证文档；不代替真实竖排或全部嵌套资源矩阵。
+
+再加`--events`可把原句拆成中文/英文两事件，验证顶层或同一嵌套叶调用的跨事件范围普通/补偿接口。两种真实水平字体样本已通过独立结构/坐标/文本检查，四页目视与同DPI顶层/嵌套PNG对照通过；原默认CLI亦回归通过。此固定样本不覆盖真实竖排或跨不同Form。
 
 Info/XMP 默认独立编辑，不自动修改另一侧。`set_info_and_metadata(Some(info), Some(packet))` 可在同一事务替换两者；任一失败回滚全部修改，None 解除对应引用。该 API 只保证原子提交，语义一致性和合法 XML 由调用方负责，不自动映射字段或覆盖未知 XMP 属性。
 

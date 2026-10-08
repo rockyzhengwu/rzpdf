@@ -1,4 +1,4 @@
-//! Usage: compare_cjk_advance INPUT.pdf OUTPUT.pdf [--nested]
+//! Usage: compare_cjk_advance INPUT.pdf OUTPUT.pdf [--nested] [--events]
 //! Fixed create_cjk --images fixture. Output: baseline, second source page,
 //! compensated shorter text, uncompensated shorter text. The trailing PDF event
 //! must keep its position only on the compensated page.
@@ -8,7 +8,10 @@ use pdf::{
     error::{PdfError, PdfResult},
     io::stream_reader::StreamReader,
     objects::{PdfObject, pdf_dict::PdfDict, pdf_reference::PdfReference, pdf_stream::PdfStream},
-    page::content_builder::ContentBuilder,
+    page::{
+        content_builder::ContentBuilder,
+        content_program::{ContentProgram, TextCodePosition},
+    },
     parser::syntax::{ParseMode, SyntaxParser},
 };
 use std::io::{Cursor, Read, Seek};
@@ -95,12 +98,47 @@ fn check<R: Read + Seek>(doc: &PdfDocument<R>) -> PdfResult<()> {
     Ok(())
 }
 
+fn event_range(
+    program: &ContentProgram,
+    operation: usize,
+) -> PdfResult<std::ops::Range<TextCodePosition>> {
+    let end_operation = operation + 1;
+    let end = program
+        .operations()
+        .get(end_operation)
+        .ok_or_else(|| PdfError::ObjectError("Second text event missing".into()))?;
+    if program.operations()[operation].operator.name() != "Tj" || end.operator.name() != "Tj" {
+        return Err(PdfError::ObjectError(
+            "Expected consecutive Tj events".into(),
+        ));
+    }
+    Ok(TextCodePosition {
+        operation,
+        array_item: None,
+        offset: 0,
+    }..TextCodePosition {
+        operation: end_operation,
+        array_item: None,
+        offset: end.operator.get_as_string(0)?.bytes().len(),
+    })
+}
+
 fn main() -> PdfResult<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    let nested = args.get(2).and_then(|flag| flag.to_str()) == Some("--nested");
-    if args.len() != 2 && !(args.len() == 3 && nested) {
+    let nested = args
+        .iter()
+        .skip(2)
+        .any(|flag| flag.to_str() == Some("--nested"));
+    let events = args
+        .iter()
+        .skip(2)
+        .any(|flag| flag.to_str() == Some("--events"));
+    if args.len() < 2
+        || args.len() > 4
+        || args.len() != 2 + usize::from(nested) + usize::from(events)
+    {
         return Err(PdfError::DocumentError(
-            "Usage: compare_cjk_advance INPUT.pdf OUTPUT.pdf [--nested]".into(),
+            "Usage: compare_cjk_advance INPUT.pdf OUTPUT.pdf [--nested] [--events]".into(),
         ));
     }
     let doc = PdfDocument::open_with_mode(&args[0], ParseMode::Strict)?;
@@ -138,10 +176,23 @@ fn main() -> PdfResult<()> {
         ));
     }
     let mut following = ContentBuilder::new();
+    let mut sentence = ContentBuilder::new();
+    if events {
+        sentence.show_encoded_text(&page.encode_text_for_font(font_name, "你好，世界！")?)?;
+        sentence.show_encoded_text(&page.encode_text_for_font(font_name, "Hello PDF")?)?;
+    }
     following.show_encoded_text(&page.encode_text_for_font(font_name, " PDF")?)?;
     drop(page);
     let split = original.operations()[operation].lexical_range.end;
-    let mut source = original.source_bytes()[..split].to_vec();
+    let mut source = if events {
+        let mut source = original.source_bytes()
+            [..original.operations()[operation].lexical_range.start]
+            .to_vec();
+        source.extend_from_slice(sentence.as_bytes());
+        source
+    } else {
+        original.source_bytes()[..split].to_vec()
+    };
     source.push(b'\n');
     source.extend_from_slice(following.as_bytes());
     source.extend_from_slice(&original.source_bytes()[split..]);
@@ -164,9 +215,32 @@ fn main() -> PdfResult<()> {
         if source.invocations.len() != 2 {
             return Err(PdfError::ObjectError("Expected two Form layers".into()));
         }
-        doc.replace_nested_text_preserving_advance(2, &snapshot, &source, "你好！")?;
+        if events {
+            let leaf = doc
+                .get_page(2)?
+                .nested_content_program(&snapshot, &source)?;
+            let range = event_range(&leaf, source.operation_index)?;
+            doc.replace_nested_text_event_range_preserving_advance(
+                2,
+                &snapshot,
+                &source,
+                range,
+                "你好！",
+            )?;
+        } else {
+            doc.replace_nested_text_preserving_advance(2, &snapshot, &source, "你好！")?;
+        }
     } else {
-        doc.replace_page_text_preserving_advance(2, &snapshot, operation, "你好！")?;
+        if events {
+            doc.replace_page_text_event_range_preserving_advance(
+                2,
+                &snapshot,
+                event_range(&snapshot, operation)?,
+                "你好！",
+            )?;
+        } else {
+            doc.replace_page_text_preserving_advance(2, &snapshot, operation, "你好！")?;
+        }
     }
     let snapshot = doc.get_page(3)?.content_program()?;
     if nested {
@@ -177,9 +251,26 @@ fn main() -> PdfResult<()> {
             .find(|character| character.unicode.as_deref() == Some("你"))
             .and_then(|character| character.nested_source)
             .ok_or_else(|| PdfError::ObjectError("Nested CJK sentence missing".into()))?;
-        doc.replace_nested_text(3, &snapshot, &source, "你好！")?;
+        if events {
+            let leaf = doc
+                .get_page(3)?
+                .nested_content_program(&snapshot, &source)?;
+            let range = event_range(&leaf, source.operation_index)?;
+            doc.replace_nested_text_event_range(3, &snapshot, &source, range, "你好！")?;
+        } else {
+            doc.replace_nested_text(3, &snapshot, &source, "你好！")?;
+        }
     } else {
-        doc.replace_page_text(3, &snapshot, operation, "你好！")?;
+        if events {
+            doc.replace_page_text_event_range(
+                3,
+                &snapshot,
+                event_range(&snapshot, operation)?,
+                "你好！",
+            )?;
+        } else {
+            doc.replace_page_text(3, &snapshot, operation, "你好！")?;
+        }
     }
     if doc.get_page(0)?.content_program()?.source_bytes() != baseline.source_bytes() {
         return Err(PdfError::DocumentError("Shared baseline changed".into()));

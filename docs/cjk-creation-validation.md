@@ -149,3 +149,20 @@ rzpdf - 中文字体嵌入
 ```
 
 两页 72 DPI PNG 均已目视检查：中文和拉丁文字可读，无缺字方框、重叠或裁切。Poppler 的既有 libtiff 依赖问题未修改系统，使用 MuPDF 替代。样本限于这款字体和水平简单文字，不覆盖所有中文/补充平面字形、shaping、变体、子集、CFF、竖排、PDF/A 或本库 P2 文本提取接口；P1-05/P1-10 完整验收仍不勾选。未运行 fuzz。
+## 真实中文跨事件范围对照（两层 Form）
+
+可重复的正负对照门禁：`bash docs/check-cjk-event-negatives.sh output/pdf/rzpdf-cjk-event-advance.pdf output/pdf/rzpdf-cjk-nested-event-advance.pdf`。脚本先确认两个正常输入通过，独立qpdf交换每份输出的第3/4页，确认交换后的PDF语法合法，再要求比较脚本退出1且已到MuPDF四页坐标提取阶段，避免把依赖缺失/结构错误算作正确拒绝。原输入不修改，只清理脚本自身新建的临时文件。2026-10-08原session59505退出0，日志`/tmp/rzpdf-cjk-event-negatives.log`；两个负例均在坐标比较处拒绝。此为固定对照样本测试，不是通用PDF符合性或fuzz。
+
+`compare_cjk_advance`新增可组合的`--events`和`--nested`。固定两页`create_cjk --images`输入沿用实际嵌入的静态Noto Sans SC字体，把原句拆为中文和英文两Tj事件；范围模式将两事件一起替换为“你好！”。四页为基线、原第二页、保持推进、普通替换，不引入新字形或重新排版。
+
+```sh
+cargo run -p pdf --example compare_cjk_advance --locked -- output/pdf/rzpdf-cjk-images.pdf output/pdf/rzpdf-cjk-nested-event-advance.pdf --nested --events
+bash docs/check-cjk-advance.sh output/pdf/rzpdf-cjk-nested-event-advance.pdf --nested
+mutool draw -r 96 -o tmp/pdfs/rzpdf-cjk-nested-event-%d.png output/pdf/rzpdf-cjk-nested-event-advance.pdf
+```
+
+2026-10-08 示例原session27878退出0，内置坐标/基线隔离/displaylist/严格重开自检通过，日志`/tmp/rzpdf-cjk-nested-event-advance.log`。独立检查退出0，日志`/tmp/rzpdf-cjk-nested-event-independent.log`：qpdf结构及字体嵌入/图像/Form复制关系、MuPDF尾部P/D/F坐标和归一化文本通过。四页96DPI PNG逐页查看，标题、中文、图片与透明页正常；补偿页保留原尾部位置，普通替换左移，补偿后的间隙为预期而非自动布局。系统Poppler因缺失libtiff.5.dylib无法启动，使用现有MuPDF独立渲染，未修改系统依赖。
+
+产物`output/pdf/rzpdf-cjk-nested-event-advance.pdf`的SHA-256为`da41b67db3a02b2ea18605ac294591cecba60de76a7978e8f91c85db92ec7050`。此证据仅覆盖固定真实水平字体、相邻两Tj和同一两层Form调用内范围；不代表真实竖排、跨不同Form、所有TJ/字体切换矩阵或完整P3验收。
+
+顶层`--events`原session39731及原默认CLI原session67694也已退出0，分别生成`output/pdf/rzpdf-cjk-event-advance.pdf`与`output/pdf/rzpdf-cjk-advance-cli-regression.pdf`。两文件都通过`bash docs/check-cjk-advance.sh FILE.pdf`独立结构/坐标/文本复验，日志`/tmp/rzpdf-cjk-event-independent.log`与`/tmp/rzpdf-cjk-event-default-independent.log`。顶层跨事件四页另以96DPI MuPDF渲染，对应PNG逐页与已查看的嵌套跨事件PNG用cmp完全一致；原session17875退出0。原默认单事件CLI仍有效，不能据此宣称所有新模式或错误参数组合完整验收。

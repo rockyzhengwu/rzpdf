@@ -23,6 +23,7 @@ use crate::{
 
 pub mod catalog;
 mod content_edit;
+mod text_event_edit;
 pub mod cross_ref_table;
 pub mod embedded_font;
 pub mod identity;

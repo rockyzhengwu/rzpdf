@@ -20,6 +20,16 @@ pub struct NestedDrawSource {
     pub geometry_operation_indices: Vec<usize>,
 }
 
+/// Character-code byte position qualified by one original leaf invocation.
+/// Borrowing the draw source avoids allocating/cloning an invocation chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NestedTextCodePosition<'a> {
+    pub source: &'a NestedDrawSource,
+    /// TJ item index (including numeric items); None for Tj/quotes.
+    pub array_item: Option<usize>,
+    pub offset: usize,
+}
+
 impl NestedDrawSource {
     pub(crate) fn validate_limits(
         &self,

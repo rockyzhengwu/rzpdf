@@ -32,6 +32,24 @@
 
 公共补偿外层unwind补验通过：Tj/两类引号成功修改后注入panic，检查两共享页源码与Contents流ID恢复、旧快照拒绝、刷新重试与严格保存重开后的文本/后续字符及下一行位置。增强版要求panic载荷精确匹配指定注入消息，防止其他断言失败误认成成功清理；原session71814退出0，七项通过、0失败/忽略、1.36秒，日志`/tmp/rzpdf-compensation-outer-unwind-verified.log`。尚不代表所有公共入口和每一个失败点的完整unwind矩阵。
 
+## 跨文字事件范围替换与推进补偿
+
+普通入口`replace_page_text_event_range(page, &snapshot, start..end, text)`与补偿入口使用同一端点、原字体编码、快照验证、预算和事务路径，但不计算或抵消新旧推进差。普通模式保留Tj/两类引号操作及TJ项数，只改选中的字符串；双引号的原Tw/Tc数值拼写保留。不因字号为零而拒绝，后续字形可随删插内容移动（遇到重设矩阵或换行时按原操作执行），不是自动排版。
+
+两种入口都不跨Form、不补字体覆盖，且不应把字节偏移当作Unicode索引。普通片段重建版本的最终门禁`cargo test -p pdf --lib --test text_event_range --test content_program --test adjusted_text --locked`已退出0：636项单元、14项补偿、29项解析与8项跨事件专项通过，日志`/tmp/rzpdf-text-event-range-ordinary-fragments-final.log`。普通模式新增零字号/后续字符独立位移、引号保持/TJ项数不变/数值拼写及严格重开回归；补偿模式既有矩阵同时通过。不等同全部工作区或完整字体/失败点验收，补偿模式此前的限定证据见下文。
+
+`replace_page_text_event_range_preserving_advance(page, &snapshot, start..end, text)`按原快照的操作顺序编辑多个顶层文字事件。端点为`TextCodePosition { operation, array_item, offset }`：Tj/两类引号使用`array_item: None`；TJ使用`Some(字符串项索引)`，索引包含数值项。`offset`是解码字符串的字符码字节偏移，必须落在完整字符码边界，不是Unicode索引或内容流源码偏移。结束偏移不包含在删除范围内，同一位置的范围表示插入；提交后刷新快照和项索引。
+
+新文字仅使用起始事件的原有效字体编码，其他选中事件删除各自的范围。每段按其原字体、字号及字符/词间距计算补偿，放在保留后缀之前。中间Tf、Tc/Tw/Tz、矩阵、换行及其他非文字操作保持，空/纯数值TJ也保持；原TJ数字与未选字符串不被当作待删除文字。即使跨换行，新文字也集中插入起点，不重新排版到原先多行，不防止重叠。
+
+各片段先在同池预算下构建，最后经批量内容重建和一个事务提交；字体/字符码/片段所有者保留到提交返回。输入和输出字符额度分别累计整个受影响事件中的字符串，包含未选前后缀；不是只按删掉的片段或逐事件独立计数。有效字体状态当前按原快照逐事件扫描，不承诺线性时间复杂度。此入口不选择Form内部事件、不跨Form、不搜索、不补字体覆盖，也不是安全擦除。
+
+定向回归`cargo test -p pdf --test text_event_range --locked`退出0，4项通过，日志`/tmp/rzpdf-text-event-range-expanded.log`：Courier/Helvetica切换、负Tz与仿射矩阵、两类引号换行、TJ及空/纯数字TJ、短/长/空替换、保留后缀及后续字符位置、共享隔离/严格重开、非法端点、聚合字符额度、外层错误/panic精确载荷回滚、原流ID恢复与刷新重试。此证据不覆盖跨事件混合字节Type0/真实竖排、全部失败点或独立阅读器验收；完整P3仍未完成。
+
+复合字体后续补验：同一专项扩展为5项并退出0，日志`/tmp/rzpdf-text-event-range-mixed-cid-final.log`。新增混合一／两字节Type0跨Tj/TJ/Tj范围，在W/W2两种模式和空/原字符/字符加双字节空格三种替换下，独立核对三个事件的补偿数值、双字节空格排除Tw、首尾截断码的精确拒绝、TJ原数值保留、结束后缀/后续文字/下一行位置、共享原页与严格重开。生产代码未改，先前636项单元/29项解析证据仍对应该生产版。此为合成度量回归，不证明真实竖排字形、全部字体切换组合或独立阅读器；跨Form范围仍未实现。
+
+预算拒绝补验后专项为6项，原session17541退出0，日志`/tmp/rzpdf-text-event-range-memory.log`。512KiB操作额度下重复大替换返回ResourceLimit，revision/stamp、资源字典、原流ID与共享两页源码不变；使用原快照的小替换成功，严格重开后原页保持。此公共入口回归不证明同池精确峰值或所有失败点。
+
 ## TJ 单项推进补偿
 
 `replace_page_text_array_item_preserving_advance(page, &snapshot, operation, item, text)`按有效字体/字号/Tc/Tw计算单个TJ字符串的新旧推进差，并在该字符串后立即插入数值调整。不能把调整放在数组末尾，否则数组内部后续字符串的位置会改变。项索引包含数值项，但目标必须是字符串；新增数值使后续项索引加一，提交后必须刷新快照。原有数值拼写、注释和未选字符串词法保留；即使原数值紧贴字符串闭合符，新数值后也补空格避免两个数字粘连。
@@ -55,6 +73,18 @@ TJ单项版本文字补偿专项10项通过（日志`/tmp/rzpdf-tj-item-compensa
 ## Form 调用编辑与分层来源
 
 ### 嵌套文字推进补偿（固定矩阵已验证）
+
+带来源端点的新入口`replace_nested_text_span(page, &root, start..end, text)`及`replace_nested_text_span_preserving_advance`使用`NestedTextCodePosition { source: &NestedDrawSource, array_item, offset }`。两端借用原来源，不分配调用链副本；不同调用链明确拒绝，正确同调用的结束操作还需与原字节位置匹配。两端都是相对于root所选叶的原字符码位置，source仅描述文档局部路径，不能独立认证另一个文档或充当持久句柄，必须与当前root快照配对。旧裸索引入口保留原语义，新入口也尚不编辑跨不同调用范围。最终门禁原session41041退出0，636项单元、10项嵌套及8项顶层跨事件专项全部通过，日志`/tmp/rzpdf-nested-span-final.log`。新增双端不同调用/错误结束字节位置拒绝、stamp及内容保持、正确端点普通/补偿成功、其他调用/共享页及严格重开通过；不是完整工作区、全部失败点或跨不同Form验收。
+
+来源契约补验后嵌套专项为9项，原session80528退出0，日志`/tmp/rzpdf-nested-event-provenance.log`。新增普通/补偿选中第四调用，前面三调用及共享页保持，补偿保留该调用末端位置并严格重开；错误页面、离线或外文档root拒绝且stamp/内容不变。`TextCodePosition`不携带独立来源身份，裸结束索引始终按source选定的叶程序解释；不能期待把另一调用的相同数值索引传入后自动识别或拒绝。若定位来自不同调用，必须先检查调用链，当前接口不表达跨调用/不同Form范围。
+
+多事件预算补验后嵌套专项为8项，原session13635退出0，日志`/tmp/rzpdf-nested-event-quota.log`。普通/补偿两种范围在512KiB操作额度下重复大替换返回ResourceLimit，stamp、旧叶/父Form、资源字典、共享两页源码与Contents流ID保持；原root/source可直接小替换重试并严格重开。这是多事件公共拒绝路径证据，不以单事件额度测试替代，也不表示全部失败点或精确峰值已覆盖。
+
+嵌套叶跨事件复合字体后续验收：原session71434退出0，nested_adjusted_text扩展为7项全部通过，日志`/tmp/rzpdf-nested-event-mixed-cid.log`。新增继承混合一/两字节Type0跨Tj/TJ/Tj范围，W/W2、普通/补偿和B/空/B加双字节空格十二组合，覆盖起止截断码精确拒绝/stamp与资源不变、补偿三段独立数值/双字节空格排除Tw/保留末端及下一行、普通TJ项数与原间距、其他三调用/共享页/旧叶对象及严格重开。取代下面新增嵌套范围仅Courier验证的范围限制，但仍不是全部字体/失败点或真实竖排字形、跨不同Form及独立阅读器验收。生产代码未改，636项单元仍对应该生产版。此前集成原session78782也已退出0：首版嵌套5项及顶层8项通过，日志`/tmp/rzpdf-nested-text-event-integration.log`，取代下面该命令待确认状态；不将旧5项当作最新7项。
+
+同一叶Form的跨事件范围：`replace_nested_text_event_range(page, &root, &source, start..end, text)`为普通模式，`replace_nested_text_event_range_preserving_advance`为补偿模式。端点使用叶程序的`TextCodePosition`，`source.operation_index`必须等于起始端点操作索引，调用链决定所选的一次叶调用；结束端点也属于该叶程序，不能引用另一Form或另一调用的操作索引。每个事件按原调用链传递字体/字号/间距，再解析叶的原前缀；计划保留实际字体/编码/片段所有者，最后一次逐层复制Form与局部Do重绑，不逐事件提交或改变后续原索引。当前逐事件重扫调用链和前缀，不承诺线性时间。
+
+嵌套专项原session40020退出0，6项通过，日志`/tmp/rzpdf-nested-text-event-rollback.log`；生产版单元原session70664退出0，636项通过，日志`/tmp/rzpdf-nested-text-event-units.log`。新增两层四调用、普通/补偿长短空替换、继承状态、保留字符位置、其他调用/共享页/旧Form不变与严格重开；新增错误锚点/不可编码拒绝、两种模式外层错误及精确panic回滚、流ID/资源/旧Form恢复、旧来源拒绝和刷新重试。复合字体旧回归同时通过，但新增嵌套跨事件范围目前只覆盖Courier及局部Helvetica q/Q恢复，不代替其完整复合字体/失败点矩阵、跨不同Form选择或独立阅读器验收。顶层/嵌套集成原session78782的最后顶层组仍待命令终态，不将单独专项的6项称为该命令全绿。
 
 后续复合/真实字体补验：混合一／两字节Type0的横竖排五类目标、新旧W/W2独立调整、双字节空格排除Tw、保留末端后缀/其他调用/共享页、严格重开与截断字符码拒绝已通过；原session28938退出0，nested_adjusted_text 4项，日志`/tmp/rzpdf-nested-mixed-cid-compensation.log`。真实静态Noto Sans SC的两层整Tj补偿/无补偿四页样本也通过qpdf/MuPDF独立坐标/文本、逐页目视和同DPI顶层PNG cmp；脚本拒绝交换对照页的四页负例，详见[真实中文嵌套验证](cjk-creation-validation.md)。合成竖排不证明真实竖排字形，固定真实水平字体不代替全部字体或TJ范围独立视觉。
 

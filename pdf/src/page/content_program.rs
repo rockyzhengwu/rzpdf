@@ -699,6 +699,49 @@ impl ContentProgram {
         crate::budget::BudgetedBytes::from_reserved_vec(replacement.bytes, replacement.lease.unwrap())
     }
 
+    /// Build an ordinary TJ replacement, retaining numbers and item count.
+    pub fn text_array_items_fragment_with_budget(
+        &self, index: usize, replacements: &[(usize, &[u8])], options: ParseOptions,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<crate::budget::BudgetedBytes> {
+        let replacement = self.text_array_items_replacement_bytes_inner(
+            index, replacements, options, Some(budget), None,
+        )?;
+        crate::budget::BudgetedBytes::from_reserved_vec(replacement.bytes, replacement.lease.unwrap())
+    }
+
+    /// Build ordinary encoded text without changing its Tj/quote operator.
+    pub fn text_codes_fragment_with_budget(
+        &self, index: usize, codes: &[u8], options: ParseOptions,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<crate::budget::BudgetedBytes> {
+        let target = &self.operations.get(index).ok_or_else(||
+            PdfError::ContentParseError("text operation index out of range".into()))?.operator;
+        match (target.name(), target.num_operands()) {
+            ("Tj" | "'", 1) => { target.get_as_string(0)?; }
+            ("\"", 3) => { target.get_as_f32(0)?; target.get_as_f32(1)?; target.get_as_string(2)?; }
+            _ => return Err(PdfError::UnsupportedFeature("Text fragment requires Tj or quote".into())),
+        }
+        let encoded = super::content_builder::ContentBuilder::encoded_text_with_budget(codes, options.limits, budget)?;
+        let token = &encoded.as_slice()[..encoded.as_slice().len() - 4];
+        let prefix: [&[u8]; 4] = if target.name() == "\"" {
+            [target.operand(0)?.as_number().unwrap().lexeme().as_bytes(), b" ",
+             target.operand(1)?.as_number().unwrap().lexeme().as_bytes(), b" "]
+        } else { [b""; 4] };
+        let length = prefix.iter().try_fold(token.len(), |size, part| size.checked_add(part.len()))
+            .and_then(|size| size.checked_add(target.name().len() + 2))
+            .filter(|&size| size <= options.limits.max_raw_stream_bytes.min(options.limits.max_decoded_bytes))
+            .ok_or_else(|| PdfError::ResourceLimit("ordinary text fragment bytes".into()))?;
+        let mut output = crate::budget::BudgetedBytes::copy_from_slice(budget, b"")?;
+        output.try_reserve_capacity(length)?;
+        for part in prefix { output.try_extend_from_slice(part)?; }
+        output.try_extend_from_slice(token)?;
+        output.try_extend_from_slice(b" ")?;
+        output.try_extend_from_slice(target.name().as_bytes())?;
+        output.try_extend_from_slice(b"\n")?;
+        Ok(output)
+    }
+
     fn text_array_items_replacement_bytes_inner(
         &self, index: usize, replacements: &[(usize, &[u8])], options: ParseOptions,
         budget: Option<&crate::budget::OperationBudget>, adjustment: Option<ArrayAdjustmentPlan<'_>>,
@@ -1060,7 +1103,6 @@ impl ContentProgram {
         Ok(BudgetedContentProgram { program, _leases: ProgramLeases { _allocation: allocation } })
     }
 
-    /// Return an independently parsed program with one lexical operation replaced.
     /// Build a Tj/quote range fragment with adjustment before the retained suffix.
     /// The caller supplies codes, a complete code boundary and actual metrics.
     /// Returns its instruction count; quotes keep their spacing and line effects.
@@ -1079,6 +1121,7 @@ impl ContentProgram {
         let prefix_codes = codes.get(..suffix_offset)
             .ok_or_else(|| PdfError::ContentParseError("text suffix offset out of bounds".into()))?;
         let suffix_codes = &codes[suffix_offset..];
+        if options.limits.max_objects < 3 { return Err(PdfError::ResourceLimit("adjusted text array items".into())); }
         let adjusted = super::content_builder::ContentBuilder::adjusted_encoded_text_with_budget(
             prefix_codes, adjustment, options.limits, budget,
         )?;
@@ -1096,7 +1139,6 @@ impl ContentProgram {
             .and_then(|size| size.checked_add(5))
             .filter(|&size| size <= options.limits.max_raw_stream_bytes.min(options.limits.max_decoded_bytes))
             .ok_or_else(|| PdfError::ResourceLimit("text range fragment bytes".into()))?;
-        if options.limits.max_objects < 3 { return Err(PdfError::ResourceLimit("adjusted text array items".into())); }
         let mut output = crate::budget::BudgetedBytes::copy_from_slice(budget, b"")?;
         output.try_reserve_capacity(length)?;
         for part in prefix { output.try_extend_from_slice(part)?; }

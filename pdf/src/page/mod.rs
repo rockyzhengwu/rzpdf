@@ -22,7 +22,7 @@ pub mod content_syntax;
 pub mod diagnostic;
 pub mod display_list;
 pub(crate) mod execution_budget;
-mod font_binding;
+pub(crate) mod font_binding;
 pub mod general_state;
 pub mod graph_state;
 pub mod graphic_state;

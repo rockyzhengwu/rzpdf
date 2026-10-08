@@ -49,6 +49,7 @@ fn fixture_with_options(
         "\"" => "3 2 (AB) \" (C) Tj",
         "item" => "[(AB)17.00(C)] TJ",
         "range" => "[(AB)17.00(EF)% keep\n-20.50(GH)] TJ (C) Tj",
+        "events" => "(AB) Tj [(EF)17.00(GH)] TJ (C) Tj",
         _ => unreachable!(),
     };
     let body = format!(
@@ -95,6 +96,401 @@ fn selection(doc: &Doc) -> (ContentProgram, NestedDrawSource) {
     (root, source)
 }
 
+#[test]
+fn source_qualified_nested_span_checks_both_invocations_and_end_byte_position() {
+    use pdf::page::source_provenance::NestedTextCodePosition;
+    for preserve in [false, true] {
+        let (doc, _, _, _) = fixture("events");
+        let root = doc.get_page(0).unwrap().content_program().unwrap();
+        let before = doc
+            .get_page(0)
+            .unwrap()
+            .extract_characters_paint_order()
+            .unwrap();
+        let start_source = before[0].nested_source.as_ref().unwrap();
+        let end_source = before[4].nested_source.as_ref().unwrap();
+        let another_call = before[28].nested_source.as_ref().unwrap();
+        assert_eq!(end_source.operation_index, another_call.operation_index);
+        let start = NestedTextCodePosition {
+            source: start_source,
+            array_item: None,
+            offset: 1,
+        };
+        let endpoint = |source| NestedTextCodePosition {
+            source,
+            array_item: Some(2),
+            offset: 1,
+        };
+        let replace = |end| {
+            if preserve {
+                doc.replace_nested_text_span_preserving_advance(0, &root, start..end, "X")
+            } else {
+                doc.replace_nested_text_span(0, &root, start..end, "X")
+            }
+        };
+        let stamp = doc.stamp();
+        assert!(
+            matches!(replace(endpoint(another_call)), Err(PdfError::UnsupportedFeature(ref message)) if message == "text span across different Form invocations")
+        );
+        let mut wrong_offset = end_source.clone();
+        wrong_offset.operator_byte_offset = Some(0);
+        assert!(
+            matches!(replace(endpoint(&wrong_offset)), Err(PdfError::PageResourceError(ref message)) if message == "Nested span end byte position mismatch")
+        );
+        assert!(doc.is_stamp_current(&stamp));
+        for page in [0, 1] {
+            assert_eq!(
+                doc.get_page(page)
+                    .unwrap()
+                    .content_program()
+                    .unwrap()
+                    .source_bytes(),
+                root.source_bytes()
+            );
+        }
+        replace(endpoint(end_source)).unwrap();
+        let reopened =
+            Doc::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict).unwrap();
+        let after = reopened
+            .get_page(0)
+            .unwrap()
+            .extract_characters_paint_order()
+            .unwrap();
+        assert_eq!(
+            after[..5]
+                .iter()
+                .filter_map(|ch| ch.unicode.as_deref())
+                .collect::<String>(),
+            "AXHCD"
+        );
+        for (old, new) in before[8..].iter().zip(&after[5..]) {
+            assert_eq!(old.unicode, new.unicode);
+            assert!((old.position.x() - new.position.x()).abs() < 0.002);
+            assert!((old.position.y() - new.position.y()).abs() < 0.002);
+        }
+        if preserve {
+            for (old_index, new_index) in [(0, 0), (5, 2), (6, 3), (7, 4)] {
+                assert!(
+                    (before[old_index].position.x() - after[new_index].position.x()).abs() < 0.002
+                );
+                assert!(
+                    (before[old_index].position.y() - after[new_index].position.y()).abs() < 0.002
+                );
+            }
+        }
+        assert_eq!(
+            reopened
+                .get_page(1)
+                .unwrap()
+                .content_program()
+                .unwrap()
+                .source_bytes(),
+            root.source_bytes()
+        );
+    }
+}
+
+#[test]
+fn nested_event_range_qualifies_last_call_and_rejects_wrong_root_snapshots() {
+    use pdf::page::content_program::TextCodePosition;
+    for preserve in [false, true] {
+        let (doc, _, _, _) = fixture("events");
+        let root = doc.get_page(0).unwrap().content_program().unwrap();
+        let before = doc
+            .get_page(0)
+            .unwrap()
+            .extract_characters_paint_order()
+            .unwrap();
+        let source = before[24].nested_source.as_ref().unwrap();
+        let first = before[0].nested_source.as_ref().unwrap();
+        assert_ne!(source.invocations, first.invocations);
+        assert_eq!(source.operation_index, first.operation_index);
+        let start = TextCodePosition {
+            operation: source.operation_index,
+            array_item: None,
+            offset: 1,
+        };
+        let end = TextCodePosition {
+            operation: source.operation_index + 1,
+            array_item: Some(2),
+            offset: 1,
+        };
+        let replace = |snapshot: &ContentProgram| {
+            if preserve {
+                doc.replace_nested_text_event_range_preserving_advance(
+                    0,
+                    snapshot,
+                    source,
+                    start..end,
+                    "X",
+                )
+            } else {
+                doc.replace_nested_text_event_range(0, snapshot, source, start..end, "X")
+            }
+        };
+        let wrong_page = doc.get_page(1).unwrap().content_program().unwrap();
+        let offline =
+            ContentProgram::from_decoded_bytes(root.source_bytes().to_vec(), Default::default())
+                .unwrap();
+        let (foreign, _, _, _) = fixture("events");
+        let foreign_root = foreign.get_page(0).unwrap().content_program().unwrap();
+        let stamp = doc.stamp();
+        for snapshot in [&wrong_page, &offline, &foreign_root] {
+            assert!(replace(snapshot).is_err());
+            assert!(doc.is_stamp_current(&stamp));
+            assert_eq!(
+                doc.get_page(0)
+                    .unwrap()
+                    .content_program()
+                    .unwrap()
+                    .source_bytes(),
+                root.source_bytes()
+            );
+        }
+        replace(&root).unwrap();
+        let reopened =
+            Doc::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict).unwrap();
+        let after = reopened
+            .get_page(0)
+            .unwrap()
+            .extract_characters_paint_order()
+            .unwrap();
+        assert_eq!(after.len(), 29);
+        for (old, new) in before[..24].iter().zip(&after[..24]) {
+            assert_eq!(old.unicode, new.unicode);
+            assert!((old.position.x() - new.position.x()).abs() < 0.002);
+            assert!((old.position.y() - new.position.y()).abs() < 0.002);
+        }
+        assert_eq!(
+            after[24..]
+                .iter()
+                .filter_map(|ch| ch.unicode.as_deref())
+                .collect::<String>(),
+            "AXHCD"
+        );
+        if preserve {
+            for (old_index, new_index) in [(24, 24), (29, 26), (30, 27), (31, 28)] {
+                assert!(
+                    (before[old_index].position.x() - after[new_index].position.x()).abs() < 0.002
+                );
+                assert!(
+                    (before[old_index].position.y() - after[new_index].position.y()).abs() < 0.002
+                );
+            }
+        }
+        assert_eq!(
+            reopened
+                .get_page(1)
+                .unwrap()
+                .content_program()
+                .unwrap()
+                .source_bytes(),
+            root.source_bytes()
+        );
+    }
+}
+
+#[test]
+fn nested_event_range_rejects_bad_anchor_and_rolls_back_error_and_unwind() {
+    use pdf::page::content_program::TextCodePosition;
+    for preserve in [false, true] {
+        let (doc, leaf, outer, _) = fixture("events");
+        let (root, source) = selection(&doc);
+        let original_resources = doc.get_page(0).unwrap().resource().unwrap();
+        let original_leaf = doc.resolve_object(leaf).unwrap();
+        let original_outer = doc.resolve_object(outer).unwrap();
+        let start = TextCodePosition {
+            operation: source.operation_index,
+            array_item: None,
+            offset: 1,
+        };
+        let end = TextCodePosition {
+            operation: source.operation_index + 1,
+            array_item: Some(2),
+            offset: 1,
+        };
+        let replace =
+            |editing: &Doc, root: &ContentProgram, source: &NestedDrawSource, text: &str| {
+                if preserve {
+                    editing.replace_nested_text_event_range_preserving_advance(
+                        0,
+                        root,
+                        source,
+                        start..end,
+                        text,
+                    )
+                } else {
+                    editing.replace_nested_text_event_range(0, root, source, start..end, text)
+                }
+            };
+        let stamp = doc.stamp();
+        let mut wrong = source.clone();
+        wrong.operation_index += 1;
+        assert!(
+            matches!(replace(&doc, &root, &wrong, "X"), Err(PdfError::ObjectError(ref message)) if message == "nested range source must anchor its start event")
+        );
+        assert!(replace(&doc, &root, &source, "你").is_err());
+        assert!(doc.is_stamp_current(&stamp));
+        let result: PdfResult<()> = doc.edit_transaction(|editing| {
+            replace(editing, &root, &source, "X")?;
+            assert_ne!(
+                editing.get_page(0)?.content_program()?.source_bytes(),
+                root.source_bytes()
+            );
+            Err(PdfError::DocumentError("nested event rollback".into()))
+        });
+        assert!(
+            matches!(result, Err(PdfError::DocumentError(ref message)) if message == "nested event rollback")
+        );
+        assert!(replace(&doc, &root, &source, "X").is_err());
+        let (fresh, fresh_source) = selection(&doc);
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: PdfResult<()> = doc.edit_transaction(|editing| {
+                replace(editing, &fresh, &fresh_source, "X")?;
+                assert_ne!(
+                    editing.get_page(0)?.content_program()?.source_bytes(),
+                    root.source_bytes()
+                );
+                panic!("nested event unwind");
+            });
+        }));
+        assert_eq!(
+            caught.unwrap_err().downcast_ref::<&str>().copied(),
+            Some("nested event unwind")
+        );
+        for page in [0, 1] {
+            let current = doc.get_page(page).unwrap().content_program().unwrap();
+            assert_eq!(current.source_bytes(), root.source_bytes());
+            assert_eq!(current.stream_object_id(0), root.stream_object_id(0));
+        }
+        assert_eq!(
+            doc.get_page(0).unwrap().resource().unwrap(),
+            original_resources
+        );
+        assert_eq!(doc.resolve_object(leaf).unwrap(), original_leaf);
+        assert_eq!(doc.resolve_object(outer).unwrap(), original_outer);
+        let (retry, retry_source) = selection(&doc);
+        replace(&doc, &retry, &retry_source, "X").unwrap();
+        let reopened =
+            Doc::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict).unwrap();
+        assert_eq!(
+            reopened
+                .get_page(1)
+                .unwrap()
+                .content_program()
+                .unwrap()
+                .source_bytes(),
+            root.source_bytes()
+        );
+        let chars = reopened
+            .get_page(0)
+            .unwrap()
+            .extract_characters_paint_order()
+            .unwrap();
+        assert_eq!(
+            chars
+                .iter()
+                .take(5)
+                .filter_map(|ch| ch.unicode.as_deref())
+                .collect::<String>(),
+            "AXHCD"
+        );
+    }
+}
+
+#[test]
+fn nested_event_range_inherits_caller_state_and_isolates_one_invocation() {
+    use pdf::page::content_program::TextCodePosition;
+    for preserve in [false, true] {
+        for text in ["X", "", "XX XX"] {
+            let (doc, leaf, outer, _) = fixture("events");
+            let (root, source) = selection(&doc);
+            let old_leaf = doc.resolve_object(leaf).unwrap();
+            let old_outer = doc.resolve_object(outer).unwrap();
+            let start = TextCodePosition {
+                operation: source.operation_index,
+                array_item: None,
+                offset: 1,
+            };
+            let end = TextCodePosition {
+                operation: source.operation_index + 1,
+                array_item: Some(2),
+                offset: 1,
+            };
+            if preserve {
+                doc.replace_nested_text_event_range_preserving_advance(
+                    0,
+                    &root,
+                    &source,
+                    start..end,
+                    text,
+                )
+                .unwrap();
+            } else {
+                doc.replace_nested_text_event_range(0, &root, &source, start..end, text)
+                    .unwrap();
+            }
+            assert_eq!(doc.resolve_object(leaf).unwrap(), old_leaf);
+            assert_eq!(doc.resolve_object(outer).unwrap(), old_outer);
+            let reopened =
+                Doc::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict).unwrap();
+            let before = reopened
+                .get_page(1)
+                .unwrap()
+                .extract_characters_paint_order()
+                .unwrap();
+            let after = reopened
+                .get_page(0)
+                .unwrap()
+                .extract_characters_paint_order()
+                .unwrap();
+            let count = text.chars().count() + 4;
+            assert_eq!(before.len(), 32);
+            assert_eq!(after.len(), count + 24);
+            assert_eq!(
+                after[..count]
+                    .iter()
+                    .filter_map(|ch| ch.unicode.as_deref())
+                    .collect::<String>(),
+                format!("A{text}HCD")
+            );
+            for (old, new) in before[8..].iter().zip(&after[count..]) {
+                assert_eq!(old.unicode, new.unicode);
+                assert!((old.position.x() - new.position.x()).abs() < 0.002);
+                assert!((old.position.y() - new.position.y()).abs() < 0.002);
+            }
+            if preserve {
+                for (old_index, new_index) in
+                    [(0, 0), (5, count - 3), (6, count - 2), (7, count - 1)]
+                {
+                    let old = &before[old_index];
+                    let new = &after[new_index];
+                    assert_eq!(old.unicode, new.unicode);
+                    assert!((old.position.x() - new.position.x()).abs() < 0.002);
+                    assert!((old.position.y() - new.position.y()).abs() < 0.002);
+                }
+            } else {
+                let old = &before[6];
+                let new = &after[count - 2];
+                assert!(
+                    (old.position.x() - new.position.x()).abs()
+                        + (old.position.y() - new.position.y()).abs()
+                        > 1.0
+                );
+            }
+            assert_eq!(
+                reopened
+                    .get_page(1)
+                    .unwrap()
+                    .content_program()
+                    .unwrap()
+                    .source_bytes(),
+                root.source_bytes()
+            );
+        }
+    }
+}
+
 fn cid_fixture(vertical: bool, event: &str) -> (Doc, ObjectId, String) {
     let (doc, leaf, _, old_body) = fixture(event);
     doc.delete_page(1).unwrap();
@@ -129,6 +525,7 @@ fn cid_fixture(vertical: bool, event: &str) -> (Doc, ObjectId, String) {
         "\"" => "7 2 <418101> \" <42> Tj T* <42> Tj",
         "item" => "[<418101>17.00<42>] TJ T* <42> Tj",
         "range" => "[<418101>17.00<81018120>% keep\n-20.50<428101>] TJ <42> Tj T* <42> Tj",
+        "events" => "<418101> Tj [<81018120>30.00] TJ <810142> Tj <42> Tj T* <42> Tj",
         _ => unreachable!(),
     };
     let split = old_body.find(" Tm ").unwrap() + 4;
@@ -287,6 +684,150 @@ fn nested_mixed_cid_compensation_checks_w_w2_and_partial_suffix_boundaries() {
                         );
                     }
                 }
+            }
+        }
+    }
+}
+
+#[test]
+fn nested_event_range_mixed_cid_inheritance_checks_signed_metrics_and_split_endpoints() {
+    use pdf::page::content_program::TextCodePosition;
+    for vertical in [false, true] {
+        for preserve in [false, true] {
+            for text in ["B", "", "B "] {
+                let (doc, leaf, body) = cid_fixture(vertical, "events");
+                let (root, source) = selection(&doc);
+                let start = TextCodePosition {
+                    operation: source.operation_index,
+                    array_item: None,
+                    offset: 1,
+                };
+                let end = TextCodePosition {
+                    operation: source.operation_index + 2,
+                    array_item: None,
+                    offset: 2,
+                };
+                let replace = |start, end| {
+                    if preserve {
+                        doc.replace_nested_text_event_range_preserving_advance(
+                            0,
+                            &root,
+                            &source,
+                            start..end,
+                            text,
+                        )
+                    } else {
+                        doc.replace_nested_text_event_range(0, &root, &source, start..end, text)
+                    }
+                };
+                let stamp = doc.stamp();
+                let resources = doc.get_page(0).unwrap().resource().unwrap();
+                for (start, end) in [
+                    (TextCodePosition { offset: 2, ..start }, end),
+                    (start, TextCodePosition { offset: 1, ..end }),
+                ] {
+                    let error = replace(start, end).unwrap_err();
+                    assert!(
+                        matches!(error, PdfError::ObjectError(ref message) if message == "text range splits a character code")
+                    );
+                    assert!(doc.is_stamp_current(&stamp));
+                    assert_eq!(doc.get_page(0).unwrap().resource().unwrap(), resources);
+                }
+                replace(start, end).unwrap();
+                let reopened =
+                    Doc::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict)
+                        .unwrap();
+                assert_eq!(
+                    reopened
+                        .resolve_object(leaf)
+                        .unwrap()
+                        .into_stream()
+                        .unwrap()
+                        .raw_data(),
+                    body.as_bytes()
+                );
+                let before = reopened
+                    .get_page(1)
+                    .unwrap()
+                    .extract_characters_paint_order()
+                    .unwrap();
+                let after = reopened
+                    .get_page(0)
+                    .unwrap()
+                    .extract_characters_paint_order()
+                    .unwrap();
+                let count = text.chars().count() + 4;
+                assert_eq!(before.len(), 32);
+                assert_eq!(after.len(), count + 24);
+                assert_eq!(
+                    after[..count]
+                        .iter()
+                        .filter_map(|ch| ch.unicode.as_deref())
+                        .collect::<String>(),
+                    format!("A{text}CCC")
+                );
+                for (old, new) in before[8..].iter().zip(&after[count..]) {
+                    assert_eq!(old.unicode, new.unicode);
+                    assert!((old.position.x() - new.position.x()).abs() < 0.002);
+                    assert!((old.position.y() - new.position.y()).abs() < 0.002);
+                }
+                if preserve {
+                    for (old_index, new_index) in
+                        [(0, 0), (5, count - 3), (6, count - 2), (7, count - 1)]
+                    {
+                        assert!(
+                            (before[old_index].position.x() - after[new_index].position.x()).abs()
+                                < 0.002
+                        );
+                        assert!(
+                            (before[old_index].position.y() - after[new_index].position.y()).abs()
+                                < 0.002
+                        );
+                    }
+                }
+                let fresh = reopened.get_page(0).unwrap().content_program().unwrap();
+                let program = reopened
+                    .get_page(0)
+                    .unwrap()
+                    .nested_content_program(&fresh, after[0].nested_source.as_ref().unwrap())
+                    .unwrap();
+                let arrays: Vec<_> = program
+                    .operations()
+                    .iter()
+                    .filter(|op| op.operator.name() == "TJ")
+                    .map(|op| op.operator.get_as_array(0).unwrap())
+                    .collect();
+                if preserve {
+                    assert_eq!(arrays.len(), 3);
+                    let first = match (vertical, text) {
+                        (_, "B") => 0.0,
+                        (false, "") => -900.0,
+                        (true, "") => 1000.0,
+                        (false, "B ") => 1100.0,
+                        (true, "B ") => -900.0,
+                        _ => unreachable!(),
+                    };
+                    for (array, expected) in arrays.iter().zip([
+                        first,
+                        if vertical { 1900.0 } else { -2000.0 },
+                        if vertical { 1000.0 } else { -900.0 },
+                    ]) {
+                        assert_eq!(array.get(1).unwrap().as_number().unwrap().value(), expected);
+                    }
+                } else {
+                    assert_eq!(arrays.len(), 1);
+                    assert_eq!(arrays[0].len(), 2);
+                    assert_eq!(arrays[0].get(1).unwrap().as_number().unwrap().value(), 30.0);
+                }
+                assert_eq!(
+                    reopened
+                        .get_page(1)
+                        .unwrap()
+                        .content_program()
+                        .unwrap()
+                        .source_bytes(),
+                    root.source_bytes()
+                );
             }
         }
     }
@@ -550,5 +1091,91 @@ fn nested_compensation_public_quota_rejection_keeps_resources_and_retry() {
         }
         replace(&doc, &root, &source, event, "X").unwrap();
         Doc::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict).unwrap();
+    }
+}
+
+#[test]
+fn nested_event_range_quota_rejection_preserves_chain_and_original_source_retry() {
+    use pdf::{
+        page::content_program::TextCodePosition,
+        parser::options::{Limits, ParseOptions},
+    };
+    for preserve in [false, true] {
+        let (doc, leaf, outer, _) = fixture_with_options(
+            "events",
+            ParseOptions {
+                limits: Limits {
+                    max_operation_bytes: 512 * 1024,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let (root, source) = selection(&doc);
+        let leaf_before = doc.resolve_object(leaf).unwrap();
+        let outer_before = doc.resolve_object(outer).unwrap();
+        let resources = doc.get_page(0).unwrap().resource().unwrap();
+        let stamp = doc.stamp();
+        let start = TextCodePosition {
+            operation: source.operation_index,
+            array_item: None,
+            offset: 1,
+        };
+        let end = TextCodePosition {
+            operation: source.operation_index + 1,
+            array_item: Some(2),
+            offset: 1,
+        };
+        let replace = |text: &str| {
+            if preserve {
+                doc.replace_nested_text_event_range_preserving_advance(
+                    0,
+                    &root,
+                    &source,
+                    start..end,
+                    text,
+                )
+            } else {
+                doc.replace_nested_text_event_range(0, &root, &source, start..end, text)
+            }
+        };
+        let large = "X".repeat(512 * 1024);
+        for _ in 0..2 {
+            assert!(matches!(replace(&large), Err(PdfError::ResourceLimit(_))));
+            assert!(doc.is_stamp_current(&stamp));
+            assert_eq!(doc.resolve_object(leaf).unwrap(), leaf_before);
+            assert_eq!(doc.resolve_object(outer).unwrap(), outer_before);
+            assert_eq!(doc.get_page(0).unwrap().resource().unwrap(), resources);
+            for page in [0, 1] {
+                let current = doc.get_page(page).unwrap().content_program().unwrap();
+                assert_eq!(current.source_bytes(), root.source_bytes());
+                assert_eq!(current.stream_object_id(0), root.stream_object_id(0));
+            }
+        }
+        replace("X").unwrap();
+        let reopened =
+            Doc::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict).unwrap();
+        assert_eq!(
+            reopened
+                .get_page(1)
+                .unwrap()
+                .content_program()
+                .unwrap()
+                .source_bytes(),
+            root.source_bytes()
+        );
+        let chars = reopened
+            .get_page(0)
+            .unwrap()
+            .extract_characters_paint_order()
+            .unwrap();
+        assert_eq!(
+            chars
+                .iter()
+                .take(5)
+                .filter_map(|ch| ch.unicode.as_deref())
+                .collect::<String>(),
+            "AXHCD"
+        );
     }
 }
