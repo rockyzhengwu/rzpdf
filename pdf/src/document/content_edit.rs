@@ -182,6 +182,53 @@ pub(crate) fn budgeted_text_array_range_replacements(
     })
 }
 
+pub(crate) struct BudgetedTextAdjustments {
+    items: Vec<crate::page::content_program::TextArrayAdjustment>,
+    _lease: crate::budget::MemoryLease,
+}
+
+impl BudgetedTextAdjustments {
+    pub(crate) fn as_slice(&self) -> &[crate::page::content_program::TextArrayAdjustment] {
+        &self.items
+    }
+}
+
+/// Borrow existing range output; no font cloning or concatenated measurement
+/// buffers. Each adjustment precedes the original retained suffix.
+pub(crate) fn budgeted_text_array_range_adjustments(
+    budget: &crate::budget::OperationBudget,
+    array: &PdfArray,
+    range: &std::ops::Range<(usize, usize)>,
+    codes: &[u8],
+    replacements: &[(usize, &[u8])],
+    measure: impl Fn(&[u8], &[u8]) -> PdfResult<f32>,
+) -> PdfResult<BudgetedTextAdjustments> {
+    use crate::page::content_program::TextArrayAdjustment;
+    let size = std::mem::size_of::<TextArrayAdjustment>();
+    let mut lease = budget.reserve(replacements.len().checked_mul(size)
+        .ok_or_else(|| PdfError::ResourceLimit("TJ adjustment metadata".into()))?)?;
+    let mut items = Vec::new();
+    items.try_reserve_exact(replacements.len())
+        .map_err(|_| PdfError::ResourceLimit("TJ adjustment allocation".into()))?;
+    lease.resize(items.capacity().checked_mul(size)
+        .ok_or_else(|| PdfError::ResourceLimit("TJ adjustment metadata".into()))?)?;
+    for &(item, _) in replacements {
+        let old = array.get(item).and_then(PdfObject::as_string)
+            .ok_or_else(|| PdfError::ObjectError("TJ adjustment requires a string item".into()))?.bytes();
+        let start = if item == range.start.0 { range.start.1 } else { 0 };
+        let end = if item == range.end.0 { range.end.1 } else { old.len() };
+        let removed = old.get(start..end)
+            .ok_or_else(|| PdfError::ObjectError("TJ adjustment range out of bounds".into()))?;
+        let inserted = if item == range.start.0 { codes } else { b"" };
+        items.push(TextArrayAdjustment {
+            value: measure(removed, inserted)?,
+            suffix_offset: start.checked_add(inserted.len())
+                .ok_or_else(|| PdfError::ResourceLimit("TJ suffix offset".into()))?,
+        });
+    }
+    Ok(BudgetedTextAdjustments { items, _lease: lease })
+}
+
 #[cfg(test)]
 fn text_array_range_replacements(
     font: &crate::font::pdf_font::Font,
@@ -381,6 +428,71 @@ fn text_array_range_replacements_with_reservation(
 }
 
 impl<R: Read + Seek> PdfDocument<R> {
+    /// Atomically replace multiple source operations with caller-built sequences.
+    /// Indices/counts refer to this page's current snapshot; unchanged operations
+    /// and stream boundaries are verified before copy-on-write commit. Does not
+    /// encode Unicode, compute layout or validate arbitrary graphics semantics.
+    pub fn replace_page_operation_sequences(
+        &self,
+        page: u32,
+        expected: &ContentProgram,
+        replacements: &[crate::page::content_program::OperationReplacement<'_>],
+    ) -> PdfResult<()> {
+        let budget = self.ctx.limits().operation_budget();
+        self.commit_page_content_edit_with_budget(page, expected, &budget, || {
+            expected.with_replaced_operation_sequences_with_budget(replacements, self.ctx.options(), &budget)
+        })
+    }
+
+    /// Replace a TJ range while preserving retained prefixes, suffixes and
+    /// later text positions. Each changed string is split around a per-item
+    /// adjustment. Original numeric spacing is kept. Refresh item indices after
+    /// commit; endpoints are decoded code bytes, not Unicode indices.
+    pub fn replace_page_text_array_range_preserving_advance(
+        &self,
+        page: u32,
+        expected: &ContentProgram,
+        operation: usize,
+        range: std::ops::Range<(usize, usize)>,
+        text: &str,
+    ) -> PdfResult<()> {
+        let budget = self.ctx.limits().operation_budget();
+        let mut retained_state = None;
+        let mut retained_replacements = None;
+        self.commit_page_content_edit_with_budget(page, expected, &budget, || {
+            let target = &expected.operations().get(operation).ok_or_else(||
+                PdfError::ObjectError("text operation index out of range".into()))?.operator;
+            if target.name() != "TJ" || target.num_operands() != 1 {
+                return Err(PdfError::ObjectError("array range compensation requires TJ".into()));
+            }
+            let array = target.get_as_array(0)?;
+            validate_text_array_range(array, &range, self.ctx.limits())?;
+            let count = (range.start.0..=range.end.0)
+                .filter(|&index| array.get(index).and_then(PdfObject::as_string).is_some()).count();
+            let added = count.checked_mul(2).and_then(|count| count.checked_add(array.len()))
+                .ok_or_else(|| PdfError::ResourceLimit("TJ adjusted array items".into()))?;
+            if added > self.ctx.limits().max_objects {
+                return Err(PdfError::ResourceLimit("TJ adjusted array items".into()));
+            }
+            let state = self.get_page_with_budget(page, &budget)?
+                .text_metrics_for_operation_with_budget(expected, operation, &budget)?;
+            let state = retained_state.insert(state);
+            let codes = state.font.encode_text_with_budget(text, self.ctx.limits(), &budget)?;
+            let replacements = budgeted_text_array_range_replacements(
+                &budget, &state.font, array, range.clone(), codes.as_slice(), self.ctx.limits(),
+            )?;
+            let replacements = retained_replacements.insert(replacements);
+            let borrowed = BudgetedTextItems::new(&budget, replacements.as_slice())?;
+            let adjustments = budgeted_text_array_range_adjustments(
+                &budget, array, &range, codes.as_slice(), borrowed.as_slice(),
+                |old, new| state.replacement_adjustment(old, new, self.ctx.limits()),
+            )?;
+            expected.with_adjusted_text_array_items_codes_with_budget(
+                operation, borrowed.as_slice(), adjustments.as_slice(), self.ctx.options(), &budget,
+            )
+        })
+    }
+
     /// Replace a range spanning TJ string items. Endpoints are array indices and
     /// decoded code-byte offsets. Insert into the start item; retain numbers,
     /// empty intermediate strings, and the end suffix. No advance compensation.
@@ -936,6 +1048,43 @@ impl<R: Read + Seek> PdfDocument<R> {
         })
     }
 
+    /// Replace one TJ string while preserving subsequent text positions. Inserts
+    /// a numeric adjustment immediately after the string; original numbers and
+    /// other strings stay unchanged. Subsequent array indices shift by one.
+    /// Does not shape text, add glyph coverage or prevent glyph overlap.
+    pub fn replace_page_text_array_item_preserving_advance(
+        &self,
+        page: u32,
+        expected: &ContentProgram,
+        operation: usize,
+        item: usize,
+        text: &str,
+    ) -> PdfResult<()> {
+        let budget = self.ctx.limits().operation_budget();
+        let mut retained_state = None;
+        let mut retained_codes = None;
+        self.commit_page_content_edit_with_budget(page, expected, &budget, || {
+            let target = &expected.operations().get(operation).ok_or_else(||
+                PdfError::ObjectError("text operation index out of range".into()))?.operator;
+            if target.name() != "TJ" || target.num_operands() != 1 {
+                return Err(PdfError::ObjectError("text array compensation requires TJ".into()));
+            }
+            let old = target.get_as_array(0)?.get(item)
+                .and_then(PdfObject::as_string)
+                .ok_or_else(|| PdfError::ObjectError("TJ compensation requires a string item".into()))?
+                .bytes();
+            let state = self.get_page_with_budget(page, &budget)?
+                .text_metrics_for_operation_with_budget(expected, operation, &budget)?;
+            let state = retained_state.insert(state);
+            let codes = state.font.encode_text_with_budget(text, self.ctx.limits(), &budget)?;
+            let codes = retained_codes.insert(codes);
+            let adjustment = state.replacement_adjustment(old, codes.as_slice(), self.ctx.limits())?;
+            expected.with_adjusted_text_array_item_codes_with_budget(
+                operation, item, codes.as_slice(), adjustment, self.ctx.options(), &budget,
+            )
+        })
+    }
+
     /// Replace one TJ string item using its effective font and unchanged spacing.
     pub fn replace_page_text_array_item(
         &self,
@@ -1028,7 +1177,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         self.commit_page_content_edit_inner(page, expected, None, edit)
     }
 
-    fn commit_page_content_edit_with_budget<E: AsRef<ContentProgram>>(
+    pub(super) fn commit_page_content_edit_with_budget<E: AsRef<ContentProgram>>(
         &self,
         page: u32,
         expected: &ContentProgram,

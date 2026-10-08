@@ -9,6 +9,45 @@ use std::{
     ops::Range,
 };
 
+/// Explicit adjustment inside a replacement TJ string. Bytes before
+/// `suffix_offset` are shown, then `value`, then the remaining bytes. The offset
+/// is in decoded character-code bytes, not Unicode or escaped source indices.
+#[derive(Clone, Copy, Debug)]
+pub struct TextArrayAdjustment {
+    pub value: f32,
+    pub suffix_offset: usize,
+}
+
+/// Replace one original operation with a complete instruction sequence. Indices
+/// refer to the original snapshot; input must be strictly ordered and unique.
+#[derive(Debug, Clone, Copy)]
+pub struct OperationReplacement<'a> {
+    pub index: usize,
+    pub source: &'a [u8],
+    pub operation_count: usize,
+}
+
+/// One complete-character boundary in an original top-level text event.
+/// TJ uses Some(array index), including numeric slots in the index space;
+/// single-string events use None. Offset is decoded code bytes, not Unicode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TextCodePosition {
+    pub operation: usize,
+    pub array_item: Option<usize>,
+    pub offset: usize,
+}
+
+struct ArrayReplacementBytes {
+    bytes: Vec<u8>,
+    lease: Option<crate::budget::MemoryLease>,
+}
+
+#[derive(Clone, Copy)]
+enum ArrayAdjustmentPlan<'a> {
+    AfterString(f32),
+    BeforeSuffix(&'a [TextArrayAdjustment]),
+}
+
 impl<R: Read + Seek> super::PdfPage<'_, R> {
     /// Encode Unicode using an explicitly selected existing font resource.
     /// Does not infer the active Tf, register fonts, shape text or prove glyph coverage.
@@ -553,6 +592,7 @@ impl ContentProgram {
             options,
             None,
             &mut None,
+            None,
         )
     }
 
@@ -572,12 +612,59 @@ impl ContentProgram {
             options,
             Some(budget),
             &mut allocation,
+            None,
         )?;
         Ok(BudgetedContentProgram {
             program,
             _leases: ProgramLeases {
                 _allocation: allocation,
             },
+        })
+    }
+
+    /// Replace one TJ string and insert its caller-computed adjustment directly
+    /// after it. Original numeric tokens, comments and other strings are kept.
+    /// The inserted number shifts subsequent array indices by one.
+    pub fn with_adjusted_text_array_item_codes_with_budget(
+        &self,
+        index: usize,
+        item: usize,
+        codes: &[u8],
+        adjustment: f32,
+        options: ParseOptions,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<BudgetedContentProgram> {
+        let mut allocation = Some(budget.reserve(0)?);
+        let program = self.with_replaced_text_array_items_codes_inner(
+            index, &[(item, codes)], options, Some(budget), &mut allocation,
+            Some(ArrayAdjustmentPlan::AfterString(adjustment)),
+        )?;
+        Ok(BudgetedContentProgram {
+            program,
+            _leases: ProgramLeases { _allocation: allocation },
+        })
+    }
+
+    /// Replace ordered TJ strings in one pass with an adjustment before each
+    /// retained suffix. Each replacement adds a number and a suffix string;
+    /// existing numeric tokens and untouched strings remain byte-identical.
+    /// The caller supplies complete character-code boundaries and metrics.
+    pub fn with_adjusted_text_array_items_codes_with_budget(
+        &self,
+        index: usize,
+        replacements: &[(usize, &[u8])],
+        adjustments: &[TextArrayAdjustment],
+        options: ParseOptions,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<BudgetedContentProgram> {
+        let mut allocation = Some(budget.reserve(0)?);
+        let program = self.with_replaced_text_array_items_codes_inner(
+            index, replacements, options, Some(budget), &mut allocation,
+            Some(ArrayAdjustmentPlan::BeforeSuffix(adjustments)),
+        )?;
+        Ok(BudgetedContentProgram {
+            program,
+            _leases: ProgramLeases { _allocation: allocation },
         })
     }
 
@@ -588,7 +675,34 @@ impl ContentProgram {
         options: ParseOptions,
         budget: Option<&crate::budget::OperationBudget>,
         allocation: &mut Option<crate::budget::MemoryLease>,
+        adjustment: Option<ArrayAdjustmentPlan<'_>>,
     ) -> PdfResult<Self> {
+        let replacement = self.text_array_items_replacement_bytes_inner(
+            index, replacements, options, budget, adjustment,
+        )?;
+        self.with_replaced_operation_sequence_inner(
+            index, &replacement.bytes, options, 1, budget, allocation,
+        )
+    }
+
+    /// Build one adjusted TJ fragment without reparsing the entire original
+    /// program. Used by multi-event editing before its one final source rebuild.
+    pub fn adjusted_text_array_items_fragment_with_budget(
+        &self, index: usize, replacements: &[(usize, &[u8])],
+        adjustments: &[TextArrayAdjustment], options: ParseOptions,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<crate::budget::BudgetedBytes> {
+        let replacement = self.text_array_items_replacement_bytes_inner(
+            index, replacements, options, Some(budget),
+            Some(ArrayAdjustmentPlan::BeforeSuffix(adjustments)),
+        )?;
+        crate::budget::BudgetedBytes::from_reserved_vec(replacement.bytes, replacement.lease.unwrap())
+    }
+
+    fn text_array_items_replacement_bytes_inner(
+        &self, index: usize, replacements: &[(usize, &[u8])], options: ParseOptions,
+        budget: Option<&crate::budget::OperationBudget>, adjustment: Option<ArrayAdjustmentPlan<'_>>,
+    ) -> PdfResult<ArrayReplacementBytes> {
         let operation = self.operations.get(index).ok_or_else(|| {
             PdfError::ContentParseError("content operation index out of range".into())
         })?;
@@ -598,8 +712,22 @@ impl ContentProgram {
             ));
         }
         let array = operation.operator.get_as_array(0)?;
+        let added_items = match adjustment {
+            None => 0,
+            Some(ArrayAdjustmentPlan::AfterString(_)) => replacements.len(),
+            Some(ArrayAdjustmentPlan::BeforeSuffix(adjustments)) => {
+                if adjustments.len() != replacements.len() || adjustments.iter().zip(replacements)
+                    .any(|(adjustment, (_, codes))| adjustment.suffix_offset > codes.len()) {
+                    return Err(PdfError::ContentParseError("TJ adjustment count or suffix offset mismatch".into()));
+                }
+                replacements.len().checked_mul(2)
+                    .ok_or_else(|| PdfError::ResourceLimit("TJ adjustment items".into()))?
+            }
+        };
         if array.len() > options.limits.max_objects
             || replacements.len() > options.limits.max_objects
+            || (adjustment.is_some() && array.len().checked_add(added_items)
+                .is_none_or(|count| count > options.limits.max_objects))
         {
             return Err(PdfError::ResourceLimit("TJ array items".into()));
         }
@@ -670,28 +798,67 @@ impl ContentProgram {
                             "TJ string source range mismatch".into(),
                         ));
                     }
+                    let (value, prefix, suffix) = match adjustment {
+                        None => (None, codes, None),
+                        Some(ArrayAdjustmentPlan::AfterString(value)) => (Some(value), codes, None),
+                        Some(ArrayAdjustmentPlan::BeforeSuffix(adjustments)) => {
+                            let planned = adjustments[next];
+                            let (prefix, suffix) = codes.split_at(planned.suffix_offset);
+                            (Some(planned.value), prefix, Some(suffix))
+                        }
+                    };
                     let mut builder = super::content_builder::ContentBuilder::new();
                     let encoded = budget
                         .map(|budget| {
-                            super::content_builder::ContentBuilder::encoded_text_with_budget(
-                                codes,
-                                options.limits,
-                                budget,
-                            )
+                            if let Some(adjustment) = value {
+                                super::content_builder::ContentBuilder::adjusted_encoded_text_with_budget(
+                                    prefix, adjustment, options.limits, budget,
+                                )
+                            } else {
+                                super::content_builder::ContentBuilder::encoded_text_with_budget(
+                                    prefix, options.limits, budget,
+                                )
+                            }
                         })
                         .transpose()?;
                     if encoded.is_none() {
-                        builder.show_encoded_text_with_limits(codes, options.limits)?;
+                        if let Some(adjustment) = value {
+                            builder.show_adjusted_encoded_text_with_limits(prefix, adjustment, options.limits)?;
+                        } else {
+                            builder.show_encoded_text_with_limits(prefix, options.limits)?;
+                        }
                     }
                     let bytes = encoded
                         .as_ref()
                         .map(|bytes| bytes.as_slice())
                         .unwrap_or(builder.as_bytes());
-                    let token = &bytes[..bytes.len() - 4];
+                    let token = if value.is_some() {
+                        &bytes[1..bytes.len() - 5]
+                    } else {
+                        &bytes[..bytes.len() - 4]
+                    };
+                    // Both generated buffers remain owned until they have been
+                    // copied into the replacement, so their coexistence counts.
+                    let mut suffix_builder = super::content_builder::ContentBuilder::new();
+                    let encoded_suffix = match (suffix, budget) {
+                        (Some(suffix), Some(budget)) => Some(super::content_builder::ContentBuilder::encoded_text_with_budget(
+                            suffix, options.limits, budget,
+                        )?),
+                        (Some(suffix), None) => {
+                            suffix_builder.show_encoded_text_with_limits(suffix, options.limits)?;
+                            None
+                        }
+                        _ => None,
+                    };
+                    let suffix_bytes = encoded_suffix.as_ref().map(|bytes| bytes.as_slice())
+                        .unwrap_or(suffix_builder.as_bytes());
+                    let suffix_token = if suffix.is_some() { &suffix_bytes[..suffix_bytes.len() - 4] } else { b"" };
                     let size = replacement
                         .len()
                         .checked_add(start - copied)
                         .and_then(|n| n.checked_add(token.len()))
+                        .and_then(|n| n.checked_add(usize::from(value.is_some())))
+                        .and_then(|n| n.checked_add(suffix_token.len()))
                         .filter(|&n| n <= limit)
                         .ok_or_else(|| PdfError::ResourceLimit("TJ replacement bytes".into()))?;
                     reserve_replacement_bytes(
@@ -702,6 +869,10 @@ impl ContentProgram {
                     )?;
                     replacement.extend_from_slice(&source[copied..start]);
                     replacement.extend_from_slice(token);
+                    // A number may abut the original string's closing delimiter.
+                    // Separate it from our inserted adjustment number.
+                    if value.is_some() { replacement.push(b' '); }
+                    replacement.extend_from_slice(suffix_token);
                     copied = end;
                     next += 1;
                 }
@@ -714,14 +885,7 @@ impl ContentProgram {
             .ok_or_else(|| PdfError::ResourceLimit("TJ replacement bytes".into()))?;
         reserve_replacement_bytes(&mut replacement, size, budget, &mut replacement_lease)?;
         replacement.extend_from_slice(&source[copied..]);
-        self.with_replaced_operation_sequence_inner(
-            index,
-            &replacement,
-            options,
-            1,
-            budget,
-            allocation,
-        )
+        Ok(ArrayReplacementBytes { bytes: replacement, lease: replacement_lease })
     }
 
     /// Replace the string of Tj/'/" with caller-encoded font character codes.
@@ -897,6 +1061,53 @@ impl ContentProgram {
     }
 
     /// Return an independently parsed program with one lexical operation replaced.
+    /// Build a Tj/quote range fragment with adjustment before the retained suffix.
+    /// The caller supplies codes, a complete code boundary and actual metrics.
+    /// Returns its instruction count; quotes keep their spacing and line effects.
+    pub fn adjusted_text_range_fragment_with_budget(
+        &self, index: usize, codes: &[u8], suffix_offset: usize, adjustment: f32,
+        options: ParseOptions, budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<(crate::budget::BudgetedBytes, usize)> {
+        let target = &self.operations.get(index).ok_or_else(||
+            PdfError::ContentParseError("text operation index out of range".into()))?.operator;
+        let count = match (target.name(), target.num_operands()) {
+            ("Tj", 1) => { target.get_as_string(0)?; 1 }
+            ("'", 1) => { target.get_as_string(0)?; 2 }
+            ("\"", 3) => { target.get_as_f32(0)?; target.get_as_f32(1)?; target.get_as_string(2)?; 4 }
+            _ => return Err(PdfError::UnsupportedFeature("Text range fragment requires Tj or quote".into())),
+        };
+        let prefix_codes = codes.get(..suffix_offset)
+            .ok_or_else(|| PdfError::ContentParseError("text suffix offset out of bounds".into()))?;
+        let suffix_codes = &codes[suffix_offset..];
+        let adjusted = super::content_builder::ContentBuilder::adjusted_encoded_text_with_budget(
+            prefix_codes, adjustment, options.limits, budget,
+        )?;
+        let suffix = super::content_builder::ContentBuilder::encoded_text_with_budget(suffix_codes, options.limits, budget)?;
+        let prefix: [&[u8]; 5] = match target.name() {
+            "\"" => [target.operand(0)?.as_number().unwrap().lexeme().as_bytes(), b" Tw\n",
+                target.operand(1)?.as_number().unwrap().lexeme().as_bytes(), b" Tc\n", b"T*\n"],
+            "'" => [b"", b"", b"", b"", b"T*\n"],
+            _ => [b""; 5],
+        };
+        let body = &adjusted.as_slice()[..adjusted.as_slice().len() - 5];
+        let suffix_token = &suffix.as_slice()[..suffix.as_slice().len() - 4];
+        let length = prefix.iter().try_fold(body.len(), |size, part| size.checked_add(part.len()))
+            .and_then(|size| size.checked_add(1)).and_then(|size| size.checked_add(suffix_token.len()))
+            .and_then(|size| size.checked_add(5))
+            .filter(|&size| size <= options.limits.max_raw_stream_bytes.min(options.limits.max_decoded_bytes))
+            .ok_or_else(|| PdfError::ResourceLimit("text range fragment bytes".into()))?;
+        if options.limits.max_objects < 3 { return Err(PdfError::ResourceLimit("adjusted text array items".into())); }
+        let mut output = crate::budget::BudgetedBytes::copy_from_slice(budget, b"")?;
+        output.try_reserve_capacity(length)?;
+        for part in prefix { output.try_extend_from_slice(part)?; }
+        output.try_extend_from_slice(body)?;
+        output.try_extend_from_slice(b" ")?;
+        output.try_extend_from_slice(suffix_token)?;
+        output.try_extend_from_slice(b"] TJ\n")?;
+        Ok((output, count))
+    }
+
+    /// Return an independently parsed program with one lexical operation replaced.
     /// Preserves surrounding bytes and stream count; replacement is placed in
     /// the stream containing the operation start. A newline terminates its tail.
     /// Clears document provenance because the returned source is an offline edit.
@@ -1010,6 +1221,142 @@ impl ContentProgram {
         let mut builder = crate::page::content_builder::ContentBuilder::default();
         builder.draw_image_with_limits(resource.name, matrix, options.limits)?;
         self.with_replaced_operation_sequence(index, builder.as_bytes(), options, 4)
+    }
+
+    /// Atomically rebuild multiple original operations in a single source pass
+    /// and final parse. Preserves stream count and untouched bytes/operators;
+    /// fragments are placed in the stream containing their original start.
+    /// Each fragment has an explicit instruction count (zero means removal).
+    /// Borrowed inputs are excluded; fragment validation, metadata and result
+    /// capacities coexist in the supplied pool. Result provenance is cleared.
+    pub fn with_replaced_operation_sequences_with_budget(
+        &self,
+        replacements: &[OperationReplacement<'_>],
+        options: ParseOptions,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<BudgetedContentProgram> {
+        if replacements.len() > options.limits.max_objects
+            || self.stream_ranges.len() > options.limits.max_objects {
+            return Err(PdfError::ResourceLimit("batch content metadata".into()));
+        }
+        let mut previous = None;
+        let mut total = self.source.len();
+        let mut operation_count = self.operations.len();
+        for replacement in replacements {
+            if previous.is_some_and(|index| replacement.index <= index) {
+                return Err(PdfError::ContentParseError("batch indices must be ordered and unique".into()));
+            }
+            let target = self.operations.get(replacement.index)
+                .ok_or_else(|| PdfError::ContentParseError("batch operation index out of range".into()))?;
+            if replacement.source.len() > options.limits.max_raw_stream_bytes {
+                return Err(PdfError::ResourceLimit("batch fragment bytes".into()));
+            }
+            total = total.checked_sub(target.lexical_range.len())
+                .and_then(|size| size.checked_add(replacement.source.len()))
+                .and_then(|size| size.checked_add(2))
+                .ok_or_else(|| PdfError::ResourceLimit("batch content source bytes".into()))?;
+            operation_count = operation_count.checked_sub(1)
+                .and_then(|count| count.checked_add(replacement.operation_count))
+                .ok_or_else(|| PdfError::ResourceLimit("batch operation count".into()))?;
+            previous = Some(replacement.index);
+        }
+        if total > options.limits.max_decoded_bytes || operation_count > options.limits.max_content_operations {
+            return Err(PdfError::ResourceLimit("batch content output limits".into()));
+        }
+        let mut fragment_table_lease = reserve_metadata::<BudgetedContentProgram>(Some(budget), replacements.len())?;
+        let mut fragments = Vec::new();
+        fragments.try_reserve_exact(replacements.len())
+            .map_err(|_| PdfError::ResourceLimit("batch fragment table allocation".into()))?;
+        reconcile_metadata::<BudgetedContentProgram>(&mut fragment_table_lease, fragments.capacity())?;
+        for replacement in replacements {
+            let bytes = crate::budget::BudgetedBytes::copy_from_slice(budget, replacement.source)?;
+            let fragment = Self::from_decoded_bytes_with_budget(bytes, options, budget)?;
+            if fragment.program.operations.len() != replacement.operation_count {
+                return Err(PdfError::ContentParseError("batch fragment operation count mismatch".into()));
+            }
+            fragments.push(fragment);
+        }
+        let mut source_lease = reserve_metadata::<u8>(Some(budget), total)?;
+        let mut ranges_lease = reserve_metadata::<Range<usize>>(Some(budget), self.stream_ranges.len())?;
+        let mut source = Vec::new();
+        source.try_reserve_exact(total)
+            .map_err(|_| PdfError::ResourceLimit("batch source allocation".into()))?;
+        reconcile_metadata::<u8>(&mut source_lease, source.capacity())?;
+        let mut ranges = Vec::new();
+        ranges.try_reserve_exact(self.stream_ranges.len())
+            .map_err(|_| PdfError::ResourceLimit("batch stream ranges allocation".into()))?;
+        reconcile_metadata::<Range<usize>>(&mut ranges_lease, ranges.capacity())?;
+        let mut next = 0;
+        for stream in &self.stream_ranges {
+            let start = source.len();
+            let mut copied = stream.start;
+            while let Some(replacement) = replacements.get(next) {
+                let range = &self.operations[replacement.index].lexical_range;
+                if range.start >= stream.end { break; }
+                let prefix_end = range.start.clamp(stream.start, stream.end);
+                source.extend_from_slice(&self.source[copied..prefix_end]);
+                if stream.start <= range.start && range.start < stream.end {
+                    // The old operand may have been a delimiter directly after
+                    // an operator word. Delimit both sides of the new fragment.
+                    source.push(b'\n');
+                    source.extend_from_slice(replacement.source);
+                    // A fragment may end in a comment; delimit the next original
+                    // instruction without depending on its leading whitespace.
+                    source.push(b'\n');
+                }
+                copied = range.end.clamp(stream.start, stream.end);
+                if range.end <= stream.end { next += 1; } else { break; }
+            }
+            source.extend_from_slice(&self.source[copied..stream.end]);
+            ranges.push(start..source.len());
+        }
+        if next != replacements.len() || source.len() != total {
+            return Err(PdfError::ContentParseError("batch source reconstruction mismatch".into()));
+        }
+        let mut operations_lease = Some(budget.reserve(0)?);
+        let program = Self::parse_with_stream_ranges_budget(source, ranges, options, Some(budget), &mut operations_lease)?;
+        if program.operations.len() != operation_count {
+            return Err(PdfError::ContentParseError("batch changed adjacent instruction boundaries".into()));
+        }
+        let verify = |actual: &SourceOperation, expected: &SourceOperation| -> PdfResult<()> {
+            if actual.operator.name() != expected.operator.name()
+                || actual.operator.num_operands() != expected.operator.num_operands() {
+                return Err(PdfError::ContentParseError("batch changed neighboring operations".into()));
+            }
+            for operand in 0..expected.operator.num_operands() {
+                if actual.operator.operand(operand)? != expected.operator.operand(operand)? {
+                    return Err(PdfError::ContentParseError("batch changed neighboring operands".into()));
+                }
+            }
+            Ok(())
+        };
+        let mut old_index = 0;
+        let mut new_index = 0;
+        for (replacement, fragment) in replacements.iter().zip(&fragments) {
+            while old_index < replacement.index {
+                verify(&program.operations[new_index], &self.operations[old_index])?;
+                old_index += 1;
+                new_index += 1;
+            }
+            for expected in &fragment.program.operations {
+                verify(&program.operations[new_index], expected)?;
+                new_index += 1;
+            }
+            old_index += 1;
+        }
+        while old_index < self.operations.len() {
+            verify(&program.operations[new_index], &self.operations[old_index])?;
+            old_index += 1;
+            new_index += 1;
+        }
+        let mut allocation = budget.reserve(0)?;
+        for lease in [&mut source_lease, &mut ranges_lease, &mut operations_lease] {
+            if let Some(lease) = lease { allocation.absorb(lease)?; }
+        }
+        Ok(BudgetedContentProgram {
+            program,
+            _leases: ProgramLeases { _allocation: Some(allocation) },
+        })
     }
 
     fn with_replaced_operation_sequence(

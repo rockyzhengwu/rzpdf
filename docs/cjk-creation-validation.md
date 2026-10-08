@@ -1,5 +1,25 @@
 # 中英文整字体构建验证
 
+## 两层Form真实中文推进补偿（2026-10-08）
+
+`compare_cjk_advance`新增可选`--nested`：先把含中文/图片和后续PDF事件的第一页包装为两层Form，再复制补偿/无补偿页，调用嵌套Unicode补偿/普通替换入口。固定输出仍为基线、原第二页、补偿、无补偿；使用原嵌入静态Noto Sans SC字体，不用合成字形替代真实字体。本例由rzpdf生成，独立工具只用于核验。
+
+```sh
+cargo run -p pdf --example compare_cjk_advance --locked -- output/pdf/rzpdf-cjk-images.pdf output/pdf/rzpdf-cjk-nested-advance.pdf --nested
+bash docs/check-cjk-advance.sh output/pdf/rzpdf-cjk-nested-advance.pdf --nested
+mutool draw -r 96 -o tmp/pdfs/rzpdf-cjk-nested-advance-%d.png output/pdf/rzpdf-cjk-nested-advance.pdf
+```
+
+最终运行原session82446退出0，日志`/tmp/rzpdf-real-cjk-nested-advance-final.log`；首轮示例编译将Option字典转换当Result，修正后重新生成。保存/释放/严格重开后的补偿P/D/F位置及无补偿水平差均通过；生成文件SHA-256为`d29a38641d0b10e054144501d98bda5dbffc5a8264ce660982b1e9400165b7f9`，不承诺再次生成字节一致。
+
+qpdf 11.2.0结构与MuPDF 1.27.0独立stext坐标/归一化文字通过，日志`/tmp/rzpdf-cjk-nested-independent-final.log`。脚本检查共享Type0/ToUnicode/FontFile2、RGB/软遮罩，以及三份不同外Form/三份不同叶Form的字型和图片共用关系。复制编辑保留未使用的旧资源别名，因此按唯一对象引用计数；首次脚本重复计数拒绝正常文件，已修正后复验，并在原顶层样本上通过回归。无嵌套标志拒绝嵌套文件、嵌套标志拒绝顶层文件；交换第三/四页的同结构四页文件通过结构阶段、随后坐标检查退出1，日志`/tmp/rzpdf-cjk-nested-swapped-check.log`。
+
+四页96 DPI PNG均已目视：真实中文字形、标题和图片/透明度清晰，无缺字/裁切，补偿页空隙为保留后续位置的预期结果，无补偿页PDF左移。另将顶层对照同样渲染到`tmp/pdfs/rzpdf-cjk-advance-check-%d.png`，四页分别与嵌套PNG进行cmp，全部字节一致，确认包装本身不改变这组页面的渲染。原先72 DPI PNG与新96 DPI图不能直接比较尺寸；没有将首次不同分辨率的cmp失败解释为引擎问题。
+
+按PDF技能完成渲染检查；本机Poppler仍因缺libtiff.5.dylib无法启动，使用已有MuPDF，未修改系统依赖。仅证明这款真实水平字体的两层整Tj缩短补偿，不代替真实竖排/TJ范围/所有资源作用域/全部字体或完整P3；合成混合字符码横竖排另有四项嵌套专项通过，但不证明实际竖排字形视觉。fuzz未运行。
+
+扩展示例的原两参数默认CLI也已复跑，原session25317退出0，生成`output/pdf/rzpdf-cjk-advance-regression.pdf`并经新检查脚本通过，日志`/tmp/rzpdf-cjk-advance-default-regression.log`和`/tmp/rzpdf-cjk-advance-default-regression-check.log`；不只使用旧PDF来证明默认生成路径兼容。
+
 ## 真实字体自动推进补偿与不补偿对照（2026-10-08）
 
 新增`compare_cjk_advance`，输入为已有两页`create_cjk --images`样本。它在第一页正文后插入独立的“ PDF”文字事件，再复制出两页：第三页将整句缩短为“你好！”并自动补偿，第四页作相同替换但不补偿。输出顺序为基线、原第二页、补偿、无补偿；不修改输入文件，输出路径应与输入不同。

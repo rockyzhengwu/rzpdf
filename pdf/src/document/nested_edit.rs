@@ -169,6 +169,7 @@ impl<R: Read + Seek> PdfDocument<R> {
             source,
             NestedTextEdit::WholeString { item: None },
             text,
+            false,
         )
     }
 
@@ -187,6 +188,7 @@ impl<R: Read + Seek> PdfDocument<R> {
             source,
             NestedTextEdit::WholeString { item: Some(item) },
             text,
+            false,
         )
     }
 
@@ -207,6 +209,7 @@ impl<R: Read + Seek> PdfDocument<R> {
             source,
             NestedTextEdit::StringRange { item, range },
             text,
+            false,
         )
     }
 
@@ -220,7 +223,33 @@ impl<R: Read + Seek> PdfDocument<R> {
         range: std::ops::Range<(usize, usize)>,
         text: &str,
     ) -> PdfResult<()> {
-        self.replace_nested_unicode(page, root, source, NestedTextEdit::ArrayRange(range), text)
+        self.replace_nested_unicode(page, root, source, NestedTextEdit::ArrayRange(range), text, false)
+    }
+
+    /// Replace nested Tj/quote Unicode text, preserving following writing-axis
+    /// positions and quote line/spacing effects. Copies only the selected chain.
+    /// Inherits effective font/size/spacing; does not shape or fit glyph bounds.
+    pub fn replace_nested_text_preserving_advance(
+        &self, page: u32, root: &ContentProgram, source: &NestedDrawSource, text: &str,
+    ) -> PdfResult<()> {
+        self.replace_nested_unicode(page, root, source, NestedTextEdit::WholeString { item: None }, text, true)
+    }
+
+    /// Compensate one nested TJ string immediately after that string. Inserting
+    /// the number shifts subsequent array indices; refresh root and source.
+    pub fn replace_nested_text_array_item_preserving_advance(
+        &self, page: u32, root: &ContentProgram, source: &NestedDrawSource, item: usize, text: &str,
+    ) -> PdfResult<()> {
+        self.replace_nested_unicode(page, root, source, NestedTextEdit::WholeString { item: Some(item) }, text, true)
+    }
+
+    /// Compensate a range across nested TJ strings before each retained suffix.
+    /// Endpoints are complete character-code byte boundaries, not Unicode indices.
+    pub fn replace_nested_text_array_range_preserving_advance(
+        &self, page: u32, root: &ContentProgram, source: &NestedDrawSource,
+        range: std::ops::Range<(usize, usize)>, text: &str,
+    ) -> PdfResult<()> {
+        self.replace_nested_unicode(page, root, source, NestedTextEdit::ArrayRange(range), text, true)
     }
 
     fn replace_nested_unicode(
@@ -230,6 +259,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         source: &NestedDrawSource,
         edit: NestedTextEdit,
         text: &str,
+        preserve_advance: bool,
     ) -> PdfResult<()> {
         let budget = self.ctx.limits().operation_budget();
         let current_page = self.get_page_with_budget(page, &budget)?;
@@ -276,40 +306,70 @@ impl<R: Read + Seek> PdfDocument<R> {
                     range,
                     self.ctx.limits(),
                 )?;
+                if preserve_advance {
+                    let array = target.get_as_array(0)?;
+                    let count = (range.start.0..=range.end.0)
+                        .filter(|&index| array.get(index).and_then(PdfObject::as_string).is_some()).count();
+                    if count.checked_mul(2).and_then(|count| count.checked_add(array.len()))
+                        .is_none_or(|count| count > self.ctx.limits().max_objects) {
+                        return Err(PdfError::ResourceLimit("TJ adjusted array items".into()));
+                    }
+                }
             }
         }
         let (page_scope, _page_scope_lease) = current_page.resource_with_budget(&budget)?;
-        let mut font = None;
+        let mut state = Default::default();
         for (index, call) in source.invocations.iter().enumerate() {
             let (program, scope) = if index == 0 {
                 (root, &page_scope)
             } else {
                 (&*chain[index - 1].program, &chain[index - 1].resource_scope)
             };
-            font = current_page.font_before_operation_in_scope_with_budget(
+            state = current_page.text_state_before_operation_in_scope_with_budget(
                 program,
                 call.operation_index,
                 scope,
-                font,
+                state,
                 &budget,
             )?;
         }
         let leaf = chain
             .last()
             .ok_or_else(|| PdfError::PageResourceError("Nested leaf absent".into()))?;
-        let font = current_page
-            .font_before_operation_in_scope_with_budget(
+        let state = current_page
+            .text_state_before_operation_in_scope_with_budget(
                 &leaf.program,
                 source.operation_index,
                 &leaf.resource_scope,
-                font,
+                state,
                 &budget,
-            )?
-            .ok_or_else(|| PdfError::FontError("Nested text has no effective font".into()))?;
+            )?;
+        let state = state.into_metrics()?;
+        let font = &state.font;
         let mut codes = font.encode_text_with_budget(text, self.ctx.limits(), &budget)?;
         let mut range_lease = budget.reserve(0)?;
         let (item, range) = match edit {
-            NestedTextEdit::WholeString { item } => (item, None),
+            NestedTextEdit::WholeString { item } => {
+                if preserve_advance {
+                    let old = match item {
+                        Some(item) => target.get_as_array(0)?.get(item).and_then(PdfObject::as_string)
+                            .ok_or_else(|| PdfError::ObjectError("TJ compensation requires a string item".into()))?.bytes(),
+                        None if target.name() == "\"" => target.get_as_string(2)?.bytes(),
+                        None => target.get_as_string(0)?.bytes(),
+                    };
+                    let adjustment = state.replacement_adjustment(old, codes.as_slice(), self.ctx.limits())?;
+                    let edited = match item {
+                        Some(item) => leaf.program.with_adjusted_text_array_item_codes_with_budget(
+                            source.operation_index, item, codes.as_slice(), adjustment, self.ctx.options(), &budget,
+                        )?,
+                        None => leaf.program.with_adjusted_text_codes_with_budget(
+                            source.operation_index, codes.as_slice(), adjustment, self.ctx.options(), &budget,
+                        )?,
+                    };
+                    return self.commit_nested_edit_with_budget(page, root, source, chain, edited, &budget);
+                }
+                (item, None)
+            }
             NestedTextEdit::StringRange { item, range } => (item, Some(range)),
             NestedTextEdit::ArrayRange(range) => {
                 let target = &leaf.program.operations()[source.operation_index].operator;
@@ -320,12 +380,22 @@ impl<R: Read + Seek> PdfDocument<R> {
                     &budget,
                     &font,
                     target.get_as_array(0)?,
-                    range,
+                    range.clone(),
                     codes.as_slice(),
                     self.ctx.limits(),
                 )?;
                 let borrowed =
                     super::content_edit::BudgetedTextItems::new(&budget, replacements.as_slice())?;
+                if preserve_advance {
+                    let adjustments = super::content_edit::budgeted_text_array_range_adjustments(
+                        &budget, target.get_as_array(0)?, &range, codes.as_slice(), borrowed.as_slice(),
+                        |old, new| state.replacement_adjustment(old, new, self.ctx.limits()),
+                    )?;
+                    let edited = leaf.program.with_adjusted_text_array_items_codes_with_budget(
+                        source.operation_index, borrowed.as_slice(), adjustments.as_slice(), self.ctx.options(), &budget,
+                    )?;
+                    return self.commit_nested_edit_with_budget(page, root, source, chain, edited, &budget);
+                }
                 let edited = leaf
                     .program
                     .with_replaced_text_array_items_codes_with_budget(

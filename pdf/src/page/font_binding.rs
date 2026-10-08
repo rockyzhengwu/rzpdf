@@ -33,6 +33,23 @@ pub(crate) struct BudgetedTextMetrics {
     pub(crate) metrics: TextMetrics,
 }
 
+/// Form callers can carry spacing even before any font has been selected.
+/// Moving this state also moves its optional font reservation, never a clone.
+#[derive(Default)]
+pub(crate) struct BudgetedTextState {
+    pub(crate) font: Option<BudgetedFont>,
+    pub(crate) metrics: TextMetrics,
+}
+
+impl BudgetedTextState {
+    pub(crate) fn into_metrics(self) -> PdfResult<BudgetedTextMetrics> {
+        Ok(BudgetedTextMetrics {
+            font: self.font.ok_or_else(|| PdfError::FontError("Nested text has no effective font".into()))?,
+            metrics: self.metrics,
+        })
+    }
+}
+
 impl BudgetedTextMetrics {
     /// The writing-axis displacement is measured before Tz/CTM, using signed
     /// W2 advances for vertical fonts. Tw applies only to a one-byte 0x20 code.
@@ -138,6 +155,7 @@ impl<R: Read + Seek> PdfPage<'_, R> {
                 Some(budget),
                 &mut retained,
                 Some(&mut metrics),
+                TextMetrics::default(),
             )?
             .ok_or_else(|| PdfError::FontError("text replacement has no effective font".into()))?;
         if let Some(mut lease) = retained {
@@ -216,6 +234,7 @@ impl<R: Read + Seek> PdfPage<'_, R> {
             Some(budget),
             &mut retained,
             None,
+            TextMetrics::default(),
         )?;
         if let Some(mut child) = retained {
             lease.absorb(&mut child)?;
@@ -224,6 +243,35 @@ impl<R: Read + Seek> PdfPage<'_, R> {
             font,
             _lease: lease,
         }))
+    }
+
+    /// Preserve inherited font and metrics through one stream prefix. Returns
+    /// scalar state even when neither the caller nor this prefix selected a font.
+    pub(crate) fn text_state_before_operation_in_scope_with_budget(
+        &self,
+        program: &ContentProgram,
+        target: usize,
+        scope: &crate::objects::pdf_dict::PdfDict,
+        inherited: BudgetedTextState,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<BudgetedTextState> {
+        let mut lease = budget.reserve(0)?;
+        let initial_metrics = inherited.metrics;
+        let inherited_font = if let Some(mut font) = inherited.font {
+            lease.absorb(&mut font._lease)?;
+            Some(font.font)
+        } else { None };
+        let mut retained = None;
+        let mut metrics = initial_metrics;
+        let font = self.font_before_operation_in_scope_tracked(
+            program, target, scope, inherited_font, Some(budget), &mut retained,
+            Some(&mut metrics), initial_metrics,
+        )?;
+        if let Some(mut retained) = retained { lease.absorb(&mut retained)?; }
+        Ok(BudgetedTextState {
+            font: font.map(|font| BudgetedFont { font, _lease: lease }),
+            metrics,
+        })
     }
 
     fn font_before_operation_in_scope_inner(
@@ -235,7 +283,7 @@ impl<R: Read + Seek> PdfPage<'_, R> {
         budget: Option<&crate::budget::OperationBudget>,
     ) -> PdfResult<Option<Font>> {
         self.font_before_operation_in_scope_tracked(
-            program, target, scope, inherited, budget, &mut None, None,
+            program, target, scope, inherited, budget, &mut None, None, TextMetrics::default(),
         )
     }
 
@@ -248,6 +296,7 @@ impl<R: Read + Seek> PdfPage<'_, R> {
         budget: Option<&crate::budget::OperationBudget>,
         retained: &mut Option<crate::budget::MemoryLease>,
         metrics_out: Option<&mut TextMetrics>,
+        initial_metrics: TextMetrics,
     ) -> PdfResult<Option<Font>> {
         let mut object_lease = budget.map(|pool| pool.reserve(0)).transpose()?;
         let mut font_lease = budget.map(|pool| pool.reserve(0)).transpose()?;
@@ -281,7 +330,7 @@ impl<R: Read + Seek> PdfPage<'_, R> {
         let limits = self.ctx.limits();
         // Savepoints share immutable fonts rather than deep-cloning font tables.
         let mut selection = inherited.map(Rc::new);
-        let mut metrics = TextMetrics::default();
+        let mut metrics = initial_metrics;
         let mut _stack_lease = budget.map(|pool| pool.reserve(0)).transpose()?;
         let mut stack = Vec::new();
         let mut in_text = false;
@@ -508,6 +557,59 @@ fn finite_text_metric(value: f32) -> PdfResult<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn inherited_text_state_keeps_unbound_spacing_and_restores_local_font() {
+        use crate::budget::OperationBudget;
+        let doc = Document::new().unwrap();
+        doc.add_page(0).unwrap();
+        let courier = doc.resources().register_standard_font(0, StandardFont::Courier).unwrap();
+        let helvetica = doc.resources().register_standard_font(0, StandardFont::Helvetica).unwrap();
+        let page = doc.get_page(0).unwrap();
+        let scope = page.resource().unwrap();
+        let parse = |bytes: Vec<u8>| ContentProgram::from_decoded_bytes(bytes, Default::default()).unwrap();
+        let unbound = parse(b"2 Tc 7 Tw -75 Tz /Outer Do".to_vec());
+        let parent = parse(format!("BT /{courier} 10 Tf 2 Tc 7 Tw -75 Tz ET /Outer Do").into_bytes());
+        let middle = parse(b"q 8 Tc 9 Tw 50 Tz /Inner Do Q /Inner Do".to_vec());
+        let leaf = parse(format!("BT q /{helvetica} 20 Tf 4 Tc 5 Tw 25 Tz Q (A) Tj ET").into_bytes());
+        let bound_leaf = parse(format!("BT /{courier} 10 Tf (A) Tj ET").into_bytes());
+        let pool = OperationBudget::new(4 * 1024 * 1024);
+        let neighbor = pool.reserve(7).unwrap();
+        let state = page.text_state_before_operation_in_scope_with_budget(&unbound, 3, &scope, Default::default(), &pool).unwrap();
+        assert!(state.font.is_none());
+        assert_eq!(state.metrics.char_space, 2.0);
+        assert_eq!(state.metrics.word_space, 7.0);
+        assert_eq!(state.metrics.horizontal_scale, -0.75);
+        assert_eq!(pool.live_bytes(), 7);
+        let state = page.text_state_before_operation_in_scope_with_budget(&bound_leaf, 2, &scope, state, &pool).unwrap();
+        assert_eq!(state.metrics, TextMetrics { font_size: 10.0, char_space: 2.0, word_space: 7.0, horizontal_scale: -0.75 });
+        assert_eq!(state.font.as_ref().unwrap().name(), "Courier");
+        drop(state);
+        assert_eq!(pool.live_bytes(), 7);
+        for (target, char_space, word_space, scale) in [(4, 8.0, 9.0, 0.5), (6, 2.0, 7.0, -0.75)] {
+            let state = page.text_state_before_operation_in_scope_with_budget(&parent, 6, &scope, Default::default(), &pool).unwrap();
+            let state = page.text_state_before_operation_in_scope_with_budget(&middle, target, &scope, state, &pool).unwrap();
+            let state = page.text_state_before_operation_in_scope_with_budget(&leaf, 7, &scope, state, &pool).unwrap();
+            assert_eq!(state.metrics, TextMetrics { font_size: 10.0, char_space, word_space, horizontal_scale: scale });
+            assert_eq!(state.font.as_ref().unwrap().name(), "Courier");
+            assert_eq!(pool.live_bytes(), state.font.as_ref().unwrap()._lease.bytes() + 7);
+            drop(state);
+            assert_eq!(pool.live_bytes(), 7);
+        }
+        let invalid = parse(b"BT bogus (A) Tj ET".to_vec());
+        let state = page.text_state_before_operation_in_scope_with_budget(&parent, 6, &scope, Default::default(), &pool).unwrap();
+        assert!(page.text_state_before_operation_in_scope_with_budget(&invalid, 2, &scope, state, &pool).is_err());
+        assert_eq!(pool.live_bytes(), 7);
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let state = page.text_state_before_operation_in_scope_with_budget(&parent, 6, &scope, Default::default(), &pool).unwrap();
+            let _state = page.text_state_before_operation_in_scope_with_budget(&leaf, 7, &scope, state, &pool).unwrap();
+            panic!("inherited text state owner unwind");
+        }));
+        assert_eq!(caught.unwrap_err().downcast_ref::<&str>().copied(), Some("inherited text state owner unwind"));
+        assert_eq!(pool.live_bytes(), 7);
+        drop(neighbor);
+        assert_eq!(pool.live_bytes(), 0);
+    }
+
     #[test]
     fn budgeted_text_metrics_restore_font_spacing_and_target_quote_state() {
         use crate::budget::OperationBudget;

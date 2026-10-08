@@ -16,6 +16,8 @@ Unicode 文档替换可用 `replace_page_text` / `replace_page_text_array_item`�
 
 内容文字编辑支持 Tj、两类引号操作和 TJ 单项字符串替换，`replace_page_text_range` 按解码字符码边界提供局部 Unicode 替换/插入/删除；沿用目标有效字体，不自动补字体覆盖或补偿字宽。文档提交校验页面快照身份/修订号并采用事务和流复制写入。`encode_text_for_font` 可按显式字体资源的既有Unicode映射编码；复合字体要求已有ToUnicode/Encoding并验证字符码长度及读回。TJ 保留其他片段、显式间距与注释，不等于完整排版编辑或安全删除。详见 [内容编辑接口](docs/content-editing.md)。
 
+`replace_page_operation_sequences(page, &snapshot, replacements)`可按原快照一次原子提交多段操作替换；使用`OperationReplacement { index, source, operation_count }`，可展开或删除操作，保留其他操作及流边界并验证最终结果。它接受调用方构建的原始内容片段，不负责跨事件Unicode范围/字体分段或自动布局补偿。详见[批量内容提交](docs/content-editing.md)。
+
 `remove_page_text_draw(page, &snapshot, operation)` 清空整个顶层文字事件的字符串，支持Tj/TJ/两类引号，不依赖字体编码；保留引号状态与TJ数值/注释，批量TJ仅一次扫描和程序重解析。它取消原字形推进，不保证连续文本布局保持，也不清除旧内容对象中的残留数据。
 
 顶层文字、图片及路径绘制带来源操作位置；文字字符另带 TJ 项索引和解码字符码范围。图片/文字报告及 DisplayList 可检查同文档/同页/同修订配对与当前性。`image_geometry_hits` 提供显示空间的图片几何候选，`transform_page_image_draw_display` 支持显示空间仿射编辑；不判断裁剪、透明和遮挡，也不覆盖 Form/内联来源或文字路径命中。
@@ -144,9 +146,13 @@ cargo run -p pdf --example edit_page_order --locked -- INPUT.pdf OUTPUT.pdf
 
 真实中文字体文字编辑固定示例：`cargo run -p pdf --example edit_cjk_text --locked -- INPUT.pdf OUTPUT.pdf`，输入为两页`create_cjk --images`文件。复制第一页后仅在副本中把“世界”替换成“你好”，检查未映射字符拒绝、外层事务回滚及原页隔离，再保存严格读回。可用 `bash docs/check-cjk-page-edit.sh OUTPUT.pdf --text-edit` 复验；独立提取和目视结果见[中文构建验证](docs/cjk-creation-validation.md)。只替换已映射字符，不新增字形、不作布局补偿，也不是通用文本搜索替换。
 
-`replace_page_text_preserving_advance(page, &snapshot, operation, text)`提供顶层Tj/两类引号的可选推进补偿：按有效字体与字符/词间距生成TJ调整，保留后续文字的写字轴位置和引号行矩阵语义。零字号拒绝；较长文字仍可能与后续字形重叠，不是排版适配。Courier位置/共享隔离/回滚、合成竖排和固定真实中文水平字体对照已验收；TJ数组、嵌套Form、真实竖排及完整字体矩阵仍待完成。底层显式调整和预算接口见[内容编辑](docs/content-editing.md)。
+`replace_page_text_preserving_advance(page, &snapshot, operation, text)`提供顶层Tj/两类引号的可选推进补偿：按有效字体与字符/词间距生成TJ调整，保留后续文字的写字轴位置和引号行矩阵语义。`replace_page_text_array_item_preserving_advance(page, &snapshot, operation, item, text)`在TJ单项字符串后插入补偿，保留数组内后续文字的位置与原数值间距；`replace_page_text_array_range_preserving_advance(..., range, text)`支持跨TJ字符串的完整字符码范围，并把逐项补偿放在保留后缀之前。新增数组元素改变后续项索引，编辑后刷新快照。零字号拒绝；较长文字仍可能与后续字形重叠，不是排版适配。Courier位置/共享隔离/回滚、单字符串合成竖排和固定真实中文水平字体对照已验收；跨文字事件、嵌套复杂字体、真实竖排及完整字体矩阵仍待完成。底层显式调整和预算接口见[内容编辑](docs/content-editing.md)。
+
+嵌套Form对应提供`replace_nested_text_preserving_advance`、`replace_nested_text_array_item_preserving_advance`及`replace_nested_text_array_range_preserving_advance`，继承调用链的有效字体/字号/间距，仅逐层复制并重绑选中调用。固定Courier两层四调用、共享页与邻接位置/严格重开/错误及panic回滚/额度拒绝重试已有回归；复杂字体嵌套、独立阅读器与完整排版矩阵仍待验证。
 
 固定真实字体补偿对照：`cargo run -p pdf --example compare_cjk_advance --locked -- INPUT.pdf OUTPUT.pdf`，输入为两页`create_cjk --images`文件。输出四页基线/原第二页/补偿/无补偿，独立MuPDF坐标检查及目视确认后续PDF仅在补偿页保持原位；可运行 `bash docs/check-cjk-advance.sh OUTPUT.pdf` 复验。范围、负例和渲染记录见[中文构建验证](docs/cjk-creation-validation.md)。合成Identity-V/W2度量回归也已通过，但真实竖排字形和完整字体矩阵仍未验收。
+
+同一示例支持末尾`--nested`，将第一页包装为两层Form后使用嵌套补偿入口；对应检查命令为`bash docs/check-cjk-advance.sh OUTPUT.pdf --nested`。固定真实中文样本的独立坐标/文本、四页目视和同分辨率顶层PNG对照已通过，详见上述验证文档；不代替真实竖排或全部嵌套资源矩阵。
 
 Info/XMP 默认独立编辑，不自动修改另一侧。`set_info_and_metadata(Some(info), Some(packet))` 可在同一事务替换两者；任一失败回滚全部修改，None 解除对应引用。该 API 只保证原子提交，语义一致性和合法 XML 由调用方负责，不自动映射字段或覆盖未知 XMP 属性。
 

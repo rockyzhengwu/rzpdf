@@ -1,5 +1,13 @@
 # 内容编辑
 
+## 多事件操作片段批量提交
+
+`replace_page_operation_sequences(page, &snapshot, replacements)`接受按原快照操作索引严格递增的`OperationReplacement { index, source, operation_count }`列表。每项替换一个原操作，可输出多个指令或零指令（删除）；重复/倒序/越界索引、片段实际指令数不符、语法或总量/额度错误拒绝。它是调用方已构建内容片段的原子提交，不编码Unicode、不推断跨事件选区或各事件字体、不自动计算推进差，也不验证任意图形语义。
+
+低层`with_replaced_operation_sequences_with_budget`先在同池逐片段验证，保留片段程序所有者，再按原流边界一次重建完整源、最后统一解析。新片段放在原操作开始的流中，跨流原操作剩余字节移除，空流及其他字节保持；片段前后加换行，防止旧字符串闭合符作为词法分隔时新指令粘连，也防止片段尾注释吞掉邻接操作。校验最终所有未选操作名称/操作数和值及生成片段操作，结果清除来源身份并持有真实容量租约。借用原快照与输入片段不重复计费；描述表、片段验证/重建源码/操作表/结果的共存峰值由同池承担。
+
+文档入口沿用当前快照身份/修订号/流ID验证与事务流复制写入，不逐事件分别提交。跨流/空流、未知邻接操作、词法边界、元数据/总量、峰值差1/邻居/返回结果所有权、公共多事件共享隔离/回滚/指定panic/刷新重试及严格重开专项已通过：原session72276退出0，content_batch_edit 5项及既有ContentProgram 29项通过（日志`/tmp/rzpdf-batch-content-integration-final.log`）；最终单元原session50444退出0，PDF 636项通过、4.07秒（日志`/tmp/rzpdf-batch-content-pdf-unit-final.log`）。跨事件Unicode范围、字体分段、保留后缀与自动补偿仍需在此基础上继续实现，不据此勾选完整P3；专项用调用方明确提供的Courier字符码/TJ数值，不冒充自动补偿。
+
 ## 显式 TJ 调整构建（验收中）
 
 `ContentBuilder::show_adjusted_encoded_text(codes, adjustment)`及带Limits版本输出`[<字符码> adjustment] TJ`，不推断字体、不编码Unicode。调整数值采用PDF TJ的千分之一字号单位：正值沿写字轴后退，负值向前。它只改变文字矩阵，不应拿Td代替（Td还会改变行矩阵）。`adjusted_encoded_text_with_budget(codes, adjustment, limits, budget)`返回持有实际Vec容量租约的BudgetedBytes；数字格式化使用64字节栈缓冲，不另分配String。非有限数值、字符串/数字token超限、输出超限或额度不足返回错误，普通builder已有字节不变。
@@ -24,7 +32,37 @@
 
 公共补偿外层unwind补验通过：Tj/两类引号成功修改后注入panic，检查两共享页源码与Contents流ID恢复、旧快照拒绝、刷新重试与严格保存重开后的文本/后续字符及下一行位置。增强版要求panic载荷精确匹配指定注入消息，防止其他断言失败误认成成功清理；原session71814退出0，七项通过、0失败/忽略、1.36秒，日志`/tmp/rzpdf-compensation-outer-unwind-verified.log`。尚不代表所有公共入口和每一个失败点的完整unwind矩阵。
 
+## TJ 单项推进补偿
+
+`replace_page_text_array_item_preserving_advance(page, &snapshot, operation, item, text)`按有效字体/字号/Tc/Tw计算单个TJ字符串的新旧推进差，并在该字符串后立即插入数值调整。不能把调整放在数组末尾，否则数组内部后续字符串的位置会改变。项索引包含数值项，但目标必须是字符串；新增数值使后续项索引加一，提交后必须刷新快照。原有数值拼写、注释和未选字符串词法保留；即使原数值紧贴字符串闭合符，新数值后也补空格避免两个数字粘连。
+
+低层`with_adjusted_text_array_item_codes_with_budget`接受既有字符码和显式调整，不计算度量、不编码Unicode。重建和验证沿用同池预算所有者；插入前检查新增数组项数量，错误/额度不足不改变原程序。顶层入口保留字体和编码所有者直到事务返回，与单字符串入口一样拒绝零字号/不可编码文字，不负责字形覆盖、形状化或避免长文字重叠。跨TJ项范围、嵌套Form继承与真实竖排的补偿仍待完成，不能将新增代码等同完整P3验收。
+
+TJ单项版本文字补偿专项10项通过（日志`/tmp/rzpdf-tj-item-compensation.log`），PDF单元635项通过、原session33192退出0（日志`/tmp/rzpdf-tj-item-pdf-unit.log`）。Courier覆盖数组首/中/末字符串、删除/增长、空格间距、正负Tz/仿射矩阵、数组内邻接文字/后续事件/下一行、共享页与严格重开；另验证相邻数字分隔、数组项上限、不可编码/错误索引拒绝、峰值差1/邻居保留/双结果/释放重试、结果所有者unwind和公共外层错误/panic回滚。专项原session3616还在运行既有ContentProgram回归，尚未将整个命令计为退出0；此前提交的完整工作区测试也不代替本版本测试。
+
+上述TJ单项专项命令原session3616已退出0：文字补偿10项、既有ContentProgram 29项全部通过，取代此前命令待终态记录。完整P3仍未完成；不将此定向回归称作当前版本全部工作区验收。
+
+## TJ 跨项范围推进补偿
+
+复合字体补验与嵌套状态前置（验收中）：新增混合一／两字节CMap的水平W/竖排W2范围回归，按独立数值验证双字节空格不加Tw、范围末端后缀位置、三种截断码边界拒绝及保存重开。新增内部BudgetedTextState将可空字体所有者和字号/Tc/Tw/Tz一起传递；父流尚无字体时标量仍有效，子流Tf和q/Q按继承状态更新/恢复。既有嵌套Unicode绑定已沿调用链使用此状态，但仍只是编码绑定，尚无嵌套推进补偿的公开提交入口。最终单元及集成正在运行，不沿用此前635项或13项证明新增代码；合成度量不证明实际竖排字形或独立阅读器视觉。
+
+`replace_page_text_array_range_preserving_advance(page, &snapshot, operation, range, text)`沿用`Range<(数组索引, 解码字符码字节偏移)>`与完整字符码边界验证。新文字放在范围起始项；受影响的每个字符串拆成`<原前缀＋新文字> 调整 <原后缀>`，中间项的新文字为空，范围末项保留结束偏移之后的后缀。调整放在后缀之前，分别补偿每项被删部分和插入字符码的推进差，因此原前缀、结束后缀、原数值间距及后续事件/行位置保持。零宽范围是可补偿的插入，但新文字可能与原后缀重叠，不是自动排版。
+
+上述复合范围与嵌套状态版已验收：PDF单元636项（原session91993退出0，日志`/tmp/rzpdf-inherited-text-state-pdf-unit.log`）、补偿14项/嵌套文字编辑6项/文字来源9项（原session1678退出0，日志`/tmp/rzpdf-inherited-text-state-integration-final.log`）均通过，取代新增状态版待确认记录。嵌套状态传递已接入编码绑定，但嵌套推进补偿提交接口仍待实现；不将合成横竖排度量、字符位置与来源验证当作真实字形视觉或完整P3验收。
+
+每个受影响字符串新增一个数字和一个后缀字符串（允许空串），提交前检查整个数组项数；提交后必须刷新快照及项索引。编码、范围重建、借用描述表、调整元数据和最终程序按同池实际容量持有租约，不逐项重解析完整程序。低层`with_adjusted_text_array_items_codes_with_budget`接受有序替换字符码和`TextArrayAdjustment { value, suffix_offset }`，调用方负责字符码边界与度量；它不编码Unicode。该版本原session78035退出0，补偿专项13项及ContentProgram 29项通过，日志`/tmp/rzpdf-tj-range-compensation.log`；原session52401退出0，PDF单元635项通过、1.94秒，日志`/tmp/rzpdf-tj-range-pdf-unit.log`。仅证明固定Courier范围与已列预算/失败矩阵，不代表完整P3/全部工作区验收。跨文字事件、复合字体范围/竖排、嵌套继承和独立视觉验证继续待完成。
+
 ## Form 调用编辑与分层来源
+
+### 嵌套文字推进补偿（固定矩阵已验证）
+
+后续复合/真实字体补验：混合一／两字节Type0的横竖排五类目标、新旧W/W2独立调整、双字节空格排除Tw、保留末端后缀/其他调用/共享页、严格重开与截断字符码拒绝已通过；原session28938退出0，nested_adjusted_text 4项，日志`/tmp/rzpdf-nested-mixed-cid-compensation.log`。真实静态Noto Sans SC的两层整Tj补偿/无补偿四页样本也通过qpdf/MuPDF独立坐标/文本、逐页目视和同DPI顶层PNG cmp；脚本拒绝交换对照页的四页负例，详见[真实中文嵌套验证](cjk-creation-validation.md)。合成竖排不证明真实竖排字形，固定真实水平字体不代替全部字体或TJ范围独立视觉。
+
+`replace_nested_text_preserving_advance(page, &root, &source, text)`处理叶Tj/两类引号；`replace_nested_text_array_item_preserving_advance(..., item, text)`处理叶TJ单项；`replace_nested_text_array_range_preserving_advance(..., range, text)`处理叶TJ跨项完整字符码范围。沿每层选中Do前的字体/字号/Tc/Tw/Tz传递有效状态，并扫描叶前缀的局部Tf/gs/q/Q；缺有效字体、零字号、非法目标/边界、编码或预算失败拒绝。两类引号保留Tw/Tc/T*效果；跨项调整仍位于保留后缀前，原数组数字/注释保持。
+
+顶层与嵌套范围共用预算调整元数据构建，不复制裸Font或拼接新旧度量字符串；重建叶后复用逐层复制和局部Do重绑，其他调用/共享页与旧Form对象不改。整个提交沿原事务路径回滚，编辑后刷新root/source及数组索引。它不补字体覆盖、不形状化、不适配绘制边界，也不跨文字事件或提供安全擦除；公开入口已接入，两层四调用Courier位置/独立调整/共享页/严格重开、外层错误/panic、额度拒绝与重试测试已通过，不代替复杂字体或独立视觉验收。
+
+该版原session61779退出0：adjusted_text 14项、nested_adjusted_text 3项、既有nested_text_edit 6项全部通过（日志`/tmp/rzpdf-nested-compensation-integration-final.log`）；原session6117退出0，PDF单元636项通过、1.99秒（日志`/tmp/rzpdf-nested-compensation-pdf-unit.log`）。首次集成因测试页面变量缺mut编译失败，已修正夹具后复验；未以编译检查或旧版结果替代本版专项。
 
 以下入口只编辑顶层页面 Contents 中选定的一次 Form `Do`，要求当前文档、当前 revision 和同页的 `ContentProgram`：
 

@@ -1,30 +1,42 @@
 #!/usr/bin/env bash
 # Fixed compare_cjk_advance fixture only, not general layout/conformance checking.
 set -euo pipefail
-if [[ $# -ne 1 ]]; then
-    echo 'Usage: bash docs/check-cjk-advance.sh comparison.pdf' >&2
+if [[ $# -lt 1 || $# -gt 2 || ( $# -eq 2 && $2 != --nested ) ]]; then
+    echo 'Usage: bash docs/check-cjk-advance.sh comparison.pdf [--nested]' >&2
     exit 2
 fi
 task_pdf_path=$1
+task_nested=false
+if [[ $# -eq 2 ]]; then task_nested=true; fi
 for task_tool in qpdf mutool jq xmllint; do
     command -v "$task_tool" >/dev/null || { echo "Missing external tool: $task_tool" >&2; exit 2; }
 done
 qpdf --check "$task_pdf_path"
-qpdf --json --json-key=qpdf "$task_pdf_path" | jq -e '
+qpdf --json --json-key=qpdf "$task_pdf_path" | jq -e --argjson nested "$task_nested" '
     .qpdf[1] as $objects |
     def deref($ref): $objects["obj:" + $ref];
     deref($objects.trailer.value["/Root"]).value as $root |
     deref($root["/Pages"]).value as $tree |
     [$tree["/Kids"][] | deref(.).value] as $pages |
     [$pages[] | .["/Resources"]["/Font"] | to_entries[] | .value] as $fonts |
-    [$pages[] | .["/Resources"]["/XObject"] | to_entries[] | .value] as $images |
+    [$pages[] | .["/Resources"]["/XObject"] | to_entries[] | .value | select(deref(.).stream.dict["/Subtype"] == "/Image")] as $images |
+    [$pages[] | ((.["/Resources"]["/XObject"] // {}) | to_entries[]) | .value | select(deref(.).stream.dict["/Subtype"] == "/Form")] as $forms |
     ($tree["/Count"] == 4) and ($pages | length == 4) and
     ($fonts | length == 4) and ($fonts | unique | length == 1) and
     (deref($fonts[0]).value["/Subtype"] == "/Type0") and
     (deref(deref($fonts[0]).value["/ToUnicode"]).stream.dict != null) and
+    (deref(deref(deref(deref($fonts[0]).value["/DescendantFonts"][0]).value["/FontDescriptor"]).value["/FontFile2"]).stream.dict != null) and
     ($images | length == 4) and ($images[0] == $images[2]) and ($images[0] == $images[3]) and
     (deref($images[0]).stream.dict["/SMask"] == null) and
-    (deref($images[1]).stream.dict["/SMask"] != null)
+    (deref($images[1]).stream.dict["/SMask"] != null) and
+    (if $nested then
+        ($forms | length >= 3) and ($forms | unique | length == 3) and
+        (([($forms | unique)[] | deref(.).stream.dict["/Resources"]["/XObject"] | to_entries[] | .value] | unique) as $leaves |
+         ($leaves | length == 3) and ($leaves | unique | length == 3) and
+         all($leaves[]; deref(.).stream.dict["/Subtype"] == "/Form") and
+         ([$leaves[] | deref(.).stream.dict["/Resources"]["/Font"] | to_entries[] | .value] | all(. == $fonts[0])) and
+         ([$leaves[] | deref(.).stream.dict["/Resources"]["/XObject"] | to_entries[] | .value] | all(. == $images[0])))
+     else ($forms | length == 0) end)
 ' >/dev/null
 task_xml=$(mutool draw -F stext "$task_pdf_path")
 for task_letter in P D F; do

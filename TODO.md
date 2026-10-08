@@ -95,6 +95,32 @@ P0 的普通回归、错误处理、预算和真实样本登记贯穿上述工�
 
 ### 实施记录
 
+- 2026-10-08 批量片段最终终态：原session72276退出0，content_batch_edit 5项、既有content_program 29项全部通过、0失败/忽略，日志/tmp/rzpdf-batch-content-integration-final.log；原session50444退出0，PDF单元636项通过、0失败/忽略、4.07秒，日志/tmp/rzpdf-batch-content-pdf-unit-final.log，取代前条待确认状态。最终双侧分隔/文档多事件事务均覆盖，不复用首版仅单侧分隔的原session91507（三项及29项退出0）或原session38509（636项退出0）作为最终证据。此为跨事件范围的批量源重建/原子提交基础，下一步接入字符码端点、分段有效字体、Unicode编码及逐事件后缀前补偿；不将原始片段/手动TJ测试等同自动跨事件编辑，完整P3/AR-03未完成，fuzz未运行、新增改动未提交，test.png保留。
+
+- 2026-10-08 跨事件批量重建前置：新增OperationReplacement与with_replaced_operation_sequences_with_budget，按原操作索引严格有序验证片段，片段/描述表/完整结果在同池共存，一次遍历原流边界重建并统一最终解析，逐一核对未选操作及操作数。片段两侧换行防旧字符串分隔变词法粘连/尾注释吞邻接；跨流操作、空流及其他字节保留。新增replace_page_operation_sequences通过原快照身份/流ID与共享事务一次提交多事件，不逐事件刷新/提交。新content_batch_edit覆盖跨3流/空流/未知操作、插入多指令/删除、邻接词法、索引/计数/额度拒绝、峰值差1/邻居/双结果/unwind、公共两事件共享隔离/外层错误/指定panic/重试及严格重开。首轮check原session81721退出0；随后增加双侧分隔和文档入口，最终集成原session72276日志/tmp/rzpdf-batch-content-integration-final.log、单元原session50444日志/tmp/rzpdf-batch-content-pdf-unit-final.log待终态，Rust源码冻结。旧单侧版本原session91507/38509仍需观察但不替代最终结果；跨事件Unicode端点/分段字体/自动补偿仍未完成，不以底层批量提交替代完整P3，fuzz未运行，新增改动未提交。
+
+- 2026-10-08 嵌套复合字体及真实中文独立验证：原session28938退出0，nested_adjusted_text 4项通过、0失败/忽略、4.95秒；新增混合一/两字节CMap水平W/竖排W2，五类目标/长短空替换、双字节空格排除Tw、独立调整/保留后缀/其他调用/共享页/严格重开及跨项三个截断码边界拒绝。生产代码未改，636项单元基线仍对应当前生产版。compare_cjk_advance新增--nested两层真实静态Noto Sans SC四页补偿对照，最终原session82446退出0（首轮Option字典转换示例编译错误已修正）；qpdf11.2.0/MuPDF1.27.0结构、独立P/D/F坐标、归一化文本、四页96DPI目视与同分辨率顶层PNG逐页cmp全部通过。脚本按唯一Form引用统计保守保留的旧资源别名，错误模式和交换对照页负例拒绝，详情/哈希/命令见docs/cjk-creation-validation.md。原默认CLI回归原session25317退出0，生成的新顶层对照也经新脚本通过复验；全工作区原session7661仍运行且为提交c81fd6d，不覆盖新代码。真实竖排字形/TJ范围独立视觉/跨事件/完整P3/AR-03未完成，fuzz未运行，新增改动未提交，test.png保留。
+
+- 2026-10-08 嵌套补偿最终集成终态：原session61779退出0，adjusted_text 14项、nested_adjusted_text 3项、既有nested_text_edit 6项全部通过、0失败/忽略，日志/tmp/rzpdf-nested-compensation-integration-final.log；本版PDF单元原session6117退出0、636项通过、1.99秒，取代此前待确认状态。固定Courier嵌套矩阵勾选；实际五类文字目标、两层四调用/单次复制、独立调整/邻接位置、共享页/旧Form/严格重开、不可编码/外层错误/指定panic/聚合额度拒绝与重试通过。完整P3/AR-03仍未完成；下一步补嵌套复合字体/竖排和独立视觉验证、跨文字事件范围。提交c81fd6d的全工作区原session7661仍未终态，不覆盖新代码；未运行fuzz、新增改动未提交、test.png保留。
+
+- 2026-10-08 嵌套补偿版单元终态：原session6117退出0，PDF单元636项通过、0失败/忽略、1.99秒，日志/tmp/rzpdf-nested-compensation-pdf-unit.log。首轮集成原session94430编译退出101，仅测试夹具页面变量缺mut；修正后原session61779日志/tmp/rzpdf-nested-compensation-integration-final.log已通过adjusted_text 14项，新增nested_adjusted_text及既有nested_text_edit仍待终态，Rust源码继续冻结。未将旧版14项或首次编译错误当作新增嵌套专项通过；fuzz未运行，新增改动未提交。
+
+- 2026-10-08 嵌套推进补偿提交接入：新增replace_nested_text_preserving_advance、replace_nested_text_array_item_preserving_advance、replace_nested_text_array_range_preserving_advance，复用调用链有效字体/字号/间距状态与同池叶重建、逐层复制/局部Do重绑和事务提交。顶层/嵌套范围提取共用BudgetedTextAdjustments，按被删码段度量并在保留后缀前调整，元数据实际容量同池所有权。新nested_adjusted_text两层四调用矩阵覆盖Tj/引号/TJ单项/跨项的长短删除、独立Courier调整、后缀/数组邻接/下一事件/下一行、共享页/旧Form、严格重开、不可编码/外层错误/指定panic/刷新重试和公共聚合额度拒绝。cargo check原session97973退出0；最终集成原session94430日志/tmp/rzpdf-nested-compensation-integration.log、PDF单元原session6117日志/tmp/rzpdf-nested-compensation-pdf-unit.log待终态，Rust源码冻结。完整P3/跨事件/复杂字体/独立视觉及AR-03仍未完成，未运行fuzz，新增改动未提交，test.png保留。
+
+- 2026-10-08 复合范围/嵌套状态最终集成终态：原session1678退出0，adjusted_text 14项、nested_text_edit 6项、text_source 9项全部通过、0失败/忽略，日志/tmp/rzpdf-inherited-text-state-integration-final.log；该版PDF单元原session91993退出0、636项通过，取代此前待确认状态。混合一/两字节横竖排范围及双字节空格独立数值通过，嵌套调用链完整字体/字号/间距状态传递已有回归。下一步接入嵌套补偿公开入口及逐层复制提交，仍不表示真实字形/独立阅读器、跨事件或完整P3/AR-03完成。全工作区原session7661仍在运行且对应提交c81fd6d，不覆盖新代码；未运行fuzz，新增改动未提交，test.png保留。
+
+- 2026-10-08 嵌套状态版单元终态：原session91993退出0，PDF单元636项通过、0失败/忽略、2.01秒，日志/tmp/rzpdf-inherited-text-state-pdf-unit.log，含新增无字体父流/三层状态/qQ/所有权错误与unwind专项。此前仅复合字体测试版原session17633退出0，adjusted_text 14项通过、1.73秒，但不覆盖之后状态代码；最终集成原session1678日志/tmp/rzpdf-inherited-text-state-integration-final.log仍待终态。完整目标保持进行中，嵌套公开补偿/复杂字体独立视觉仍未完成，fuzz未运行，新增改动未提交。
+
+- 2026-10-08 复合字体范围与嵌套状态前置：新增混合一/两字节Type0横/竖排范围专项，显式W/W2独立调整、双字节空格排除Tw、保留前缀/后缀/下一事件/下一行、严格重开/共享隔离及三种截断字符码边界精确拒绝。首轮原session17633日志/tmp/rzpdf-mixed-cid-range-compensation.log仍待终态；随后新增BudgetedTextState，font可空而标量状态继续传递，继承字体所有者移动不Clone；嵌套Unicode绑定沿调用链和叶前缀复用完整状态，新增无字体父流、q/Q恢复字体/字号/间距、失败与所有者unwind专项。最终单元原session91993日志/tmp/rzpdf-inherited-text-state-pdf-unit.log、集成原session1678日志/tmp/rzpdf-inherited-text-state-integration-final.log待终态。首次集成命令因不存在nested_text_range目标退出101，已按实际nested_text_edit/text_source目标修正，不当作实现失败或通过。当前Rust源码冻结；嵌套补偿公开提交入口仍未接入，真实竖排字形/独立视觉及完整P3/AR-03未完成，fuzz未运行，新增改动未提交。
+
+- 2026-10-08 TJ跨项范围补偿终态：原session78035退出0，adjusted_text 13项、content_program 29项全部通过、0失败/忽略，日志/tmp/rzpdf-tj-range-compensation.log；原session52401退出0，PDF单元635项通过、0失败/忽略、1.94秒，日志/tmp/rzpdf-tj-range-pdf-unit.log，取代下条待确认状态。固定Courier范围矩阵勾选；完整连续编辑/P3/AR-03仍未完成。下一步补复合字体多字节边界/竖排范围、嵌套状态继承与独立渲染；提交c81fd6d的全工作区原session7661仍在运行，不是新版本全部工作区证据。未运行fuzz、新增改动未提交，test.png保留。
+
+- 2026-10-08 TJ跨项范围补偿接入：新增replace_page_text_array_range_preserving_advance，复用完整字符码边界/总量验证与同池范围重建；每受影响字符串拆为前缀加插入文字、按被删部分计算的调整、保留后缀，补偿位于后缀前而非整串后，保留原数组数值/注释。低层批量入口单次扫描/完整重解析，预检每项新增两个数组元素，调整元数据与旧新缓冲共存计费。新增末项部分后缀、跨三项/单项/零宽插入与独立Courier数值/保留字符坐标、预算所有者/错误与panic回滚专项；原session78035日志/tmp/rzpdf-tj-range-compensation.log、PDF单元原session52401日志/tmp/rzpdf-tj-range-pdf-unit.log均待终态，Rust源码冻结。跨文字事件/嵌套、真实竖排/独立阅读器及完整P3仍未完成，fuzz未运行，新增改动未提交。
+
+- 2026-10-08 TJ单项补偿终态：原session3616退出0，adjusted_text 10项及既有content_program 29项均通过、0失败/忽略，日志/tmp/rzpdf-tj-item-compensation.log；原session33192退出0，PDF单元635项通过、0失败/忽略、1.97秒，日志/tmp/rzpdf-tj-item-pdf-unit.log，取代下条待确认状态。固定Courier矩阵项勾选，完整P3/AR-03保持未完成。提交c81fd6d的完整工作区原session7661仍在运行，不作为当前TJ版本完整工作区证据；新增改动未提交，fuzz未运行，test.png保留。
+
+- 2026-10-08 本地提交及TJ单项推进补偿接入：此前完成的文字补偿/中文编辑示例与文档已提交c81fd6d，未推送，test.png未纳入。该提交完整工作区测试原session7661、日志/tmp/rzpdf-precommit-workspace.log仍待终态，不覆盖随后改动。新增replace_page_text_array_item_preserving_advance与低层预算入口，在选中字符串后立即插入调整并补数字分隔，保留既有数值/注释/其他字符串，预检查增加一项的额度。新增数组内部邻接/下一事件/下一行、共享隔离/严格重开、峰值差1/邻居/结果所有权/unwind、公共错误与外层错误/panic回滚专项；原session3616日志/tmp/rzpdf-tj-item-compensation.log，PDF单元原session33192日志/tmp/rzpdf-tj-item-pdf-unit.log均待终态。当前Rust源码冻结；跨项范围/嵌套继承、真实竖排和完整P3/AR-03仍未完成，未运行fuzz，新增改动未提交。
+
 - 2026-10-08 公共补偿外层unwind增强终态：原session71814退出0，adjusted_text七项通过、0失败/忽略、1.36秒，日志/tmp/rzpdf-compensation-outer-unwind-verified.log，含指定panic载荷确认；两共享页源码/Contents流ID恢复、旧快照拒绝、刷新重试及严格重开文本/后续字符/下一行位置均通过，取代此前待确认状态。此轮仅测试改动，生产版635项PDF单元证据仍有效；不表示所有失败点、TJ/嵌套或完整P3已完成，未运行fuzz、未提交。
 
 - 2026-10-08 公共补偿unwind首轮终态与增强复验：原session45816退出0，adjusted_text七项通过、0失败/忽略、1.37秒；随后新增panic载荷精确断言，要求确为成功编辑后注入的“injected compensation commit unwind”，避免其他断言panic被误认成功。增强版原session71814、日志/tmp/rzpdf-compensation-outer-unwind-verified.log，终态待确认，Rust源码冻结，不沿用初版结果。生产代码未改，635项单元基线仍有效；未运行fuzz、未提交。
@@ -2071,7 +2097,12 @@ P0 的普通回归、错误处理、预算和真实样本登记贯穿上述工�
 - [ ] P3-02 定义文本/图片/路径的来源映射、坐标系、命中测试和稳定定位方式。
 - [ ] P3-03 提供文字替换与删除，明确字体覆盖、字距、换行和布局边界。
   - [x] 固定自动补偿矩阵：Courier Tj/两类引号及Identity-V/W2合成独立数值回归，真实静态Noto Sans SC水平整Tj补偿/无补偿对照经独立坐标/文本/目视验收；不代替真实竖排、全部字体、TJ数组、嵌套或排版适配。
-  - [ ] 连续文字推进补偿：显式TJ预算原语、同池有效字体/字号/Tc/Tw/Tz与q/Q/gs/引号状态、新旧完整字符码度量及顶层单字符串事务入口已接入；Courier四项专项通过，当前PDF单元待终态。仍需TJ数组/跨项、嵌套继承与复制编辑、竖排/真实字体专项、完整unwind及独立渲染；不能以单字符数或Td估计/补偿，保留结束位置不代表字形装入原绘制边界。验收包括后续事件位置、行矩阵不变、共享隔离及失败所有权。
+  - [x] 固定Courier TJ单项补偿矩阵：首/中/末项与删除/增长/空格，原数值词法/注释、数组内邻接/后续事件/下一行位置，共享页/严格重开及错误/预算/unwind回归通过；仅此水平字体矩阵，不代替TJ跨项、嵌套或独立阅读器验收。
+  - [x] 固定Courier TJ跨项范围补偿：跨三字符串、首尾部分保留、单项及零宽插入，逐项独立数值/后缀/后续文字位置、词法数字/注释、共享页/严格重开、预算所有权和外层错误/panic回滚通过；不代替复杂字体/嵌套或独立阅读器矩阵。
+  - [x] 固定Courier嵌套推进补偿：两层四调用中单次Tj/引号/TJ单项/跨项长短删除，继承与局部q/Q字号/字距、独立调整/后缀/后续事件/下一行位置、共享页/旧Form/严格重开、外层错误/指定panic/额度拒绝与刷新重试均通过；不代替复杂字体、独立阅读器或完整P3。
+  - [x] 固定混合字符码嵌套补偿矩阵：合成Type0一/两字节横竖排W/W2、五类目标、双字节空格、保留后缀、独立调整、严格重开/共享页/多字节边界拒绝通过；不代替实际竖排字形或全部字体。
+  - [x] 固定真实静态Noto Sans SC两层Form整Tj补偿对照：qpdf结构/共享FontFile2、MuPDF独立P/D/F坐标/归一化文本、四页目视、同DPI顶层逐页PNG cmp及错误模式/交换对照页负例通过；不代替TJ范围、真实竖排、跨事件或完整P3。
+  - [ ] 连续文字推进补偿：显式TJ预算原语、同池有效字体/字号/Tc/Tw/Tz与q/Q/gs/引号状态、新旧完整字符码度量及顶层及嵌套单字符串/TJ单项/跨项范围事务入口已接入；当前补偿专项14项、嵌套补偿3项及PDF单元636项通过。仍需跨文字事件、嵌套复杂字体/独立渲染、真实竖排/完整字体矩阵、完整unwind及独立渲染；不能以单字符数或Td估计/补偿，保留结束位置不代表字形装入原绘制边界。验收包括后续事件位置、行矩阵不变、共享隔离及失败所有权。
   - [x] 固定真实静态Noto Sans SC单Tj已映射中文字范围替换：复制后原页隔离、未映射字符拒绝、外层错误回滚/重试、独立结构/精确文本/目视验证通过；不代替新增字形、连续推进或复杂字体矩阵。
 - [ ] P3-04 提供图片替换与移动、路径修改；处理共享 XObject 的复制后修改。
   - [x] 固定edit_content两页对照独立验证：qpdf结构检查、MuPDF文字提取及逐页渲染确认文字替换、图片旋转/单次删除、红路径删除和原页隔离。仅覆盖Helvetica英文与顶层图片/路径，复杂字体/Form/内联与完整视觉矩阵仍未验收。
