@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Exact checks for documented sample inputs; not a general merge verifier.
 set -euo pipefail
-if [[ $# -ne 2 ]]; then
-    echo 'Usage: bash docs/check-merge-extract-example.sh MERGED.pdf EXTRACTED.pdf' >&2
+if [[ $# -lt 2 || $# -gt 3 || (${3:-} != '' && ${3:-} != '--cjk-images') ]]; then
+    echo 'Usage: bash docs/check-merge-extract-example.sh MERGED.pdf EXTRACTED.pdf [--cjk-images]' >&2
     exit 2
 fi
 for task_tool in qpdf mutool jq; do
@@ -10,19 +10,27 @@ for task_tool in qpdf mutool jq; do
 done
 task_merged=$1
 task_extracted=$2
+task_merged_images=2
+task_extracted_images=1
+if [[ ${3:-} == '--cjk-images' ]]; then
+    # Two CJK images plus their SMask, and two English images.
+    task_merged_images=5
+    # Selected pages 3/0 contain one English and one opaque CJK image.
+    task_extracted_images=2
+fi
 qpdf --check "$task_merged"
 qpdf --check "$task_extracted"
-qpdf --json --json-key=qpdf "$task_merged" | jq -e '
+qpdf --json --json-key=qpdf "$task_merged" | jq -e --argjson image_count "$task_merged_images" '
     .qpdf[1] as $o |
     ([$o[] | .value? | select(.["/Type"] == "/Page")] | length == 4) and
     ([$o[] | .value? | select(.["/FontFile2"] != null)] | length == 1) and
-    ([$o[] | .stream.dict? | select(.["/Subtype"] == "/Image")] | length == 2)
+    ([$o[] | .stream.dict? | select(.["/Subtype"] == "/Image")] | length == $image_count)
 ' >/dev/null
-qpdf --json --json-key=qpdf "$task_extracted" | jq -e '
+qpdf --json --json-key=qpdf "$task_extracted" | jq -e --argjson image_count "$task_extracted_images" '
     .qpdf[1] as $o |
     ([$o[] | .value? | select(.["/Type"] == "/Page")] | length == 2) and
     ([$o[] | .value? | select(.["/FontFile2"] != null)] | length == 1) and
-    ([$o[] | .stream.dict? | select(.["/Subtype"] == "/Image")] | length == 1)
+    ([$o[] | .stream.dict? | select(.["/Subtype"] == "/Image")] | length == $image_count)
 ' >/dev/null
 task_merged_text=$(mutool draw -F txt "$task_merged" | tr -d '\f' | sed '/^[[:space:]]*$/d')
 task_extracted_text=$(mutool draw -F txt "$task_extracted" | tr -d '\f' | sed '/^[[:space:]]*$/d')

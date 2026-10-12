@@ -1,5 +1,15 @@
 # TrueType 字符映射验证
 
+边界修正版有限验收结果（2026-10-09）：闭包5项、组装/公共注册前缀10项均通过；后者直接检查保存前及严格重开后的FontBBox。两个真实示例已重生成，qpdf检查及MuPDF精确文本提取通过，96DPI三页PNG逐页查看无缺字、重叠或裁切。提取字体/tmp/rzpdf-bounds-extract.QYG20U/font-0006.ttf、font-0008.ttf经python3.11 -O独立脚本与七固定负例均通过（含错误整体边界但有效校验和）；Arial为17标量/26GID/5真实复合，Noto为44/45/0。MuPDF直接显示FontBBox：Arial[-1.4648438,-205.5664,768.5547,869.1406]（设计单位按2048缩放），Noto[16,-229,974,880]。预算化闭包只联合有效字形头，不重新验证所有简单轮廓/提示指令语义；有限样本不代表全面字体符合性。修正版完整workspace及自动新增字符选区编辑尚未完成；下方“进行中”与首轮记录保留为历史。
+
+边界修正版进度（2026-10-09）：首轮冻结版workspace已退出0，1027项通过；该结果不覆盖随后修正。GlyphClosure现在于同一预算化依赖遍历中计算保留有轮廓字形头联合，忽略空复合，全空为零框，写入head；闭包5项及组装前缀9项专项已通过。独立检查器新增整体边界检查，旧Arial产物在-O下明确拒绝；新增校验和修复后的错误边界负例，待新样本运行七负例。公共注册/严格重开FontBBox测试会话46394、Arial生成90747、中文生成53660均未终态，不把旧产物或旧绿色门禁当修正版验收。下文首轮记录为历史字段范围，真实重生成/独立核验/逐页视觉完成前不宣称边界修复闭环或全面字体符合性。
+
+当前已确认的元数据缺口（2026-10-09）：首轮子集head仍沿用源字体整体边界；Noto为(-1002,-1048,2928,1808)，保留轮廓头联合实际为(16,-229,974,880)；Arial为(-1361,-665,4096,2060)，联合实际为(-3,-421,1574,1780)。按[官方head规范](https://learn.microsoft.com/en-us/typography/opentype/spec/head)应计算有轮廓字形联合、忽略无轮廓字形。现独立检查器通过的字段不包含整体head边界；渲染与逐字轮廓通过不能证明该字段正确。冻结版完整门禁结束后优先修正、补独立检查并重新生成验证；当前不宣称完整字体符合性。
+
+2026-10-09 实际复合子集：`create_subset /System/Library/Fonts/Supplemental/Arial.ttf ArialMT 716 80 output/pdf/rzpdf-latin-subset.pdf`生成固定文本`Composite subset - é Å ö ñ ç é`，许可/fsType沿用源字体。本机源Arial没有复制入库，系统字体未修改。独立qpdf、MuPDF提取/96DPI视觉及`check-cjk-subset.py SOURCE.ttf EXTRACTED.ttf STEXT.xml --latin --self-test`在python3.11 -O下通过：17标量、26保留GID、5所选真实复合字形，校验和、组件原GID、展开轮廓、度量、指令、许可和六负例正确。辅助LTSH/hdmx/VDMX/PCLT仅在显式允许省略时删除并报告；不将陈旧缓存保留或未知表静默丢失。该样本不是全面字体符合性验证，最新workspace门禁另进行中。
+
+2026-10-09 实验子集真实中文首轮验证：`create_cjk ... --subset`使用既有静态Noto源（上述来源/许可记录），生成`output/pdf/rzpdf-cjk-subset.pdf`。qpdf结构、MuPDF两页精确文本和96DPI逐页视觉检查通过；FontTools只读脚本`check-cjk-subset.py SOURCE.ttf EXTRACTED.ttf STEXT.xml`验证44标量、45保留GID、原GID映射、校验和、轮廓、水平/竖向度量、字形指令、未选空字形和版权/许可/fsType保持。源字体10,595,948字节，嵌入子集381,196字节，PDF384,596字节；构建池peak546,136字节。仅固定两页水平样本，不代表实际复合字体或新增字符编辑闭环；完整workspace及检查器负例仍待补。字体不新增入库，fuzz暂缓。
+
 真实复合字形对照（2026-10-05后续）：示例现调用统一 `checked_glyph_outline`，只读比较脚本允许复合并提供 `--require-composite`，不能用全部简单样本冒充复合验收。使用本机 `/System/Library/Fonts/Supplemental/Arial.ttf`，无 fvar，SHA256 `525979822591a3447cfc49d943d6f7683508e25543407871c0ed8fed05fd2bd9`；未复制/发布系统字体。实际复合 é/Å/ö/ñ/ç 的 GID、独立 FontTools BoundsPen 边界和 PointInsidePen 非零绕数分类全部一致：1445 采样点，0 数值 Boundary 排除。复现：先构建示例，再运行 `python3 docs/check-glyph-outline.py /path/to/Arial.ttf --characters 'éÅöñç' --require-composite`（Python 需已有 FontTools，本机复用 3.11/4.39.4）。只含 A 的 require-composite 输入拒绝，空列表拒绝。这个有限字体、默认实例、未 hinting 网格不代替全面 flags/嵌套/点对齐/phantom、字体指标、PDF 映射/可见性或真实渲染验收；合成嵌套/点对齐测试仍是单独证据。
 
 PDF 复合轮廓入口（2026-10-05后续）：`Font::glyph_outline` 按 PDF code/CID→GID 查询统一 SFNT 轮廓；`TextObject::character_outline_display` 及其边界/几何位置查询现支持上述默认实例复合轮廓。原 `Font::simple_glyph_outline` 行为不变。扩展既有测试：不含 Unicode cmap 的合成 FontFile2 通过显式 CIDToGIDMap 将字符65映射至复合GID0、66映射至空GID2；原文档和严格保存重读的 em 命令、独立显示坐标、顶点 Boundary 及空轮廓均通过。PDF 库335项单元测试通过。此合成共线轮廓只证明映射/坐标/边界查询链路，不证明内部填充或真实复合字体渲染；phantom/hinting/metrics/变体、透明/裁剪/可见性边界不变，下一步真实字体独立对照。
@@ -39,6 +49,10 @@ SFNT轮廓入口（2026-10-05后续）：`TrueTypeProgram::checked_simple_glyph_
 跨页复用：RegisteredCidFont 保留文档归属 ObjectHandle，通过 register_on_page 在同一文档其他页绑定已有 Type0 对象，返回该页资源名；已有 F1 时可返回 F2，重复注册复用原名。不重嵌入 FontFile2/后代/映射；编码器改为只读 encoding()，避免替换编码表后与已写入字体对象不一致。object_handle() 用于现有归属检查接口；跨文档拒绝且不修改目标文档，非法页拒绝。回归用两页保存严格读回，并确认 FontFile2/CIDFontType2 各仅一个。外层事务回滚后的新对象句柄不得继续使用；通过低层对象编辑替换字体或编码相关对象的调用方仍须自行维护编码一致性。此项不是跨文档字体导入或按字体字节自动去重，也不取代真实中文渲染验收。
 
 整字体注册入口：ResourceManager::embed_truetype_font 接受字体字节、固定 repertoire 与 TrueTypeEmbeddingOptions，返回资源名及编码器。按 PDF 32000-1 表 117/118/122/126 构造 Type0/Identity-H、CIDFontType2、FontDescriptor/FontFile2、CIDToGIDMap、W 和 ToUnicode，六个间接对象及页资源绑定在事务中完成。FontFile2 保留完整源字节；至少 PDF 1.3；拒绝 CFF/可变字体、缺必要指标或缺字，并按可编辑文档检查 fsType，不允许预览打印专用字体进入该接口。调用方显式提供真实 PostScript 名称、1000 单位 CapHeight/StemV 与 serif 分类，不推测缺失指标；许可条款仍由调用方确认。注册不执行轮廓点/复合依赖/hinting 完整验证，不是 PDF/A 或真实字体安全/显示验收。自编 SFNT 元数据样本验证保存严格读回、字体对象关键字段、缺字/受限许可前置拒绝，以及对象额度不足后的对象内容和下一对象号回滚；该样本不是可渲染字体，真实中文显示与文本提取验收仍待完成。
+
+实验性子集入口：`embed_truetype_subset_font(page_index, source, repertoire, options, subset_tag, omit_layout_and_auxiliary, budget)` 不改变整字体接口。调用方提供文档内唯一的六个大写字母 tag；基础名称非空、至多56字节，使用旧入口允许的字母/数字/`-_.`，前缀后的名称同步用于 name ID6、FontDescriptor 和 BaseFont。只支持静态独立 TrueType、固定 Unicode 标量字集、直接 CID 映射；保持原GID与numGlyphs，未选字形为空，包含GID0及所选复合依赖，重建glyf/loca/cmap/head/name。name版本0/1的版权、许可和语言标签保持。`omit_layout_and_auxiliary=true`明确允许省略已知布局表及LTSH/hdmx/VDMX/PCLT辅助表，不授权省略未知表；DSIG不保留，省略表通过`RegisteredSubsetCidFont::omitted_tables()`报告。变量/CFF/颜色等未支持依赖明确拒绝。原句柄的固定字集不会自动扩充，编辑新增字符必须另建字体资源；shaping、变体序列和自动子集tag分配尚未实现。
+
+子集预算跟踪重建输出、临时闭包/表清单和存活省略报告；借用源、现有字体解析器普通分配及文档持久对象不在此输出池范围。字体资源注册复用六对象事务。组装、公共保存/跨页提取、注册中途失败回滚和显式单事件新增字体隔离专项已有通过证据；固定真实中文/复合字形独立字体工具和渲染也已通过。最新辅助表策略后的完整工作区回归仍进行中，自动覆盖扩充与通用跨事件/嵌套选区入口未完成，不能据此宣称P3-05完成。
 
 字体描述信息前置：按 [OpenType post 规范](https://learn.microsoft.com/en-us/typography/opentype/spec/post) 增加 PostMetrics 公共 32 字节头读取，支持版本 1/2/2.5/3，保留有符号 16.16 italicAngle 的分数、下划线位置/厚度及非零 isFixedPitch 语义。TrueTypeProgram 加载可选 post_metrics；缺表仍为 None，出现不支持版本或头截断则报错。单元测试覆盖负分数、非 1 固定宽标志、全部头截断及版本，SFNT 样本验证挂接。只读取公共头，不验证版本 2/2.5 字形名称尾部、不调整可变实例，也不据此伪造完整 FontDescriptor 或 StemV/CapHeight。
 

@@ -125,6 +125,35 @@ impl TrueTypeProgram {
         )
     }
 
+    /// Borrow static vertical metrics from this SFNT source. Both absent means
+    /// no vertical metrics; a partial pair or malformed table is an error.
+    /// This does not synthesize PDF defaults or apply vertical substitutions.
+    pub fn checked_vertical_metrics(
+        data: &[u8],
+        limits: crate::parser::options::Limits,
+    ) -> PdfResult<Option<crate::font::truetype::tables::vertical::VerticalMetrics<'_>>> {
+        let sfnt = Sfnt::try_new_with_limits(&mut TrueTypeReader::new(data), limits)?;
+        match (sfnt.get_table("vhea"), sfnt.get_table("vmtx")) {
+            (None, None) => Ok(None),
+            (Some(header), Some(metrics)) => {
+                let table = |record: &crate::font::truetype::sfnt::TableRecord| -> PdfResult<&[u8]> {
+                    let start = record.offset() as usize;
+                    let end = start.checked_add(record.length() as usize)
+                        .ok_or_else(|| PdfError::FontError("Vertical table range overflow".into()))?;
+                    data.get(start..end)
+                        .ok_or_else(|| PdfError::FontError("Vertical table exceeds font data".into()))
+                };
+                let program = Self::try_new_with_limits(data, limits)?;
+                let glyphs = program.num_glyphs
+                    .ok_or_else(|| PdfError::FontError("Vertical metrics require maxp".into()))?;
+                Ok(Some(crate::font::truetype::tables::vertical::VerticalMetrics::try_new(
+                    table(header)?, table(metrics)?, glyphs,
+                )?))
+            }
+            _ => Err(PdfError::FontError("Incomplete vhea/vmtx pair".into())),
+        }
+    }
+
     pub fn try_new(data: &[u8]) -> PdfResult<Self> {
         Self::try_new_with_limits(data, crate::parser::options::Limits::default())
     }

@@ -49,6 +49,10 @@ pub struct GlyphDependencySummary {
 }
 
 impl<'a> GlyphLocations<'a> {
+    pub(crate) fn glyph_count(&self) -> u16 {
+        self.count
+    }
+
     /// Validate component dependencies iteratively, without native recursion.
     /// Does not decode leaf points or perform transforms/point alignment/hinting.
     /// Repeated DAG occurrences are charged separately to bound graph expansion.

@@ -258,7 +258,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         &self, page: u32, root: &ContentProgram, source: &NestedDrawSource,
         range: std::ops::Range<crate::page::content_program::TextCodePosition>, text: &str,
     ) -> PdfResult<()> {
-        self.replace_nested_text_event_range_inner(page, root, source, range, text, false, None)
+        self.replace_nested_text_event_range_inner(page, root, source, range, text, false)
     }
 
     /// Preserve each selected event's advance using its inherited original state.
@@ -267,11 +267,11 @@ impl<R: Read + Seek> PdfDocument<R> {
         &self, page: u32, root: &ContentProgram, source: &NestedDrawSource,
         range: std::ops::Range<crate::page::content_program::TextCodePosition>, text: &str,
     ) -> PdfResult<()> {
-        self.replace_nested_text_event_range_inner(page, root, source, range, text, true, None)
+        self.replace_nested_text_event_range_inner(page, root, source, range, text, true)
     }
 
-    /// Source-qualified endpoints. Different leaf invocations are explicitly
-    /// rejected rather than interpreting the end index in the start's scope.
+    /// Source-qualified endpoints in original expanded paint order.
+    /// Different Form invocations are edited in one transaction.
     pub fn replace_nested_text_span(
         &self, page: u32, root: &ContentProgram,
         range: std::ops::Range<crate::page::source_provenance::NestedTextCodePosition<'_>>,
@@ -293,31 +293,19 @@ impl<R: Read + Seek> PdfDocument<R> {
         range: std::ops::Range<crate::page::source_provenance::NestedTextCodePosition<'_>>,
         text: &str, preserve_advance: bool,
     ) -> PdfResult<()> {
-        range.start.source.validate_limits(&self.ctx.limits())?;
-        range.end.source.validate_limits(&self.ctx.limits())?;
-        if range.start.source.invocations != range.end.source.invocations {
-            return Err(PdfError::UnsupportedFeature("text span across different Form invocations".into()));
-        }
-        if !range.start.source.geometry_operation_indices.is_empty()
-            || !range.end.source.geometry_operation_indices.is_empty() {
-            return Err(PdfError::ObjectError("text span endpoint has path geometry".into()));
-        }
-        let position = |endpoint: crate::page::source_provenance::NestedTextCodePosition<'_>| {
-            crate::page::content_program::TextCodePosition {
-                operation: endpoint.source.operation_index,
-                array_item: endpoint.array_item,
-                offset: endpoint.offset,
-            }
-        };
-        self.replace_nested_text_event_range_inner(page, root, range.start.source,
-            position(range.start)..position(range.end), text, preserve_advance, Some(range.end.source))
+        // The expanded walker authenticates both endpoints and permits an
+        // explicit page-root source. Ordinary Form-only edits retain their
+        // separate nonempty invocation-chain validation.
+        // Equal endpoint paths can still enclose a child Form invocation.
+        // Only the explicit event-range API has single-program semantics.
+        let budget = self.ctx.limits().operation_budget();
+        self.replace_selected_text_span(page, root, range, text, preserve_advance, &budget)
     }
 
     fn replace_nested_text_event_range_inner(
         &self, page: u32, root: &ContentProgram, source: &NestedDrawSource,
         range: std::ops::Range<crate::page::content_program::TextCodePosition>, text: &str,
         preserve_advance: bool,
-        end_source: Option<&NestedDrawSource>,
     ) -> PdfResult<()> {
         if source.operation_index != range.start.operation {
             return Err(PdfError::ObjectError("nested range source must anchor its start event".into()));
@@ -326,13 +314,6 @@ impl<R: Read + Seek> PdfDocument<R> {
         let current_page = self.get_page_with_budget(page, &budget)?;
         let chain = current_page.prepare_form_chain_with_budget(root, source, &budget)?;
         let leaf = chain.last().ok_or_else(|| PdfError::PageResourceError("Nested leaf absent".into()))?;
-        if let Some(end_source) = end_source {
-            let end = leaf.program.operations().get(end_source.operation_index)
-                .ok_or_else(|| PdfError::PageResourceError("Nested span end index missing".into()))?;
-            if end.operator.byte_offset() != end_source.operator_byte_offset {
-                return Err(PdfError::PageResourceError("Nested span end byte position mismatch".into()));
-            }
-        }
         let (page_scope, _page_scope_lease) = current_page.resource_with_budget(&budget)?;
         let edited = self.build_text_event_edit_plan(
             &leaf.program, range, text, preserve_advance, &budget, |target| {
@@ -789,9 +770,44 @@ impl<R: Read + Seek> PdfDocument<R> {
         C: IntoIterator<Item = crate::page::source_provenance::PreparedForm>,
         C::IntoIter: DoubleEndedIterator + ExactSizeIterator,
     {
+        self.commit_nested_prepared_inner(page, root, source, || Ok((chain, edited)), budget)
+    }
+
+    /// Authenticate the original page before preparation can register resources.
+    /// Preparation and bottom-up copied-Form publication share one transaction.
+    pub(super) fn commit_nested_prepared_with_budget<P, C>(
+        &self,
+        page: u32,
+        root: &ContentProgram,
+        source: &NestedDrawSource,
+        prepare: impl FnOnce() -> PdfResult<(C, P)>,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<()>
+    where
+        P: AsRef<ContentProgram>,
+        C: IntoIterator<Item = crate::page::source_provenance::PreparedForm>,
+        C::IntoIter: DoubleEndedIterator + ExactSizeIterator,
+    {
+        self.commit_nested_prepared_inner(page, root, source, prepare, Some(budget))
+    }
+
+    fn commit_nested_prepared_inner<P, C>(
+        &self,
+        page: u32,
+        root: &ContentProgram,
+        source: &NestedDrawSource,
+        prepare: impl FnOnce() -> PdfResult<(C, P)>,
+        budget: Option<&crate::budget::OperationBudget>,
+    ) -> PdfResult<()>
+    where
+        P: AsRef<ContentProgram>,
+        C: IntoIterator<Item = crate::page::source_provenance::PreparedForm>,
+        C::IntoIter: DoubleEndedIterator + ExactSizeIterator,
+    {
         let mut retained_copies = budget.map(|pool| pool.reserve(0)).transpose()?;
         let edit = |doc: &Self| {
             doc.commit_page_content_edit_inner(page, root, budget, || {
+                let (chain, edited) = prepare()?;
                 let mut child = None;
                 let mut bytes = 0usize;
                 for (index, mut form) in chain.into_iter().enumerate().rev() {
@@ -950,17 +966,43 @@ impl<R: Read + Seek> PdfDocument<R> {
         Err(PdfError::ResourceLimit("Nested Form resource names".into()))
     }
 
-    fn bind_local_xobject_with_budget(
+    pub(super) fn bind_local_xobject_with_budget(
         &self,
         resources: &mut PdfDict,
         id: ObjectId,
         budget: &crate::budget::OperationBudget,
     ) -> PdfResult<(String, crate::budget::MemoryLease)> {
+        self.bind_local_resource_with_budget(resources, "XObject", b"FmEdit", id, budget)
+    }
+
+    /// Bind an already validated font into a copied effective Form scope.
+    /// The caller retains the returned lease through publication; original
+    /// resource dictionaries and indirect category dictionaries stay immutable.
+    pub(super) fn bind_local_font_with_budget(
+        &self,
+        resources: &mut PdfDict,
+        id: ObjectId,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<(String, crate::budget::MemoryLease)> {
+        self.bind_local_resource_with_budget(resources, "Font", b"FontEdit", id, budget)
+    }
+
+    fn bind_local_resource_with_budget(
+        &self,
+        resources: &mut PdfDict,
+        category: &'static str,
+        prefix: &[u8],
+        id: ObjectId,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<(String, crate::budget::MemoryLease)> {
         let mut _entries_lease = None;
-        let entries = if let Some(value) = resources.get("XObject") {
+        let entries = if let Some(value) = resources.get(category) {
             let (value, lease) = self.ctx.resolve_owned_with_budget(value, budget)?;
             _entries_lease = Some(lease);
-            value.into_dict().ok_or(PdfError::PageXobjectIsNotDict)?
+            value.into_dict().ok_or_else(|| {
+                if category == "XObject" { PdfError::PageXobjectIsNotDict }
+                else { PdfError::PageResourceError("Form Font resources must be a dictionary".into()) }
+            })?
         } else {
             PdfDict::default()
         };
@@ -982,10 +1024,10 @@ impl<R: Read + Seek> PdfDocument<R> {
                     break;
                 }
             }
-            let mut buffer = [0u8; 26];
-            buffer[..6].copy_from_slice(b"FmEdit");
-            let length = 6 + digits.len() - start;
-            buffer[6..length].copy_from_slice(&digits[start..]);
+            let mut buffer = [0u8; 28];
+            buffer[..prefix.len()].copy_from_slice(prefix);
+            let length = prefix.len() + digits.len() - start;
+            buffer[prefix.len()..length].copy_from_slice(&digits[start..]);
             if length > limits.max_token_bytes {
                 return Err(PdfError::ResourceLimit(
                     "Nested Form resource name bytes".into(),
@@ -1000,7 +1042,7 @@ impl<R: Read + Seek> PdfDocument<R> {
             let (entries, _binding_lease) =
                 entries.with_replaced_entry_with_budget(&name, &reference, budget, limits)?;
             let (replacement, mut replacement_lease) = resources.with_replaced_entry_with_budget(
-                "XObject",
+                category,
                 &PdfObject::PdfDict(entries),
                 budget,
                 limits,
@@ -1023,6 +1065,44 @@ fn checked_edited_bytes(retained: usize, next: usize, limit: usize) -> PdfResult
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn local_font_binding_preserves_scope_and_rejects_short_budget_atomically() {
+        use crate::budget::OperationBudget;
+        let doc = PdfDocument::new().unwrap();
+        let id = ObjectId::new(17, 0);
+        let mut entries = PdfDict::default();
+        for name in ["FontEdit1", "FontEdit2"] {
+            entries.insert(name.into(), PdfObject::PdfReference(PdfReference::from_id(id)));
+        }
+        let mut original = PdfDict::default();
+        original.insert("Font".into(), PdfObject::PdfDict(entries));
+        original.insert("Keep".into(), PdfObject::PdfName(PdfName::new("kept".repeat(128))));
+        let pool = OperationBudget::new(65536);
+        let (mut resources, input_lease) = crate::objects::clone_dict_with_budget(&original, &pool, doc.ctx.limits(), 0).unwrap();
+        let (name, lease) = doc.bind_local_font_with_budget(&mut resources, id, &pool).unwrap();
+        assert_eq!(name, "FontEdit3");
+        assert_eq!(resources.get("Keep"), original.get("Keep"));
+        assert_eq!(resources.get("Font").unwrap().as_dict().unwrap().get(&name), Some(&PdfObject::PdfReference(PdfReference::from_id(id))));
+        assert!(original.get("Font").unwrap().as_dict().unwrap().get(&name).is_none());
+        assert_eq!(pool.live_bytes(), input_lease.bytes() + lease.bytes());
+        let peak = pool.peak_bytes();
+        drop((resources, name, lease, input_lease));
+        assert_eq!(pool.live_bytes(), 0);
+        let limited = OperationBudget::new(peak - 1);
+        let (mut resources, input_lease) = crate::objects::clone_dict_with_budget(&original, &limited, doc.ctx.limits(), 0).unwrap();
+        assert!(matches!(doc.bind_local_font_with_budget(&mut resources, id, &limited), Err(PdfError::ResourceLimit(_))));
+        assert_eq!(resources, original);
+        assert_eq!(limited.live_bytes(), input_lease.bytes());
+        drop((resources, input_lease));
+        assert_eq!(limited.live_bytes(), 0);
+        let mut malformed = PdfDict::default();
+        malformed.insert("Font".into(), PdfObject::PdfNumber(crate::objects::pdf_number::PdfNumber::new(1.0)));
+        let saved = malformed.clone();
+        assert!(matches!(doc.bind_local_font_with_budget(&mut malformed, id, &pool), Err(PdfError::PageResourceError(_))));
+        assert_eq!(malformed, saved);
+        assert_eq!(pool.live_bytes(), 0);
+    }
+
     #[test]
     fn budgeted_form_do_escapes_names_and_retains_exact_output_capacity() {
         use crate::{budget::OperationBudget, parser::options::Limits};
@@ -1417,7 +1497,7 @@ fn form_do(name: &str) -> PdfResult<Vec<u8>> {
     Ok(bytes)
 }
 
-fn form_do_with_budget(
+pub(super) fn form_do_with_budget(
     name: &str,
     limits: crate::parser::options::Limits,
     budget: &crate::budget::OperationBudget,

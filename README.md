@@ -1,5 +1,17 @@
 # rzpdf
 
+## 版本与交付状态
+
+当前目标为 **v0.1 基础闭环版（收口中，尚未发布）**。已有 API 不等于已通过版本验收；复杂内容编辑、字体子集与竖排等能力在完成对应版本验收前按实验能力管理。
+
+- [版本路线与发布规则](ROADMAP.md)：v0.1～v1.0 的范围和退出条件。
+- [v0.1 范围与验收清单](docs/releases/v0.1.md)：当前唯一交付清单及候选支持矩阵。
+- [v0.1 候选支持矩阵](docs/releases/v0.1-support.md)：输入、字体/图片、保存、预算与平台边界。
+- [长期任务池与历史实施记录](TODO.md)：P0～P5 技术任务，不以勾选比例衡量版本进度。
+- [变更记录](CHANGELOG.md)：待发布变更与后续正式发布记录。
+
+下文保留现有接口和验证说明；其具体限制仍然有效，不构成所有 PDF 文件均受支持的承诺。
+
 `replace_page_form_draw(page, &snapshot, operation, &form_handle)` 用同文档Form替换顶层一次Do调用，事务注册页面局部资源名并复制变化内容流，保留重复调用和共享页面。外文档句柄与过期快照拒绝，跨文档Form须先导入；不修改嵌套叶内容或自动匹配替换Form尺寸/Matrix。实色路径Skia像素回归验证单次颜色/尺寸替换、邻接及共享页整图保持和严格保存重开。
 
 `remove_page_form_draw(page, &snapshot, operation)` 删除顶层Contents中一次Form Do调用，保留共享Form对象、重复调用及其他页面；要求当前页面快照，拒绝图片Do和offline叶流快照。它不是嵌套Form内容编辑或安全擦除，已有事务回滚及严格保存重开回归。
@@ -22,9 +34,9 @@ Unicode 文档替换可用 `replace_page_text` / `replace_page_text_array_item`�
 
 普通入口`replace_page_text_event_range`使用相同端点和事务，但不补偿推进，保留Tj/引号操作与TJ项数，允许零字号。普通/补偿模式及既有解析定向687项测试通过；不代表跨Form、完整字体矩阵或独立阅读器验收。
 
-嵌套入口`replace_nested_text_event_range`及其`_preserving_advance`版本支持同一次叶Form调用内的多事件范围，端点为叶程序位置、source锚定起始事件，保留其他调用和共享页。继承字体与事务回滚已有固定回归；尚不支持跨不同Form或不同调用的选择，详见内容编辑接口。
+嵌套入口`replace_nested_text_event_range`及其`_preserving_advance`版本支持同一次叶Form调用内的多事件范围，端点为叶程序位置、source锚定起始事件，保留其他调用和共享页。跨调用选择应使用下面的双端来源入口，详见内容编辑接口。
 
-`replace_nested_text_span`及其`_preserving_advance`版本接受两端带借用来源的`NestedTextCodePosition`，明确拒绝不同调用链并核对结束操作原字节位置；仍须配对当前root快照，不是持久句柄。当前单元/顶层/嵌套定向654项通过，跨不同Form编辑仍待实现。
+`replace_nested_text_span`及其`_preserving_advance`版本接受两端带借用来源的`NestedTextCodePosition`，核对原调用路径和字节位置，按原展开顺序编辑选区，并在一次事务中发布；不同调用链、同链端点夹子Form及中间页面级文字均使用统一展开语义。显式`replace_nested_text_event_range`仍只编辑同一次叶调用的程序。端点须配对当前root快照，不是持久句柄。两层共享祖先四调用的普通/补偿、共享页隔离、失败重试、外层错误/panic回滚、合成CID横/竖排字符码边界与严格重开已有回归验证；各版本门禁范围和当前待验证改动见[实施计划](TODO.md)。固定真实水平字体的整事件、部分结束事件、混合字体及TJ字符串末尾/内部边界已有独立文字、坐标与渲染验收，见[真实字体验证](docs/cjk-creation-validation.md)。这些证据不代表全部字体、性能收敛或重新排版支持；后续优化须单独回归。
 
 `remove_page_text_draw(page, &snapshot, operation)` 清空整个顶层文字事件的字符串，支持Tj/TJ/两类引号，不依赖字体编码；保留引号状态与TJ数值/注释，批量TJ仅一次扫描和程序重解析。它取消原字形推进，不保证连续文本布局保持，也不清除旧内容对象中的残留数据。
 
@@ -96,7 +108,9 @@ A Rust library for **PDF data extraction** and **rendering**.
 
 `document.reorder_pages(&[2, 0, 1])?` 按当前 0 起始页索引的完整排列重排三页；重复、缺失、越界索引拒绝，恒等排列不修改 revision。保留页面对象 ID、页面树槽位及 Count；跨父节点先固化继承资源/MediaBox/CropBox/Rotate，整个修改事务化，不删除共享对象。尚不自动调整页标签、书签的页序语义或结构树，也不等同于页面复制/跨文档导入。
 
-TrueType cmap 已增加 Format 12 与 `get_gid_u32`；整字体嵌入可用 `resources().embed_truetype_font`，生成 CIDFontType2/Identity-H、CIDToGIDMap、字宽与 ToUnicode。返回字体的 `encoding().encode_text` 产生两字节字符码，`register_on_page` 可跨页复用。要求有嵌入许可的静态 TrueType、固定字符集合和显式描述指标；尚不支持子集、CFF、可变实例或 shaping。真实 Noto Sans SC 中英文创建/显示/提取验证见 [中文构建验证](docs/cjk-creation-validation.md)，其他边界见 [字符映射验证](docs/font-cmap-validation.md)。
+TrueType cmap 已增加 Format 12 与 `get_gid_u32`；整字体嵌入可用 `resources().embed_truetype_font`，生成 CIDFontType2/Identity-H、CIDToGIDMap、字宽与 ToUnicode。返回字体的 `encoding().encode_text` 产生两字节字符码，`register_on_page` 可跨页复用。显式静态子集入口为 `embed_truetype_subset_font`，采用原 GID 保留策略；已有句柄的字符集合保持不可变。要求有嵌入许可的静态 TrueType和显式描述指标；不支持 CFF、可变实例或 shaping。真实 Noto Sans SC 中英文创建/显示/提取验证见 [中文构建验证](docs/cjk-creation-validation.md)，其他边界见 [字符映射验证](docs/font-cmap-validation.md)。
+
+显式竖排入口为 `embed_truetype_vertical_font` / `embed_truetype_vertical_subset_font`，要求源字体具有有效的 `vhea/vmtx`，写出 Identity-V/W2；自动子集替换保持原书写模式。固定真实 Noto 单 Tj 自然/补偿样本已完成独立文字、纵向坐标、抽取字体及三页视觉检查；完整回归与多层/混合状态矩阵仍在验收。不应用竖排字形替换、旋转、shaping或自动排版。当前证据与限制见 [内容编辑](docs/content-editing.md)。
 
 `PdfStream::data_state()` 明确区分 RawEncoded（按字典编码的原始载荷，无 Filter 即恒等编码）与 Decoded（显式替换后的解码字节）。`from_decoded_data`/`with_decoded_data` 清理 Filter/DecodeParms/DL 并重建 Length；新建页面内容与 Metadata 共用该入口。保存重新读取后属于 RawEncoded，状态不写入 PDF；对象相等仍比较字典和字节，不比较来源标记。直接页面追加/替换及创建检查单流原始/解码字节限额，不代表多个流或事务克隆的聚合峰值已受限。
 

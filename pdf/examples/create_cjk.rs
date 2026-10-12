@@ -1,4 +1,4 @@
-//! Usage: create_cjk FONT.ttf POSTSCRIPT_NAME CAP_HEIGHT STEM_V OUTPUT.pdf [--overlay] [--images]
+//! Usage: create_cjk FONT.ttf POSTSCRIPT_NAME CAP_HEIGHT STEM_V OUTPUT.pdf [--overlay] [--images] [--subset]
 //! Supply licensed static TrueType data and descriptor metrics in 1000 units.
 use pdf::{
     document::{
@@ -15,7 +15,12 @@ fn main() -> PdfResult<()> {
     if args.len() < 5
         || flags
             .iter()
-            .any(|flag| flag != "--overlay" && flag != "--images")
+            .any(|flag| flag != "--overlay" && flag != "--images" && flag != "--subset")
+        || flags
+            .iter()
+            .filter(|flag| flag.as_str() == "--subset")
+            .count()
+            > 1
         || flags
             .iter()
             .filter(|flag| flag.as_str() == "--overlay")
@@ -28,7 +33,7 @@ fn main() -> PdfResult<()> {
             > 1
     {
         return Err(PdfError::DocumentError(
-            "Usage: create_cjk FONT.ttf POSTSCRIPT_NAME CAP_HEIGHT STEM_V OUTPUT.pdf [--overlay] [--images]"
+            "Usage: create_cjk FONT.ttf POSTSCRIPT_NAME CAP_HEIGHT STEM_V OUTPUT.pdf [--overlay] [--images] [--subset]"
                 .into(),
         ));
     }
@@ -53,17 +58,35 @@ fn main() -> PdfResult<()> {
     if overlays {
         repertoire.push_str("草稿第 页 / 共 12");
     }
-    let font = doc.resources().embed_truetype_font(
-        0,
-        std::fs::read(&args[0]).map_err(|error| PdfError::DocumentError(error.to_string()))?,
-        &repertoire,
-        TrueTypeEmbeddingOptions {
-            postscript_name: args[1].clone(),
-            cap_height: metric(&args[2])?,
-            stem_v: metric(&args[3])?,
-            serif: false,
-        },
-    )?;
+    let source =
+        std::fs::read(&args[0]).map_err(|error| PdfError::DocumentError(error.to_string()))?;
+    let options = TrueTypeEmbeddingOptions {
+        postscript_name: args[1].clone(),
+        cap_height: metric(&args[2])?,
+        stem_v: metric(&args[3])?,
+        serif: false,
+    };
+    let font = if flags.iter().any(|flag| flag == "--subset") {
+        let budget = pdf::budget::OperationBudget::new(128 * 1024 * 1024);
+        let subset = doc.resources().embed_truetype_subset_font(
+            0,
+            &source,
+            &repertoire,
+            options,
+            *b"RZPDFX",
+            true,
+            &budget,
+        )?;
+        eprintln!(
+            "Subset omitted tables: {:?}; construction peak: {} bytes",
+            subset.omitted_tables(),
+            budget.peak_bytes()
+        );
+        subset.font
+    } else {
+        doc.resources()
+            .embed_truetype_font(0, source, &repertoire, options)?
+    };
     for index in 0..2 {
         let resource = font.register_on_page(&doc, index)?;
         let mut content = ContentBuilder::new();

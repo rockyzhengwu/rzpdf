@@ -97,6 +97,219 @@ fn selection(doc: &Doc) -> (ContentProgram, NestedDrawSource) {
 }
 
 #[test]
+fn cross_invocation_span_outer_error_and_unwind_restore_publication() {
+    use pdf::page::source_provenance::NestedTextCodePosition;
+    for preserve in [false, true] {
+        for unwind in [false, true] {
+            let (doc, leaf, outer, _) = fixture("events");
+            let saved = doc.save_to_bytes().unwrap();
+            let leaf_before = doc.resolve_object(leaf).unwrap();
+            let outer_before = doc.resolve_object(outer).unwrap();
+            let edit = |doc: &Doc| -> PdfResult<()> {
+                let root = doc.get_page(0)?.content_program()?;
+                let chars = doc.get_page(0)?.extract_characters_paint_order()?;
+                let start = NestedTextCodePosition {
+                    source: chars[0].nested_source.as_ref().unwrap(), array_item: None, offset: 1,
+                };
+                let end = NestedTextCodePosition {
+                    source: chars[28].nested_source.as_ref().unwrap(), array_item: Some(2), offset: 1,
+                };
+                if preserve {
+                    doc.replace_nested_text_span_preserving_advance(0, &root, start..end, "X")
+                } else {
+                    doc.replace_nested_text_span(0, &root, start..end, "X")
+                }
+            };
+            if unwind {
+                let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _: PdfResult<()> = doc.edit_transaction(|doc| {
+                        edit(doc)?;
+                        panic!("cross invocation outer unwind");
+                    });
+                }));
+                assert_eq!(caught.unwrap_err().downcast_ref::<&str>().copied(), Some("cross invocation outer unwind"));
+            } else {
+                let failed: PdfResult<()> = doc.edit_transaction(|doc| {
+                    edit(doc)?;
+                    Err(PdfError::DocumentError("cross invocation outer error".into()))
+                });
+                assert!(matches!(failed, Err(PdfError::DocumentError(ref message)) if message == "cross invocation outer error"));
+            }
+            assert_eq!(doc.resolve_object(leaf).unwrap(), leaf_before);
+            assert_eq!(doc.resolve_object(outer).unwrap(), outer_before);
+            assert_eq!(doc.save_to_bytes().unwrap(), saved);
+            // Rollback invalidates snapshots; obtain fresh endpoints for retry.
+            edit(&doc).unwrap();
+            Doc::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict).unwrap();
+        }
+    }
+}
+
+#[test]
+fn cross_invocation_span_quota_rejection_keeps_original_endpoints() {
+    use pdf::page::source_provenance::NestedTextCodePosition;
+    let options = pdf::parser::options::ParseOptions {
+        limits: pdf::parser::options::Limits {
+            // Permit the deliberately oversized input through character-count
+            // validation so rejection must exercise the live-byte pool.
+            max_operation_bytes: 8 * 1024 * 1024,
+            max_text_chars: 16 * 1024 * 1024,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    for preserve in [false, true] {
+        let (doc, leaf, outer, _) = fixture_with_options("events", options);
+        let root = doc.get_page(0).unwrap().content_program().unwrap();
+        let chars = doc.get_page(0).unwrap().extract_characters_paint_order().unwrap();
+        let start = NestedTextCodePosition {
+            source: chars[0].nested_source.as_ref().unwrap(), array_item: None, offset: 1,
+        };
+        let end = NestedTextCodePosition {
+            source: chars[28].nested_source.as_ref().unwrap(), array_item: Some(2), offset: 1,
+        };
+        let stamp = doc.stamp();
+        let saved = doc.save_to_bytes().unwrap();
+        let leaf_before = doc.resolve_object(leaf).unwrap();
+        let outer_before = doc.resolve_object(outer).unwrap();
+        let resources = doc.get_page(0).unwrap().resource().unwrap();
+        let replace = |text: &str| {
+            if preserve {
+                doc.replace_nested_text_span_preserving_advance(0, &root, start..end, text)
+            } else {
+                doc.replace_nested_text_span(0, &root, start..end, text)
+            }
+        };
+        assert!(matches!(replace(&"X".repeat(8 * 1024 * 1024)),
+            Err(PdfError::ResourceLimit(ref message)) if message == "operation live bytes"));
+        assert!(doc.is_stamp_current(&stamp));
+        assert_eq!(doc.resolve_object(leaf).unwrap(), leaf_before);
+        assert_eq!(doc.resolve_object(outer).unwrap(), outer_before);
+        assert_eq!(doc.get_page(0).unwrap().resource().unwrap(), resources);
+        assert_eq!(doc.save_to_bytes().unwrap(), saved);
+        replace("X").unwrap();
+        Doc::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict).unwrap();
+    }
+}
+
+#[test]
+fn complex_four_call_span_fixed_budget_ladder() {
+    use pdf::page::source_provenance::NestedTextCodePosition;
+    for preserve in [false, true] {
+        let mut successes = 0;
+        for ceiling in [512 * 1024, 1024 * 1024, 2 * 1024 * 1024, 8 * 1024 * 1024] {
+            // Each rung owns a fresh document and operation pool. This measures
+            // success at fixed ceilings, not exact peak, RSS or minimum memory.
+            let options = pdf::parser::options::ParseOptions {
+                limits: pdf::parser::options::Limits {
+                    max_operation_bytes: ceiling,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let (doc, leaf, outer, _) = fixture_with_options("events", options);
+            let root = doc.get_page(0).unwrap().content_program().unwrap();
+            let before = doc.get_page(0).unwrap().extract_characters_paint_order().unwrap();
+            let original = before.iter().filter_map(|ch| ch.unicode.as_deref()).collect::<String>();
+            let saved = doc.save_to_bytes().unwrap();
+            let stamp = doc.stamp();
+            let leaf_before = doc.resolve_object(leaf).unwrap();
+            let outer_before = doc.resolve_object(outer).unwrap();
+            let resources = doc.get_page(0).unwrap().resource().unwrap();
+            let start = NestedTextCodePosition {
+                source: before[0].nested_source.as_ref().unwrap(), array_item: None, offset: 1,
+            };
+            let end = NestedTextCodePosition {
+                source: before[28].nested_source.as_ref().unwrap(), array_item: Some(2), offset: 1,
+            };
+            let result = if preserve {
+                doc.replace_nested_text_span_preserving_advance(0, &root, start..end, "X")
+            } else {
+                doc.replace_nested_text_span(0, &root, start..end, "X")
+            };
+            match result {
+                Err(PdfError::ResourceLimit(ref message)) if message == "operation live bytes" => {
+                    println!("complex four-call preserve={preserve} ceiling={ceiling}: rejected");
+                    assert!(doc.is_stamp_current(&stamp));
+                    assert_eq!(doc.get_page(0).unwrap().resource().unwrap(), resources);
+                    assert_eq!(doc.save_to_bytes().unwrap(), saved);
+                    assert!(ceiling < 8 * 1024 * 1024, "known 8MiB retry must succeed");
+                }
+                Ok(()) => {
+                    successes += 1;
+                    println!("complex four-call preserve={preserve} ceiling={ceiling}: passed");
+                    let reopened = Doc::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict).unwrap();
+                    let after = reopened.get_page(0).unwrap().extract_characters_paint_order().unwrap();
+                    assert_eq!(after.iter().filter_map(|ch| ch.unicode.as_deref()).collect::<String>(), "AXHCD");
+                    assert_eq!(reopened.get_page(1).unwrap().extract_characters_paint_order().unwrap()
+                        .iter().filter_map(|ch| ch.unicode.as_deref()).collect::<String>(), original);
+                    if preserve {
+                        for (old, new) in [(0, 0), (29, 2), (30, 3), (31, 4)] {
+                            assert!((before[old].position.x() - after[new].position.x()).abs() < 0.002);
+                            assert!((before[old].position.y() - after[new].position.y()).abs() < 0.002);
+                        }
+                    }
+                }
+                Err(error) => panic!("unexpected fixed-budget error at {ceiling}: {error:?}"),
+            }
+            assert_eq!(doc.resolve_object(leaf).unwrap(), leaf_before);
+            assert_eq!(doc.resolve_object(outer).unwrap(), outer_before);
+        }
+        assert!(successes > 0);
+    }
+}
+
+#[test]
+fn source_qualified_span_across_shared_ancestors_preserves_other_page() {
+    use pdf::page::source_provenance::NestedTextCodePosition;
+    for preserve in [false, true] {
+        let (doc, _, _, _) = fixture("events");
+        let root = doc.get_page(0).unwrap().content_program().unwrap();
+        let before = doc.get_page(0).unwrap().extract_characters_paint_order().unwrap();
+        let original: String = before.iter().filter_map(|ch| ch.unicode.as_deref()).collect();
+        let start = NestedTextCodePosition {
+            source: before[0].nested_source.as_ref().unwrap(),
+            array_item: None,
+            offset: 1,
+        };
+        let end = NestedTextCodePosition {
+            source: before[28].nested_source.as_ref().unwrap(),
+            array_item: Some(2),
+            offset: 1,
+        };
+        let stamp = doc.stamp();
+        let saved = doc.save_to_bytes().unwrap();
+        let invalid_end = NestedTextCodePosition { offset: 3, ..end };
+        for (finish, replacement) in [(invalid_end, "X"), (end, "😀")] {
+            let result = if preserve {
+                doc.replace_nested_text_span_preserving_advance(0, &root, start..finish, replacement)
+            } else {
+                doc.replace_nested_text_span(0, &root, start..finish, replacement)
+            };
+            assert!(result.is_err());
+            assert!(doc.is_stamp_current(&stamp));
+            assert_eq!(doc.save_to_bytes().unwrap(), saved);
+        }
+        if preserve {
+            doc.replace_nested_text_span_preserving_advance(0, &root, start..end, "X").unwrap();
+        } else {
+            doc.replace_nested_text_span(0, &root, start..end, "X").unwrap();
+        }
+        let reopened = Doc::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict).unwrap();
+        let after = reopened.get_page(0).unwrap().extract_characters_paint_order().unwrap();
+        assert_eq!(after.iter().filter_map(|ch| ch.unicode.as_deref()).collect::<String>(), "AXHCD");
+        assert_eq!(reopened.get_page(1).unwrap().extract_characters_paint_order().unwrap()
+            .iter().filter_map(|ch| ch.unicode.as_deref()).collect::<String>(), original);
+        if preserve {
+            for (old, new) in [(0, 0), (29, 2), (30, 3), (31, 4)] {
+                assert!((before[old].position.x() - after[new].position.x()).abs() < 0.002);
+                assert!((before[old].position.y() - after[new].position.y()).abs() < 0.002);
+            }
+        }
+    }
+}
+
+#[test]
 fn source_qualified_nested_span_checks_both_invocations_and_end_byte_position() {
     use pdf::page::source_provenance::NestedTextCodePosition;
     for preserve in [false, true] {
@@ -129,13 +342,17 @@ fn source_qualified_nested_span_checks_both_invocations_and_end_byte_position() 
             }
         };
         let stamp = doc.stamp();
-        assert!(
-            matches!(replace(endpoint(another_call)), Err(PdfError::UnsupportedFeature(ref message)) if message == "text span across different Form invocations")
-        );
+        let reverse_start = endpoint(another_call);
+        let reverse = if preserve {
+            doc.replace_nested_text_span_preserving_advance(0, &root, reverse_start..start, "X")
+        } else {
+            doc.replace_nested_text_span(0, &root, reverse_start..start, "X")
+        };
+        assert!(reverse.is_err());
         let mut wrong_offset = end_source.clone();
         wrong_offset.operator_byte_offset = Some(0);
         assert!(
-            matches!(replace(endpoint(&wrong_offset)), Err(PdfError::PageResourceError(ref message)) if message == "Nested span end byte position mismatch")
+            matches!(replace(endpoint(&wrong_offset)), Err(PdfError::ObjectError(ref message)) if message == "span endpoint byte position mismatch")
         );
         assert!(doc.is_stamp_current(&stamp));
         for page in [0, 1] {
@@ -682,6 +899,57 @@ fn nested_mixed_cid_compensation_checks_w_w2_and_partial_suffix_boundaries() {
                             array.get(10).unwrap().as_string().unwrap().bytes(),
                             b"\x81\x01"
                         );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn cross_invocation_mixed_cid_span_checks_boundaries_and_signed_advance() {
+    use pdf::page::source_provenance::NestedTextCodePosition;
+    for vertical in [false, true] {
+        for preserve in [false, true] {
+            for text in ["B", "", "B "] {
+                let (doc, leaf, body) = cid_fixture(vertical, "events");
+                let root = doc.get_page(0).unwrap().content_program().unwrap();
+                let before = doc.get_page(0).unwrap().extract_characters_paint_order().unwrap();
+                assert_eq!(before.len(), 32);
+                let original: String = before.iter().filter_map(|ch| ch.unicode.as_deref()).collect();
+                let start = NestedTextCodePosition {
+                    source: before[0].nested_source.as_ref().unwrap(), array_item: None, offset: 1,
+                };
+                let end = NestedTextCodePosition {
+                    source: before[28].nested_source.as_ref().unwrap(), array_item: None, offset: 2,
+                };
+                let replace = |start, end| {
+                    if preserve {
+                        doc.replace_nested_text_span_preserving_advance(0, &root, start..end, text)
+                    } else {
+                        doc.replace_nested_text_span(0, &root, start..end, text)
+                    }
+                };
+                let stamp = doc.stamp();
+                let saved = doc.save_to_bytes().unwrap();
+                for (first, last) in [(NestedTextCodePosition { offset: 2, ..start }, end),
+                    (start, NestedTextCodePosition { offset: 1, ..end })] {
+                    assert!(matches!(replace(first, last), Err(PdfError::ObjectError(ref message)) if message == "text range splits a character code"));
+                    assert!(doc.is_stamp_current(&stamp));
+                    assert_eq!(doc.save_to_bytes().unwrap(), saved);
+                }
+                replace(start, end).unwrap();
+                let reopened = Doc::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict).unwrap();
+                assert_eq!(reopened.resolve_object(leaf).unwrap().into_stream().unwrap().raw_data(), body.as_bytes());
+                let after = reopened.get_page(0).unwrap().extract_characters_paint_order().unwrap();
+                assert_eq!(after.iter().filter_map(|ch| ch.unicode.as_deref()).collect::<String>(), format!("A{text}CCC"));
+                assert_eq!(reopened.get_page(1).unwrap().extract_characters_paint_order().unwrap()
+                    .iter().filter_map(|ch| ch.unicode.as_deref()).collect::<String>(), original);
+                if preserve {
+                    let suffix = 1 + text.chars().count();
+                    for (old, new) in [(0, 0), (29, suffix), (30, suffix + 1), (31, suffix + 2)] {
+                        assert!((before[old].position.x() - after[new].position.x()).abs() < 0.002);
+                        assert!((before[old].position.y() - after[new].position.y()).abs() < 0.002);
                     }
                 }
             }

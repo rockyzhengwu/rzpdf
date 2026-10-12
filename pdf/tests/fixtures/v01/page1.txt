@@ -1,0 +1,6 @@
+%%MediaBox 0 0 240 160
+%%Font F0 Helvetica Latin
+%%Image Im0 pdf/tests/fixtures/v01/pixels.png
+BT /F0 16 Tf 20 120 Td (External producer - page 1) Tj ET
+q 80 0 0 40 20 30 cm /Im0 Do Q
+0 0 0 RG 1 w 20 30 80 40 re S

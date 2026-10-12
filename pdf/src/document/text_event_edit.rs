@@ -11,24 +11,97 @@ use crate::{
     },
 };
 
-type PreparedEvent = (
-    usize,
-    BudgetedBytes,
-    usize,
-    BudgetedTextMetrics,
-    BudgetedBytes,
-);
+type PreparedEvent = (usize, BudgetedBytes, usize);
 
-/// Own generated content and every actual font/code/fragment allocation until
-/// the caller's transaction has consumed the result.
+/// Own generated content and its fragment leases until transaction consumption.
+/// Temporary metrics and encoding owners are released after serialization.
 pub(super) struct TextEventEditPlan {
     program: BudgetedContentProgram,
     _events: OwnedTable<PreparedEvent>,
+    input_chars: usize,
+    output_chars: usize,
+}
+
+#[cfg(test)]
+mod fragment_owner_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_fragment_parse_preserves_single_and_multiple_donors() {
+        for count in [1, 2] {
+            let doc = PdfDocument::new().unwrap();
+            let expected = ContentProgram::from_decoded_bytes(
+                b"(A) Tj (B) Tj".to_vec(), doc.ctx.options(),
+            ).unwrap();
+            let budget = OperationBudget::new(1024 * 1024);
+            let mut donors = Vec::new();
+            for index in 0..count {
+                let mut events = OwnedTable::new(&budget, 1).unwrap();
+                let bytes: &[u8] = if index == 0 { b"(" } else { b"(Y) Tj" };
+                events.items.push((index, BudgetedBytes::copy_from_slice(&budget, bytes).unwrap(), 1));
+                donors.push(Some(TextEventFragments { events, input_chars: 1, output_chars: 1 }));
+            }
+            let retained = budget.live_bytes();
+            let failure = doc.finish_text_event_fragments(&expected, &mut donors, &budget);
+            assert!(failure.is_err());
+            assert!(!matches!(failure, Err(PdfError::ResourceLimit(_))),
+                "invalid syntax must reach fragment parsing, not fail on budget");
+            assert!(donors.iter().all(Option::is_some));
+            assert_eq!(budget.live_bytes(), retained);
+            assert_eq!(donors[0].as_ref().unwrap().events.items[0].1.as_slice(), b"(");
+            donors[0].as_mut().unwrap().events.items[0].1 =
+                BudgetedBytes::copy_from_slice(&budget, b"(X) Tj").unwrap();
+            let result = doc.finish_text_event_fragments(&expected, &mut donors, &budget).unwrap();
+            assert!(donors.iter().all(Option::is_none));
+            assert_eq!(result.character_counts(), (count, count));
+            assert_eq!(result.original_replacements().len(), count);
+            drop(result);
+            assert_eq!(budget.live_bytes(), 0);
+        }
+    }
+}
+
+/// Generated original-index fragments without an intermediate full program.
+pub(super) struct TextEventFragments {
+    events: OwnedTable<PreparedEvent>,
+    input_chars: usize,
+    output_chars: usize,
+}
+
+impl TextEventFragments {
+    pub(super) fn single(
+        index: usize, fragment: BudgetedBytes, operation_count: usize,
+        input_chars: usize, output_chars: usize, budget: &OperationBudget,
+    ) -> PdfResult<Self> {
+        let mut events = OwnedTable::new(budget, 1)?;
+        events.items.push((index, fragment, operation_count));
+        Ok(Self { events, input_chars, output_chars })
+    }
 }
 
 impl AsRef<ContentProgram> for TextEventEditPlan {
     fn as_ref(&self) -> &ContentProgram {
         self.program.as_ref()
+    }
+}
+
+impl TextEventEditPlan {
+    pub(super) fn character_counts(&self) -> (usize, usize) {
+        (self.input_chars, self.output_chars)
+    }
+    /// Borrow owned fragments at original indices. A tree parent can merge them
+    /// with child Do edits; no fragment borrows temporary font/encoding data.
+    pub(super) fn original_replacements(
+        &self,
+    ) -> impl ExactSizeIterator<Item = OperationReplacement<'_>> {
+        self._events
+            .items
+            .iter()
+            .map(|(index, fragment, count)| OperationReplacement {
+                index: *index,
+                source: fragment.as_slice(),
+                operation_count: *count,
+            })
     }
 }
 use std::{
@@ -71,7 +144,48 @@ fn is_text(name: &str) -> bool {
     matches!(name, "Tj" | "TJ" | "'" | "\"")
 }
 
-fn endpoint(program: &ContentProgram, position: TextCodePosition) -> PdfResult<()> {
+/// Full lexical code range of one show. Numeric-only and empty TJ events have
+/// no editable strings but must remain in expanded selection order unchanged.
+pub(super) fn full_event_range(
+    program: &ContentProgram,
+    index: usize,
+) -> PdfResult<Option<Range<TextCodePosition>>> {
+    let op = &program.operations().get(index)
+        .ok_or_else(|| PdfError::ObjectError("span event index out of range".into()))?.operator;
+    let (first, last, len) = match (op.name(), op.num_operands()) {
+        ("Tj" | "'", 1) => (None, None, op.get_as_string(0)?.bytes().len()),
+        ("\"", 3) => {
+            op.get_as_f32(0)?;
+            op.get_as_f32(1)?;
+            (None, None, op.get_as_string(2)?.bytes().len())
+        }
+        ("TJ", 1) => {
+            let mut first = None;
+            let mut last = None;
+            let mut len = 0;
+            for (item, object) in op.get_as_array(0)?.into_iter().enumerate() {
+                match object {
+                    PdfObject::PdfString(string) => {
+                        first.get_or_insert(item);
+                        last = Some(item);
+                        len = string.bytes().len();
+                    }
+                    PdfObject::PdfNumber(_) => (),
+                    _ => return Err(PdfError::ObjectError("span TJ item type".into())),
+                }
+            }
+            if first.is_none() {
+                return Ok(None);
+            }
+            (first, last, len)
+        }
+        _ => return Err(PdfError::ObjectError("span event operator/operand mismatch".into())),
+    };
+    Ok(Some(TextCodePosition { operation: index, array_item: first, offset: 0 }
+        ..TextCodePosition { operation: index, array_item: last, offset: len }))
+}
+
+pub(super) fn endpoint(program: &ContentProgram, position: TextCodePosition) -> PdfResult<()> {
     let target = &program
         .operations()
         .get(position.operation)
@@ -104,6 +218,43 @@ fn endpoint(program: &ContentProgram, position: TextCodePosition) -> PdfResult<(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod span_range_tests {
+    use super::*;
+
+    #[test]
+    fn full_event_ranges_keep_tj_numeric_slots_and_quote_operands() {
+        let program = ContentProgram::from_decoded_bytes(
+            b"[(A) 17 () -3 (BC) 9] TJ [] TJ [17 -3] TJ () Tj (D) ' 2 3 (EF) \""
+                .to_vec(),
+            Default::default(),
+        ).unwrap();
+        let range = full_event_range(&program, 0).unwrap().unwrap();
+        assert_eq!((range.start.array_item, range.start.offset), (Some(0), 0));
+        assert_eq!((range.end.array_item, range.end.offset), (Some(4), 2));
+        for index in [1, 2] {
+            assert!(full_event_range(&program, index).unwrap().is_none());
+        }
+        for (index, len) in [(3, 0), (4, 1), (5, 2)] {
+            let range = full_event_range(&program, index).unwrap().unwrap();
+            assert_eq!((range.start.array_item, range.start.offset), (None, 0));
+            assert_eq!((range.end.array_item, range.end.offset), (None, len));
+            endpoint(&program, range.start).unwrap();
+            endpoint(&program, range.end).unwrap();
+        }
+        assert!(full_event_range(&program, 6).is_err());
+    }
+
+    #[test]
+    fn full_event_ranges_reject_invalid_shows_without_fabricating_endpoints() {
+        for bytes in [b"[true] TJ".as_slice(), b"[17 (A) null] TJ", b"() () Tj",
+            b"2 (A) \"", b"2 true (A) \"", b"12 Tf"] {
+            let program = ContentProgram::from_decoded_bytes(bytes.to_vec(), Default::default()).unwrap();
+            assert!(full_event_range(&program, 0).is_err(), "{bytes:?}");
+        }
+    }
 }
 
 impl<R: Read + Seek> PdfDocument<R> {
@@ -169,8 +320,26 @@ impl<R: Read + Seek> PdfDocument<R> {
         text: &str,
         preserve_advance: bool,
         budget: &OperationBudget,
-        mut resolve_metrics: F,
+        resolve_metrics: F,
     ) -> PdfResult<TextEventEditPlan>
+    where
+        F: FnMut(usize) -> PdfResult<BudgetedTextMetrics>,
+    {
+        let fragments = self.build_text_event_fragments(
+            expected, range, text, preserve_advance, budget, resolve_metrics,
+        )?;
+        self.finish_text_event_fragments(expected, &mut [Some(fragments)], budget)
+    }
+
+    pub(super) fn build_text_event_fragments<F>(
+        &self,
+        expected: &ContentProgram,
+        range: Range<TextCodePosition>,
+        text: &str,
+        preserve_advance: bool,
+        budget: &OperationBudget,
+        mut resolve_metrics: F,
+    ) -> PdfResult<TextEventFragments>
     where
         F: FnMut(usize) -> PdfResult<BudgetedTextMetrics>,
     {
@@ -404,29 +573,75 @@ impl<R: Read + Seek> PdfDocument<R> {
                     )
                 }
             };
-            // Retain each actual font/encoding owner and generated fragment
-            // across final parsing and transaction commit, never bare-clone.
+            // The serialized fragment owns its bytes. Metrics and encoded codes
+            // are no longer borrowed and can drop here, releasing their actual
+            // allocations and leases before the next event/final reconstruction.
             prepared
                 .items
-                .push((index, fragment, operation_count, state, codes));
+                .push((index, fragment, operation_count));
         }
-        let mut borrowed = OwnedTable::new(&budget, prepared.items.len())?;
-        for (index, fragment, count, _, _) in &prepared.items {
-            borrowed.items.push(OperationReplacement {
-                index: *index,
-                source: fragment.as_slice(),
-                operation_count: *count,
-            });
+        Ok(TextEventFragments {
+            events: prepared,
+            input_chars,
+            output_chars,
+        })
+    }
+
+    /// Build one complete program per node. Donors remain owned on failure.
+    pub(super) fn finish_text_event_fragments(
+        &self,
+        expected: &ContentProgram,
+        donors: &mut [Option<TextEventFragments>],
+        budget: &OperationBudget,
+    ) -> PdfResult<TextEventEditPlan> {
+        let limits = self.ctx.limits();
+        let (mut count, mut input_chars, mut output_chars) = (0usize, 0usize, 0usize);
+        let mut previous = None;
+        for donor in donors.iter().flatten() {
+            count = count.checked_add(donor.events.items.len())
+                .filter(|&n| n <= limits.max_objects)
+                .ok_or_else(|| PdfError::ResourceLimit("merged text event count".into()))?;
+            input_chars = input_chars.checked_add(donor.input_chars)
+                .filter(|&n| n <= limits.max_text_chars)
+                .ok_or_else(|| PdfError::ResourceLimit("merged input text characters".into()))?;
+            output_chars = output_chars.checked_add(donor.output_chars)
+                .filter(|&n| n <= limits.max_text_chars)
+                .ok_or_else(|| PdfError::ResourceLimit("merged output text characters".into()))?;
+            for (index, _, _) in &donor.events.items {
+                if previous.is_some_and(|previous| previous >= *index) {
+                    return Err(PdfError::ObjectError("merged events are not in original order".into()));
+                }
+                previous = Some(*index);
+            }
+        }
+        let sole = donors.iter().flatten().count() == 1;
+        // A sole table can transfer its existing allocation/lease after parsing.
+        // For multiple donors reserve the destination before consuming any owner.
+        let mut events = if sole { None } else { Some(OwnedTable::new(budget, count)?) };
+        let mut borrowed = OwnedTable::new(budget, count)?;
+        for donor in donors.iter().flatten() {
+            for (index, fragment, count) in &donor.events.items {
+                borrowed.items.push(OperationReplacement {
+                    index: *index, source: fragment.as_slice(), operation_count: *count,
+                });
+            }
         }
         let program = expected.with_replaced_operation_sequences_with_budget(
-            &borrowed.items,
-            self.ctx.options(),
-            &budget,
+            &borrowed.items, self.ctx.options(), budget,
         )?;
         drop(borrowed);
+        for donor in donors {
+            if let Some(mut donor) = donor.take() {
+                if let Some(events) = &mut events {
+                    events.items.append(&mut donor.events.items);
+                } else {
+                    events = Some(donor.events);
+                }
+            }
+        }
         Ok(TextEventEditPlan {
-            program,
-            _events: prepared,
+            program, _events: events.expect("destination allocated or sole donor transferred"),
+            input_chars, output_chars,
         })
     }
 }

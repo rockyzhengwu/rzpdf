@@ -4,6 +4,42 @@ pub struct ContentBuilder {
 }
 
 impl ContentBuilder {
+    /// Serialize a checked Tf operation without unaccounted temporary strings.
+    pub(crate) fn font_selection_with_budget(
+        name: &str,
+        size: f32,
+        limits: crate::parser::options::Limits,
+        budget: &crate::budget::OperationBudget,
+    ) -> crate::error::PdfResult<crate::budget::BudgetedBytes> {
+        use crate::error::PdfError;
+        use std::io::Write;
+        if !size.is_finite() || name.is_empty() || name.as_bytes().contains(&0) {
+            return Err(PdfError::ObjectError("Invalid budgeted font selection".into()));
+        }
+        let escaped = |byte: u8| byte <= 32 || byte >= 127 || b"()<>[]{}/%#".contains(&byte);
+        let token_length = name.bytes().try_fold(1usize, |length, byte| length.checked_add(if escaped(byte) { 3 } else { 1 }))
+            .filter(|&length| length <= limits.max_token_bytes)
+            .ok_or_else(|| PdfError::ResourceLimit("font resource name bytes".into()))?;
+        let mut suffix = std::io::Cursor::new([0u8; 64]);
+        write!(&mut suffix, " {} Tf\n", size).map_err(|_| PdfError::ObjectError("Font size serialization overflow".into()))?;
+        let suffix_length = suffix.position() as usize;
+        let length = token_length.checked_add(suffix_length)
+            .filter(|&length| length <= limits.max_raw_stream_bytes && length <= limits.max_decoded_bytes)
+            .ok_or_else(|| PdfError::ResourceLimit("font selection bytes".into()))?;
+        let mut lease = budget.reserve(length)?;
+        let mut output = Vec::new();
+        output.try_reserve_exact(length).map_err(|_| PdfError::ResourceLimit("font selection allocation".into()))?;
+        lease.resize(output.capacity())?;
+        output.push(b'/');
+        let hex = b"0123456789ABCDEF";
+        for byte in name.bytes() {
+            if escaped(byte) { output.extend_from_slice(&[b'#', hex[(byte >> 4) as usize], hex[(byte & 15) as usize]]); }
+            else { output.push(byte); }
+        }
+        output.extend_from_slice(&suffix.get_ref()[..suffix_length]);
+        crate::budget::BudgetedBytes::from_reserved_vec(output, lease)
+    }
+
     /// Build one hexadecimal Tj operation with its capacity held in the pool.
     /// Borrowed input codes are accounted by their existing owner.
     pub fn encoded_text_with_budget(
@@ -875,6 +911,33 @@ mod image_tests {
             .try_set_font_with_limits("F ", 12.0, limits)
             .is_err());
         assert!(rejected.build().is_empty());
+    }
+
+    #[test]
+    fn budgeted_font_selection_matches_existing_writer_and_releases() {
+        use crate::{budget::OperationBudget, parser::options::Limits};
+        let limits = Limits::default();
+        for (name, size) in [("F /#中", 12.0), ("F1", -0.125), ("F1", f32::MAX)] {
+            let mut builder = ContentBuilder::new();
+            builder.try_set_font(name, size).unwrap();
+            let pool = OperationBudget::new(4096);
+            let neighbor = pool.reserve(7).unwrap();
+            let output = ContentBuilder::font_selection_with_budget(name, size, limits, &pool).unwrap();
+            assert_eq!(output.as_slice(), builder.as_bytes());
+            let peak = pool.peak_bytes();
+            drop(output);
+            assert_eq!(pool.live_bytes(), 7);
+            let short = OperationBudget::new(peak - 8);
+            assert!(ContentBuilder::font_selection_with_budget(name, size, limits, &short).is_err());
+            assert_eq!(short.live_bytes(), 0);
+            drop(neighbor);
+            assert_eq!(pool.live_bytes(), 0);
+        }
+        let pool = OperationBudget::new(4096);
+        for (name, size) in [("", 12.0), ("F\0", 12.0), ("F1", f32::NAN), ("F1", f32::INFINITY)] {
+            assert!(ContentBuilder::font_selection_with_budget(name, size, limits, &pool).is_err());
+            assert_eq!(pool.live_bytes(), 0);
+        }
     }
 
     #[test]

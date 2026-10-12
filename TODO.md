@@ -1,10 +1,929 @@
 # PDF 引擎实施计划
 
-更新日期：2026-10-08。本文是实施任务清单，不表示这些功能已经完成。
+更新日期：2026-10-13。本文是长期技术任务池与历史实施记录，不表示这些功能已经完成。
 
-本地提交检查点（2026-10-08）：按用户要求保存跨文本事件编辑、同叶嵌套端点、测试和文档；`span_tree.rs` 作为未接入原型保存，不表示跨 Form 调用编辑已实现。已接入功能定向门禁 654 项通过，原型隔离测试 6 项通过；完整工作区回归仍在运行，尚不能宣称整体通过。fuzz 继续暂缓，来源不明的 `test.png` 不纳入提交，不推送远端。
+## 当前版本管理规则
+
+2026-10-13 v0.1继续收口：独立MuPDF生产者fixture及2项组合回归退出0；14个内置PFB与历史gsfonts源包逐字节匹配，来源/上游许可及Noto OFL副本已归档；候选支持矩阵已冻结。完整自动门禁运行于 `output/pdf/v01-20261013-workspace-01`，未终态前不宣布通过；本轮不变更被冻结的Rust/fixture/门禁输入，fuzz不实现、不运行。最终候选提交与远端操作另待用户确认。
+
+v0.1 首批收口已落地：新增 `pdf/tests/v01_workflow.rs` 公共 API 组合回归、`docs/check-v01.sh` 完整自动门禁，普通 CI 增加独立英文创建检查/渲染归档；场景映射与实际专项结果见 [v0.1 验证记录](docs/releases/v0.1-validation.md)，来源/许可缺口见 [样本登记](docs/releases/v0.1-samples.md)。未将工作区专项当作最终候选提交验收，V01-01～08 仍以其完整条件决定勾选。
+
+当前交付目标为 **v0.1 基础闭环版，收口中、尚未发布**。版本范围以 [ROADMAP.md](ROADMAP.md) 为准，当前执行与验收以 [v0.1 清单](docs/releases/v0.1.md) 为准；二者取代本文历史执行队列和 M0～M5 顺序作为当前工作入口。
+
+P0～P5 保留稳定任务 ID 和历史证据，不删除已有代码，不因划入后续版本而撤回已有能力。任务的目标版本映射见 ROADMAP；跨版本任务只验收当期子范围，不提前勾选整个父项。版本进度按验收场景报告，不按全局 checkbox 比例报告。旧记录中的“当前”“下一步”“运行中”“源码冻结”描述当时状态，不自动代表现在状态。
+
+2026-10-12 状态核对：最新全量日志 `/tmp/rzpdf-resource-owner-workspace.log` 记录52组、1066项通过、0失败、0忽略；旧会话句柄已过期，未取得总退出码，不将其描述为已观察到 EXIT 0 的发布门禁。对应 Rust/Cargo 指纹为 `3e62ae80a25b20f96f36d469fc34aa8dcba167688af39df506220adf0b6486e6`。这是历史核对结果，不能替代最终候选提交上的发布验收。当前本地仍有未提交实现；fuzz 暂缓，不实现、不运行，不阻塞本期正常功能验收。
+
+以下为历史实施记录，较新状态以上述摘要及版本清单为准。
+
+逐对象所有者公共终态：79126退出0，五组15/6/3/8/9共41 passed、0 failed/ignored/filtered；与715项PDF单元同一源码指纹`3e62ae80a25b20f96f36d469fc34aa8dcba167688af39df506220adf0b6486e6`。启动统一全工作区`cargo test --workspace --locked --quiet`，日志`/tmp/rzpdf-resource-owner-workspace.log`，尚未终态；源码继续冻结。ResolvedResource及泛型BM借用核心的专项和公共回归已通过，不等于完整AR-03；旧1065项全量属于此前操作聚合版本，不覆盖本次变更。
+
+逐对象所有者整组PDF单元终态：43937退出0，`/tmp/rzpdf-resource-owner-full-unit.log`为715 passed、0 failed/ignored/filtered，95.57秒；源码指纹`3e62ae80a25b20f96f36d469fc34aa8dcba167688af39df506220adf0b6486e6`未变。公共79126首组nested_adjusted_text已15项通过，当前nested_text_edit，整体公共会话尚未结束，源码继续冻结；不将单元结果视为完整工作区验收。
+
+混合模式专项97276退出0：1 passed、0 failed/ignored（714过滤），普通结果回调的偏好数组完整验证与预算失败清理通过。启动新版本整组PDF单元43937（`cargo test -p pdf --lib --locked`，`/tmp/rzpdf-resource-owner-full-unit.log`），公共79126仍在编译；两者尚未终态。源码指纹核对仍为`3e62ae80a25b20f96f36d469fc34aa8dcba167688af39df506220adf0b6486e6`，源码继续冻结，diff空白检查通过；完整工作区仍需新版本统一复验。
+
+逐对象所有者定向终态：57433退出0，字体绑定15 passed、0 failed/ignored（700过滤），含新增BM逐元素生命周期及既有Tf/gs精确峰值邻居拒绝/重试、返回所有者、异池及unwind用例。启动混合模式专项97276（`/tmp/rzpdf-resource-blend-tests.log`）及五组公共文字编辑79126（`/tmp/rzpdf-resource-owner-public.log`），尚未终态。源码指纹仍为`3e62ae80a25b20f96f36d469fc34aa8dcba167688af39df506220adf0b6486e6`，暂时冻结；新版本整组PDF单元和全工作区仍待验收，旧1065项基线不覆盖本次生产变更。
+
+逐对象所有者编译检查99268退出0（39.18秒）。新增resolved_resource_blend_elements_release_individually_and_retry：32元素逐次查询之间仅数组额度存活、峰值等于数组保留加单元素峰值、精确额度加1字节邻居拒绝/释放重试、支持模式后的非法元素仍报错、解析回调panic释放。字体绑定专项会话57433运行中，命令`cargo test -p pdf --lib --locked page::font_binding::tests`，日志`/tmp/rzpdf-resource-owner-tests.log`；源码指纹`3e62ae80a25b20f96f36d469fc34aa8dcba167688af39df506220adf0b6486e6`。尚未通过专项或新版本公共/全量回归；Tf/gs真实资源精确共存边界仍需补核。
+
+资源副本逐对象所有权实现中：font_binding新增非Clone的ResolvedResource，字段按PdfObject/MemoryLease顺序拥有；font_scope_resource借用类别字典并返回资源所有者，ext_state_font的字号副本局部释放、数组仅保留至字体复制结束。混合模式核心改为泛型Borrow<PdfObject>结果，在持有数组所有者时逐个解析/释放元素，普通PdfObject解析回调保持兼容，并继续验证全部元素。编译检查会话99268（`cargo test -p pdf --lib --locked page:: --no-run`，日志`/tmp/rzpdf-resource-owner-build.log`）尚未终态；待补精确峰值/错误/unwind专项并复跑公共及全量，不能以此前1065项基线证明本次变更通过。
+
+最新统一工作区门禁已通过：会话67632退出0，命令`cargo test --workspace --locked --quiet`，日志`/tmp/rzpdf-font-resource-workspace.log`；52组共1065 passed、0 failed/ignored/filtered，其中PDF单元714、PDF集成313、render单元38。结束时Rust/Cargo源码指纹仍为`054f697ab36f4a86ff191010c44fecbd24cb4c836204b565c2911403b8a5d53f`，解除本轮源码冻结。以下及子任务中的“67632待终态”描述由本条终态取代；不再引用旧1063项基线作为当前版本验收。未实现/运行fuzz，未提交或推送代码。下一步逐项收口所有权与对象表清单，再继续资源副本逐对象生命周期及其边界测试；全量通过不代表完整AR-03或P0–P5完成。
+
+当前验收状态（以下过程记录按历史保留，不作为当前运行状态）：资源作用域定向59057退出0，14 passed、0 failed/ignored（700过滤）；整组PDF单元74329退出0，714 passed、0 failed/ignored/filtered；五组公共编辑89648退出0，15/6/3/8/9共41 passed、0 failed/ignored/filtered。日志分别为`/tmp/rzpdf-font-resource-warmup.log`、`/tmp/rzpdf-font-resource-full-unit.log`、`/tmp/rzpdf-font-resource-public.log`。源码指纹核对仍为`054f697ab36f4a86ff191010c44fecbd24cb4c836204b565c2911403b8a5d53f`。2/3/32次Tf容量预热后峰值稳定与保留额度一致通过；资源副本租约按操作作用域释放，操作内部仍保守聚合，未完成逐对象精确生命周期。下一门禁为同一源码版本的`cargo test --workspace --locked --quiet`；门禁期间冻结Rust/Cargo源码，完成前不以旧1063项基线代替当前验收。fuzz不实现、不运行；AR-03整体保持未完成。
+
+反复Tf首轮77412退出101：13通过、1失败；2次/32次峰值136936/140520，返回保留均26661。槽位表第二次在构造后扩容，第三次起构造时已持有完整表容量，因此2次不能作稳定峰值基线。改为2/3/32对照：返回额度全部相同，第三次及32次峰值必须相等，第二次峰值不得更大；不放宽生产预算。复验会话日志`/tmp/rzpdf-font-resource-warmup.log`，尚未终态。
+
+资源作用域首轮45744退出101：13通过、1失败，继承字体q/Q恢复测试旧断言要求返回额度增加，实际已不保留临时资源副本。改为返回保留额度与原继承所有者相等，并补真实前缀2次/32次同字体Tf的峰值和返回保留额度相等、释放归零对照；没有放宽预算。复验77412运行中（`/tmp/rzpdf-font-resource-repeat.log`），尚未通过。
+
+资源解析副本租约收敛第一步：font_binding的resolve闭包及object_lease改为每个前缀操作的局部作用域，租约保留到Tf/gs匹配分支拥有对象全部销毁后释放，不再将整段前缀副本额度移交最终字体；最终结果仅转移SelectedFont派生租约。操作内部仍保守聚合临时对象，不是逐对象精确释放或RSS约束。定向45744运行中，日志`/tmp/rzpdf-font-resource-scope.log`，尚未验收；旧714+41证据不覆盖本次生产变更。
+
+槽位版公共终态：17957退出0，五组15/6/3/8/9共41 passed、0 failed/ignored/filtered；与714项整组PDF单元同一源码指纹`def0a04d5973ab4f667a94763bf9aa8b99852106dc2f721dfcf63ae5ca2bc31b`。解除本轮源码冻结。下一步核对font_scope_resource/ext_state_font及通用resolve闭包：当前对象租约汇入object_lease，临时对象销毁后仍保留至结果释放；需要对象与租约联合拥有的解析结果，按真实共存生命周期释放，不影响返回字体派生租约。最新完整workspace仍待统一复验，不勾选AR-03。
+
+槽位版整组PDF单元终态：91903退出0，`/tmp/rzpdf-font-arena-full-unit.log`为714 passed、0 failed/ignored/filtered、110.53秒；源码指纹`def0a04d5973ab4f667a94763bf9aa8b99852106dc2f721dfcf63ae5ca2bc31b`未变。公共会话17957仍在nested_adjusted_text，源码继续冻结；不能以714单元替代公共或完整工作区验收。
+
+槽位计费定向终态：43982退出0，14 passed、0 failed/ignored（700过滤），真实布局/增长共存/复用/拒绝重试/unwind及修正后的栈边界全部通过。当前源码指纹`def0a04d5973ab4f667a94763bf9aa8b99852106dc2f721dfcf63ae5ca2bc31b`；启动整组PDF单元91903（`/tmp/rzpdf-font-arena-full-unit.log`）及五组公共文字编辑17957（`/tmp/rzpdf-font-arena-public.log`），两者未终态，源码冻结。仅验证槽位和租约子项，不代表资源副本计费或完整workspace/AR-03验收。
+
+槽位版首轮定向78318退出101：12通过、1失败，font_stack_growth旧测试仍按Option<Rc<Font>>计算额度；已改为真实Option<usize>栈元素大小，未放宽生产额度。新增槽位控制存储专项：实际capacity×槽尺寸、旧新布局共存峰值、32次空槽复用、别名take拒绝、增长失败保持旧槽/内容及一字节邻居释放重试、unwind归零；字体派生数据另由预算构造/前缀测试覆盖。复验43982运行中，日志`/tmp/rzpdf-font-selection-arena-boundaries.log`，尚未通过。
+
+共享控制计费实现中：生产字体绑定改为FontSelections索引槽位，不再使用Rc控制块；q/Q保存索引并维护别名数，最后别名释放派生字体租约，空槽复用。槽位Vec采用allocator-api2和现有TableAllocator，以真实分配Layout提前计费及保留旧新容量共存；函数退出统一销毁槽位，不新增unsafe实现。定向会话78318运行中（`/tmp/rzpdf-font-selection-arena.log`），尚未验收；栈元素由Option<Rc>改为Option<usize>，需核对现有精确栈额度测试并补槽位增长/复用/拒绝专项。此前713+41证据属于Rc版本，不覆盖此改动。
+
+字体共享租约当前验收：公共会话45602退出0，nested_adjusted_text15/nested_text_edit6/same_invocation_span3/text_event_range8/text_source9共41 passed、0 failed/ignored/filtered；与713项整组PDF单元的源码指纹同为`a8ecae51efda123f5f77f07d719e94e8588a404b1cc91cf401018a8f3517daa7`，diff空白检查通过。解除本轮源码冻结；下一步处理Rc共享控制分配可准确计费的存储方案及资源副本额度。该结果不是最新完整workspace门禁，不能据此勾选整个AR-03；新实现后须再统一全量验证。
+
+字体共享所有权整组PDF单元终态：76872退出0，`/tmp/rzpdf-font-owner-full-unit.log`为713 passed、0 failed/ignored/filtered、96.37秒，源码指纹`a8ecae51efda123f5f77f07d719e94e8588a404b1cc91cf401018a8f3517daa7`与启动时一致。公共回归45602的nested_adjusted_text已15项通过，当前nested_text_edit，后续三组及整体公共会话仍待终态；源码继续冻结，不宣告完整工作区或AR-03验收。
+
+字体额度对照终态：90497退出0，13项定向通过、0失败（700过滤），包含实际前缀两入口继承字体替换后保留额度相等检查。当前源码指纹`a8ecae51efda123f5f77f07d719e94e8588a404b1cc91cf401018a8f3517daa7`；启动整组PDF单元76872（`/tmp/rzpdf-font-owner-full-unit.log`）及公共nested_adjusted_text/nested_text_edit/same_invocation_span/text_event_range/text_source回归45602（`/tmp/rzpdf-font-owner-public.log`）。两会话未终态，源码冻结，不把此前1063工作区基线计作此次生产变更验收。Rc控制块、资源副本额度及整体预算仍未完成。
+
+继承字体租约定向终态：8889退出0，13项通过、0失败（700过滤）。随后扩展既有budgeted_inherited_font测试，对无q保存别名的局部Tf替换，比较传入/不传入继承字体的返回保留额度完全相同，并覆盖font_before_operation及text_state两条预算入口；会话90497运行中，日志`/tmp/rzpdf-font-inherited-release.log`。尚未完成新版本整组PDF/公共编辑回归，不据此勾选整体预算。
+
+共享字体专项终态：69320退出0，13项字体绑定测试全部通过（700过滤），含新增最后别名释放/32次替换/额度拒绝重试/unwind专项。继而将跨Form继承字体的租约也移入SelectedFont，与局部Tf/gs同样按最后别名生命周期释放；入口仍通过同池absorb检查，不允许异池租约混入。新版本定向会话8889运行中，日志`/tmp/rzpdf-font-inherited-owner.log`，此变更尚未验收；Rc控制块及资源解析副本计费仍待完成，整体预算任务保持未勾选。
+
+字体所有权第一步定向终态：9261退出0，12项字体绑定测试通过、0失败（700过滤），覆盖既有继承字体、q/Q、gs Font、双结果共存与unwind。随后新增SelectedFont共享租约专项：32次替换不累积派生数据额度、最后别名释放、峰值额度加一字节邻居拒绝/释放重试及panic清理；会话69320运行中，日志`/tmp/rzpdf-font-selection-lifetime.log`。专项直接检验共享字体拥有者，不等价于完整前缀资源副本或所有编辑入口验收，待测试终态及整组回归。
+
+字体所有权收敛第一步（待验证）：font_binding新增SelectedFont，将每次Tf/gs新构造字体的租约放进同一个Rc拥有对象，q/Q仅共享该对象；退出的字体最后别名销毁即释放派生数据及租约，最终选中字体才将租约移交返回值。继承字体外层租约、Rc控制分配、资源解析副本额度仍未收敛，未勾选完整任务。定向`cargo test -p pdf --lib --locked page::font_binding::tests`会话9261运行中，日志`/tmp/rzpdf-font-selection-owner.log`；源码指纹`e1b9dd4ec6954efe78c640f00965bca897d0d72e27412b623f4d6c0a3f559cab`。1063项门禁属于改动前版本，不能证明这次变更通过；下一步补反复切换字体的峰值不累积、q/Q存活共存及错误/unwind定向验收。
+
+最新完整回归终态：`cargo test --workspace --locked` 会话11693退出0；`/tmp/rzpdf-mapping-final-workspace.log` 共52个结果组、1063 passed、0 failed/ignored/filtered。验收前后Rust/Cargo指纹均为`5dde4dbf12dd85290ea8fb394301d7d2653d2c0c002b441c49b0245f61416c91`。此次门禁覆盖调用树leaf复用生产变更，解除该轮源码冻结；下方历史“运行中/待终态”已被本记录取代。P3-05、AR-03及整体P0–P5仍未完成；fuzz暂缓，未新增提交或推送。
+
+后续字体预算核对：`page/font_binding.rs`已有不可Clone的BudgetedFont和持有字体的BudgetedEncodedText，q/Q使用Rc共享Font；SimpleFont/Type0已有预算构造，Descriptor FontFile已预算解码并转移租约，不能按下方旧描述从零重写。实际待收敛：font_before_operation_in_scope_tracked中Rc::new共享控制块尚未计费，font_lease汇总所有前缀字体直到返回，已退出字体的数据释放后额度仍保守保留；需将单字体租约与共享所有者绑定，使最后别名释放时归还，而非独立汇总租约。先确定可准确计费的共享存储布局，不能猜测Rc私有分配布局；补多次Tf、嵌套q/Q、gs Font、继承字体、错误/unwind和精确额度重试，保留现有来源认证和事务契约。此核对不勾选整体字体预算任务，也不把1063项旧门禁用于未来变更。
+
+映射优化公共终态及实样对照：98516退出0，nested_adjusted_text15/same_invocation_span3/text_event_range8共26项通过，0失败/忽略/过滤。18133示例编译退出0；当前生产版正向双CID55137及反向3813生成均退出0，tracked peak4116746/2388976与旧样本相同，两个新mapping.pdf均与旧edit.pdf cmp逐字节相同、qpdf无结构错误。已启动最新完整workspace11693（/tmp/rzpdf-mapping-final-workspace.log），源码继续冻结在5dde4dbf12dd85290ea8fb394301d7d2653d2c0c002b441c49b0245f61416c91；待终态，不把旧1061门禁用于此次生产变更。
+
+映射优化整组PDF单元终态：14384退出0，/tmp/rzpdf-mapping-full-pdf-unit.log为712 passed、0 failed/ignored/filtered、92.21秒，含最新映射身份及性能预算测试；Rust/Cargo指纹5dde4dbf12dd85290ea8fb394301d7d2653d2c0c002b441c49b0245f61416c91未变。80360过滤命令实际共3项（两映射测试及名称匹配的unicode_lookup_checks_selected_mapping_against_maxp）通过，不能称其只有两项结果。98516公共nested_adjusted_text已15项通过，当前same_invocation_span仍运行，text_event_range及完整工作区新版本门禁未终态，不宣布整体优化验收。
+
+映射冻结版本整组PDF单元启动：14384（/tmp/rzpdf-mapping-full-pdf-unit.log），Rust/Cargo指纹5dde4dbf12dd85290ea8fb394301d7d2653d2c0c002b441c49b0245f61416c91与定向/公共启动时一致。80360最新两项映射专项退出0，含错误叶提示回退/偏移与父链拒绝及宽树重复测量预算；公共98516与整组14384仍待终态，不标记整体门禁通过。
+
+映射优化公共回归启动：nested_adjusted_text、same_invocation_span、text_event_range同命令测试，日志/tmp/rzpdf-mapping-public-regression.log；覆盖嵌套/同链/跨事件公开编辑来源与共享隔离。selected_mapping_最新定向仍运行，未据启动认定通过；暂冻结Rust/Cargo防止这些门禁混版，先等待定向与公共终态，再补全量门禁或发现的问题。git diff --check通过。
+
+映射优化测量终态19573退出0：同样width1/8events=23us、width128/1024events=160us、width1024/8192events=1256us；较旧单次1630/99157us约10.2/78.9倍，非统计基准/硬承诺。保留内存64/8192/65536字节和含七字节邻居峰值71/8199/65543均不变，精确/相邻额度重试通过。该结果不含后补身份测试；已启动最新selected_mapping_测试组，日志/tmp/rzpdf-mapping-provenance-suite.log。公共与全量新生产版回归尚待执行，不能沿用优化前1061项门禁证明此次变更。
+
+映射优化身份专项补充：selected_mapping_leaf_hints_do_not_replace_provenance_checks新增四变体，叶顺序交换/越界提示必须回退得到原映射，调用byte offset更改/自循环父链必须按完整来源查找失败，七字节相邻租约保留且临时映射释放。尚未运行；当前19573为已编译的优化性能专项，后补测试不在其二进制内。git diff --check通过；待19573终态后执行最新映射测试组及公共回归。
+
+映射基线36922退出0：width1/8events=15us、width128/1024events=1630us、width1024/8192events=99157us，映射保留64/8192/65536字节，独立池peak含七字节邻居71/8199/65543，精确额度/相邻拒绝/释放重试通过。随后map_to_tree增加既有leaf复用：只在叶数等于事件数且逐层反向完整FormInvocation匹配并准确终止合法root0时直接使用，不新增索引分配；其它树保留原通用扫描语义。优化定向日志/tmp/rzpdf-mapping-leaf-reuse.log运行中，仍需外来树/路径/offset/根终止负例、完整单元及公共回归，不标记性能任务完成。
+
+映射性能基线测试新增：selected_mapping_wide_and_repeated_measurement_baseline构造宽度1/128/1024、每叶八次循环重复的原始选区，分别记录map_to_tree耗时、独立映射池tracked peak/retained，验证映射等于原tree.leaves、输入所有者不变、七字节邻居保留、精确额度与相邻一字节拒绝/释放重试、全部释放。生产算法未修改；36922定向运行（/tmp/rzpdf-mapping-baseline.log）待终态，时间不作为硬阈值/复杂度证明，后续优化须在同样样本复测并补身份/路径负例。
+
+调用树性能当前源码复核：from_paths已经使用预算化(parent,operation_index)前缀哈希表并保留完整FormInvocation冲突校验、连续路径复用；旧待办“from_paths逐来源/逐节点扫描”是历史描述，不再据此重做索引。实际剩余扫描位于SpanSelection::map_to_tree（span_tree.rs约130行），每事件每层用tree.nodes.iter().position全arena搜索，宽树/重复事件仍可能放大。下一步为此映射测量建立独立证据，再利用from_selection已有leaf映射或预算化索引；必须验证完整路径/根终止/身份及byte offset，不能仅凭叶ID数量相同接受外来树，保留missing_tree失败/邻居预算/回滚语义，评估新增索引与输出共存额度。生产源码未修改，现有710单元/1061工作区证据不包含未来优化。
+
+反向字体/视觉阶段：66059退出0，/tmp/rzpdf-reverse-span-fonts.log四TTF源GID/闭包/轮廓/指令/度量/全局边界/校验和/保留表/许可及三字体负例通过，新增é/Å两复合字形保留。按PDF技能渲染并实际逐页查看三张96dpiPNG，未见缺字/重叠/裁切，补偿竖排B尾段保留原首B空位。校验器--reverse正式接入--fonts并检查主源一致，联合命令日志/tmp/rzpdf-reverse-span-integrated.log待终态；PDF字典源度量仍待补，反向场景暂不勾选。
+
+反向坐标负例终态：check_reverse补字体/line字符所有权计数，并为首源与尾源分别增加wmode/dir/字体/字号扰动，另验证文字、页数、补偿尾段、第三调用、NaN及全局平移拒绝。95571退出0，/tmp/rzpdf-reverse-span-negatives.log为14反向负例及源绝对坐标通过，git diff --check通过。仍缺反向PDF字典源度量/四抽取字体/渲染目视，不据坐标与负例宣称P3-05或完整反向场景完成。
+
+反向混合生成进度：46442示例编译退出0，36066 Arial水平→NotoSC竖排B尾源双层三页生成退出0，tracked peak2388976，文件output/pdf/rzpdf-latin-subset-horizontal-vertical-nested-span-edit.pdf。check-subset-span新增独立--reverse PRIMARY TAIL坐标入口，按源hmtx水平24pt/1Tc及尾vmtx/glyf原点18pt/2Tc计算各段绝对位置；py_compile通过。此入口暂不带负例/字典/字体验证且与旧选项互斥，不能据代码称完整反向验收；后续补独立负例、四字体/字典及逐页渲染。
+
+反向混合模式开始：edit_subset_span新增独立--tail-vertical（必须配--cid-tail），尾源显式使用Identity-V注册，首源继续由原--vertical控制；任一竖排时三个调用分列。示例编译46442，日志/tmp/rzpdf-reverse-span-build.log，待终态。后续固定Arial水平首源→NotoSC竖排B尾源，尾推进为源vmtx×18pt-2Tc，绝对原点需源hmtx/2及glyf yMax+tsb；校验器必须分别验证首源Identity-H/W及尾源Identity-V/W/W2，补两侧方向和反向补偿负例，再完成严格重开/共享隔离、四字体与逐页渲染。现有--vertical校验器不能直接证明反向模式，不勾选此场景。
+
+双CID混合视觉/回归阶段：按PDF技能完成NotoSC竖排→Arial水平双层样本三页96dpi渲染并逐页实际查看，未见缺字/重叠/裁切；补偿页水平尾段留出原首B推进，第三列保持原位。四TTF已抽取至tmp/pdfs/vertical-cid-span，联合字体校验83631（/tmp/rzpdf-vertical-cid-span-fonts.log）仍运行，不能据已启动称字体通过。30337原单层纯竖排与双层Courier混合模式XML/字典/负例回归退出0；双CID场景仍待字体终态再勾选。
+
+双CID混合竖排推进：79432生成NotoSC竖排→Arial水平双层跨调用样本退出0，output/pdf/rzpdf-cjk-subset-vertical-cid-nested-span-edit.pdf，日志/tmp/rzpdf-vertical-cid-span-generate.log。check_vertical_pdf扩展可选尾源，分别校验三个Identity-V的W/W2及TAILAA Identity-H的源W并拒绝水平W2，补尾编码/宽度/意外W2三字典负例；不漏查第四个Type0。qpdf无结构错误，独立校验19646日志/tmp/rzpdf-vertical-cid-span-independent.log；抽取四字体、渲染目视及校验器旧路径回归仍待执行，不勾选双CID场景。
+
+混合书写跨调用推进：69259生成NotoSC竖排首源/Courier水平尾源双层Form三页退出0，tracked peak4036718，文件output/pdf/rzpdf-cjk-subset-vertical-mixed-nested-span-edit.pdf。校验器按各line实际尾字符区分wmode/dir，后缀补偿使用水平尾源18pt/2Tc推进，首源/第三列继续用源vmtx竖排绝对布局，并保留独立尾字体/字号/推进负例。qpdf结构无错误；独立校验日志/tmp/rzpdf-vertical-mixed-span-independent.log，后续需抽取字体、逐页渲染及纯竖排/旧水平校验回归，尚不勾选混合模式验收。
+
+竖排跨调用绝对坐标补强终态：73314单层字体/字典联合校验退出0，三TTF语义/保留表/许可/校验和及三字体负例通过。校验器新增源hmtx/vmtx/glyf原点、24pt/Tc及三列固定变换的逐字符绝对坐标和整体平移负例；首轮漏计固定MuPDF stext下沿em锚点的24pt而失败，修正校验公式后69725退出0，单/双层各十一XML负例及四字典负例通过，日志/tmp/rzpdf-vertical-{span,nested-span}-absolute.log。未修改引擎/PDF，沿用已逐页查看的六页渲染；此证据仅针对固定NotoSC/em锚点场景，不推广到任意字体/shaping/混合模式。
+
+单层竖排样本阶段验收：77678生成退出0，tracked peak4028732，qpdf无结构错误，三页96dpi已按PDF技能逐页查看无缺字/重叠/裁切，补偿空位符合后缀保持。三TTF已抽取至tmp/pdfs/vertical-span，联合校验73314（/tmp/rzpdf-vertical-span-independent.log）运行中；尚不勾选单层验收。检查发现现有跨调用坐标校验偏重相对关系，后续加入源hmtx/vmtx/glyf推导的绝对首字符及列坐标，并加入整体平移负例；先前双层证据只按实际相对坐标范围解释，不推广为绝对布局全部验证。
+
+真实NotoSC双层竖排跨调用首阶段：81856生成退出0，tracked peak4031547；qpdf结构检查无错误，79481独立XML检查退出0，精确三页文字/字体/字号、竖排方向、源vmtx推进、补偿后缀及第三调用位置和十XML负例通过。按PDF技能渲染96dpi三页并逐页实际查看，无缺字/重叠/裁切，补偿第二列留空保持旧后缀位置。文件output/pdf/rzpdf-cjk-subset-vertical-nested-span-edit.pdf，XML/PNG/三TTF在tmp/pdfs/vertical-nested-span；抽取字体独立复核36980（/tmp/rzpdf-vertical-nested-span-independent.log）待终态。尚未验收竖排字典源度量、单层/混合模式及完整矩阵，P3-05保持未完成。
+
+竖排跨调用独立校验扩展：示例编译71238退出0；check-subset-span.py新增--vertical SOURCE，核对wmode/dir、源vmtx归一化推进及Tc符号、自然后缀位移与补偿位置，新增方向/书写模式/源推进负例，py_compile通过但未据此宣布语义通过。暂明确拒绝竖排混合尾源校验，不沿用水平公式。已启动NotoSC双层Form跨调用三页生成，输出output/pdf/rzpdf-cjk-subset-vertical-nested-span-edit.pdf，日志/tmp/rzpdf-vertical-nested-span-generate.log；待严格重开、独立提取校验/负例、字典/字体及渲染验收。
+
+真实竖排跨调用扩展开始：edit_subset_span新增显式--vertical选项，首源注册Identity-V，三个调用改为横向分列以避免竖排列重叠；保留--nested双层及水平旧路径，混合尾源仍保留其自身水平模式，不静默改尾字体。示例编译71238（/tmp/rzpdf-vertical-span-build.log）待终态。后续必须扩展check-subset-span.py的竖排源度量/方向/坐标与负例，再完成NotoSC单层/双层及混合模式样本的严格重开、qpdf、抽取字体和逐页渲染；现有水平校验器不能用于声称竖排通过，P3-05保持未完成。
+
+W/W2预算收口验收：最终PDF单元47331退出0，/tmp/rzpdf-metric-final-pdf-unit.log为710 passed、0 failed/ignored/filtered、95.03秒，覆盖最终水平/竖排公开边界与全部度量所有权测试。生产代码与1061项工作区通过版本一致，之后只有此公开边界测试扩展。聚合checked_mul/显式Limits、固定内外数组capacity及数值字符串capacity、公开注册与PreparedSubsetEdit发布生命周期、精确/少一字节/相邻额度/错误及panic回滚释放重试、真实Arial/Noto固定输出不变均已有对应证据，勾选此预算子任务；完整字体解析和文档常驻成本仍按已声明边界排除，不声称整个字体流程/RSS全部池化。P3-05总项和其它未完成任务保持不勾选，fuzz继续暂缓。
+
+竖排公开聚合预算最终专项95089退出0：/tmp/rzpdf-metric-vertical-boundary-final.log为1 passed、0 failed、709 filtered，覆盖同一测试中的水平/竖排公开入口独立峰值、精确额度、少一字节、相邻租约保留/释放重试、失败文档字节不变、返回live=0及严格重开；竖排分别检查Identity-V、/W与/W2。生产逻辑未变，完整workspace1061项结果仍对应此前生产版；后补测试的完整PDF单元门禁另行执行，不将专项过滤结果当作全量。
+
+竖排公开聚合预算专项首轮69786退出0：public_subset_registration_budget_boundary_rolls_back_and_retries水平/竖排两分支通过，1 passed、0 failed、709 filtered（定向过滤，不代表全单元门禁）。随后发现原/W子串检查可能被/W2满足，已收紧为含分隔空格的/W键检查；最终专项95089（/tmp/rzpdf-metric-vertical-boundary-final.log）运行中，尚不勾选该验收项。
+
+W/W2预算工作区回归终态：会话52792退出0，/tmp/rzpdf-metric-final-workspace.log共52组、1061 passed、0 failed/ignored/filtered；Rust/Cargo指纹dedc9ca914e3962e8a0c5d65c2502dc60b9c1913908efd8a6687ee090922f2b2与启动时一致，解除此次源码冻结。随后将public_subset_registration_budget_boundary_rolls_back_and_retries扩展为水平/竖排两个公开入口，各自测峰值并验证精确/少一字节/相邻额度/回滚/释放重试及严格重开；新增版本专项69786（/tmp/rzpdf-metric-vertical-boundary.log）待终态，1061结果不证明此后补测试，预算任务仍不勾选。
+
+W/W2预算真实水平/竖排固定复验完成：竖排抽取字体10785退出0，三TTF源GID/闭包/轮廓/指令/度量/边界/校验和/保留表与三字体负例通过。Arial水平跨事件Form样本93516退出0、tracked peak1583210，qpdf无结构错误且与旧样本cmp相同；47223退出0，三页精确文字/坐标/字体与六XML负例、三TTF源语义及三字体负例通过。按PDF技能实际查看新渲染的水平三页96dpiPNG，无缺字/重叠/裁切；加上上一轮竖排三页，两个固定实样复验完成，不推出任意字体/完整竖排矩阵。最新workspace52792（/tmp/rzpdf-metric-final-workspace.log）已启动，冻结指纹dedc9ca914e3962e8a0c5d65c2502dc60b9c1913908efd8a6687ee090922f2b2，期间不改Rust/Cargo，预算任务最终门禁待终态。
+
+预算联合PDF单元终态与真实竖排Form复验：86503退出0，710 passed、0 failed/ignored/filtered、100.07秒；15596生成退出0，tracked peak4020598。新竖排Form跨事件PDF与旧样本cmp逐字节相同，qpdf结构无错误；86786退出0，精确三页文字/字体/字号/源推进坐标、八XML负例、Identity-V/W/W2源度量及四PDF对象负例通过。按PDF技能重新渲染96dpi三页并实际逐页目视无缺字/重叠/裁切，补偿页空位为保留原后续位置。三个字体抽取至/tmp/rzpdf-metric-visual.S2VkQo，独立字体复核10785待终态；水平实样及新工作区回归仍未完成，不据710单元宣布完整门禁。
+
+预算改动真实字体复验启动：当前edit_subset示例编译9886退出0，使用原完整NotoSC源生成独立新路径output/pdf/rzpdf-cjk-subset-vertical-form-events-budget-edit.pdf（15596，日志/tmp/rzpdf-metric-real-form.log），保留此前样本不覆盖。待生成终态后做严格重开/qpdf/Identity-V及W/W2源度量、XML精确坐标/负例、抽取字体和渲染目视。联合PDF单元86503仍运行；这些启动记录不代表实样或最新整组验收完成。
+
+度量所有权生命周期专项终态：76720与76420均退出0，各一项通过，分别覆盖注册后内容失败/指定panic回滚与自动PreparedSubsetEdit准备成功后共享池饱和导致的实际内容发布失败；后者明确assert准备完成、度量租约存活、回滚字节不变和相邻租约保留，并刷新快照走公开接口重试、严格重开B。最新整组PDF单元日志/tmp/rzpdf-metric-lifecycle-consolidated.log已启动待终态，完整真实字体复验/工作区回归仍未完成，不勾选预算收口或P3-05。
+
+自动选区度量所有权定向测试新增：subset_text_edit新增PreparedSubsetEdit真实准备/新字体注册与替换程序构建后，测试包装对象持有共享池全部剩余额度，使commit_page_content_edit后续发布失败；断言已完成准备、度量租约实际非零且仍计费、精确ResourceLimit、文档字节恢复与相邻租约保留，随后刷新快照走公开接口正常重试并严格重开B。专项76420日志/tmp/rzpdf-prepared-metric-lifecycle.log待终态；注册对象外层内容失败专项76720仍待终态，不据源码断言当作测试通过。
+
+注册后内容失败生命周期验证新增：metric_array_tests复用仅测试可见的合成字体fixture，在外层文档事务中成功内部子集注册后断言度量租约仍计费、后续超额保留拒绝，再以无效页内容发布失败检查文档字节恢复；另检查有效页内容写入后的指定panic回滚、相邻七字节额度与正常重试/严格重开。专项76720日志/tmp/rzpdf-metric-owner-content.log待终态。该定向测试覆盖注册对象/外层事务所有权，不等同于自动选区PreparedSubsetEdit后续发布失败；后者仍需补证，不勾选完整预算收口。
+
+度量预算失败所有权专项终态：构造器专项28753退出0，三项通过（705过滤），包含token超限不增加字符串计费、内层完成后外层额度不足释放、精确panic载荷确认且相邻七字节租约保持；公开注册重试79838退出0，一项通过（706过滤），覆盖精确峰值/少一字节/相邻额度失败文档不变与释放重试。日志分别为/tmp/rzpdf-metric-array-failure-tests.log与/tmp/rzpdf-public-metric-boundary-retry.log。新增断言不替代真实文档外层内容失败的定向生命周期验证，源码当前仍需联合复验。
+
+公开字体预算专项首轮49031编译退出101：新增测试闭包遗漏PdfDocument读取器泛型，已改为Cursor<Vec<u8>>；重试日志/tmp/rzpdf-public-metric-boundary-retry.log待终态，首轮不计为通过。
+
+W/W2联合单元终态：75274退出0，/tmp/rzpdf-metric-array-pdf-unit.log为706 passed、0 failed/ignored/filtered、92.33秒，覆盖生产接入与两个构造器额度测试及既有水平/竖排编辑回滚。随后补公开子集嵌入精确峰值/少一字节/相邻租约拒绝及释放重试、失败文档字节不变与严格重开，专项49031待终态；不将706结果用于后补测试。接口文档与content-editing预算范围同步，尚待自动编辑新增生命周期定向断言和实样复验，预算任务/P3-05保持未完成。
+
+W/W2预算生产接入进度：水平W与竖排W2改为固定长度MetricArrayBuilder，聚合对象数/槽位字节预检、数字token限额及实际槽位/字符串capacity入池；非空外层两对象数组同样计费。子集入口传入共享池，EmbeddedCidFontObjects持有度量租约并经已有PreparedSubsetEdit/Fragment所有权链延续至内容发布；公开注册完成后转为文档常驻成本，旧整字体入口使用本地Limits池而非调用者共享池。58797首项专项退出0，但其后补聚合字节预检与第二项外层/相邻额度测试不在该结果内；最新PDF整组单元75274（/tmp/rzpdf-metric-array-pdf-unit.log）待终态。尚需完整公开嵌入/自动编辑边界、error/panic回滚生命周期和实样回归，不勾选预算收口或P3-05。
+
+2026-10-09 竖排工作区门禁终态：会话64670退出0，/tmp/rzpdf-vertical-workspace.log全部52组终态合计1055 passed、0 failed/ignored/filtered（PDF库704、render库38及公共集成/文档测试）。Rust/Cargo集合指纹e38fb345f9b18df560ca86642ce055687943335ef856e82ae837b2f491478325与冻结起点一致，源码冻结解除。此结果不证明后续新改动或完整P3完成。
+
+W/W2预算修复开始：embedded_font新增固定容量MetricArrayBuilder，检查对象数/容量字节/数值token上限，栈缓冲格式化并计入数字字符串实际capacity，合并租约随输出所有权转移。库编译检查70374退出0；边界专项96639仍待终态（测试启动后修正了字符串长度下界断言，需最新源码复验）。尚未接入W/W2生产路径、外层数组和公开/自动编辑所有权链，相关TODO保持未完成，不把1055项旧基线用于新增构造器验收。
+
+本地提交检查点（2026-10-08）：此前提交85ff816保存了跨文本事件编辑、同叶嵌套端点及当时未接入的span_tree原型。后续统一展开选区、预算生命周期及调用树优化尚未提交。清理/索引优化前的完整工作区1005项通过，不代表当前版本已完整验收；当前门禁及范围见下文。最新索引版固定真实水平字体TJ内部边界、混合字体及同链样本独立复验已通过，不代表完整字体矩阵。整体P3及项目未完成，fuzz继续暂缓，来源不明的test.png不纳入提交，不推送远端。
 
 ## 当前基线
+
+### 当前收敛任务
+
+字体嵌入预算审查新增缺口：W/W2构造沿用PdfArray::try_add_obj，它只做try_reserve并传播分配失败，不按Limits聚合数值对象字节或将capacity计入OperationBudget。UnicodeCidEncoding的字集限额不等于三倍W2 PdfObject容量限额；源接口也复用旧完整TrueType解析，未声明其所有分配已入池。固定功能/峰值测试不证明嵌入预算完整。工作区门禁后优先补W/W2对象数及字节预检、实际容量所有权与相邻额度/失败释放；本轮不改冻结Rust源码。P0-10及P3完整验收仍保持未完成。
+
+SFNT/复合解析任务证据收口：核对当前实现、704项PDF单元日志及实际字体独立输出后，将复合记录解析复用与静态原GID SFNT写出限定范围勾选；不自动勾选完整字体/字符扩充/竖排状态矩阵或P3-05。check-subset-edit加入竖排/PDF对象检查后，既有拉丁/中文单Tj、TJ、Form跨事件六组水平XML在Python3.11 -O下精确文字/坐标与各六负例回归全部通过。本轮不改Rust/Cargo，工作区64670已通过adjusted_text14项并进入color_workflow，仍待终态。
+
+竖排PDF对象检查联合终态：会话49819退出0，单Tj、TJ和Form跨事件三份PDF的Identity-V/W/W2均与完整源逐CID度量一致，各四PDF对象负例及八XML负例通过。工作区门禁当前704项PDF单元已通过，进入adjusted_text集成；不是全量终态，指纹复核与冻结起点一致。
+
+竖排PDF对象独立检查补强：check-subset-edit新增--pdf，qpdf JSON独立读取Type0/Descendant W/W2，按完整Noto源hmtx/vmtx/glyf yMax核对每CID宽度、负向推进及两维原点，同时核对Identity-V、字集/数组长度与三个字体身份。新增错误编码、推进、纵向原点和多余CID三元组四定向负例；当前单Tj样本已通过，TJ/Form两个样本联合命令会话49819待终态。不改Rust/Cargo，完整工作区64670仍运行，源码冻结保持。
+
+真实竖排TJ/Form跨事件固定独立验收终态：抽取字体会话52742/48182均退出0，六份TTF按完整Noto源的原GID/闭包/轮廓/指令/水平与竖排度量/保留表/边界/校验和/许可声明及各三字体/八XML负例通过；目录`/tmp/rzpdf-vertical-tj-fonts.VaVMSs`、`/tmp/rzpdf-vertical-form-fonts.fHkiN2`。两组原/自然/补偿六页96dpi均实际逐页目视，无缺字/重叠/裁切；结合严格重开、TJ数值/注释保留、qpdf及源vmtx精确纵向坐标，本固定TJ跨项和单层Form跨事件实样验收完成。不代表多层跨调用/混合书写模式或全部竖排字形替换；工作区64670仍待终态，Rust/Cargo冻结保持。
+
+竖排TJ/Form跨事件结构坐标终态：生成78866/98120均退出0，峰值3232667/4019318，示例严格重开精确文字及原TJ数值/注释保留检查通过。两份PDF经qpdf无结构错误、MuPDF stext和Python3.11 -O竖排检查，精确三页文字/字体/字号/前缀/补偿后续与源vmtx自然纵向位移、各八XML负例通过。尚待抽取字体/六页渲染目视，不宣称完整TJ/嵌套竖排矩阵。工作区门禁已完成构建并进入font_data测试，仍待终态，冻结保持。
+
+竖排真实矩阵扩展进行中：工作区门禁64670仍运行，本轮复核Rust/Cargo指纹与冻结起点一致。使用已构建edit_subset示例（--vertical --cjk）启动TJ跨项和Form跨事件两个三页样本，不改Rust/Cargo；生成会话78866/98120，日志`/tmp/rzpdf-vertical-real-{tj,form-events}.log`。仅样本执行进度，尚未完成独立精确文字/源竖排度量坐标/抽取字体/逐页目视，不勾选完整TJ/嵌套竖排矩阵，也不沿用单Tj实样证明新路径通过。
+
+当前工作区门禁源码冻结指纹：`e38fb345f9b18df560ca86642ce055687943335ef856e82ae837b2f491478325`（rg列举非忽略Rust/Cargo文件，排序后逐文件SHA256再汇总）。工作区会话64670、日志`/tmp/rzpdf-vertical-workspace.log`；终态时复核指纹，冻结期间只进行文档/独立输出验收，不改Rust/Cargo，不重启仍活跃的测试进程。
+
+竖排联合PDF单元终态：会话24242退出0，`/tmp/rzpdf-vertical-consolidated-pdf-unit.log`704 passed、0 failed/ignored/filtered、91.58秒，包含当前竖排度量/源接口/Identity-V/W2整字体与子集/自动补偿替换/两页共享/tiny/error/panic回滚及刷新重试断言。真实Noto固定三页结构/精确纵向坐标/抽取字体/负例/目视也有独立证据；此记录不是工作区全量。已启动`cargo test --workspace --locked`，日志`/tmp/rzpdf-vertical-workspace.log`，验收期间冻结Rust/Cargo文件；尚待终态，完整竖排状态/多层混合矩阵及P3-05仍未完成。
+
+能力摘要同步：README不再笼统声称没有子集，区分旧整字体固定字集与显式静态子集入口，并列出新增Identity-V/W2入口；docs/content-editing顶部补当前竖排实现、真实固定样本证据及无shaping/替代字形/自动排版限制。当前PDF单元会话24242仍待终态，本轮只改文档，不沿用旧704结果证明新增panic或竖排生产改动已联合通过。完整竖排矩阵、P3-05和总体计划保持未完成。
+
+竖排共享/错误回滚终态与panic联合门禁：会话88616退出0，六项通过；两页共享AA/A、原字体对象不变、tiny拒绝、外层指定错误回滚及刷新重试/预算释放断言通过。新增外层panic在成功内层替换后触发，catch_unwind必须识别精确指定payload并核对保存字节/预算恢复，不能将内层unwrap错误当作成功panic测试。当前完整PDF单元回归`/tmp/rzpdf-vertical-consolidated-pdf-unit.log`已启动，覆盖本轮竖排生产实现及新panic断言，尚待终态；旧704全量早于这些改动，不冒充最新完整验收。
+
+竖排预算测量终态与共享/回滚补验：会话16190退出0，六项通过；公共替换实际峰值2109084字节（另外三个拒绝场景0），<8MiB上限和最终live_bytes=0通过，前64KiB/1MiB失败记录保留而不冒充通过。新增两页共享原竖排子集：tiny拒绝保存字节/池不变，外层指定错误在成功内层编辑后回滚，刷新快照正常重试，严格重开AA/A及原字体对象不变；`/tmp/rzpdf-vertical-sharing-rollback.log`待终态。新断言不计入此前六项通过；panic、多层/混合状态、完整PDF单元/工作区门禁仍待完成。
+
+真实竖排抽取字体独立终态：会话79745退出0，三份TTF按完整Noto源检查原GID/字形闭包/轮廓/指令/水平及竖排度量/保留表原字节/边界/校验和/许可声明通过，三个字体负例及八XML负例通过。结合前轮严格重开、qpdf、源vmtx精确纵向位移与三页目视，固定真实水平字形不替换的Identity-V输出检查已齐。合成自动替换预算专项仍未通过，因此不将输出检查代替公共语义/预算门禁或宣称完整竖排支持；测量复验16190待终态。
+
+竖排预算复验仍失败：会话84579退出101，仍为公共替换operation live bytes（5通过/1失败），1MiB不能覆盖该流程，前一“扩大后待验收”不表示成功。改用16MiB测量池并新增实际峰值输出及<8MiB上限断言，最终live_bytes=0仍必须通过；不是移除预算限制。当前测量复验日志`/tmp/rzpdf-vertical-auto-edit-measured.log`待终态。真实样本抽取三字体目录`/tmp/rzpdf-vertical-fonts.EAvhik`，独立检查会话79745待终态，尚不勾选竖排验收。
+
+真实竖排结构/坐标/视觉验收进度：rzpdf-cjk-subset-vertical-edit.pdf经qpdf无结构错误，MuPDF stext为wmode=1/dir=0 1；check-subset-edit新增--vertical SOURCE，按源vmtx/unitsPerEm计算好替换两个你的24pt自然纵向位移，精确三页文本/字体/字号/前缀/补偿后续位置与各八XML负例在Python3.11 -O通过。三页96dpi实际逐页目视，无缺字/重叠/裁切；补偿页空位为保留原后续位置。尚未抽取三字体做独立源语义/保留表校验，复验专项84579仍待终态；不勾选完整竖排实样或P3-05。
+
+竖排自动替换专项失败与复验：会话76929退出101，5通过/1失败；新增公共替换在旧64KiB语义测试池下返回operation live bytes，不是竖排映射断言失败。该测试包括新增完整字体解析/CMap/编辑规划且不定义精确预算上限，扩大为1MiB，保留失败不变及最终live_bytes=0断言；预算实现未放宽。重试日志`/tmp/rzpdf-vertical-auto-edit-retry.log`待终态，不能把失败版计为通过。edit_subset新增--vertical，真实Noto三页原/自然/补偿样本日志`/tmp/rzpdf-vertical-real-edit.log`已记录生成峰值3231794；还需独立字体/坐标/逐页目视，不声明竖排验收完成。
+
+竖排自动子集注册接入（待测试/实样）：subset_text_edit共用构造器根据原字体WritingMode选择内部with_mode注册，新字体保持Identity-V/W2，替换推进复用with_replacement_font及各字体真实竖排度量，不再固定水平注册。加入公共竖排A→AA补偿替换及严格重开精确文本断言，库检查会话56189退出0；尚未声明运行/真实竖排验收通过。此前公共竖排子集专项会话38898退出0六项通过，只覆盖自动替换接入前版本。当前专项日志`/tmp/rzpdf-vertical-auto-edit.log`已启动待终态；需要非零竖排推进、真实新字、自然/补偿坐标、共享资源/error/panic及独立视觉矩阵和新全量门禁。
+
+显式竖排子集入口接入（待专项）：新增embed_truetype_vertical_subset_font及内部with_mode共用构造器，旧公开/内部子集入口保持水平；复用原GID闭包/SFNT/权限/预算写出Identity-V/W2，不合成缺失源度量。库检查会话33653退出0；新增公共子集写出/严格重开提取A、缺对/截断保存不变及预算释放断言。此前整字体竖排专项会话77808退出0，六项通过，不能证明后加子集路径；新`/tmp/rzpdf-vertical-public-subset.log`专项已启动待终态。真实竖排样本/新PDF全量/工作区门禁及自动竖排替换仍待完成。
+
+显式竖排整字体嵌入接入（待验收）：新增embed_truetype_vertical_font，旧embed_truetype_font及子集内部仍水平；显式入口使用同源vhea/vmtx与checked_glyph_locations构造逐CID W2，Type0写Identity-V，无源度量明确拒绝，不伪造默认值。库cargo check日志`/tmp/rzpdf-vertical-embedding-check.log`退出0；新增公共写出Identity-V/W2、严格重开提取A与缺对/截断失败保存字节不变断言。三元组专项会话93754退出0，六项通过，证明嵌入接入前版本；当前公共嵌入专项`/tmp/rzpdf-vertical-public-embedding.log`已启动待终态。还没有竖排子集入口、自动竖排替换、真实竖排度量/像素独立验收或新workspace门禁。
+
+竖排PDF三元组实现：VerticalMetrics::pdf_metric按已检查同源horizontal advance与glyf yMax构造[w1y,v1x,v1y]，1000-em缩放、负向推进、横向半宽原点、yMax+有符号bearing；i32求和防止i16溢出，新增1024-em精确小数/负bearing/上界/非法units断言。源接口专项会话32935退出0（六项通过），只覆盖三元组加入前版本。新版三元组专项`/tmp/rzpdf-vertical-pdf-triples.log`已启动待终态。尚未写入W2或开放竖排子集编辑。PDF三元组依据Adobe公开ISO32000-1 Table117，字体纵向原点依据OpenType vmtx；不应用BASE/shaping替换。
+
+竖排源接口接入待验收：新增TrueTypeProgram::checked_vertical_metrics借用读取SFNT配对表；两表均无返回None，缺对/非法表返回错误，不合成PDF默认值或应用竖排替换。原子集竖排表测试新增源接口的无表、完整三GID以及缺对/截断断言。前一PDF单元会话95962退出0，日志`/tmp/rzpdf-vertical-preflight-pdf-unit.log`证明接口加入前版本，不自动证明新增源码。当前源接口专项`/tmp/rzpdf-vertical-source-interface.log`已启动，待终态；下一步Identity-V/W2与实际竖排编辑仍待实现。
+
+竖排度量预检专项终态：会话5691退出0，`/tmp/rzpdf-vertical-metrics-integrated.log`六项通过、0失败、698过滤，包含新增两项解析器、原GID竖排表保留/缺对截断拒绝及既有W2回退/竖排缩放/Identity-V编码回归。真实静态Noto源vhea版本00011000、24..34字段全零，符合新增预检；这只是源字段核对，不是竖排输出验收。已启动当前PDF单元联合回归`/tmp/rzpdf-vertical-preflight-pdf-unit.log`，生产预检变更尚未新全量workspace门禁。下一步向嵌入路径提供借用竖排度量与PDF W2构造，保持竖排自动子集显式拒绝直至真实端到端验证。
+
+竖排专项运行切换：旧解析器专项会话96814已退出0；它只证明启动时旧单测试，不计入新增版本边界/生产接入。已启动当前`cargo test -p pdf --lib --locked vertical`，日志`/tmp/rzpdf-vertical-metrics-integrated.log`，同时复验现有名称含vertical的度量/子集/推进测试；尚待终态。
+
+竖排度量预检接入（待新版验收）：build_subset的vhea/vmtx配对预检改用共用VerticalMetrics，新增1.0/1.1版本、全部表头截断、保留字段及零/越界计数回归；原尾部复用/负bearing/数据截断测试保留。旧专项会话96814的测试二进制仍确认存活，不能用其结果证明本轮后补源码；待其终态后启动当前版本专项与原子集竖排表保留回归。尚未接入Identity-V/W2或自动竖排替换，完整workspace旧门禁也不证明这项生产变更。
+
+竖排实现第一步：确认公共嵌入仅写Identity-H/水平W，自动子集入口仍显式拒绝竖排，不能删除拒绝就宣称支持。新增零分配借用VerticalMetrics解析器，按OpenType vhea/vmtx读取advanceHeight及有符号topSideBearing，尾部字形复用最后advance但保留各自bearing，检查版本/保留字段/计数/截断/GID；定向测试日志`/tmp/rzpdf-vertical-metrics.log`待终态。尚未接入TrueTypeProgram或Identity-V/W2写出/竖排编辑/独立渲染，不勾选竖排支持。规范来源：https://learn.microsoft.com/en-us/typography/opentype/spec/vmtx 和 /vhea。
+
+真实双CID源固定验收完成：八份实际抽取字体按各自完整源（EDITAA/AB/AC首源，TAILAA尾源）独立核对原GID/闭包/轮廓/指令/度量/边界/校验和/保留表/许可声明，中英检查会话31066/15264均退出0，各三字体负例和十XML负例通过；抽取目录`/tmp/rzpdf-cid-latin-fonts.d6ESfD`、`/tmp/rzpdf-cid-cjk-fonts.M3rF6Z`。六页MuPDF 96dpi渲染均实际逐页目视，无缺字/重叠/裁切，补偿BB保留原起点。结合严格重开、原父子Form不变、qpdf及尾源真实推进，固定Arial→NotoSC B、NotoSC→Arial B双层水平Tj矩阵完成；不是任意字体、复杂shaping、竖排或完整P3-05。
+
+真实双CID源结构/坐标终态：生成会话43489/88509均退出0，峰值1978136/3064158；严格重开及原父子Form隔离断言通过。两份cid-span PDF经qpdf与MuPDF stext、Python3.11 -O检查通过，独立由尾源FontTools hmtx/unitsPerEm计算18pt+2Tc的B推进，核对自然尾段精确位移及补偿位置，各十XML负例均拒绝；联合会话82505退出0。原Courier混合中英十负例回归通过。检查器新增四抽取字体/TAILAA独立尾源支持，但尚未实际抽取检查或逐页目视，不声明完整双CID矩阵完成。
+
+真实双CID源混合实现（待验收）：edit_subset_span新增互斥`--cid-tail=FONT.ttf`与Courier `--mixed-tail`，固定配对Arial首段/NotoSC尾段及反向，尾段独立TAILAA子集BBB、18pt/2Tc、双字节端点，保留原自然/补偿三页及父子Form隔离断言。仅示例改动，不是通用字体选择接口；完整字体现有源路径由调用方提供。编译检查日志`/tmp/rzpdf-cid-tail-check.log`，生成日志`/tmp/rzpdf-cid-span-{latin,cjk}.log`；尚待运行终态及四份抽取字体/双源度量/视觉独立验收，不勾选双CID矩阵。
+
+混合父Form隔离终态：中英生成会话48884/62506均退出0，新增原尾父Form精确不变断言和严格重开均通过；峰值1598289/2984130。`cmp`联合命令退出0，两个mixed-parent-span PDF分别与之前完成抽取字体/坐标/十负例及逐页目视的mixed-span PDF逐字节一致，故输出验收证据适用，无需把相同输出冒充新的视觉矩阵。生产实现未改。
+
+混合矩阵隔离断言补强：独立XML检查新增将Courier尾段字体伪装为Arial及字号改为24的两个定向负例，中英各十XML负例通过；旧同字体中英七负例回归通过。示例新增尾段父Form原对象快照及编辑后精确不变断言，补齐此前仅验证尾叶Form的缺口；生成改用mixed-parent-span新文件，保留已验收mixed-span输出。检查日志`/tmp/rzpdf-mixed-parent-check.log`，中英生成日志`/tmp/rzpdf-mixed-parent-{latin,cjk}.log`；新增父对象断言尚待生成终态，不沿用旧样本证明新断言通过。
+
+真实混合尾字体固定验收完成：两份mixed-span PDF各三份抽取TTF通过Python3.11 -O源GID/轮廓/组件/指令/度量/边界/校验和/原样保留表/许可声明检查，各三字体负例和八XML负例通过；中文会话26400退出0，抽取目录`/tmp/rzpdf-mixed-latin-fonts.1CvYfI`、`/tmp/rzpdf-mixed-cjk-fonts.RzLBB3`。MuPDF 96dpi六页均实际逐页目视，无缺字/重叠/裁切；补偿页BB起点右移为保留原末端位置，自然页BB回到原行起点。结合严格重开、原Form隔离和qpdf，此固定双层水平Tj的Arial/Noto→Courier混合范围完成；不代表竖排、两种嵌入CID字体之间的混合、自动排版或完整P3-05。
+
+真实混合尾字体结构/坐标专项终态：中英生成会话80985/1066均退出0，跟踪峰值1598289/2984130字节；示例严格重开及原共享/尾Form不变检查通过。两份mixed-span PDF经qpdf无结构错误、MuPDF stext和Python3.11 -O独立检查，精确文字/字体/字号/有限坐标/补偿后缀/第三调用不变均通过；自然尾段位移精确-12.8pt（Courier600单位×18pt＋2Tc），新增伪造尾段位移负例与原七项均正确拒绝。同字体双层中英旧检查器回归也通过。尚待实际抽取字体和六页渲染目视，不勾选完整混合实样。
+
+真实混合尾字体样本实现（待验收）：edit_subset_span新增可组合--mixed-tail，第二调用使用Courier/18pt/2Tc/单字节BBB，第一和第三调用保留真实子集/24pt/1Tc/双字节字码；可叠加--nested，两端按各自字码偏移选择，严格重开预期及原尾Form不变检查已接入。编译初版通过，移除新增unwrap后复验；中英生成日志`/tmp/rzpdf-mixed-span-{latin,cjk}.log`。尚未完成生成、独立混合字体坐标检查、抽取字体及视觉验收，不勾选真实混合矩阵。
+
+SFNT独立检查补强（2026-10-09）：`check-cjk-subset.py`新增hhea/hmtx/maxp/OS2/post及hint/竖排/STAT保留表的存在性和源原始字节比较；`check-subset-edit.py`新增修改hhea ascent后修复校验和的负例，要求精确拒绝于preserved table bytes而非损坏校验和。双层Arial/Noto各三份抽取字体在Python3.11 -O下复验均退出0，各三个字体负例及七XML负例通过。仅检查实际源中存在的表，不证明这些字体没有的可选表或竖排编辑支持。生产Rust未改；完整字体矩阵和P3-05仍未完成。
+
+当前状态摘要（2026-10-09，优先于下方历史进度）：真实双层水平Tj跨调用样本已完成独立验收；P3-05和整体P0–P5仍未完成。最新完整工作区证据为1048项，后补PDF单元联合证据为702项，不能合并为新全量。下一步核对权限预检/闭包/SFNT任务与现有实现，消除过时待实现描述，再补真实混合字体矩阵。fuzz暂缓；不新增提交或推送。下方按阶段记录的“运行中/待终态”不代表当前仍有活动进程。
+
+真实双层字体验收终态：MuPDF从两份nested-span PDF各抽取三份TTF；Python3.11 -O `check-subset-span.py --fonts SOURCE DIR` 中英均退出0。Arial原字体1标量/2保留GID，新字体3标量/7保留GID/2复合；Noto原字体1标量/2保留GID，新字体2标量/3保留GID。独立源GID映射、轮廓/组件/指令、度量、边界、校验和及许可声明保留检查通过，各两字体负例与七XML负例通过。抽取目录`/tmp/rzpdf-nested-latin-fonts.5QPKp3`和`/tmp/rzpdf-nested-cjk-fonts.H8TRTv`。结合此前严格重开、共享父子Form不变、qpdf及六页目视，固定双层实样已验收；不是完整字体矩阵或许可法律授权。
+
+真实两层跨调用结构/文本/视觉进度：生成会话50106/80043均退出0，跟踪峰值1593119/2978961字节；严格重开与共享父子Form原对象不变。`output/pdf/rzpdf-{latin,cjk}-subset-nested-span-edit.pdf` 均qpdf无结构错误，MuPDF stext经Python3.11 -O `check-subset-span.py`精确文字/字体/24pt/前后坐标及各七负例通过；六页96dpi渲染均实际逐页目视，无缺字/重叠/裁切，补偿页第二行前方空位为保留原末端位置。尚未对新两层PDF抽取字体做独立语义/校验和/许可检查，不勾选完整实样子项。
+
+真实多层样本生成进度：`cargo check -p pdf --example edit_subset_span --locked` 会话74319退出0。使用既有本机Arial和已提取静态NotoSC源生成`output/pdf/rzpdf-{latin,cjk}-subset-nested-span-edit.pdf`，分别会话50106/80043，日志`/tmp/rzpdf-real-nested-span-{latin,cjk}.log`；当前生成仍运行，中文共用构建锁排队，不另起重复进程。qpdf、MuPDF、Python3.11可用；尚未独立提取/字体检查或逐页目视，不声明多层实样验收通过。
+
+真实多层跨调用样本实现：`edit_subset_span`新增可组合`--nested`/`--cjk`选项，原单层CLI保留；两层共享父子Form、三次调用与原页/自然/补偿三页对照，检查源调用深度与编辑后原父子对象不变，严格重开文字沿用。编译检查会话74319待终态；尚未生成或独立验收多层中英样本，必须完成qpdf/独立提取坐标/字体检查及逐页渲染目视后才勾选实样矩阵。
+
+最新PDF单元联合基线：`cargo test -p pdf --lib --locked` 会话25218退出0，`/tmp/rzpdf-subset-consolidation-pdf-unit.log` 为702 passed、0 failed/ignored/filtered，耗时85.48秒，包含本轮新增五项聚合额度/复合flags/共享GID非BMP/公共表策略及既有嵌套矩阵。源码指纹`1e5847e817cdeea1cb23431709bc96ecb20802ed42fc2c7fc5149c09444773ec`，差异检查通过。生产代码自1048项工作区基线后未改，仅测试和文档变化；不能把702项当作最新完整工作区验收。下一步收口范围规划器退出条件与真实字体剩余矩阵，P3-05及整体目标保持未完成。
+
+公共子集表策略专项终态：会话33164退出0，`/tmp/rzpdf-subset-public-table-policy.log` 为1 passed、0 failed、701 filtered，12场景通过；未知/变量/颜色表不会被省略opt-in放行，GSUB显式省略及DSIG自动省略准确报告，拒绝保存字节/预算不变。此前新增聚合额度、复合flags、共享GID/非BMP专项也均已通过；生产实现未变，接下来以完整PDF单元回归联合验收新增测试，旧1048工作区基线仍只证明当时版本。
+
+公共子集表策略补验（待终态）：新增 `public_subset_table_policy_is_explicit_and_rejections_are_atomic`，12场景覆盖ZZZZ/fvar/gvar/COLR/GSUB/DSIG各两种显式省略策略；未知/变量/颜色表不得因opt-in被放行，GSUB仅显式省略可接受，DSIG省略报告必须准确，拒绝时保存字节和预算不变。会话33164，日志`/tmp/rzpdf-subset-public-table-policy.log`，尚未声明通过；不代表这些不支持的字体表已实现。
+
+共享GID公共编辑专项终态：会话61813退出0，`/tmp/rzpdf-subset-shared-gid-public.log` 为1 passed、0 failed、700 filtered。三标量共享原GID1在子集cmap与独立CID映射中保留；未选GID空轮廓、整体校验和、公共插入B𠀀后严格重开AB𠀀A/共享页AA、旧句柄不可编码新字与预算释放均通过。CID原GID映射子项据此核对完成；不是GID重编号实现或真实非BMP视觉验收，P3-05仍未完成。
+
+共享GID公共编辑补验（待终态）：新增 `shared_gid_non_bmp_subset_survives_assembly_and_public_edit`，静态源A/B/𠀀各映射原GID1，CID仍各自独立；重建子集后核对三标量cmap、CIDToGIDMap、未选GID2空轮廓及整体校验和。公共单字符串子集编辑在共享A字体页插入B𠀀，要求严格重开AB𠀀A/另一页AA、旧字体句柄仍拒绝新字符及预算回基线。会话61813，日志 `/tmp/rzpdf-subset-shared-gid-public.log`，尚未声明通过；合成字形不替代真实字体视觉矩阵。
+
+复合组件专项终态：会话 72341 退出 0，`/tmp/rzpdf-composite-flags-boundaries.log` 为 5 passed、0 failed、695 filtered；负轮廓计数/保留与互斥flags/首组件定位、截断各字段、非末组件指令、字/字节参数、完整矩阵、借用遍历及组件预算所有权均通过。新增一项测试不计入此前1048项全量；生产解析实现未改。继续核对CID映射与SFNT写出子项，P3-05保持未完成。
+
+复合组件边界补验（待终态）：新增 `composite_negative_contours_and_flag_boundaries_are_explicit`，验证轮廓计数 -1/-2/i16::MIN 均按复合解析，0/正值拒绝；保留 flags、互斥变换、同时 scaled/unscaled offset 和首组件非 XY 的精确错误。与已有截断逐字段、非末组件指令、字/字节参数、完整矩阵及预算所有权测试联合运行；会话 72341，日志 `/tmp/rzpdf-composite-flags-boundaries.log`。CID已有共享GID独立CID/ToUnicode/宽度及非BMP测试和只读glyph_mappings接口，后续按完整SFNT/公共编辑证据核对，不自动勾选全部映射交付。
+
+聚合字节测试修正待复验：会话 98511 退出 101，字符额度与原跨调用原子性两项通过；字节测试在超限拒绝后的减少调用重试阶段被 `Predefined CMap source bytes` 拒绝。Identity-H 内置源为 7887 字节，原填充产生的测试额度更小，未能到达预期成功路径。增大 Form 注释填充（每个 Form 超过该 CMap 源）以隔离展开额度，保持 `span expanded decoded work` 精确拒绝及状态不变断言；重试日志 `/tmp/rzpdf-subset-span-aggregate-limits-retry.log`，待终态，不将失败版计为字节验收通过。
+
+聚合额度专项进度：字符测试会话 22808 已退出 0，四场景通过（1 passed、697 filtered）。新增 `automatic_subset_cross_call_decoded_work_counts_repeated_forms`，公共入口验证同一 Form 三次调用按 `root 字节＋3×Form 字节` 累计，精确上限与少 1 字节拒绝；失败字节/预算不变，显式减少调用后刷新快照重试，原共享 Form 不变及严格重开文字。包含原跨调用原子性测试的三项复验会话 98511，日志 `/tmp/rzpdf-subset-span-aggregate-limits.log`，待终态；字节专项尚未声明通过，1048 完整基线早于这两项新增测试。
+
+聚合字符额度补验（待终态）：新增 `automatic_subset_cross_call_character_limits_are_aggregate_and_atomic`，公共自动子集入口覆盖两次共享 Form 各自 2 字符、累计输入 4 对上限 3/4，以及局部新字 3＋尾段保留 2、累计输出 5 对上限 4/5；拒绝时验证保存字节/预算/原 Form 不变，并刷新根快照以较窄范围重试、严格重开核对结果。专项会话 22808，日志 `/tmp/rzpdf-subset-span-aggregate-characters.log`；尚未声明通过，展开字节聚合边界仍待补齐。1048 项完整基线不覆盖这项新增测试。
+
+最新完整基线（2026-10-09）：`cargo test --workspace --locked` 会话 75971 已退出 0，`/tmp/rzpdf-root-endpoint-workspace.log` 共 52 个成功组、1048 项通过，0 失败/忽略/过滤；包括 PDF 单元 697、render 单元 38、页面根端点公共集成 3 项及三个 crate 文档测试。Rust/Cargo 指纹 `eb8aef5e9cbad965bbf35703f195abeea4592e5c5eeeff0a77ce9859ed27ba8c` 与启动时一致，`git diff --check` 通过，本轮源码冻结解除。此基线覆盖当前双向根/Form 子集修改，不代表聚合额度新任务、完整 P3-05 或整个项目完成。下方“会话 75971 正在运行”是历史记录。
+
+- [x] 范围规划器聚合额度确定性验收：公共跨调用自动子集入口覆盖多个调用各自未超限、累计输入/输出字符超限及精确上限；重复 Form 展开字节按每次调用累计，精确上限成功、少 1 字节拒绝。错误后保存字节/预算占用恢复，字符测试以较窄选区刷新重试，展开测试显式减少调用后刷新重试；原共享 Form 不变、严格重开文字均通过。证据 `/tmp/rzpdf-subset-span-aggregate-limits-retry.log` 会话 10513 退出 0，3 passed、696 filtered，包含原跨调用原子性回归。仅此固定矩阵，不代表所有预算层或完整 P3-05。
+
+2026-10-09 当前验收状态：页面根/Form 双向六场景子集专项已终态通过，`/tmp/rzpdf-subset-span-root-bidirectional.log` 为 1 passed、0 failed、696 filtered；普通页面端点公共集成三项通过。当前源码启动 `cargo test --workspace --locked`，日志 `/tmp/rzpdf-root-endpoint-workspace.log`，会话 75971；验收期间冻结 Rust/Cargo 文件，指纹 `eb8aef5e9cbad965bbf35703f195abeea4592e5c5eeeff0a77ce9859ed27ba8c`。尚未取得最新全量终态，不能沿用旧 1046 项证明当前代码通过。接下来先完成全量门禁，再核对范围规划器/聚合预算退出条件及整理当前能力摘要；P3-05 和整体计划保持未完成，fuzz 暂缓，不新增提交或推送。
+
+2026-10-09 页面端点公共集成终态与反向选区补验：会话 75814 退出 0，/tmp/rzpdf-page-root-endpoint-integration-retry.log 三项全部通过，显式根转换/普通 Form-only 空链拒绝/普通展开根内自然补偿与原 Form 选区均验收。子集专项扩展六场景：原四项 root→Form 同/异字体，加自然/补偿 Form→root（首段局部 Form 新字体、末段页面原字体后缀）；使用原绘制顺序来源，严格重开 ABBAAAA、未编辑调用索引相应移动，error/panic 回滚及字节位置拒绝沿用。/tmp/rzpdf-subset-span-root-bidirectional.log 待终态，未声明反向通过，生产基线最新全量仍为修改前 1046。
+
+2026-10-09 普通展开选区根端点入口修正待验收：/tmp/rzpdf-page-root-endpoint-integration.log 终态 2 passed/1 failed，新公共契约在普通 replace_nested_text_span 外层仍受 validate_limits 非空链拒绝，原两项 Form 用例通过。移除该外层重复校验，统一由 expanded walker 验证两个端点、几何/调用深度/索引/字节位置及原快照，普通 Form-only 接口非空链限制不变。/tmp/rzpdf-page-root-endpoint-integration-retry.log 待终态，生产变更尚未全量验收，不把子集根专项通过等同普通入口已通过。
+
+2026-10-09 页面根子集认证/panic 专项终态：会话 6696 退出 0，/tmp/rzpdf-subset-span-root-authentication.log 为 1 passed、0 failed，四场景在 root→Form 同 CID/Courier 范围基础上通过篡改字节偏移精确拒绝、指定 error/panic 发布后字节回滚、预算释放和刷新重试。公开页面端点契约集成会话 37152 待终态，最新生产修改尚未整体 workspace 验收，不用旧 1046 项代表当前全量。
+
+2026-10-09 页面端点公共契约补验待终态：same_invocation_span 集成新增 page_text_endpoint_is_explicit_and_does_not_become_a_form_leaf，真实公开类型从顶层 source 转换，要求索引/字节偏移保留、空调用/几何链、nested_content_program 拒绝且文档不变；原编码普通展开选区自然/补偿根内 B→X 严格重开 AXC，另一共享页 ABC。/tmp/rzpdf-page-root-endpoint-integration.log 待终态；该组还复验原有两项 Form 展开选区。子集根认证/panic 会话 6696 仍待结果，未宣称通过。
+
+2026-10-09 页面根端点修正专项终态：会话 91003 退出 0，/tmp/rzpdf-subset-span-root-endpoint-retry.log 为 1 passed、0 failed，四场景自然/补偿 × 同 CID/Courier 尾段验证公开根端点转换、页面新字体注册、Form 原字体后缀与共享调用/页坐标隔离、tiny 预算释放和外层指定错误字节回滚。后补精确端点位置认证与 panic 版会话 6696 仍待终态，不将这两项后补断言计入前版通过。docs/content-editing.md 已说明顶层 source 与 nested_source 的区别及空链仅展开选区可用。
+
+2026-10-09 页面根端点认证与 unwind 补验待终态：旧混合会话 99313 退出 101，同样在未修正的顶层 nested_source 解包失败，未执行真实混合编辑。修正后的页面根四场景另补篡改 operator_byte_offset 精确 ObjectError（span endpoint byte position mismatch）且字节/预算不变，以及发布后指定 panic 完整回滚和刷新重试；/tmp/rzpdf-subset-span-root-authentication.log 待终态。上一修正版会话 91003 已编译仍待运行输出，不计入本轮后补断言通过证据。
+
+2026-10-09 根端点缺口修正待验收：非混合根专项会话 2139 退出 101，测试误将顶层字符的 nested_source 解包（顶层仅 source）；展开选区原校验也拒绝空调用链，根首插入分支无法通过公开端点表达。新增 NestedDrawSource::from_page_text 显式转换，只有 visit_expanded_text_span 接受空调用链表示页面根，普通 nested validate_limits 非空约束保持，路径几何仍拒绝、事件索引/字节偏移/快照仍认证。专项改用显式页面端点，/tmp/rzpdf-subset-span-root-endpoint-retry.log 待终态；混合旧版 99313 尚待结果，不支持修正后通过声明。生产修改后旧 1046 全量不代表当前版本。
+
+2026-10-09 根→Form 跨调用混合字体补充待验收：automatic_subset_span_inserts_in_root_and_deletes_in_form 扩展自然/补偿 × 同 CID/Courier 尾段四场景；首段仍完整 TrueType 来源并注册新子集，尾段 Courier 18pt/3Tc 单字节码独立删除、保留其原字体后缀，坐标及资源隔离/预算/error 回滚断言沿用。/tmp/rzpdf-subset-span-root-mixed-public.log 待终态；先前非混合版本会话 2139 仍存活待输出，不能覆盖本轮新增混合断言。
+
+2026-10-09 根作用域跨调用专项补充待验收：中文真实字体会话 42495 已退出 0，固定中英实样子项勾选，文档同步完整 1046 门禁及实样闭环。新增 automatic_subset_span_inserts_in_root_and_deletes_in_form，覆盖页面根首事件新子集绑定、进入共享 Form 尾段旧字体删除/保留后缀、自然/补偿、tiny 预算释放、指定外层错误字节回滚及刷新重试、原 Form/另一页/未编辑调用与前缀坐标保持；/tmp/rzpdf-subset-span-root-public.log 编译测试待终态，不以旧 1046 门禁证明这项新增测试通过。
+
+2026-10-09 真实跨调用结构/坐标/视觉验收：Arial/NotoSC 生成均退出 0，严格重开和原共享 Form 不变检查通过，跟踪峰值分别 1590304/2976146 字节。output/pdf/rzpdf-{latin,cjk}-subset-span-edit.pdf 均 qpdf 无结构错误，MuPDF stext 经 Python -O check-subset-span.py 精确文字/字体/24pt/起点/补偿末端/自然平移/第三调用位置及各七负例通过；六页 96dpi PNG 已全部实际目视，无缺字、裁切或重叠，补偿页第二行前方空位为保留原位置。抽取字体目录 /tmp/rzpdf-span-latin-fonts.pFjoeJ 与 /tmp/rzpdf-span-cjk-fonts.8crrQy，Arial 完整字体检查退出 0，NotoSC 会话 42495 待终态。旧 Arial 默认检查会话 48782 退出 0，未破坏默认字集规则；完整 P3-05 仍未完成。
+
+2026-10-09 跨调用字体检查复用接入：check-subset-edit.py 的 check_fonts 增加仅关键字 repertoire_pair（默认字集/CLI 不变），check-subset-span.py --fonts SOURCE DIR 显式传 AAA/AéÅ 或 你你你/你好，复用三子集精确身份/原 GID/轮廓/复合/度量/校验和/许可及两个字体负例。旧中英 Form XML 在 Python -O 下各精确坐标和六负例复跑退出 0；旧 Arial 默认字体验收 /tmp/rzpdf-subset-font-checker-default-retry.log 待终态，新跨调用字体验收仍待实样。
+
+2026-10-09 真实跨调用示例 check 终态：首轮 /tmp/rzpdf-real-subset-span-check.log 编译失败 E0624（示例误用私有 ctx），改为公开 resolve_object 后 /tmp/rzpdf-real-subset-span-check-retry.log 会话 41828 退出 0。已分别启动 Arial/NotoSC 生成命令，日志 /tmp/rzpdf-real-subset-span-{latin,cjk}.log，目标 output/pdf/rzpdf-{latin,cjk}-subset-span-edit.pdf；两生成与独立结构/文字/字体/视觉均待验收，不将编译成功算成实样通过。
+
+2026-10-09 真实跨调用独立 XML 检查器待实样验收：新增 docs/check-subset-span.py，检查三页精确文字/ArialMT 或 NotoSansSC-Thin/24pt、所有坐标有限、保留首字符与新字插入起点、补偿第二调用两字符后缀、自然删除一致负向位移及第三调用逐字坐标保持；七个指定失败点负例包括错误文字/页数/字体/字号/补偿位置/未编辑调用位置/NaN，采用显式 require 不受 Python -O 绕过。--help 已退出 0，但尚无实际 XML 验证。生成器 check 会话 6046 仍待终态，不声明新示例或检查器通过真实验收。
+
+2026-10-09 真实跨调用生成器接入待验收：新增 pdf/examples/edit_subset_span.rs，Arial AAA→éÅ / NotoSC 你你你→好，三页共享一个原 Form、每页三次调用以 -80/-160 cm 分行；选区跨前两调用各保留起末字符，第三调用不编辑，自然/补偿分别一次调用新子集 span API，检查原共享 Form 和严格重开精确文字。/tmp/rzpdf-real-subset-span-check.log 编译待终态，尚未生成 PDF 或独立/视觉验收；刚通过的 1046 门禁早于此新增示例，不覆盖它。
+
+2026-10-09 最新跨调用完整门禁终态：会话 43104 退出 0，cargo test --workspace --locked 日志 /tmp/rzpdf-cross-call-workspace.log 共 52 个成功组、1046 passed、0 failed/ignored/filtered；PDF 单元 696、render 单元 38、全部公共集成及三个 crate 的零用例文档测试通过。Rust/Cargo 指纹 8adf9b0cb3cb065910b259ba5edad14a5a6870cc47f5ae26ac2a688452d1bbac 保持，源码冻结解除。该门禁覆盖最新跨调用入口、Owned 预算及八场景测试，不证明真实跨调用字体验收或完整 TODO 完成；下一步真实 Arial/NotoSC 样本，不做 fuzz、未提交。
+
+2026-10-09 最新全量门禁阶段结果：/tmp/rzpdf-cross-call-workspace.log 的 PDF 单元组已 696 passed、0 failed、0 ignored、0 filtered（87.47s），包括跨调用八场景及同 leaf 72 场景，正在进入 adjusted_text 等公共集成。会话 43104 尚未终态，render 与完整集成/文档测试结果未收齐，因此不声明全量成功，不解除源码冻结。
+
+2026-10-09 跨调用双层八场景专项终态：会话 35115 退出 0，/tmp/rzpdf-cross-call-subset-multilevel.log 为 1 passed、0 failed，覆盖自然/补偿 × 新 BB/空删除 × 单/双层共享 Form，并包含六种非法 CID 端点、预算/指定 error/panic 回滚、原父子对象不变、共享页/第三调用隔离与严格重开坐标断言。最新全量回归会话 43104 仍在运行，源码继续冻结；专项通过不等于全量或真实跨调用渲染完成。
+
+2026-10-09 跨调用边界与空替换专项结果：/tmp/rzpdf-cross-call-subset-boundaries.log、/tmp/rzpdf-cross-call-subset-empty.log 均为 1 passed、0 failed；边界版会话 31899 已退出 0，空替换版日志已明确成功（会话终态待收）。双层八场景 /tmp/rzpdf-cross-call-subset-multilevel.log 仍待编译/测试终态。已启动最新 cargo test --workspace --locked，日志 /tmp/rzpdf-cross-call-workspace.log；门禁期间冻结 Rust/Cargo 源码，不以旧 1044 项门禁代替本次结果，文档记录不受冻结限制。
+
+2026-10-09 跨调用双层共享 Form 补充待验收：专项矩阵为自然/补偿 × BB/空删除 × 单/双层共八场景；双层父 Form 显式 XObject 资源调用原 leaf，要求编辑后原父、子对象均未改变，第三调用与另一页仍隔离。/tmp/rzpdf-cross-call-subset-multilevel.log 编译/测试待终态。本轮 ps 已确认边界版和空替换版测试二进制均存活（0 CPU 的启动等待），未因无输出重启；它们不覆盖此最新双层修改。
+
+2026-10-09 跨调用空替换补充待验收：automatic_subset_cross_call 专项扩展为空字符串删除的自然/补偿两场景，严格重开应为 AAAAAA，另一页仍 AAAAAAAAA，末端后缀和第三调用坐标按删除后索引验证；沿用非法 CID 端点、预算失败、指定 error/panic 回滚及原 Form 不变断言。/tmp/rzpdf-cross-call-subset-empty.log 待运行终态；上一版边界测试 /tmp/rzpdf-cross-call-subset-boundaries.log 已编译，进程仍待测试输出，不以此记录声明通过。
+
+2026-10-09 跨调用专项终态与边界补充：/tmp/rzpdf-cross-call-subset-public-tests.log 与 /tmp/rzpdf-span-owned-plans-retry.log 均为 1 passed、0 failed；前者验证自然/补偿跨调用替换与事务回滚，后者验证 Owned 计划预算生命周期及明确换行字节。新增跨调用 CID 起末端六种非法偏移（切开双字节码、越过原字符串），要求失败且保存字节、预算占用不变；/tmp/rzpdf-cross-call-subset-boundaries.log 正在复验。此前 1044 项 workspace 门禁不覆盖这些最新修改，P3-05 仍未完成。
+
+2026-10-09 跨调用新子集公共测试补齐待验收：新增automatic_subset_cross_call_is_atomic_and_keeps_unselected_invocations，两自然/补偿场景跨三次共享Form的前两调用，起末均保留字符，第三调用/另一页/原Form不变；tiny预算释放、指定error/panic字节回滚及刷新重试、严格重开ABBAAAAA/AAAAAAAAA、末端x/y与未编辑调用坐标检查。/tmp/rzpdf-cross-call-subset-public-tests.log待终态。Owned计划旧专项/tmp/rzpdf-span-owned-plans-test.log退出101，预算所有者检查之后源码字节断言错误漏掉重建换行；改为明确\n(B) Tj\n，/tmp/rzpdf-span-owned-plans-retry.log复跑待终态，不算已通过。跨调用入口库check此前退出0，不代替这轮公共验收。
+
+2026-10-09 跨调用新子集公共入口实现待验收：replace_nested_text_span_with_subset_and_budget复用展开原选区、事件归属及调用树；原root认证后的预算事务回调内准备原节点，先生成所有非插入事件原字体删除片段并取得插入metrics，再注册首事件新子集并绑定复制局部scope（root事件使用页绑定），逐节点原索引合并，由Owned计划发布器一次bottom-up发布。SpanSubsetPublication持有字体/binding/scope租约到根提交，旧共享字体及Form不修改。/tmp/rzpdf-cross-call-subset-check.log库check日志已显示成功，句柄终态核对中；公共跨调用专项尚待补齐，不作功能验收。原发布器抽取版本/tmp/rzpdf-span-publication-extraction-tests.log退出0，15项nested_adjusted_text+2项same_invocation_span通过，编译早于Owned/新子集，不混算。Owned预算生命周期/tmp/rzpdf-span-owned-plans-test.log仍待终态，最新全量仍缺。
+
+2026-10-09 跨调用计划所有权接入待验证：SpanNodeProgram增加OwnedPlanned，SpanPublicationPlans区分旧入口Borrowed与新入口所需Owned预算表；共享publisher先检查表及聚合字符，再逐节点转移计划。无子节点时直接保留计划及其程序/片段租约，不借用回调局部表，不为规避生命周期而复制叶程序；旧入口借用路径保留。/tmp/rzpdf-span-owned-plans-check.log编译检查待终态；此前/tmp/rzpdf-span-publication-extraction-tests.log是所有权分支加入之前的回归，不能混算。Owned分支及跨调用新子集尚待实际接入和验收。
+
+2026-10-09 调用树发布抽取库检查终态：/tmp/rzpdf-span-publication-extraction-check.log退出0；nested_adjusted_text与same_invocation_span集成专项已启动，日志/tmp/rzpdf-span-publication-extraction-tests.log待终态。该重构尚未通过最新集成验收，跨调用子集入口仍待接入。
+
+2026-10-09 跨调用子集发布边界收敛：现有commit_prepared_span的原事务/原root认证保持，bottom-up重建与资源绑定抽为build_prepared_span_publication；未来子集入口须在认证成功后的同一回调内注册字体并发布，不提前注册后刷新快照，不重复调用树发布器。内部发布器仍检查计划表大小/聚合字符限制，字体/资源租约需由调用者保留跨发布。/tmp/rzpdf-span-publication-extraction-check.log库check待终态；跨调用子集入口尚未实现，现有span集成回归待执行，不能据此前72场景或真实同leaf样本声称跨调用已支持。
+
+2026-10-09 固定真实Form样本独立验收终态：/tmp/rzpdf-real-form-cjk-independent.log会话51410退出0，中文三份TTF及两字体负例通过，连同Arial验证完成中英两个固定Form跨Tj→TJ样本的严格重开/qpdf/独立精确文字与位置/抽取字体/六页目视闭环。该固定范围替换到末字符串结尾，不代替真实保留末端后缀、多层/混合真实字体或跨调用新子集；P3-05仍未完成，最新workspace未回归。
+
+2026-10-09 真实Form三页样本验证进度：Arial及NotoSC生成日志/tmp/rzpdf-real-form-{latin,cjk}-fixture.log均退出0，输出output/pdf/rzpdf-{latin,cjk}-subset-form-events-edit.pdf严格重开正确；两份qpdf通过，MuPDF stext配合check-subset-edit.py的精确三页文字/字体/字号/原前缀及补偿后续坐标和六XML负例通过。tmp/pdfs对应两组三页96dpi PNG已全部目视，无缺字/裁切/重叠，补偿间隔符合预期。抽取字体目录/tmp/rzpdf-form-latin-fonts.aQlNgZ及/tmp/rzpdf-form-cjk-fonts.VxjN1h各三份TTF；/tmp/rzpdf-real-form-latin-independent.log退出0，轮廓/GID/闭包/度量/head边界/校验和/许可及两字体负例通过；中文/tmp/rzpdf-real-form-cjk-independent.log会话51410仍运行，不能宣称完整真实Form验收。跨调用及最新全量未完成。
+
+2026-10-09 真实Form示例编译终态：/tmp/rzpdf-real-form-subset-example-check.log退出0。已启动Arial与NotoSC --form --events生成，日志/tmp/rzpdf-real-form-{latin,cjk}-fixture.log，输出output/pdf/rzpdf-{latin,cjk}-subset-form-events-edit.pdf；生成结果尚待确认，qpdf/MuPDF文字位置、抽取字体及六页目视尚未执行，不作真实Form验收。
+
+2026-10-09 真实Form示例接入待验证：edit_subset增加--form（当前须同时--events），三页复用同一原Form，页面仅Do；页面1/2通过原nested provenance及leaf program调用同leaf跨事件新子集入口，分别自然/补偿，保留TJ数字/注释并严格重开检查原页及两编辑页文字。生成仍使用本项目引擎以验证实现，PDF技能要求后续独立结构/字体检查及渲染目视，不以内部提取代替视觉。/tmp/rzpdf-real-form-subset-example-check.log编译检查待终态，尚未生成或验收真实Form样本；跨调用及最新全量未完成。
+
+2026-10-09 同leaf混合字体72场景专项终态：/tmp/rzpdf-nested-subset-events-mixed-retry.log退出0，automatic_subset七项通过、687过滤，Form测试内部72场景包含尾段Courier单字节编码/18pt/3Tc与首段CID码、保留末端原字体后缀及自然/补偿位置；沿用单/双层继承、名字冲突/页回退、预算拒绝、指定error/panic字节回滚和共享调用/页隔离。首轮样本名称假设已修正，实际跨字体编辑验证通过。该结果不是最新全量或真实字体渲染验收，跨调用自动子集仍待实现，P3-05未完成。
+
+2026-10-09 72场景混合字体首轮状态纠正：/tmp/rzpdf-nested-subset-events-mixed-tests.log退出101，六项通过、Form一项在样本注册阶段失败；page0已含原CID字体F1，Courier为F2，page1尚无原字体所以Courier为F1，测试错误要求名称相同。已在混合样本page1注册同一原字体再注册Courier，建立一致资源而不修改生产注册规则。复跑/tmp/rzpdf-nested-subset-events-mixed-retry.log待终态，首轮不作72场景验收。
+
+2026-10-09 同leaf混合字体公共矩阵补验：nested_show扩为72场景，在原48场景之外增加跨事件尾段Courier单字节编码、18pt及3Tc；首段仍原CID子集，结束端点按尾段1字节字符码选首字符并保留第二字符，检查末端原Courier绑定及各事件度量补偿。混合字体场景同样覆盖单层/双层继承、局部名称冲突/页回退、预算与指定error/panic回滚、共享页/调用及坐标隔离。/tmp/rzpdf-nested-subset-events-mixed-tests.log最新七项待终态，不计入前48场景通过；真实Form与跨调用自动子集仍待推进。
+
+2026-10-09 同leaf跨事件公共专项终态：/tmp/rzpdf-nested-subset-events-public-tests.log退出0，automatic_subset七项通过、687过滤；nested_show内部48场景完成同事件/跨下一Tj保留末端后缀、自然/补偿、单层与双层继承/资源冲突/页回退、指定error/panic完整回滚重试及共享调用/页和坐标隔离。该结果覆盖共享范围规划器与新Form event_range入口，不宣称跨调用展开选区或真实Form字体验收；末段不同字体/状态变化矩阵仍待补齐，最新全量仍是这些生产修改之前1044基线。
+
+2026-10-09 同leaf跨事件公共矩阵待验收：nested_show测试扩为48场景（四种首事件×自然/补偿×单层冲突/双层冲突/双层页回退×同事件/跨下一事件）。新公共event_range入口跨到下一Tj首字符末端，保留其第二字符；严格重开检查目标文字、未编辑四字符调用与另一页、后缀x/y补偿及资源名称，所有场景沿用tiny预算拒绝、指定error/panic字节回滚和刷新重试。/tmp/rzpdf-nested-subset-events-public-tests.log最新七项待终态，不算已通过。此前共享规划器重构/tmp/rzpdf-scoped-subset-range-tests.log退出0七项通过、687过滤，编译早于新Form入口及48场景。不同后段字体、状态变化、真实Form样本、跨调用新子集和最新全量仍待推进。
+
+2026-10-09 同leaf跨事件自动子集入口实现待验收：replace_nested_text_event_range_with_subset_and_budget锚定原start source，认证root后预算准备调用链，每个原事件重建祖先继承状态及原leaf metrics；共享范围规划器先尾段删除再首段新子集，复制leaf scope独立绑定并持有scope/binding租约到inside-out一次发布。原scope不被新字体注册污染；中间子Form调用保持，不宣称展开选区/跨调用支持。/tmp/rzpdf-nested-subset-events-check.log库check退出0；公共跨事件测试仍待补齐，最新全量不覆盖。原/tmp/rzpdf-form-subset-scope-matrix.log退出0，单项内部24场景通过、693过滤，编译早于范围规划重构；重构七项/tmp/rzpdf-scoped-subset-range-tests.log仍运行，不混用结果。
+
+2026-10-09 作用域无关范围规划器接入：页面跨事件入口保留原快照认证与外层事务，调用build_scoped_subset_event_range；该内部规划器接收原事件metrics解析回调及可选局部scope，先规划后段删除、首段子集注册、按原索引合并，不自行发布或刷新快照。PreparedSubsetRangeEdit额外持有局部binding预算租约到发布结束，为同leaf Form复用准备。/tmp/rzpdf-scoped-subset-range-check.log库检查退出0；格式化后/tmp/rzpdf-scoped-subset-range-tests.log七项专项待终态。原24场景/tmp/rzpdf-form-subset-scope-matrix.log编译早于此生产重构，仍待终态，不能替该重构验收。Form跨事件尚未公开接入，P3-05未完成。
+
+2026-10-09 显式leaf名称冲突专项终态及回退分支保留：/tmp/rzpdf-form-subset-font-collision-retry.log退出0，1项通过、693过滤，内部16场景验证保留FontEdit1并使用FontEdit2，双层文字状态由parent继承。随后将无leaf Resources的页回退分支恢复为独立组合，现四种事件×自然/补偿×单层冲突/双层冲突/双层页回退共24场景，/tmp/rzpdf-form-subset-scope-matrix.log待终态；后补不计入先前通过。同leaf跨事件/跨调用自动子集仍待实施。
+
+2026-10-09 名字冲突首轮失败纠正：/tmp/rzpdf-form-subset-font-collision.log退出101，继承样本无leaf Resources时实际使用页资源回退，父scope中的FontEdit1不属于leaf作用域，测试错误地要求父资源继承。无资源回退16场景此前/inherited-matrix.log已通过；本次冲突样本改为显式leaf资源、仍继承父Tf/Tc/TL，首轮未通过不作验收。复跑/tmp/rzpdf-form-subset-font-collision-retry.log待终态，未改变生产资源解析规则。
+
+2026-10-09 双层继承专项终态及名字冲突补验：/tmp/rzpdf-form-subset-inherited-matrix.log退出0，1项通过、693过滤，内部16场景通过（leaf无资源及Tf/Tc/TL，由父层继承；原父/叶对象及另一调用/页保持，预算/error/panic回滚）。随后给单层leaf或双层parent局部Font预占FontEdit1，成功编辑后检查复制leaf保留原绑定并新增/使用FontEdit2；/tmp/rzpdf-form-subset-font-collision.log待终态。该后补版本不算入此前继承通过或1044全量，跨事件/跨调用自动子集仍未完成。
+
+2026-10-09 多层Form继承矩阵补验：nested_show专项扩为四种文本事件×自然/补偿×单层显式状态/双层继承共16场景；继承样本leaf无Resources且无Tf/Tc/TL，由parent提供字体和文字状态。核对两层provenance、原parent/leaf对象不变，沿用预算/error/panic回滚、共享页及未编辑调用坐标隔离。/tmp/rzpdf-form-subset-inherited-matrix.log待终态，不计入此前1044完整门禁。局部名字冲突、同leaf跨事件及跨调用自动子集仍待推进。
+
+2026-10-09 Form位置隔离专项终态：/tmp/rzpdf-form-subset-position-isolation.log退出0，1项通过、693过滤，测试内部八场景均完成后缀及下一事件y坐标、未编辑调用逐字符文本与x/y坐标保持断言。最新完整生产基线为下述1044门禁；新增断言仅此次专项验证。下一步多层Form继承/局部字体名称冲突与同leaf跨事件范围规划，P3-05仍未完成。
+
+2026-10-09 Form位置隔离补验：在已通过的八场景测试中增加后缀及下一事件y坐标保持，并逐字符核对未编辑第二调用的文本与x/y坐标；/tmp/rzpdf-form-subset-position-isolation.log专项待终态。此为1044完整门禁之后的测试修改，不能声称新断言已被该门禁验证。
+
+2026-10-09 最新完整门禁终态：会话32619退出0，/tmp/rzpdf-form-matrix-workspace.log共52组1044项通过，0失败/忽略/过滤，含694项PDF单元、38项render单元及三组零用例文档测试。Rust/Cargo集合SHA256保持c1b7bb5ad1ad6954e4fb5474ffa7a43a77584b7c05194ce7eec3652f56b9709c；本轮源码冻结结束。该结果覆盖Form独立字体对象注册及单事件八场景版本，不证明尚未实现的多层/同leaf跨事件/跨调用自动子集和真实Form样本，P3-05保持未完成。下一步补完整位置隔离断言并扩展多层继承。
+
+2026-10-09 最新全量回归跟踪：会话32619对应cargo test --workspace --locked，日志/tmp/rzpdf-form-matrix-workspace.log；最近检查cargo及rustc子进程仍存活，尚在构建集成测试/示例，无测试终态，不重复启动。冻结期间Rust/Cargo文件集合SHA256为c1b7bb5ad1ad6954e4fb5474ffa7a43a77584b7c05194ce7eec3652f56b9709c，终态须重新核对；允许更新进度文档，但不改生产/测试源码。此前1041项不能替代本轮最新全量。
+
+2026-10-09 Form八场景专项终态：/tmp/rzpdf-nested-subset-show-matrix-retry.log退出0，automatic_subset七项通过、687过滤；nested_show测试内部Tj/单引号/双引号/TJ各自然/补偿共八场景完成，包含预算拒绝释放、指定error/panic字节回滚重试、原Form及页Font字典不变、共享页隔离、TJ数字/注释和后缀x坐标检查。该结果不代表多层继承、Form跨事件/跨调用、真实Form字体样本或最新全量验收。下一完整回归日志/tmp/rzpdf-form-matrix-workspace.log；回归期间不修改生产和测试源码，P3-05仍未完成。
+
+2026-10-09 Form八场景编译状态纠正：/tmp/rzpdf-nested-subset-show-matrix.log已退出101，E0596来自TJ检查中current_page缺少mut，未执行测试；下方“仍运行”记录失效。已补mutable绑定，重新运行日志/tmp/rzpdf-nested-subset-show-matrix-retry.log，结果待确认，不借此前七项通过证明八场景或最新全量。
+
+2026-10-09 Form单事件八场景补验：公共合成样本扩为Tj/单引号/双引号/TJ跨项×自然/补偿；原TL/Td及双引号Tw/Tc保持，TJ跨两个字符串首→末起点范围保留后缀、-125/+75及注释。增加tiny ResourceLimit与预算释放、发布后指定panic payload完整字节回滚、每次失败重新取得root及nested provenance后成功重试；沿用指定error/共享页/原Form与页Font字典不变及后缀/下一事件坐标断言。/tmp/rzpdf-nested-subset-show-matrix.log最新七项仍运行，尚未验收该八场景。多层继承、同leaf跨事件/跨调用自动子集、真实Form样本与最新全量仍待推进，P3-05保持未完成。
+
+2026-10-09 独立Form字体注册验收终态：/tmp/rzpdf-detached-nested-subset-tests.log退出0，最新automatic_subset七项通过（687过滤），包含目标页Font字典完整不变、复制leaf独立字体绑定、共享Form/另一页隔离与位置补偿和回滚重试。准备回调重构版/tmp/rzpdf-nested-prepared-regression.log亦退出0，嵌套补偿15/图像2/路径8/文字6共31项通过；该四组编译早于独立注册，不将其当作最新独立注册全量。下方“仍运行”历史状态由本记录取代。下一步补Form TJ/引号/多层继承及预算/panic矩阵，接同leaf跨事件和跨调用自动新子集，真实字体验证与最新workspace仍待推进，P3-05未完成。
+
+2026-10-09 Form首轮公共终态及独立注册收敛：/tmp/rzpdf-nested-subset-verified-tests.log退出0，automatic_subset七项通过（687过滤），目标Form单事件新字自然/补偿、重复共享调用/另一页、原Form对象不变、指定error回滚/重试成立。随后embedded_font拆出内部EmbeddedCidFontObjects/EmbeddedSubsetFontObjects与Option页绑定注册，公开RegisteredCidFont/RegisteredSubsetCidFont页面名称契约不变，不用空名称冒充已注册句柄。Form片段使用None仅创建字体对象并绑定复制leaf FontEdit，去除额外页Font绑定；目标页仍仅新增必要复制Form XObject绑定。/tmp/rzpdf-detached-subset-check.log库check退出0；/tmp/rzpdf-detached-nested-subset-tests.log后补页Font字典完整不变断言的最新七项仍运行，不能借首轮证明独立注册版本已验收。最新workspace及完整Form跨事件/跨调用与真实矩阵仍待推进。
+
+Form公共测试构建更正：/tmp/rzpdf-nested-subset-public-tests.log退出101，新增测试跨模块直接访问私有doc.ctx导致E0616，未运行测试；已改为公开ctx()只读入口。新七项日志/tmp/rzpdf-nested-subset-verified-tests.log重新编译验证，仍待终态；生产库check已通过，不将测试构建失败当作成功或更改断言。
+
+2026-10-09 Form单事件自动子集接入：新增replace_nested_text_show_range_with_subset_and_budget，source锚定同一原Tj/引号/TJ（支持同TJ多字符串端点）；原root认证后预算prepare调用链，按每层原scope还原继承状态，注册新子集并在复制leaf scope绑定FontEdit，再生成局部Tf片段，预算化inside-out复制/根Do一次发布。新增局部资源副本租约持有到提交，不提前退租约。库check /tmp/rzpdf-nested-subset-check.log退出0；/tmp/rzpdf-nested-subset-public-tests.log最新automatic_subset七项运行，新增两共享调用/另一页、自然/补偿、指定error回滚/刷新重试、严格重开BBAAAAA/AAAAAA和原Form对象不变。先前准备回调集成/tmp/rzpdf-nested-prepared-regression.log已有嵌套补偿15项通过，其他三组仍待终态；两轮编译范围不可混算。此为单事件入口，不代表跨事件/跨调用Form选区完成；当前字体注册仍兼用目标页注册器，额外页字体绑定需后续独立注册接口收敛，不能声称只新增leaf绑定。P3-05与最新完整门禁未完成。
+
+2026-10-09 Form认证后准备回调：commit_nested_edit_inner改为复用commit_nested_prepared_inner，新增内部commit_nested_prepared_with_budget。原页面快照认证成功后才执行prepare返回调用链与预算编辑程序，注册/局部scope修改和既有inside-out Form复制/根Do发布处于同一预算事务；现有入口仅包装原已准备参数，不重复实现发布。不刷新root快照、不绕过身份/修订认证。/tmp/rzpdf-nested-prepared-check.log库check退出0；/tmp/rzpdf-nested-prepared-regression.log嵌套文字/补偿/图像/路径四组公共集成仍运行，尚未验收本轮。下一步build_subset_text_fragment接局部Font name绑定及scope所有者，公共Form自动新子集入口仍待完成，P3-05不勾选。
+
+2026-10-09 Form局部绑定专项终态：/tmp/rzpdf-form-local-font-binding-tests.log退出0，local_过滤10项通过（683过滤），包含新Font局部绑定和既有预算化XObject冲突/原子失败回归。名称FontEdit3避让、其他scope保持、原Font不变、实际租约/峰值少1失败和非字典输入拒绝成立；助手尚未用于公共Form自动子集编辑，不把前置专项当作Form交付完成。
+
+2026-10-09 Form局部字体绑定前置：nested_edit预算化XObject绑定抽成私有同池资源类别助手，保留FmEdit名称/原错误契约；新增bind_local_font_with_budget仅改复制的有效Font scope，用FontEdit冲突避让，输入已验证font对象ID，返回真实资源副本/名称租约由调用者持有到发布。新增三类验证：已有FontEdit1/2避让且原scope/其他资源不变、精确峰值少1拒绝保持输入及租约、Font类别非字典拒绝恢复；/tmp/rzpdf-form-local-font-binding-tests.log运行中，未验收。尚未接公共自动子集Form编辑：注册必须放在原root认证之后，不能先改页资源再二次认证，也不能用刷新快照绕过；下一步抽出认证后的自底向上发布构造器与局部新font名称绑定回调。P3-05仍未完成，最新完整门禁待重跑。
+
+真实跨事件字体独立检查终态：/tmp/rzpdf-events-latin-independent.log与/tmp/rzpdf-events-cjk-independent.log均退出0；六份抽取TTF通过精确字集/原GID、复合闭包、轮廓/指令/度量、head边界、全表/整字体校验和及许可字段检查，各两字体负例按指定语义拒绝。Latin新子集各2所选复合，NotoSC固定字形无所选复合；不能以此证明所有复合或CJK全字体支持。下一步Form局部字体绑定与原调用隔离接入、真实保留后缀边界矩阵，最新完整workspace仍待重跑。
+
+2026-10-09 真实跨事件样例首轮：edit_subset新增--events，与--tj互斥，可叠加--cjk；将原文字拆到首Tj与尾TJ，跨事件替换至尾字符串结尾，保留-25/+15及注释，后续独立Tj验证自然/补偿推进。Arial A A A→A éÅ和NotoSC你你你→你好三页样例均生成退出0、严格重开精确文本、qpdf和MuPDF原前缀/后续坐标/字体字号及六XML负例通过，六页96DPI渲染已逐页目视，无缺字/重叠/裁切。输出output/pdf/rzpdf-{latin,cjk}-subset-events-edit.pdf；抽字体目录/tmp/rzpdf-events-latin-fonts.Rautqe及/tmp/rzpdf-events-cjk-fonts.KfXR4s，独立日志/tmp/rzpdf-events-{latin,cjk}-independent.log。固定样本不代替真实保留末端后缀/跨字号矩阵、Form或最新全量；P3-05保持未完成，fuzz继续暂缓。
+
+2026-10-09 跨事件混合字体专项终态：/tmp/rzpdf-subset-cross-event-mixed-tests.log退出0，最新automatic_subset六项通过（686过滤），四场景同子集/后续单字节Courier×自然/补偿和tiny/stale/error/panic/重试均通过；严格重开保留后缀和下一事件Courier绑定与补偿坐标，旧共享页不变。仅该固定混合水平矩阵，不证明真实字体跨事件、竖排、跨Form或最新完整workspace，P3-05继续未完成。
+
+2026-10-09 跨事件混合字体矩阵补充：automatic_subset_cross_event用例扩为同子集/后续Courier两种×自然/补偿四场景，首段双字节静态子集新B、尾段单字节Courier (A)/(AA) 部分范围；要求严格重开ABAA、后缀及下一事件仍Courier、各自字号/字距补偿、共享页和tiny/stale/error/panic/重试保持。后续Courier无FontFile2，测试若通过可证明删除段未被错误要求匹配首段完整源字体。最新六项日志/tmp/rzpdf-subset-cross-event-mixed-tests.log仍运行，尚不宣称通过；真实跨事件及Form仍待推进。
+
+2026-10-09 跨事件预算/回滚补充终态：/tmp/rzpdf-subset-cross-event-rollback-tests.log退出0，最新automatic_subset六项通过（686过滤），包含tiny ResourceLimit、同快照精确stale拒绝、刷新后发布指定error及指定panic payload回滚、完整保存字节/租约恢复与成功重试。上条“仍待终态”已由本记录取代。此固定合成水平字体/两字号矩阵不代替混合字体、真实新增字符、嵌套Form或最新workspace门禁；继续按完整P3-05推进。
+
+2026-10-09 跨事件首轮专项终态：/tmp/rzpdf-subset-cross-event-verified-tests.log退出0，automatic_subset六项通过（686过滤），新增跨事件自然/补偿、字号/字距变化、原索引一次发布、TJ数值注释、共享页、外层指定error回滚/重试、严格重开与后缀/下一事件位置均通过。后补tiny/stale/panic专项/tmp/rzpdf-subset-cross-event-rollback-tests.log仍待终态，不计入首轮六项范围。跨事件复杂混合字体与真实矩阵、Form仍未完成，最新1041工作区是本入口实现前基线。
+
+2026-10-09 跨事件回滚覆盖补充：新增tiny预算请求要求ResourceLimit、失败后同原快照要求精确过期错误、刷新快照后发布并外层error回滚、指定panic payload回滚及再次刷新成功重试；每步要求完整保存字节和邻近池租约恢复。新日志/tmp/rzpdf-subset-cross-event-rollback-tests.log六项专项仍运行，原/tmp/rzpdf-subset-cross-event-verified-tests.log不包含后补预算/panic断言，两轮编译范围分别记录；当前尚未宣称跨事件验收通过。
+
+跨事件测试构建更正：首轮/tmp/rzpdf-subset-cross-event-tests.log退出101，为新增坐标断言误用不存在的origin字段导致E0609，未执行测试；已改用ExtractedCharacter.position.x()/y()。新日志/tmp/rzpdf-subset-cross-event-verified-tests.log重编译六项，仍待终态，不能将上一条“运行”视作通过。生产库check通过不受该测试字段错误影响。
+
+2026-10-09 跨事件自动子集接入首轮：片段抽取版五项专项/tmp/rzpdf-subset-fragment-tests.log退出0（5通过/686过滤）。新增replace_page_text_event_range_with_subset_and_budget，原快照认证后先规划后续旧字体删除片段，再构造首事件新字片段，复用finish_text_event_fragments按原索引一次组装/发布；首段计入合并字符额度，原码字节跨事件聚合，非文字状态和numeric-only TJ保持。库check /tmp/rzpdf-subset-event-check.log退出0；新增自然/补偿两模式公共回归，包含不同字号/字距、Tj→TJ部分后缀、数字注释、共享页、发布后指定error回滚与新快照重试、严格重开ABAA及后缀/下一事件坐标。最新六项日志/tmp/rzpdf-subset-cross-event-tests.log仍运行，未验收本轮跨事件入口；复杂混合字体、预算/panic全矩阵、真实字体及Form仍待推进，不借重构前1041门禁证明新代码。
+
+2026-10-09 自动子集片段构造器抽取：subset_text_edit新增内部SubsetTextFragment（原index/预算字节/operation_count/注册字体所有者）和build_subset_text_fragment，接收原有效BudgetedTextMetrics，不提交内容或刷新快照。既有单字符串/引号/TJ入口仍在原快照认证后的同一外层事务内调用，再一次组装发布。片段临时字体度量和编码在构造结束释放，实际片段及注册所有者保留到提交。/tmp/rzpdf-subset-fragment-check.log库check退出0；/tmp/rzpdf-subset-fragment-tests.log五项专项仍运行，尚未验收本轮重构。此前1041全量属于重构前基线，跨事件组合/聚合预算/后续混合字体删除及Form仍未接入，P3-05保持未完成。
+
+2026-10-09 最新TJ完整门禁终态：原cargo会话25252退出0，/tmp/rzpdf-subset-tj-workspace.log共52个成功测试组、1041项通过，0失败/忽略/过滤；PDF单元691项、render单元38项（64.31s），所有公共集成及font_data/pdf/render文档测试终态成功。Rust/Cargo集合指纹始终为3c0bca8f584ea1b9a0b626f8c74bbae6bd0d7f6ea67d091c7f3cd29860eab733，git diff --check通过，解除本轮源码冻结。此基线覆盖自动子集单字符串/引号/TJ单项及跨项和回滚快照测试修正；真实Arial/NotoSC跨TJ固定范围独立验收另见上方记录。下一步实施不提交的单事件片段构造器并接跨事件一次事务发布，再推进Form局部资源及真实边界矩阵；P3-05及完整项目仍未完成，fuzz继续暂缓，未创建新commit或推送。
+
+2026-10-09 最新全量阶段结果：/tmp/rzpdf-subset-tj-workspace.log编译完成（5m40s），PDF单元691项通过、0失败/忽略/过滤，包含本轮TJ拆分/跨项规划和自动子集回滚修正。原cargo会话25252仍运行，进入adjusted_text等公共集成；不可将单元通过表述为全workspace终态。源码指纹保持3c0bca8f584ea1b9a0b626f8c74bbae6bd0d7f6ea67d091c7f3cd29860eab733，继续冻结，后续render和文档测试尚待确认。
+
+2026-10-09 真实字体跨TJ样例：edit_subset增加可组合--tj/--cjk，保留-25/+15及注释，跨三个字符串起点部分保留→末项结束替换；Arial A A A→A éÅ、NotoSC你你你→你好，三页原共享资源/自然/补偿对照及下一Tj。两次生成退出0，严格重开精确文本、原数值注释断言、qpdf和MuPDF三页文字/字体/字号/原前缀与下一事件坐标检查及各六负例通过；六页96DPI渲染逐页目视无缺字/重叠/裁切，补偿空隙用于保持后续位置。抽字体目录/tmp/rzpdf-tj-latin-fonts.OjL6yW及/tmp/rzpdf-tj-cjk-fonts.ozRHKg，独立日志/tmp/rzpdf-tj-{latin,cjk}-independent.log。最新完整cargo test --workspace --locked已启动，日志/tmp/rzpdf-subset-tj-workspace.log，Rust/Cargo指纹3c0bca8f584ea1b9a0b626f8c74bbae6bd0d7f6ea67d091c7f3cd29860eab733；门禁期间不改源码。尚未全量终态，固定末项结束样本不代替真实保留后缀/全边界矩阵，跨事件/Form及P3-05仍未完成，fuzz不运行。
+
+2026-10-09 跨TJ回滚复验终态：诊断日志/tmp/rzpdf-subset-tj-cross-diagnostic.log退出101，确认原tiny请求实际返回ObjectError("content snapshot is foreign, offline or stale")，不是预算路径失败。刷新快照及精确错误断言后的/tmp/rzpdf-subset-tj-cross-refreshed-tests.log退出0，最新automatic_subset五项通过（686过滤）；覆盖四类真实边界拒绝、tiny预算ResourceLimit、发布后指定error及panic回滚、成功重试、共享页隔离和自然/补偿位置。此轮仅修正测试假阳性风险，生产实现未变；不替代真实字体TJ矩阵、最新完整workspace或P3-05验收。
+
+2026-10-09 跨TJ回滚专项复核：9788已终态，原公共五项通过；45518已终态，新增回滚专项4通过/1失败，失败于tiny预算预期ResourceLimit。检查DocumentState::StoreRollback确认失败回滚递增revision，连续复用快照会提前触发过期拒绝。补实际错误诊断（/tmp/rzpdf-subset-tj-cross-diagnostic.log），各非法请求前重新取快照并要求具体边界错误；tiny和发布后外层error前刷新快照，外层error要求指定发布后错误，防止.is_err()掩盖未执行编辑。最新五项复验日志/tmp/rzpdf-subset-tj-cross-refreshed-tests.log尚在运行，未宣称修复通过。生产代码未变，真实字体TJ矩阵、最新全量、跨事件/Form及P3-05仍待完成；fuzz继续暂缓。
+
+2026-10-09 跨TJ事务隔离补充：在既有跨三字符串自然/补偿位置用例补第二共享字体页面；非法数字端点/半码/反向请求和tiny预算拒绝均须完整保存字节保持、租约恢复。发布后外层error及指定panic回滚，刷新原快照后成功重试；成功后共享页原内容字节与严格重开AAAAAAA保持。生产代码未再改变。45518日志/tmp/rzpdf-subset-tj-cross-rollback-tests.log验证新增断言；9788原跨项公共五项尚未终态，不将后补断言计入其编译范围。未宣称TJ跨项完成，跨事件/Form及真实字体验证/最新全量仍待推进。
+
+2026-10-09 TJ跨项公共入口接入：86843聚合规划补充退出0，专项1项通过（689过滤），包含新增输出超限/原码字节超限/完全删除段ffff无效码拒绝。新增replace_page_text_array_range_with_subset_and_budget，与单项共用统一事务注册入口；按整数组规划字集，用既有budgeted_text_array_range_replacements仅删除旧码，既有逐项adjustments/数组序列化保留原数值词法和注释，再在起点前缀末拆分插入q/Tf新码/Q。补偿第一段旧→新、后续旧→空；不把新子集码交给旧字体解码。87893库check退出0；9788日志/tmp/rzpdf-subset-tj-cross-public-tests.log最新automatic_subset五项运行中，新增跨三字符串部分端点自然/补偿、严格重开ABAA、原/新字体分区、后缀/下一事件坐标与-125/+75注释保持及释放。公共跨项尚未验收，完整最新门禁、跨事件/Form和真实新增字符矩阵仍待推进，P3-05未完成。
+
+2026-10-09 跨TJ规划首轮终态：63295退出0，registered_subset_descriptor专项1项通过（689过滤），同一Font注册/严格重开路径包含跨三字符串、同项插入、整段替换/删除及错误边界/缺字/输入字符聚合/短池释放规划断言。后补聚合输出插入超限、聚合原码字节超限和完全删除段含ffff无效码拒绝，86843日志/tmp/rzpdf-subset-tj-range-aggregate-tests.log运行中，未计入首轮。接公共跨项时必须让既有budgeted_text_array_range_replacements只删除旧码，不能传新子集码触发旧字体解码；在起点局部Tf单独显示新码，补偿分别计算第一段旧→新及后续段旧→空，并保留原TJ数字位置/值。公共跨项发布尚未完成。
+
+2026-10-09 TJ跨字符串规划前置：新增plan_subset_text_array_range，借用两遍遍历整个原数组，按原字体校验所有CID/Unicode/源GID，包括完全删除的字符串；字符串端点和半码边界拒绝，数字槽不计字符，replacement仅在起点插入。聚合原码字节/输入字符/输出字符/UTF8字节额度，输出一次精确预留并持实际capacity租约，不为各项创建解码String或元数据Vec。已补跨三字符串ABA、同项插入、整数组替换/删除、数字端点/反向/越界/缺字/半码、聚合原字符上限及短池释放断言，registered_subset_descriptor定向日志/tmp/rzpdf-subset-tj-range-plan-tests.log运行中，尚未验收。仍未接公共跨项注册/内容发布与逐片段补偿，不缩减P3-05。
+
+2026-10-09 TJ单项专项终态：96262退出0，automatic_subset三项通过（686过滤），覆盖Tj/两类引号/TJ×自然/补偿八场景、严格重开及原TJ数值注释/前后字体保持；9370退出0，最新四项通过（686过滤），后补TJ六类边界、数字端点/半码/越界无修改拒绝、发布后外层error回滚/新快照重试、共享页AAAA及租约释放通过。两个二进制的编译范围分别记录，不将四项后补测试算进先前三项结果。下一步跨字符串字集与逐片段补偿规划，再接跨事件/Form及真实新增字符矩阵；P3-05未完成，最新完整workspace仍为此前1038项冻结版本，不覆盖本轮TJ接口。
+
+2026-10-09 TJ边界与回滚补充：48801拆分专项退出0，1项通过（688过滤），词法数值/注释/邻居及预算释放验证成立。96262八场景公共专项仍运行，不能提前宣称通过。另补automatic_subset_tj_item_boundaries_and_public_rollback：句首/中间/句尾插入、整串删除、前/后半替换六类，拒绝数字项端点/半字符码/越界保持完整保存字节；发布后外层error回滚并刷新快照重试，严格重开目标页与共享字体另一页AAAA，操作租约释放。最新9370日志/tmp/rzpdf-subset-tj-boundary-tests.log运行中，不将后补断言计入已编译96262结果。TJ跨项/跨事件/Form自动新字集仍未完成。
+
+2026-10-09 TJ单字符串公共接入：新增replace_page_text_array_item_with_subset_and_budget，与Tj/两类引号共用replace_subset_string_inner的原快照认证、来源/GID/字符边界规划、外层事务注册与预算化新旧字体补偿。TJ原字符串前后由split接口生成旧字体数组，中间q/Tf显示新码后Q恢复，原数值间距及注释不重编码。14649库check退出0；96262最新automatic_subset专项运行中，位置矩阵新增TJ自然/补偿（合计八场景），要求严格重开ABBAA、原前后字体、后续坐标和-125/+75注释字节保留。48801较早拆分专项仍活跃，不将其未终态或旧1038项门禁当作公共接入验收。跨项、跨事件、嵌套自动子集路径仍未完成，P3-05未完成。
+
+2026-10-09 TJ新字体片段前置实现：新增ContentProgram::text_array_split_string_fragments_with_budget，预算解析核对原TJ词法与对象；围绕单字符串解码字节范围生成两个旧字体TJ，原数值/注释/未修改字符串逐字节保留，前后缀仅重新序列化为hex。两份返回缓冲与生成token按实际capacity租约共存；字符码边界由上层字体规划验证，不在此词法接口猜测。定向48801日志/tmp/rzpdf-subset-tj-split-tests.log运行中，覆盖转义原字符串/数值注释/邻居保持、非法范围、短预算与释放；尚未验收。此为后续单项/跨项公共注册编辑前置，不以内部拆分替代完整TJ或P3-05；1038项全量只证明此前冻结版本。
+
+2026-10-09 最新一致版本workspace完成：原98627交互句柄在等待中断后丢失，但Cargo PID18018继续运行至退出；原日志/tmp/rzpdf-subset-edit-workspace-final.log包含52个执行组及52个成功终态，总计1038项通过、0失败/忽略/过滤，PDF库688、render库38及全部公共集成/三组零用例文档测试完成。总进程退出码无法从丢失句柄取回，不虚报exit0；全部组终态与进程退出、无错误日志及Rust/Cargo集合指纹ea43e3b9e2bff811f14ac2abd26bf0503a60b56a671f5b81835a38f26359fe5e保持已核对。源码冻结结束，下一步接入统一新字体替换片段和TJ；P3-05及整体目标未完成，未提交，fuzz暂缓。
+
+2026-10-09 最新全量分项：98627日志/tmp/rzpdf-subset-edit-workspace-final.log确认PDF库688项全部通过，0失败/忽略/过滤，包含当前自动子集编辑三项及已有span/事务回归；同一会话继续adjusted_text公共集成，完整workspace未终态。Rust/Cargo文件集合内容指纹ea43e3b9e2bff811f14ac2abd26bf0503a60b56a671f5b81835a38f26359fe5e保持，不据库单元结果宣布完整门禁或P3-05完成。
+
+2026-10-09 独立检查器反例加固：78711/93630分别Latin/CJK增强检查退出0；六个XML反例现在必须在指定检查点以准确错误拒绝，不能把其他ValueError当通过。新增两类字体反例：修复校验和后的错误head边界须在全局轮廓边界检查拒绝；完整来源字体冒充子集须在精确Unicode字集检查拒绝。Python -O下两套全部通过。98627原会话50秒复查仍活跃，未重启、未计全量通过；Rust源码未改。
+
+下一实施顺序（2026-10-09，P3-05范围不缩减）：
+
+- [x] 当前98627全量门禁终态核对，期间不更改Rust生产/测试/示例源码；52组1038项均成功终态，指纹保持；总退出码因句柄丢失未取得，具体证据与限制见上。
+- [ ] 统一新增字体替换片段规划：复用TextCodePosition、原快照认证、有效字体度量、OperationReplacement和预算持有/事务发布。现有text_array_items_fragment接口同字体假设不能直接用于混合原码/新子集码；规划必须先输出旧字体前缀，局部q/Tf显示新码并可补偿，再Q恢复旧字体后缀，不能错误重编码其他片段。
+- [ ] TJ数组自动子集入口：逐项保留原数字的顺序和值，支持字符串内边界、跨字符串、空串/插入/删除；以旧码解码验证原GID并聚合新字集。替换字体仅作用于新码，补偿按新旧字体各自度量，不吞掉既有间距。严格重开、原数字检查、共享页隔离、位置对照、预算失败/error/panic回滚与原快照重试必须通过。
+- [ ] 跨事件/嵌套接入既有调用树：按原有效状态分别计量、仅在起点插入新码；Form局部资源及其他调用隔离，保留未知操作和夹子调用范围契约。不得维护另一套独立提交/修订号机制。
+- [ ] 真实中文/Latin矩阵及最新全量复验后再评估P3-05验收；shaping、字体回退和布局适配按支持矩阵明确范围，不由单字符串专项推出完整字体支持。
+
+2026-10-09 真实编辑字体独立复核：44564退出0，MuPDF从两份三页编辑PDF各抽取三份TTF；FontTools逐份验证EDITAA/EDITAB/EDITAC唯一身份、精确Unicode字集、原GID、完整复合依赖、未选轮廓清空、保留轮廓/指令/水平及可选垂直度量、head全局边界、表及全字体校验和与许可字段。Arial新子集各4标量/8 GID/2选中复合字形，中文新子集各2标量/3 GID。已将复核入口纳入check-subset-edit.py --fonts，可与位置检查和六反例一起复跑。98627最新workspace仍运行，源代码在该门禁期间不扩展；此字体专项不代替全量门禁或P3-05剩余编辑范围。
+
+2026-10-09 真实自动子集编辑收口：84087退出0，automatic_subset三项通过（685过滤），空替换/事务隔离/引号与补偿矩阵通过。最新短替换Arial与NotoSC示例76682/73870均退出0并严格重开；两份PDF的qpdf检查、MuPDF三页文字/字体/字号/前缀与后续坐标检查及Python -O六反例均通过。六张96 DPI PNG逐页目视无缺字、重叠或裁切；补偿保留后续位置，自然模式左移。Latin默认stext在补偿空隙插入一个视觉空格，检查器固定记录该输出，不通用过滤字符。此次未独立复核新增字体表，亦未完成最新workspace全量门禁；下一步先全量回归，再复用既有选区/事务/预算机制接入TJ、跨事件与Form，不分别复制编辑引擎。P3-05与整体项目保持未完成，fuzz暂缓。
+
+2026-10-09 自动单字符串补偿/引号专项：85917自然模式公共预算/error/panic回滚、来源不匹配拒绝与共享页资源/内容流保持退出0；70330补偿版两项退出0，30010引号lib检查退出0；34345扩展两项退出0，位置测试覆盖Tj/单引号/双引号×自然/补偿六场景，A→BB严格重开ABBAA，原字体前后缀与后续显示保持，补偿时后缀/下一事件x误差<0.002、自然模式推进差异>1，y保持。双引号显式Tw/Tc/T*副作用不局部撤销。后补空替换删除中间字符/原字体/释放另轮运行中。以上合成水平静态字体专项不替代真实新增字符坐标/视觉、TJ或跨事件/嵌套入口、完整workspace，P3-05未完成。
+
+2026-10-09 实验自动单Tj子集编辑接入：新增公开document::subset_text_edit及SubsetTextEditOptions，显式完整来源/描述指标/唯一标签/辅助表省略；replace_page_text_string_with_subset先原快照认证，再在同一外层事务注册新子集和q/Tf/Tj/Q原操作替换，保留前后缀与共享旧字体，非目标页不变。17676 lib检查退出0；69729预算Tf内容构建13项通过；73662首轮公共自动编辑专项退出0，BAA/AAA严格重开、旧编码器/旧字体保持、半码拒绝、陈旧快照拒绝及外层error回滚/刷新重试通过。后补_and_budget显式池与极小额度拒绝/邻接租约释放另轮进行中，未计入首轮。自然推进模式仅单顶层Tj，补偿/TJ/引号/跨事件/嵌套及真实新增字符视觉仍未完成，P3-05保持未完成。
+
+2026-10-09 单字符串规划专项终态：99248退出0，subset前缀12项通过（672过滤），包含来源固定head字段/比较工作额度、原CID输入额度及完整注册/严格重开中的前后缀保留AA→BA/ABA/AB/空、半码/倒序/越界/缺字/聚合字符超额和释放。随后新增ContentBuilder::font_selection_with_budget，栈缓冲格式化有限f32字号，直接转义资源名，输出实际capacity租约持有；与既有写出逐字节比较及短额度/非法输入释放测试另轮运行中。自动新子集注册/内容发布、TJ/跨事件/嵌套路径仍待实现，P3-05未完成。
+
+2026-10-09 Unicode规划前置：49140退出0，注册/严格重开1项通过（683过滤），含借用Unicode/GID遍历重复顺序与回调拒绝、两遍预算解码输出及短额度释放；不含后补head固定字段/代码输入额度与plan_subset_string。新增单原字符串前后缀+替换规划，检查源覆盖、分割码边界、输入及聚合输出字符/UTF8字节额度，全部缓冲实际容量计费；测试覆盖AA→BA/ABA/AB/空、半码/倒序/越界/缺C/字符超额及释放，subset前缀另轮运行中。仍为内部规划，未注册新资源或发布内容，跨事件/TJ/嵌套自动编辑未完成，不以此缩减P3-05。
+
+2026-10-09 CID预算编码专项终态：88645退出0，cid_encoding4项全部通过（680过滤），包括新增中文/nonBMP固定字集编码、未覆盖字符释放、相邻租约及短额度失败/重试，原公开编码接口保持不变。随后validate_subset_codes委托借用visit_subset_scalars，提供Unicode/GID回调用于前后缀规划，并新增两遍预算化decode_subset_codes；已补重复顺序、回调拒绝、UTF8输出/短额度释放，另轮运行中未验收。这些仅为内部前置能力，自动新增字符选区/事务资源注册尚未接入，不代表P3-05完成。
+
+2026-10-09 自动编辑前置验证：84043来源兼容/聚合比较上限两项退出0；字符映射用例27208因测试访问私有ctx字段编译失败（退出101），改现有ctx()访问后88630退出0，注册/严格重开用例通过，覆盖正确CID→Unicode→源GID、未知码、半字符码及错误源cmap拒绝。生产validate_subset_codes借用Type0映射，不逐字分配String，缺失/空/多标量映射明确拒绝，尚不支持简单字体或shaping。新增UnicodeCidEncoding预算化编码方法及中文/nonBMP/缺字/额度/释放重试测试，另轮进行中；原公开固定编码接口不变。自动事务注册/选区规划与嵌套发布仍未接入，P3-05未完成。
+
+2026-10-09 来源兼容性初版专项：72099退出0，1项通过（681过滤），同源接受、保留hmtx/glyf及unitsPerEm改动/截断拒绝与重试通过；不含后来累计工作限制。84043启动subset_source两项，覆盖后补聚合比较字节额度与恢复重试，尚未终态。完整自动新增字符事务/字符码边界与ToUnicode规划、原字体恢复和跨事件/嵌套均仍待接入，不以内部来源校验替代P3-05。
+
+2026-10-09 跨字体度量专项终态：28408退出0，font_binding12项通过（669过滤），含精确推进、字符额度重试与跨字体分开计量/状态不匹配拒绝。新增validate_subset_source初版比较双向保留表、unitsPerEm/原GID数量及非空保留字形原始字节（允许最多3字节零填充），借用表片段无新复制；后补累计比较字节上限。它仅证明当前静态原GID子集的来源兼容性，删除轮廓无法证明缺失部分原始身份，不是密码学认证。72099正在验证此前版本的同源/度量/字形/单位错误/截断用例，未覆盖后补工作上限；尚未接入公共自动编辑，P3-05未完成。
+
+2026-10-09 自动子集编辑前置度量：边界修正版PDF库84993退出0，679项全通过，0失败/忽略/过滤；随后font_binding提取advance_1000并新增跨绑定replacement_adjustment_to，旧入口委托同绑定路径，新旧代码各按所属字体计算，明确相同有效文本状态/书写轴前置，不以Unicode空格替代单字节0x20的Tw规则。补Courier精确推进/空文本/字符额度失败重试/零字号与释放测试；4643仅验证提取版，运行中，不包含后补跨绑定方法及新增断言。自动新增字符公共入口、来源匹配、事务注册及跨事件/嵌套矩阵仍未实现，P3-05不勾选。
+
+2026-10-09 边界真实样本修正版验收：46394退出0，subset前缀10项通过（669过滤），含公共FontBBox注册/保存严格重开；90747/53660两生成退出0。提取字体位于/tmp/rzpdf-bounds-extract.QYG20U/font-0006.ttf与font-0008.ttf，MuPDF重新提取XML并96DPI重渲染三页；逐页查看无缺字/重叠/裁切。qpdf两PDF检查退出0。72665/93027独立FontTools检查在-O下均退出0：Arial17标量/26GID/5真实复合、中文44/45/0，head联合与轮廓/度量/文本正确，七固定负例均准确拒绝，含修复校验和但错误head框。以上为有限真实样本和专项证据，不代表全面字体符合性、新版完整workspace或自动新增字符/通用选区编辑完成；P3-05仍未完成，fuzz暂缓。
+
+2026-10-09 边界组装专项终态：10140退出0，subset前缀9项全部通过（669过滤），含源head框扩大到[-200,-300,400,500]后子集重开回到[0,0,30,60]、源不变及精确预算邻界回滚。随后新增公共FontBBox描述符断言，覆盖注册前后保存/严格重开，46394正在验证，未计入前述9项。更新后的独立检查器在-O下检查旧Arial子集，明确于subset global outline bounds拒绝（退出1），证明旧产物不满足新增字段要求；该拒绝不是新产物验证成功。新样本重生成及七负例验收仍待完成。
+
+2026-10-09 子集整体边界修正进行中：来源绑定GlyphClosure在既有迭代依赖遍历中记录轮廓存在性，联合保留字形头边界，忽略零轮廓及仅引用空字形的复合字形，全空结果为零框；布尔缓存/扩大的遍历栈实际容量纳入OperationBudget，写入head36..44，注册路径继续从重建字体度量生成FontBBox。43352专项退出0：闭包/重建5项通过，覆盖负坐标、空复合、缓存依赖顺序及既有预算失败/回滚；不含随后新增组装断言。独立脚本补FontTools展开轮廓端点排空及head联合检查；组装层源框扩大后重开缩框/源不变断言另轮运行中。真实样本重生成、PDF FontBBox直接验证及新版完整验收尚未完成，P3-05仍未完成。
+
+2026-10-09 字体子集冻结版完整门禁终态：会话49844的cargo test --workspace --locked退出0；日志/tmp/rzpdf-subset-workspace.W44TxU共52组结果、1027项通过，0失败/忽略/过滤，零用例文档测试不计入通过项。源码清单摘要仍为39e3ff309032bdeace5cd213969efb30baaf7cdbc0a7ea8dc7c936d97f03a324，确认全程同版。解除本轮源码冻结，下一步优先修正已确认的head/FontBBox边界缺口；本次绿色门禁不证明该未覆盖字段正确，不代表P3-05或整体TODO完成，fuzz继续暂缓。
+
+2026-10-09 最新完整门禁阶段结果：49844仍运行，编译阶段已完成（7m04s）；冻结版PDF单元677项全部通过，0失败/忽略/过滤，随后进入adjusted_text公共集成。font_data单元为零用例，不计入测试通过数。该单元结果覆盖冻结源码及辅助表策略，但不替代所有集成/render/文档测试终态；head整体边界已确认缺口仍待修正。继续同会话/同日志/tmp/rzpdf-subset-workspace.W44TxU，不改源码、不重启，P3-05未完成。
+
+2026-10-09 冻结版整体边界缺口确认：完整门禁49844仍运行（本轮见cargo PID38654及create_document编译子进程，不因0CPU等待重启）。只读FontTools对产物核对head全局边界：Noto旧head(-1002,-1048,2928,1808)，实际保留非空轮廓头联合(16,-229,974,880)；Arial旧head(-1361,-665,4096,2060)，保留轮廓头联合(-3,-421,1574,1780)。现subset.rs仅改loca格式/校验和，未重建head边界，独立检查器也未覆盖该字段。依据[OpenType head规范](https://learn.microsoft.com/en-us/typography/opentype/spec/head)，全局边界应按有轮廓字形计算并忽略无轮廓字形。下一源码冻结结束后优先从来源绑定闭包重建该联合及PDF FontBBox，补无轮廓/复合/负坐标与预算失败测试、独立检查并重生成真实样本；不把当前渲染通过当完整字体符合性，P3-05未完成。
+
+2026-10-09 冻结期验收文档收敛：90577退出0，扩展复合检查后的CJK正常输入/六负例在-O下复验通过（44标量、45GID、0所选复合），停止轮询。docs/font-cmap-validation.md统一omit_layout_and_auxiliary及已通过/未完成边界；P3-05仅新增三个范围明确的固定验收子项勾选，总项/自动扩充/通用选区仍未勾选。完整门禁49844本轮确认仍运行，日志仍在编译警告阶段；生产/测试/示例/render文件内容清单指纹39e3ff309032bdeace5cd213969efb30baaf7cdbc0a7ea8dc7c936d97f03a324（rg --files排序逐文件sha256再摘要，含未跟踪新源码），继续冻结，不因长启动或静默重启；fuzz暂缓。
+
+2026-10-09 真实复合闭环终态与完整门禁启动：93148生成退出0，output/pdf/rzpdf-latin-subset.pdf严格重开精确文本通过；qpdf结构、MuPDF独立文字及96DPI目视无重音缺失/裁切/重叠。检查器--latin明确要求>=5真实复合字符；86959退出0，17标量/26保留GID/5复合、原组件GID/轮廓/度量/指令/许可及六固定负例均通过，停止轮询。按PDF技能使用既有工具，Arial源未修改或入库。最新版检查器CJK回归90577运行中。新模块/涉及入口与示例完成局部rustfmt，差异检查通过；启动cargo test --workspace --locked，日志/tmp/rzpdf-subset-workspace.W44TxU，源码从此冻结至该一致版本完整门禁终态，不以旧专项替代最新完整结果。自动覆盖扩充/通用选区和其他阶段尚未完成，P3-05不勾选，fuzz暂缓。
+
+2026-10-09 新增字符隔离专项终态：4145最新版单事件版退出0，九项子集专项全部通过、668过滤，含BA/AA与尾部字体恢复、外层失败/重试及共享资源隔离；停止轮询。68757较早整页版也退出0九项通过，停止轮询，不将其替代单事件证据。两版本不覆盖后补辅助表策略；93148实际复合示例仍在编译运行。P3-05未完成。
+
+2026-10-09 真实复合样本接入待验收：依PDF技能完整读取流程，本机Arial.ttf只读FontTools核对é/Å/ö/ñ/ç均复合，fsType8可编辑嵌入；还包含LTSH/hdmx/VDMX/PCLT。按官方各表规范不盲目复制改写后的缓存/打印元数据，纳入显式允许布局+辅助省略并报告的策略（未知表仍拒绝）；公共布尔参数名明确omit_layout_and_auxiliary，原整字体入口不变。新增create_subset固定Latin复合样本示例，调用方显式指标/tag/辅助策略、严格重开核对文本；93148使用本机Arial生成output/pdf/rzpdf-latin-subset.pdf，编译运行中未验收，系统字体不复制入库。4145单事件与68757早期整页专项仍未终态，新表策略还须重验，真实独立轮廓/渲染及完整workspace仍待完成，fuzz暂缓。
+
+2026-10-09 新增字符单事件隔离专项接入待验收：将前轮整页替换测试加强为既有replace_page_operation_sequences显式局部事件流程，两页AA共享原子集，仅第一页首个Tj替换为q/新字体Tf/编码B Tj/Q，严格重开期望BA/AA并核对尾部字体恢复原AAAAAA+Demo。外层失败与重试仍包含新字体注册和事件替换，原共享对象/另一页资源源码不变。新会话4145编译中未终态；旧68757整页版本仍运行，其结果不能冒充单事件版。该流程显式指定原操作/字体/字号，不是自动覆盖扩充或通用跨事件/嵌套选区API，后者仍待实现，P3-05不勾选。
+
+2026-10-09 检查器负例终态与新增字符隔离专项：51393退出0，python3.11 -O正常输入及六个固定负例全部通过，拒绝阶段精确匹配，停止轮询。子集组装测试新增显式局部资源替换流程：两页共享A子集，另建B子集只替换第一页内容；核对原字体对象/第二页资源与内容不变、原编码器仍拒绝B、严格重开分别B/A。外层事务在新注册+内容替换后主动失败，检查保存字节恢复并随后重试成功，报告预算释放。最新68757编译中未验收；这是固定单事件整页内容替换流程，不代表任意选区/嵌套Form自动新增覆盖或公共字体扩充策略已完成，P3-05保持未完成，fuzz暂缓。
+
+2026-10-09 独立子集检查器负例待验收：check-cjk-subset.py补精确MuPDF字体绑定/两行字号检查及--self-test，先验正常样本，再固定六负例（字体校验和损坏、整字体冒充子集、文字改动、缺页、误字体绑定、误字号）。只认可对应ValueError精确检查阶段，不把依赖失败等任意错误算通过；隔离临时目录生成控制数据，源不变，使用显式require而非优化时消失的assert。python3.11 -O会话51393运行中未终态，差异检查通过；这是确定性验证，不是fuzz，真实复合字体/新增字符编辑与完整workspace仍待完成。
+
+2026-10-09 真实中文子集首轮闭环终态：22238生成退出0，output/pdf/rzpdf-cjk-subset.pdf两页；省略BASE/GDEF/GPOS/GSUB，构建peak546136字节。qpdf结构通过，MuPDF独立stext/96DPI两页渲染完成并逐页目视无缺字/重叠/裁切。新增只读docs/check-cjk-subset.py，FontTools独立验证44标量/45保留GID、全字体及各表校验和、原GID、所有所选轮廓/水平竖向度量/指令、未选空字形、版权许可/fsType及精确两页文本；17530退出0。原字体10595948字节→嵌入子集381196字节，PDF384596字节（不是完整项目性能验收）。26274最新八项专项全通过、668过滤，停止轮询。按PDF技能验证使用已有MuPDF/FontTools，未安装依赖；仍缺独立实际复合字体、编辑新增字符/共享隔离、检查器负例及最新完整workspace门禁，P3-05不勾选，fuzz暂缓。
+
+2026-10-09 真实字体旧策略终态与新版验证启动：64943退出1，明确错误Unknown subset table policy: vhea，停止轮询；17774最新策略示例构建退出0，停止轮询，随后运行该已构建二进制生成同名中文子集PDF（新运行会话待终态，不是因静默重启旧进程）。新增组装竖向度量正常保留、缺单表及长度差1字节拒绝/释放测试，26274使用font::truetype::subset过滤覆盖组装/名称/策略，运行中未验收。真实字体独立校验/渲染和完整工作区仍待完成，P3-05不勾选。
+
+2026-10-09 复合专项终态及真实字体表策略修正：47230退出0四项通过、671过滤，包含复合组件保留，停止轮询。FontTools只读检查实际静态Noto发现STAT/vhea/vmtx；官方STAT规范明确静态字体也可包含，故STAT改为保留（name记录ID及风格不变），不再误当变量输入；原GID/numGlyphs不变时保留vhea/vmtx，组装补成对存在/头长度/度量数量及数据长度检查，不代表新增竖排PDF入口。未知表仍拒绝，fvar/gvar等仍拒绝。官方依据[STAT](https://learn.microsoft.com/en-us/typography/opentype/spec/stat)、[vmtx](https://learn.microsoft.com/en-us/typography/opentype/spec/vmtx)。64943旧样本进程仍运行，预期旧策略拒绝但未终态不重启；最新示例构建另会话进行中，尚未验收后补策略，真实产物闭环与P3-05未完成。
+
+2026-10-09 修正版公共专项终态及真实样本启动：55918退出0，三项组装/公共跨页严格重开/对象中途失败回滚全部通过（671过滤），覆盖权限夹具版本3与基础名称修正，停止轮询。47230复合版仍未终态。create_cjk新增--subset（旧默认不变），明确允许布局省略并打印报告/预算peak；64943使用既有静态Noto字体/tmp/rzpdf-outline-font.nFalKk/font-0008.ttf生成output/pdf/rzpdf-cjk-subset.pdf，运行中未验收。依PDF技能已完整读取流程，后续用现有MuPDF替代缺libtiff的Poppler，字体工具/结构/提取/PNG视觉核验尚未完成，P3-05不勾选。
+
+2026-10-09 复合组装专项接入待验收：自建字体夹具增加A为复合GID1引用简单GID2，选A但不选B；新测试验证输出cmap不覆盖B但GID2轮廓保留、组件仍引用原2、依赖重验访问两字形及释放。maxp夹具同步复合点/轮廓/组件深度上限。最新47230编译中，尚未终态；55918修正权限/名称版仍运行。较早32013退出0两项通过，但不含后补禁止子集/非法tag断言及中途失败测试，不替代最新版本证据；停止轮询32013。差异检查通过，尚不代表实际中文字体独立渲染验收，P3-05未完成。
+
+2026-10-09 公共专项失败定位与修正：24008退出101，组装及中途对象失败回滚两项通过，公共跨页测试失败于禁止子集断言；夹具OS/2版本0按既有规范忽略后定义高位，改为版本3后使用0x0100，没有放宽生产权限规则。另修复基础名称为空加tag后误接受，公共入口预检基础名称1–56字节/旧字符集、描述数值和PDF版本，补空名称/+和/非法断言。最新55918运行中未终态，32013仍未终态，不以旧构建覆盖修正；docs/font-cmap-validation.md记录实验入口和预算/支持边界。P3-05继续未完成。
+
+2026-10-09 公共子集注册中途失败专项接入待验收：新增对象额度10/预占至ID8夹具，使FontFile2和描述对象插入后第三对象失败；核对ID1–8逐对象相等、页资源恢复、下一插入编号9以及临时子集预算归零。不用低额度保存限制替代对象状态检查。最新专项24008编译中（含前轮后补权限/tag断言），尚未终态；原32013已启动但仍未终态，继续观察同句柄不因静默重启。尚需取得专项结果及真实中文/复合字形独立闭环，P3-05不勾选，fuzz暂缓。
+
+2026-10-09 公共子集运行专项接入待验收：组装模块增加公共ResourceManager测试，自建简单轮廓字体注册后编码AA并拒绝未选B，跨两页复用句柄/写入文本，严格保存重开核对两页各两个A及ABCDEF+Demo名称；tiny预算、禁止子集fsType及非法tag检查文档保存字节不变，句柄报告drop释放预算。会话32013编译中，但禁止子集/非法tag断言在启动后补入，须确认编译覆盖或随后重跑，不把之前组装测试冒充公共验收。差异检查通过；真实中文/复合字形、独立字体工具/渲染及注册中途对象失败仍待完成，P3-05不勾选，fuzz暂缓。
+
+2026-10-09 子集组装专项终态：38183退出0，组装1项通过、671过滤，覆盖原GID/字符覆盖/空未选字形/校验和/源不变及精确预算邻居拒绝释放重试，停止轮询。该二进制在后补公共入口前构建，不代表公共入口运行验收；不把自建简单轮廓夹具替代中文复合字形和独立工具闭环。
+
+2026-10-09 公共子集入口编译终态：56311退出0，cargo check -p pdf --locked通过，停止轮询；有80条警告，不声称无警告或运行测试通过。公共入口专项尚未添加，原组装38183仍未取得终态；继续验证创建/保存/回滚及字体闭环，整体目标保持进行中。
+
+2026-10-09 显式公共子集入口接入待验收：ResourceManager::embed_truetype_subset_font接受借用源、固定字集、描述参数、调用方文档内唯一六大写字母tag、显式布局省略选项与输出操作预算；检查subset权限、构建子集后复用字体资源事务，统一name ID6/FontDescriptor/两个BaseFont名称。返回RegisteredSubsetCidFont包裹原字体句柄并保留可查询的省略表报告及其预算租约；旧embed_truetype_font签名与整字体名称验证不变。子集字节租约保持至注册完成，文档长期分配及旧解析器内部分配不在该临时输出池范围，不宣称全事务预算化。最新cargo check会话56311运行中；组装专项38183先前已启动但未终态，不能覆盖后补公共入口。尚需公共创建/保存重开/错误回滚及共享资源隔离专项，真实字体独立验收与P3-05均未完成，fuzz暂缓。
+
+2026-10-09 组装初版编译检查终态：89803退出0，cargo check -p pdf --locked通过（有既存及未接入内部模块警告），停止轮询；该构建在maxp后补检查之前启动，不把它宣称为后补版专项通过。38183已取得锁并编译最新版单元测试，尚未终态；组装有效字体专项和真实字体独立验收仍待结果。
+
+2026-10-09 子集组装专项接入待验收：新增自建SFNT夹具，含真实简单三角轮廓、两字符映射及必要名称/度量/权限表，验证子集重开后A原GID1保持、B不覆盖、未选GID2为空、numGlyphs保持、全字体校验和及源不变；补精确peak差1字节邻居拒绝/释放重试。该夹具不是独立工具验收或中文/复合字形闭环。组装入口进一步要求TrueType maxp版本1，避免沿用读入兼容的CFF版maxp。专项38183等待原89803构建锁；89803已进入pdf编译但尚未终态，不重启静默进程。P3-05与公共入口仍未完成。
+
+2026-10-09 名称边界专项终态：84557退出0，最新版两项均通过、669过滤，包含语言引用和版本1/Mac/截断边界，停止轮询。该结果不覆盖后续新增subset组装层；89803编译检查仍在构建本地依赖，未终态。
+
+2026-10-09 子集组装层接入待验收：新增subset::build_subset，将原GID闭包/glyf+长loca/cmap/name/head与显式表策略连接为SFNT输出；要求独立静态TrueType签名及必需表，检查subset=true/editable=true权限，并核对编码Unicode/GID/宽度与源字体一致。head副本设置indexToLocFormat=1，不修改输入；表清单、重建输出和省略表报告均持有操作预算，报告排序且随SubsetFont持有。现有Sfnt/TrueTypeProgram解析器内部普通分配及借用源字节明确不在该输出池统计范围，不能宣称全路径预算化。cargo check会话89803运行中，尚未终态；名称最新专项84557仍未终态。尚缺组装专项有效字体测试、公共资源入口、完整字段语义及真实字体/PDF独立验证，P3-05不勾选，fuzz暂缓。
+
+2026-10-09 表策略/名称专项终态与补边界：89296退出0，表策略1项通过（668过滤）；96449退出0，初版名称1项通过（669过滤），两会话停止轮询，不代表完整回归。随后名称入口增加高位语言ID引用和语言标签偶数字节校验，新增name版本1/Mac编码原标签保留、截断及越界/失败释放测试；最新会话84557运行中，尚未终态，旧96449不覆盖这些后补改动。字体组装、公共嵌入与真实PDF独立验收仍待实现，P3-05保持未完成。
+
+2026-10-09 子集名称重建接入待验收：新增subset_name::rewrite_postscript_name，读取name版本0/1并校验名称及语言标签字符串范围；保留原表内容（含版权、许可、语言标签），追加ASCII或UTF-16BE名称并只重定向ID6记录。名称遵守63字符及PostScript字符限制，不支持的ID6编码/缺少ID6明确拒绝；输出持有实际capacity预算并检查16位字符串偏移和流额度。依据[OpenType name规范](https://learn.microsoft.com/en-us/typography/opentype/spec/name)。新增保留许可/Unicode名称/非法名称/预算释放测试会话96449进行中，未验收；表策略89296已构建完成、测试进程启动但未终态。尚未组装真实子集字体或统一PDF资源名称；P3-05不勾选，fuzz暂缓。
+
+2026-10-09 子集表策略接入待验收：新增内部subset_tables模块，原GID/direct-CID静态TrueType策略显式区分保留、重建和省略；glyf/loca/cmap/head/name要求重建，原GID度量和hint表保留，DSIG省略。布局表省略必须显式允许，未知表及变量/替代轮廓/颜色等未支持表拒绝，不能用允许布局省略绕过未知依赖。该分类不是表语义验证，尚未接入组装与公共入口；需报告省略表、补名称重建并独立真实字体验证。依据[DSIG内容签名规范](https://learn.microsoft.com/en-us/typography/opentype/spec/dsig)及[maxp资源字段规范](https://learn.microsoft.com/en-us/typography/opentype/spec/maxp)。新增策略测试会话89296进行中，尚未通过；最新完整门禁仍为字体子集改动前1007项，P3-05不勾选，fuzz暂缓。
+
+2026-10-09 子集cmap专项终态：原9028退出0，CID模块三项通过，包含新格式12中文/非BMP/共享GID、未选字符零映射及预算失败释放，停止轮询。当前PDF单元总数668（3通过、665过滤），不代表完整验收。下一步组装真实静态TrueType子集并接入显式权限入口；需明确head/度量/名称与未知表策略，独立字体校验和PDF提取/渲染仍未完成。
+
+2026-10-09 子集cmap接入待验收：UnicodeCidEncoding::subset_cmap生成Unicode平台0/4格式12，固定字集中每个标量一个单点组、保留原GID，按已有排序字集输出；共享GID不合并标量，未选字符无映射。输出实际capacity持有操作租约，检查长度/流限额；不生成Windows BMP兼容format4，不支持变体选择/shaping映射，公共支持范围须明确。官方结构依据[OpenType cmap格式12](https://learn.microsoft.com/en-us/typography/opentype/spec/cmap#format-12-segmented-coverage)。新增中文/非BMP/共享GID、未选字符和额度失败释放回归，原9028编译中，尚未验收；未接入完整子集组装或公共嵌入。
+
+2026-10-09 原GID重建专项终态：原89126退出0且实际输出包含后补重建测试，四项通过；最新来源绑定版26737也退出0，四项通过，含闭包边界/缓存深度及重建复合引用、未选空范围和释放。停止轮询两终态会话。当前PDF单元总数667（4通过、663过滤），不是完整回归。仍需重建cmap、明确度量/未知表策略、公共子集权限入口及实际字体独立验收；原GID策略不表示未选字形的旧cmap可原样保留。
+
+2026-10-09 原GID字形表重建待验收：GlyphClosure借用原GlyphLocations，重建入口不接受另一字体的位置表，避免同numGlyphs来源替换。保留原GID/numGlyphs，所选字形数据按四字节压紧、未选字形空范围、重建长loca并绑定两份输出预算；调用方仍须设置head.indexToLocFormat=1并明确cmap/度量/其他表策略。新增复合引用保持/未选空范围/缩小及释放回归。原89126较早来源参数版本执行中且新增测试启动后补入，不假定覆盖；最新26737来源借用绑定版本编译中，尚未验收，不是完整子集字体。
+
+2026-10-09 SFNT容器专项终态：原80763退出0，较早一项结构测试通过；最新15013退出0，两项均通过，含排序/对齐/长度/整体校验及错误输入、精确预算失败/邻居保持/释放重试。停止轮询这两个会话。当前PDF单元总数666（本专项2通过、664过滤），仍不是完整验收；容器已验证固定结构，不是有效字体语义/子集字形/独立工具闭环，继续实施P3-05。
+
+2026-10-09 SFNT容器写出实现待验收：sfnt_writer.rs接收显式借用表清单，预算化排序副本与输出共存，标签合法性/重复检查、四字节对齐、记录实际未填充长度及检查u32/输出限额；复制head后清零调整字段，生成表目录校验，再计算整个字体调整，不改输入。固定两表结构测试核对排序/对齐/长度/整体校验及解析；最新补非法标签、重复/缺失/截断head、输出限制和peak差1字节邻居保持/释放重试。原80763仅第一项版本执行中；最新15013两项版本编译中，均未终态。该容器不验证每张表语义或必需表完整性，两表夹具不是有效可绘制字体；子集glyf/loca/cmap/度量重建及独立真实字体工具验证仍待完成。
+
+2026-10-09 SFNT基础专项终态：原77881退出0，目录枚举版3项通过；原60968退出0，最新目录/校验和版4项通过，包含虚拟零填充/回绕/调整算术。停止轮询两终态会话。当前PDF单元总数664（本专项4通过、660过滤）；不是664项完整验收。下一实现为预算化SFNT容器写出：显式输入表清单、标签排序/去重、四字节对齐、实际长度/offset检查、head清零后目录校验再整体调整；容器通过仍须重建glyf/loca与字符映射及独立字体验证，不能冒充字体子集完成。
+
+2026-10-09 SFNT写出基础接入：新增内部借用table_records/tag访问，明确无序迭代必须由写出端排序，未知表也必须进入策略检查；新增未知标签及记录指针一致测试。新增无分配table_checksum，按大端32位回绕求和并虚拟零填充；head目录校验需先清零checkSumAdjustment，最终全字体校验调整另由写出端处理，依据[OpenType官方文件规范](https://learn.microsoft.com/en-us/typography/opentype/spec/otff#calculating-checksums)。补空输入/1–3字节尾部/回绕/整体调整算术测试。目录版原77881和最新校验和版60968分别待终态，不混用为同一版本；尚无实际SFNT子集产物或独立字体工具验收。
+
+2026-10-09 修正版闭包专项终态：原71108退出0，3项全部通过，含256/255累计解析边界、精确共存峰值差1字节拒绝、邻居保持/释放重试及迭代器panic清理。原90080失败已由夹具修正后的本次结果收口，停止轮询终态会话。验证仅闭包模块，最新PDF单元总数662（3通过、659过滤）；SFNT写出/公共嵌入/新字符编辑及最新完整回归仍未完成。
+
+2026-10-09 闭包边界失败与修正版：原90080退出101，两项通过、一项失败；32字节夹具先被Composite components/storage限制拒绝，未执行后续精确峰值及unwind断言。生产限制不变，夹具将复合字形范围填充到128字节，使双遍累计256字节接受/255字节精确累计解析拒绝，独立组件存储限制不再遮挡目标边界。修正版原71108编译中，尚未验收；旧32/31记录仅为失败夹具，不是通过证据。
+
+2026-10-09 闭包补充边界待验收：新增第三项回归，复合单组件双遍解析32字节接受、31字节精确累计解析拒绝；测量实际scratch/result/组件共存peak，peak+7配7字节邻居成功、peak+6拒绝且保持邻居，释放后同池重试。根迭代器在一个根处理后panic，catch_unwind检查全部临时预算释放及原根重试。最新原90080编译中，不以较早70322两项证明新增断言通过。
+
+2026-10-09 闭包专项终态：原70322退出0，glyph_subset两项通过，覆盖去重结果预算及循环/越界/工作额度/缓存长路径深度拒绝，停止轮询。当前PDF单元总数661（本专项2通过、659过滤），不能把过滤项当作通过；最新生产尚未完整工作区回归。后续需补聚合解析字节、精确 scratch/result共存额度及unwind验证，再接入SFNT子集写出；P3-05仍未完成。
+
+2026-10-09 P3-05多根闭包已实现待验收：glyph_subset.rs复用GlyphLocations及预算化组件解析，迭代DFS去重并加入GID零；活动标记拒绝循环，完成子图缓存高度，命中时校验当前栈深度加缓存高度。状态结果、临时高度表/栈实际容量及组件集合均持有同池租约；根/唯一字形/组件边累计工作受max_objects限制，复合双遍输入费用累计受max_decoded_bytes限制。输入字体字节借用且由调用方负责预算；简单轮廓体未在此解码验证，不代表完整字形程序验证。新增两项覆盖去重、结果持有、邻居拒绝/释放重试、越界/循环/工作额度及先缓存短根后长根的深度拒绝；原70322编译中，尚未通过，未接入公共嵌入或SFNT写出。
+
+P3-05预算化组件专项终态：原61184退出0，4项通过、0失败，覆盖最新预算化组件容量/邻居保持/释放重试及借用遍历三项；停止轮询该会话。仅该模块专项，不代表闭包、子集写出、编辑新字符或当前完整工作区验收。下一实现是多根去重字形闭包，须同时保留循环拒绝与最长依赖深度检查，不能因已见GID直接跳过而漏掉不同根路径的深度超限。
+
+P3-05预算化组件收集已接入待验收：CompositeGlyph::try_new_with_budget先用无集合分配遍历校验/计数，再预留组件容量并校准实际capacity；返回BudgetedCompositeGlyph将Vec和租约绑定，借用访问、不暴露脱离租约的所有权转换。新增准确容量、邻居占用下operation live bytes拒绝、释放后同池重试、截断失败清理回归。最新原会话61184编译中，尚未通过；此前38759三项仅覆盖借用遍历版本。输入字体字节由调用方负责预算，双遍解析的聚合工作与闭包栈/集合仍需在后续闭包实现中约束，不能据此勾选完整依赖闭包。
+
+P3-05接入专项结果：原38759退出0，复合组件3项通过，覆盖新增借用遍历与收集一致、回调错误传播、截断指令及既有变换/非末指令标志。原63960的CID单元2项通过，但命令未加--lib，仍在依次启动被过滤的公共集成程序，尚未整体退出；不因此重复启动。新增接入尚未完整工作区回归，闭包/子集写出/编辑新字符仍未完成。
+
+P3-05复合组件接入进行中：CompositeGlyph新增内部visit_components回调遍历，共用已有flags/GID/参数/变换/指令边界校验，遍历本身不创建组件Vec；原try_new收集接口通过回调保留既有契约。回调可失败中止，但后续记录或指令仍可能校验失败，调用方必须丢弃已收集临时状态，不可边遍历边发布文档修改。新增结果一致/非末组件指令标志/回调错误/截断指令断言，原定向会话38759等待构建锁，尚未通过。无分配遍历不等于预算化闭包已完成，去重集合、栈、工作额度及子集写出仍待实现。
+
+P3-05接入进行中：UnicodeCidEncoding新增内部借用glyph_mappings迭代器，提供(CID, Unicode标量, 原始GID, 宽度)，宽度及CIDToGIDMap序列化共用该来源；不分配映射副本、不合并共享GID的独立CID，CID零由后续子集规划显式加入。共享GID/非BMP断言已补入既有回归，定向测试原会话63960编译中，尚未验收。下述1007项完整门禁覆盖此修改之前的基线，不证明新增接口已完整回归；字体子集写出、依赖闭包及编辑新增字符仍未实现。
+
+当前一致版本完整门禁已完成：原会话99029退出0，日志/tmp/rzpdf-indexed-consecutive-workspace.log，52组1007项通过，0失败、0忽略，包含657项PDF单元、38项渲染单元、公共集成及三组零用例文档测试。覆盖索引+连续完整路径复用、精确共存断言及后补额度阶梯，生产/测试源码diff指纹e5072c20de8453d64474c6dabd8de4b8182fd4aee2b1380d266320ac5a7292b6未变；本轮源码冻结结束。不以旧62635混合构建结果替代，整体TODO仍未完成，未提交。下一步审查差异并推进P3-05，不以当前回归通过冒充字体子集或完整项目完成。
+
+当前实现：预算化调用树前缀索引保留首次出现节点ID；命中比较完整FormInvocation，连续完整路径相等时复用上一叶映射。实际表布局、扩容和输出共存费用计入预算；临时表返回前释放。完整选区专项14645已退出0，17项含精确共存额度/邻居保持/释放重试通过，日志/tmp/rzpdf-indexed-tree-consecutive-path-suite.log。公共及完整门禁尚未收口，不能扩大该专项范围。
+
+当前验收证据：99029一致版本完整工作区退出0，1007项通过，包含当前15项nested_adjusted_text及2项same_invocation_span。当前源码真实TJ内部边界生成14322及独立验证69734均退出0，四页渲染/原间距/后缀坐标复验通过。63431较早索引版公共15项嵌套及2项同链、原33924的17项和29670精确额度专项均已通过；均仅各自当时范围，详见实施记录。
+
+历史清理验证：单叶辅助函数移除不可达end_source分支后56361退出0（14项嵌套+2项同链）。原完整62635仍保留运行，但多个构建共享target，后续公共二进制可能已被替换，不能将它解释为统一当前版本门禁。完整差异收敛尚未完成，不提交。
+
+索引优化前完整工作区终态：session11429退出0，`/tmp/rzpdf-unified-span-workspace.log`52组1005项通过，覆盖当时统一入口及精确预算断言；session48561退出0（51组1003项）只覆盖更早范围。均停止轮询，不据此证明当前索引版。
+
+当前最新改动：同链端点夹子Form旧路径漏选已修正，公共span统一到展开规划；14项公共集成及656项PDF单元通过。同链/同事件专项session49141退出0，两项覆盖六种插入删除变体、精确存活内存额度拒绝及原端点重试、单叶契约对照和外层error/panic回滚。不同调用链、同链夹子Form及混合字体固定水平样本独立文字/坐标/渲染复验通过，范围见docs/cjk-creation-validation.md。完整工作区session11429退出0；旧workspace48561也已退出0，但不覆盖统一入口，不混用旧版门禁。
+
+历史整工作区终态：session74387已退出0，`/tmp/rzpdf-current-owner-workspace.log`51组结果共1003项通过。仅覆盖当时的单片段表复用及后补断言；随后改动由上方session11429验证，整体目标未完成。
+
+两轮工作区门禁均已终止：较早session54420退出0（1001项），最新session74387退出0（1003项）。不再轮询旧会话；后续修改需要按实际变更重新选择验证范围。
+
+- [x] 将内部展开文本事件遍历改为预算化迭代帧栈。
+- [x] 验证512层小栈成功、深度511拒绝、16/17空TJ事件配额及预算释放；证据：`/tmp/rzpdf-expanded-boundaries-validation.log`，命令退出0。
+- [x] 完整工作区回归到终态；原session56430退出0。日志：`/tmp/rzpdf-iterative-span-workspace-validation.log`，PDF单元649项、render单元38项及全部集成/文档测试通过。后补事件配额/深度拒绝断言由session57302定向退出0独立验证；不宣称其已编入较早启动的workspace门禁。
+- [ ] 检查并收敛提交差异，排除无关格式变更及来源不明的`test.png`，再保存本地检查点。
+- [x] 接通跨不同Form调用的公共选区规划和单事务编辑；workspace session66920退出0，1001项通过；CID跨调用14项集成及不同Form对象四变体session73128定向通过。
+- [x] 验收公共span的统一展开语义：同链夹子Form旧路径漏选已修正，定向/公共集成、错误/panic、同事件边界、精确额度拒绝重试和固定水平真实字体样本均通过；完整工作区session11429退出0（1005项）覆盖统一入口。保持显式单叶event_range的既有契约；本项只指统一入口及所列回归，不以有限样本证明全字体/全部选区或完整P3完成。
+  - [x] 同链普通/补偿、错误拒绝及原端点重试、外层error/panic回滚和同事件六变体通过；session60487两项专项及14项既有集成、656项PDF单元通过。
+  - [x] 固定水平Noto Sans SC同链夹子Form四页样本，qpdf、MuPDF精确文字/坐标、四负例、模式互拒及逐页PNG目视通过；详见docs/cjk-creation-validation.md。
+  - [x] 同链2MiB存活内存额度下两模式重复超限拒绝、资源/对象/保存字节/stamp保持及原端点重试；字符限额4MiB，精确operation live bytes断言，session49141退出0。
+- [ ] 扩大跨调用编辑的真实字体、图像/非文本邻接与独立阅读器视觉验收；基础公共入口通过不等于完整P3完成。
+  - [x] 固定真实水平字体、共享两层Form的整事件及部分结束事件保留：qpdf、独立文字/坐标、负例与渲染通过；部分模式全13字符后缀位置保持。
+  - [x] 路径/图像邻接四变体及严格重开验证；这是本库断言，不替代更多真实样本的独立视觉验收。
+  - [x] 固定水平嵌入Noto Sans SC与标准14 Helvetica混合字体样本；独立字体名称/字号、文字/坐标及七个负例检查通过，不代表双嵌入或完整字体矩阵。
+  - [x] 固定真实嵌入中文字体的TJ数组跨调用选区：结束于数组第一个字符串末尾，保留第二个字符串、-125/75间距及后续事件；普通/补偿两模式、严格保存重开、qpdf、MuPDF全13字符后缀坐标和四页视觉检查通过。字符串内部结束位置及更广TJ组合仍待扩展，不代表完整矩阵。
+  - [x] 固定TJ字符串内部结束：第一个字符串包含中文和Hello，仅选中中文；保留同字符串Hello、第二字符串及-125/75间距。普通/补偿、严格重开、独立13字符坐标、结构和四页视觉通过；不代表任意字符串或全部TJ组合。
+- [ ] 测量跨调用编辑的实际预算峰值，减少重复字体度量及逐事件完整程序重建；历史四调用小替换512 KiB拒绝在当前固定复杂标准字体样本中已不再出现，两模式四档额度通过；仍不证明最低需求、真实嵌入字体或整体性能验收。
+  - [x] 每节点一次完整程序重建；事件临时字体/编码对象在序列化后实际释放，最新654项单元/14项集成及固定真实字体复验通过。
+  - [x] 独立测量两调用四变体139736–141449字节、固定Courier四调用150571/153316字节；仅跟踪内部操作预算，不是RSS或最低额度。
+  - [x] 合并乱序/重复索引和零额度拒绝保留donor与预算，释放重复片段后原计划重试通过。
+  - [ ] 测量较复杂公共四调用样本及真实字体、大选区增长；完整工作区新版本回归、全流程计费边界与更多优化仍待收敛。
+    - [x] 固定复杂四调用标准字体公共额度阶梯：512KiB/1MiB/2MiB/8MiB两模式均成功，严格重开、共享页、旧Form及补偿后缀坐标通过。只证明这些固定额度可用，不是精确峰值、最低预算、RSS或真实嵌入字体测量。
+  - [x] 收敛选区自身调用树映射重复扫描并完成新版本门禁：from_paths前缀索引/连续路径复用，加上map_to_tree完整来源认证的既有leaf复用，避免该常用路径逐事件逐层arena搜索。宽度1/128/1024每叶八次测量、额度/身份负例、712项单元、26项公共回归、双向真实字体输出字节不变及最新完整工作区11693退出0（1063项）通过。不以路径长度总和代替节点额度；通用外来树仍保留搜索回退，不声称其复杂度已优化或整体性能验收完成。
+    - [x] 优化前树构建基线：16/128/512重复及分叉来源的节点/叶映射、容量峰值、释放和宽树节点少1拒绝/恢复通过；仅树构建，不含外部来源或完整编辑，单次耗时不是稳定性能承诺。
+  - [x] 验收规划程序发布复用：无选中子调用节点借用已验证计划，调用者计划表及租约持有至事务结束；有子节点仍按原操作索引合并文字片段和Do重绑。16项定向、14项公共集成、656项完整PDF单元及固定真实字体复验通过；session48561退出0，后续统一入口由session11429完整1005项门禁覆盖。不是移动所有权或裸克隆，不据此勾选整体性能任务。
+
+fuzz按用户要求暂缓。以下为按时间记录的证据，旧记录中的“运行中/待验收”以较新的明确终态为准，不作为当前状态重复计算。
+
+### 验证与实施记录
+
+2026-10-08 当前索引混合字体/同链独立复验通过：原51039两份生成退出0，output/pdf/rzpdf-cjk-mixed-font-indexed.pdf及rzpdf-cjk-same-chain-indexed.pdf严格重开通过。两份qpdf、MuPDF精确文字/后缀坐标及-O负例通过；mixed七负例含三段字体/字号绑定，same-chain四负例。72DPI八页PNG分别与已验收旧模式四次cmp字节一致；mixed四页及same-chain新第一页面视正常，其余页与已查看基线一致。固定水平嵌入Noto+标准14及同链样本，不是双嵌入/真实竖排/全部字体矩阵。按PDF技能沿用MuPDF，源码指纹e5072c20de8453d64474c6dabd8de4b8182fd4aee2b1380d266320ac5a7292b6保持；99029继续集成，不提交，fuzz暂缓。
+
+2026-10-08 当前冻结版本完整PDF单元阶段通过：原99029日志/tmp/rzpdf-indexed-consecutive-workspace.log显示657项全部通过，含索引/连续路径及精确共存预算，正在继续adjusted_text等公共集成；尚未完整workspace终态。按PDF技能启动原51039依次生成当前mixed-font/same-chain的indexed产物，已有编译当前样本缓存复用，尚待生成终态及独立文字/字体/坐标/qpdf/PNG复验。源码指纹仍e5072c20de8453d64474c6dabd8de4b8182fd4aee2b1380d266320ac5a7292b6，生产/测试冻结，fuzz暂缓，未提交。
+
+2026-10-08 最新连续索引真实TJ复验终态：原14322生成退出0，output/pdf/rzpdf-cjk-tj-inside-indexed.pdf保存后严格重开通过；独立原69734退出0，qpdf、MuPDF精确文字/13字符后缀坐标、QDF原-125/75及-O四XML/三QDF负例通过。72DPI四页逐页目视无缺字/重叠/裁切，与优化前TJ内部样本PNG四次cmp字节一致。按PDF技能用引擎生成并沿用MuPDF替代缺依赖的Poppler，不改系统。仅固定水平真实字体TJ内部边界，不是所有字体/混合/竖排/完整门禁；原99029继续，冻结保持，fuzz暂缓，未提交。
+
+2026-10-08 索引公共集成终态及当前门禁推进：原63431退出0，/tmp/rzpdf-indexed-tree-public-integration.log15项nested及2项same_invocation全部通过，覆盖连续快捷路径加入前的索引版；不混用成最新快捷版公共门禁。原99029编译7m22s后进入测试执行，真实TJ14322解除构建锁并继续原生成会话；源码指纹仍e5072c20de8453d64474c6dabd8de4b8182fd4aee2b1380d266320ac5a7292b6，冻结保持。未提交，fuzz暂缓。
+
+2026-10-08 等待状态只读诊断：原63431同链子进程49259仍存在，CPU时间0、物理footprint12KiB；一次sample完成但无法获取二进制符号，仅主线程未知地址，报告/tmp/same_invocation_span-3c0687276370b2e3_2026-10-08_230026_YDOG.sample.txt。这些证据支持仍在启动阶段的推断，不证明具体系统阻塞原因或PDF测试逻辑死锁。当前完整99029有活跃rustc且子进程持续变化，真实字体14322等待构建锁，源码指纹未变；保留原句柄，不因静默重启或宣称通过，未改系统配置/生产/测试，fuzz暂缓，未提交。
+
+2026-10-08 连续路径索引专项终态：原14645退出0，/tmp/rzpdf-indexed-tree-consecutive-path-suite.log17项全部通过，包含后补精确scratch/输出共存额度与邻居拒绝/重试断言。重复16/128/512来源elapsed_us25/87/117，tracked peak572/1468/4540；宽树117/579/1946微秒，3280/26016/103968字节。单次时间仅对照，不作稳定阈值；固定编辑全流程峰值仍与原版相同。源码指纹仍e5072c20de8453d64474c6dabd8de4b8182fd4aee2b1380d266320ac5a7292b6；原99029完整门禁继续，真实TJ原14322等待其构建锁，公共原63431同链待终态，未提交，fuzz暂缓。
+
+2026-10-08 冻结版本验证继续：源码diff SHA-256仍为e5072c20de8453d64474c6dabd8de4b8182fd4aee2b1380d266320ac5a7292b6，原99029完整门禁编译中。原63431较早索引公共nested15项通过、同链未终态；原14645连续路径17项专项待终态。按PDF技能启动当前源码真实TJ内部边界复验原14322，日志/tmp/rzpdf-cjk-tj-inside-indexed.log，输出output/pdf/rzpdf-cjk-tj-inside-indexed.pdf尚未验收；使用引擎生成验证引擎，Poppler缺失沿用MuPDF，不改系统依赖。生产/测试冻结，fuzz暂缓，未提交。
+
+2026-10-08 最新索引/连续路径一致版本门禁启动：原99029执行cargo test --workspace --locked，日志/tmp/rzpdf-indexed-consecutive-workspace.log待终态；自启动起冻结生产及测试源码，保留原14645快捷版定向、63431早期索引公共集成和62635历史完整会话，不因观察超时重启。新门禁不是重跑旧同一版本，而是覆盖新实现及后补测试的一致编译范围；fuzz暂缓，未提交。
+
+2026-10-08 索引精确共存额度终态：原29670退出0，/tmp/rzpdf-indexed-tree-exact-budget.log专项1项通过。真实scratch/输出峰值加7字节邻居精确成功，少1字节operation live bytes拒绝后邻居保持，释放邻居原路径重试及live归零通过。只覆盖快捷路径加入前的索引版；最新14645仍待终态，未提交。
+
+2026-10-08 连续路径快捷实现中：基于重复来源hash查找耗时增加的实测，仅对完整FormInvocation切片相等复用前一叶ID，路径/身份/偏移差异仍进入索引冲突检查；无新Vec或租约。新全选区专项日志/tmp/rzpdf-indexed-tree-consecutive-path-suite.log待终态，原29670/63431继续较早索引版精确额度及公共专项，不据其证明快捷版。原62635共享target后二进制可能混合构建时点，不声明统一版本完整通过。fuzz暂缓，未提交。
+
+2026-10-08 索引版调用树专项终态：原33924退出0，/tmp/rzpdf-indexed-span-tree-suite.log17项全部通过（不含后补精确共存断言）。重复16/128/512来源elapsed_us51/197/946，tracked peak572/1468/4540；宽树282/528/2036微秒，3280/26016/103968字节。宽树512相较基线14991微秒更快，但scratch峰值增加71088字节；重复路径较慢，不宣称全场景优化。固定混合根/图像四变体、四调用及大选区全流程峰值与前版相同，释放/拒绝/重试及布局专项通过。新公共15项嵌套+2项同链原63431（/tmp/rzpdf-indexed-tree-public-integration.log）运行中，精确断言原29670仍待终态，旧完整62635继续仅优化前范围。未完整验收，fuzz暂缓，未提交。
+
+2026-10-08 索引版精确共存预算断言补充：旧“第二张Vec失败”限额已不对应新增hash临时表的实际分配顺序，改用本平台独立探针峰值；加7字节邻居在精确额度成功，少1字节须精确operation live bytes拒绝并保留邻居，释放邻居后原路径重试成功。新原会话29670（/tmp/rzpdf-indexed-tree-exact-budget.log）待终态，原33924继续早一版全选区专项，原62635继续优化前完整门禁；不混用后补断言的覆盖范围，fuzz暂缓，未提交。
+
+2026-10-08 调用树索引去重实现中：已移除逐来源深度前缀比较及已建节点线性查找，用预算化PrefixTable按父节点/原操作索引登记；同位点不同身份/字节偏移仍拒绝，唯一前缀限制含根节点。输出按首次出现ID填充，hash迭代不影响拓扑/叶顺序；表增长与输出共存实际收费，释放临时索引后返回。新span_tree全专项原33924运行中，未验收；原62635继续作为优化前基线，不混用。模块旧“公共入口未接通”注释同步修正，fuzz暂缓，未提交。
+
+2026-10-08 TJ间距自动检查实现并通过：check-cjk-span.py新增--tj-qdf（须--partial），两种边界的QDF原始/重建五个间距数组各核对-125/75及顺序；额外尾事件补偿TJ不误计为原数组。末尾/内部样本正例及三个QDF变异负例通过，内部-O及混合字体七负例、同链四负例回归通过。初版固定所有TJ数量为五导致有效额外补偿数组拒绝，检查范围已纠正；生产/PDF未改，不是通用解析或输入同源认证，完整原62635继续，fuzz暂缓，未提交。
+
+2026-10-08 调用树基线终态：原会话41714退出0，/tmp/rzpdf-tree-construction-baseline.log专项1项通过。重复路径16/128/512来源均3节点，tracked peak296/1192/4264字节，elapsed_us138/66/301；分叉路径18/130/514节点，峰值1136/8304/32880字节，时间50/1217/14991微秒。宽树节点额度少1精确span node count拒绝、live归零及恢复重试均通过。单次时间含环境波动，不据此作通用复杂度或RSS结论；后续索引优化可复用现有真实布局计费TableAllocator，须计入临时表与输出共存成本。完整原62635继续，657项单元总数仅表示新测试编入定向二进制，不表示全部657项重跑通过，fuzz暂缓，未提交。
+
+2026-10-08 调用树测量基线实现：新增invocation_tree_repeated_and_wide_path_measurement_baseline，16/128/512来源分别重复同一路径或共享首层后分叉，核对唯一节点/叶映射、跟踪峰值及释放；宽树节点额度少1精确拒绝并恢复重试。日志/tmp/rzpdf-tree-construction-baseline.log定向待终态；时间仅测树构建，调用方来源和借用表排除，非整编辑/RSS或稳定性能阈值。只加测试，生产未改；原62635不覆盖后补测量测试，fuzz暂缓，未提交。
+
+2026-10-08 四调用精确内存拒绝终态：原会话9336退出0，/tmp/rzpdf-four-call-exact-memory-quota.log专项1项通过。16MiB字符限额下8MiB替换在两模式均精确operation live bytes拒绝，stamp/资源/父子对象/完整保存不变，原root及端点小替换重试并严格重开成功。该证据替代此前仅ResourceLimit任意分支的内存解释；额度阶梯四档仍全部成功，两专项不同用途。完整原会话62635继续集成阶段，尚未终态；仅测试加固，生产未再改，fuzz暂缓，未提交。
+
+2026-10-08 四调用超限证据加固中：审阅发现既有8MiB替换测试的默认1MiB字符限额可先拒绝，不能单独证明内存预算。该专项改为16MiB字符限额和精确operation live bytes错误断言，8MiB操作额度不变；新定向日志/tmp/rzpdf-four-call-exact-memory-quota.log待终态。仅改测试，生产未改；完整原会话62635继续，不以它证明后补断言已编入。fuzz暂缓，未提交。
+
+2026-10-08 复杂四调用额度阶梯终态：原会话71264退出0，/tmp/rzpdf-complex-four-call-budget-ladder.log专项1项通过。普通/补偿分别在524288、1048576、2097152、8388608字节额度全部成功；严格重开、AXHCD结果、共享页原文、原父子Form及补偿后缀坐标检查通过。此次没有任何拒绝，不能声称新增测试的拒绝分支已执行，超限回滚证据仍来自既有专项。历史该样本512KiB拒绝不能再作为当前状态。完整原会话62635仍在PDF单元阶段，未终态；整体性能/真实字体任务未完成，fuzz暂缓，未提交。
+
+2026-10-08 复杂四调用公共额度阶梯实现：新增complex_four_call_span_fixed_budget_ladder，固定Courier/Helvetica局部与继承状态、负Tz及两层四调用Tj/TJ样本，两模式各在512KiB/1MiB/2MiB/8MiB新文档中编辑。精确operation live bytes拒绝时检查stamp/资源/保存不变；成功时严格重开、共享页和补偿后缀坐标保持，原父子Form两分支均不变。定向原会话71264日志/tmp/rzpdf-complex-four-call-budget-ladder.log待终态，尚无各额度结论。完整原会话62635继续运行，不据它证明后补新测试编入；生产未再改，不声明真实嵌入字体峰值、最低预算或RSS，fuzz暂缓，未提交。
+
+2026-10-08 单叶分支清理定向终态：原会话56361退出0，日志/tmp/rzpdf-single-leaf-cleanup.log，nested_adjusted_text14项及same_invocation_span2项全部通过。完整工作区原会话62635仍运行，继续原句柄；不以定向16项代替全工作区。预算API检查确认Limits::operation_budget每次新建独立池，公共span没有暴露该池，外部示例不能从另建池读取其真实峰值；复杂公共样本可做固定额度阶梯验收，精确峰值需内部定向测量，不为测量新增公开API或误称RSS。fuzz暂缓，未提交。
+
+2026-10-08 清理后门禁推进：原会话56361的nested_adjusted_text已14项通过，同链专项仍在原会话运行，未重启。启动当前清理版本完整cargo test --workspace --locked，日志/tmp/rzpdf-single-leaf-cleanup-workspace.log，待终态；旧1005项仅作为清理前证据。TJ文档补齐生成、qpdf、MuPDF、-O、渲染及QDF数值复现命令，修正末尾/内部边界范围歧义；整体差异审阅及性能任务未完成，fuzz暂缓，未提交。
+
+2026-10-08 片段合并预算审阅：OwnedTable按实际Vec容量收费；finish_text_event_fragments先检查聚合事件/字符上限和严格原索引顺序，预分配目标及借用表，完成完整程序解析后才take donor。单donor转交原表，多donor按预留容量append；空donor集合仍有已分配的空目标表，未发现expect空路径。该局部审阅不替代完整差异审阅或性能验收。定向原会话56361仍活跃，进程30875及其测试子进程31244确认存在，保持原句柄、不重启；测试结果待终态，fuzz暂缓，未提交。
+
+2026-10-08 核心差异局部审阅：核对mod接入、公共span统一入口、原调用对象/字节位置认证、图像Do排除及单事务bottom-up发布。规划表由调用者持有，叶节点借用计划，重建父节点按原索引合并，复制Form的实际对象及预算租约保留到事务结束；未发现本段需要架构重写的问题。移除显式单叶辅助函数的不可达end_source分支，两个调用者原本均为None；保留统一span的独立端点认证。会话56361定向测试运行中，未声称当前新生产版本1005项已通过；仍有其它差异待审阅，fuzz暂缓。
+
+2026-10-08 TJ内部结束样本终态：原会话22711退出0，output/pdf/rzpdf-cjk-tj-inside-span.pdf生成且严格重开通过。qpdf、MuPDF精确文字和13字符后缀坐标、Python -O四负例均通过；QDF五条原始/重建TJ均保留-125/75，结束调用保留同字符串Hello及第二字符串。四页72 DPI PNG逐页目视无缺字、重叠、裁切；普通后缀左移，补偿后缀原位置保持。只改示例/文档，生产未改，fuzz暂缓，未提交。
+
+2026-10-08 TJ内部结束样本启动：compare_cjk_span新增--tj-inside，数组第一字符串为中文+Hello，端点仍为中文编码长度，第二字符串为空格PDF。原会话22711确认仍运行，日志/tmp/rzpdf-cjk-tj-inside-span.log，尚未终态；只改示例及待办，不宣称验收通过，fuzz暂缓，未提交。
+
+2026-10-08 真实中文TJ样本终态：原会话47106退出0，output/pdf/rzpdf-cjk-tj-span.pdf生成成功并严格重开。qpdf检查通过，MuPDF独立精确文字和13字符后缀坐标检查（--partial）普通及-O四负例均通过；QDF内容流中原数组及普通/补偿重建均保留-125/75，补偿新增数值不取代原间距。四页72 DPI PNG逐页目视无缺字、重叠或裁切；补偿后缀保持原位置，普通后缀左移。这里只覆盖固定水平字体、数组第一字符串末尾，不覆盖字符串内部结束或完整TJ矩阵。生产未改，未提交，fuzz暂缓。
+
+2026-10-08 真实中文TJ样本实现中：compare_cjk_span新增--tj，使用两个编码字符串及-125/75两种符号的数组间距；端点明确选择array_item=0并保留结束事件的英文字符串和后续PDF。生成会话47106已启动且原句柄确认仍运行，尚未获得生成终态、独立间距检查或视觉验收，不勾选TJ任务。生产引擎未改；fuzz暂缓，未提交。
+
+2026-10-08 混合字体独立检查加固通过：check-cjk-span.py逐段验证基线文字对应NotoSansSC/24、Helvetica/18、NotoSansSC/24，新增子字体/子字号/父字体误绑定负例。最新mixed-font XML普通与-O均七负例拒绝且正例通过，默认/partial/same-chain三模式旧四负例回归通过。仅检查脚本改动，无生产引擎或PDF产物变化，1005项生产门禁仍适用；完整字体矩阵及全部TODO仍未完成，fuzz暂缓，未提交。
+
+2026-10-08 固定混合字体独立验收终态：session27044退出0，mixed-font产物qpdf、MuPDF精确文字/后缀坐标、四负例及-O通过；XML中真实嵌入NotoSansSC与Helvetica分别出现，脚本新增字体区分断言后复验通过。新第一页面目视字体/字距正常，第二至四页PNG与same-chain已验收图cmp一致。详见docs/cjk-creation-validation.md；仅水平CJK+标准14混合，不声明完整字体矩阵完成。只改示例/检查脚本，生产1005项门禁仍适用，未知test.png保留，fuzz暂缓，未提交。
+
+2026-10-08 混合字体真实样本启动：compare_cjk_span新增mixed-font模式，同链父端点采用真实嵌入Noto Sans SC，夹子Form采用Helvetica/18Tf/2Tc，与父24Tf不同。独立脚本精确要求两句中文夹Hello PDF的基线及编辑你好！ PDF和末尾坐标，已有默认/partial/same-chain XML回归四负例通过。生成session27044日志`/tmp/rzpdf-cjk-mixed-font-span.log`运行中，未验收；待独立字体区分、qpdf、文字/坐标与PNG。只是固定水平嵌入CJK+标准14字体，不宣称双嵌入字体或完整字体矩阵。生产代码未改，1005项工作区门禁仍覆盖生产范围，不覆盖后补示例；fuzz暂缓，未提交。
+
+2026-10-08 统一入口当前完整workspace终态：原session11429退出0，cargo test --workspace --locked，`/tmp/rzpdf-unified-span-workspace.log`52组1005项全部通过，PDF单元656项、render38项、公共嵌套14项和最新同链专项2项、全部集成及文档测试终态。较早原session48561同时确认退出0，`/tmp/rzpdf-planned-leaf-reuse-workspace.log`51组1003项，仅旧范围。两原会话不再轮询；当前入口统一验收子项完成，不标记整个项目/P3/性能总任务完成。无生产变化，diff空白检查通过，未知test.png保留，fuzz暂缓，未提交/推送。
+
+2026-10-08 展开来源与分组局部审阅：检查visit_expanded_text_span/events、validate_span_selection及group_events；端点匹配原完整调用路径+操作索引并验证字节位置，词法边界先检查，字体码边界由后续计划检查；组内原操作顺序严格递增，发布准备重新认证根快照，图片Do不递归为文字容器。未发现本段需即时修正的生产问题，不表示整个模块已审阅；仍有全页扫描和重复祖先定位开销。当前workspace11429原会话确认活跃编译，旧48561继续jpeg_embedding，不重启；内容编辑文档更新当前门禁范围，fuzz暂缓，未提交。
+
+2026-10-08 统一入口当前完整工作区门禁启动：当前生产代码自入口统一后未再改变，656项PDF单元、14项公共集成、两项最新同链专项以及不同/相同调用链固定真实字体独立检查已通过。启动`cargo test --workspace --locked`，日志`/tmp/rzpdf-unified-span-workspace.log`，尚待终态；此为覆盖新生产版本的独立门禁，不是因旧会话观察超时重启。旧workspace48561仍活跃到image_transform，保留原会话且结果只归旧范围。生产差异局部审阅、diff空白检查通过，完整差异审阅仍未交付，未知test.png不动，fuzz暂缓，未提交。
+
+2026-10-08 同链精确预算门禁终态：session49141退出0，`/tmp/rzpdf-same-invocation-span-memory-quota.log`两项全部通过。2MiB操作预算、4MiB字符限额，两种模式各重复两次2MiB替换均精确operation live bytes拒绝，stamp、资源、原父子对象和完整保存字节保持，原root/端点小替换成功；同事件六变体、单叶对照及外层error/panic回滚/新来源重试同时通过。生产代码未变，仍缺统一入口最新完整workspace门禁及更广字体/性能任务；fuzz暂缓，未提交。
+
+2026-10-08 同链宽泛额度断言终态：原session35744退出0，`/tmp/rzpdf-same-invocation-span-quota.log`两项通过，但未区分字符额度和存活内存，不作为精确预算门禁。提高字符额度并精确要求operation live bytes的新版本已启动，日志`/tmp/rzpdf-same-invocation-span-memory-quota.log`，待终态；原会话已结束，不轮询/重复启动。生产代码未改，fuzz暂缓，未提交。
+
+2026-10-08 同链预算断言防假阳性：默认max_text_chars为100万，2MiB替换可能先触发字符额度。此样本显式提高字符限额到4MiB，并要求ResourceLimit消息为operation live bytes，以验证实际存活预算拒绝。session35744已编译修改前断言，保留等待终态后再跑最新源；旧范围不能证明新断言。仅测试改动，未宣称验收。
+
+2026-10-08 同链公共额度拒绝重试启动：same_invocation_span夹子Form用例改为2MiB操作预算，普通/补偿各重复两次2MiB替换请求，必须ResourceLimit且stamp、完整保存字节、页面资源和原父子对象保持；随后现有原root/两端的小替换继续成功断言。新增断言未验收，原656项PDF单元/14项公共集成不作为这组后补证据；最新定向session35744日志`/tmp/rzpdf-same-invocation-span-quota.log`。未变生产代码，原workspace48561确认活跃，fuzz暂缓，未提交。
+
+2026-10-08 同链真实字体独立验收终态：生成session23177退出0，`output/pdf/rzpdf-cjk-same-chain-span.pdf`qpdf结构、MuPDF精确三句基线/你好！ PDF结果及后缀坐标、正常/-O四负例通过。四页72 DPI逐页目视无缺字/重叠/裁切，第二页图像与unified基线cmp一致；默认与same-chain模式互用均文字不符退出1。按PDF技能使用MuPDF渲染，不改系统依赖；只固定水平字体，不扩大为全部P3。生产代码未改，完整工作区48561继续旧范围，fuzz暂缓，未提交。
+
+2026-10-08 同链真实中文视觉样本启动：compare_cjk_span新增与partial互斥的same-chain模式，父Form句首/句尾夹一个子Form中文事件（原三句），内置检查两端同链而中间不同链，要求编辑后仅你好！ PDF并检查保留后缀及共享基线。独立check-cjk-span.py新增same-chain模式，精确原三句/编辑文字和坐标检查，不沿用两句基线误认。现有默认及partial的unified XML用更新脚本正常/-O四负例回归通过。生成session23177日志`/tmp/rzpdf-cjk-same-chain-span.log`运行中，待独立qpdf/MuPDF/PNG验收；按PDF技能执行，生产代码未改，fuzz暂缓，未提交。
+
+2026-10-08 统一入口真实字体复验终态：生成session95710/74173及独立检查session95377均退出0；两份unified产物qpdf结构、MuPDF精确文字/独立后缀坐标和四负例通过（部分模式python3 -O）。72 DPI八页PNG与reuse版逐页cmp一致，部分模式两编辑页目视无缺字/重叠/裁切；按PDF技能使用MuPDF，不改系统依赖。固定不同调用链样本覆盖最新生产入口，但同链真实字体视觉矩阵仍未交付。原workspace48561尚未终态且不覆盖统一入口，fuzz暂缓，未提交。
+
+2026-10-08 公共span统一真实字体复验启动：默认session95710/部分结束事件session74173，以最新生产引擎生成`output/pdf/rzpdf-cjk-cross-span-unified.pdf`及`output/pdf/rzpdf-cjk-cross-span-partial-unified.pdf`；日志`/tmp/rzpdf-cjk-span-unified-default.log`、`/tmp/rzpdf-cjk-span-unified-partial.log`，尚待生成及独立qpdf/MuPDF/PNG验收。沿用PDF技能和MuPDF，不改系统依赖。此固定样本仍是不同调用链两端，仅证明入口统一后的既有真实字体路径无回归，不能代替同链夹子Form的真实字体视觉样本。原workspace48561继续原会话，fuzz暂缓，未提交。
+
+2026-10-08 同链/同事件最新源专项终态：session60487退出0，`/tmp/rzpdf-same-invocation-span-boundaries.log`2项全部通过。新同事件六变体（普通/补偿×句首插入/中间零长度插入/整事件删除）以及原同链夹子Form、单叶对照、错误拒绝、外层error/panic回滚/重试均验证；严格重开、原Form与其他调用/共享页保持，补偿保留后缀坐标通过。生产代码未再改，最新656项PDF单元及14项公共集成证据仍适用，完整工作区及真实字体须按统一入口版本继续验收；fuzz暂缓，未提交。
+
+2026-10-08 同链外层回滚终态及同事件边界启动：session25244退出0，`/tmp/rzpdf-same-invocation-span-rollback.log`同链两模式包含发布后error/panic回滚、保存字节/原对象保持、新来源重试及共享页严格重开全部通过。新增同事件句首/中间零长度插入及整事件删除，六变体要求原Form、其他调用/共享页不变，补偿保留后缀坐标；最新源定向日志`/tmp/rzpdf-same-invocation-span-boundaries.log`运行中，不把新增断言算入原已编译回滚门禁。生产代码未变，fuzz暂缓，未提交。
+
+2026-10-08 公共span统一完整PDF单元终态：session27948退出0，`/tmp/rzpdf-unified-span-all-units.log`656项全部通过。生产代码未再变化；同链定向增加外层error/panic发生在实际编辑发布后的回滚，核对完整保存字节、原父子对象，获取新来源重试并严格重开检查编辑/共享两页；定向session25244日志`/tmp/rzpdf-same-invocation-span-rollback.log`运行中，后补断言未验收。原workspace48561仍为统一前版本，不借其门禁声明统一入口验收完成；fuzz暂缓，未提交。
+
+2026-10-08 同链最新源定向终态：session94704退出0，`/tmp/rzpdf-same-invocation-span-final.log`1项两模式回归通过，含显式单叶event_range严格重开XKCAKBC对照、公共span XCAKBC、反向/非法偏移/不可编码拒绝、stamp/字节/对象保持与原端点重试。最新全部PDF单元session27948确认测试PID69642活跃，继续原会话；原workspace48561保留，不混算版本。fuzz暂缓，未提交。
+
+2026-10-08 公共span统一初步集成终态：原session14895退出0，`/tmp/rzpdf-unified-span-integration.log`14项既有公共集成及1项同链夹子Form回归通过；两模式均删除中间K、保留原父子对象/共享页/其他调用，补偿C坐标及严格重开通过。后补拒绝重试和显式单叶对照尚需最新源复验，已启动独立日志`/tmp/rzpdf-same-invocation-span-final.log`；最新生产版全部PDF单元日志`/tmp/rzpdf-unified-span-all-units.log`同步启动。原workspace48561继续content_batch_edit，不覆盖统一入口，不重启或混用其证据；fuzz暂缓，未提交。
+
+2026-10-08 统一span公共回归分项通过：原session14895日志`/tmp/rzpdf-unified-span-integration.log`中nested_adjusted_text 14项全部通过，同会话继续same_invocation_span，尚未完整终态。新增同一输入的显式单叶event_range普通/补偿对照，要求严格重开后XKCAKBC（保留子K），与公共span的XCAKBC相区别；此对照及此前后补拒绝断言未包含原已编译二进制，待其结束后验证最新源。没有新增生产改动、fuzz或提交。
+
+2026-10-08 同链拒绝重试断言补充：same_invocation_span新增普通/补偿下反向选区、非法结束偏移、不可编码文字拒绝，要求stamp、完整保存字节、原父/子对象均保持，再以原root/端点成功重试。生产代码未再改变；原集成session14895确认cargo PID66527和nested_adjusted_text PID67070活跃，已编译范围不包含后补断言，待原会话结束后单独验证新增检查，不重复启动。较早workspace48561继续color_workflow，仅覆盖入口统一前生产版本。
+
+2026-10-08 同链夹子Form缺陷确认及修正启动：session63920退出101，定向用例实际XKCAKBC而预期XCAKBC，确认中间子文字漏选。公共replace_nested_text_span两模式统一调用展开选区规划，显式单叶event_range不改；既有错误来源字节断言改为展开路径的ObjectError及精确消息，不取消拒绝检查。最新定向/14项公共集成日志`/tmp/rzpdf-unified-span-integration.log`运行中，未验收。原workspace48561基于统一前编译源，不能宣称覆盖本次生产修正；需另选最新门禁，fuzz暂缓。
+
+2026-10-08 同链夹子Form回归启动：新增`pdf/tests/same_invocation_span.rs`，原文AKBCAKBC，两端为首次父调用的A和B，中间K来自子Form；连续展开选区替换应得XCAKBC。同时检查普通/补偿、原父子对象保持、第二调用/共享页隔离、补偿后C坐标及严格重开。现有实现预计保留K，但尚未观察终态，不作已确认缺陷声明；定向session63920日志`/tmp/rzpdf-same-invocation-span-before.log`。原workspace48561在新增文件前启动，不能作为该新用例验收；生产代码未改，fuzz暂缓。
+
+2026-10-08 规划程序复用真实字体终态：session58000/86700均退出0，两种reuse产物的qpdf结构、MuPDF精确文字/独立后缀坐标及四负例通过，部分模式python3 -O通过。72 DPI八页PNG与owner已验收基线逐页cmp一致，部分模式编辑两页目视无缺字/重叠/裁切；详见docs/cjk-creation-validation.md。完整工作区原session48561继续等待终态，不重启、不借用旧1003项门禁；fuzz暂缓，未提交。
+
+2026-10-08 最新规划程序复用独立验收启动：真实中文示例默认session58000、部分结束事件session86700，分别写入`output/pdf/rzpdf-cjk-cross-span-reuse.pdf`及`output/pdf/rzpdf-cjk-cross-span-partial-reuse.pdf`；完整工作区session48561，日志`/tmp/rzpdf-planned-leaf-reuse-workspace.log`。三条原会话保留，编译锁等待不算失败、不重新启动。内容编辑文档更新为真实借用生命周期及父节点原索引重建策略；fuzz暂缓，未提交。
+
+2026-10-08 叶节点复用完整PDF单元终态：session12322退出0，`/tmp/rzpdf-planned-leaf-reuse-all-units.log`656项全部通过，0失败/忽略；当前生产优化已有完整PDF单元及14项公共集成证据，真实字体渲染和全工作区仍待复验。没有启动fuzz或提交/推送。
+
+2026-10-08 叶节点复用公共集成终态：`/tmp/rzpdf-planned-leaf-reuse-integration.log`14项全部通过，原cargo及测试进程结束；覆盖CID边界/有符号度量、共享隔离、外层错误/panic回滚及额度拒绝重试。完整单元session12322尚待终态，不能沿用优化前1003项工作区门禁宣称当前版本全部验收。
+
+2026-10-08 叶节点规划程序复用定向验证：`/tmp/rzpdf-planned-leaf-reuse-span-suite.log`终态16项通过，失败/panic回滚、预算释放及原端点重试包含在内。512事件内部预算峰值普通608485字节、补偿943836字节，较上一版764651/1322710下降约20%/29%；小样本峰值不变，不代表RSS或通用复杂度。公共集成进程PID57928/58698已确认活跃，不重复启动；完整PDF单元session12322启动，日志`/tmp/rzpdf-planned-leaf-reuse-all-units.log`。当前优化尚未全量验收，fuzz暂缓，未提交。
+
+2026-10-08 最新workspace完整终态：原session74387退出0，cargo test --workspace --locked完整通过，日志`/tmp/rzpdf-current-owner-workspace.log`。51组共1003项通过，PDF单元656项、render38项、所有集成及文档测试到终态，涵盖片段重构、生命周期缩短、单表所有权复用及最新解析失败非额度假阳性断言；未运行fuzz。此前旧session54420亦1001项通过，但不与本门禁混算。当前收敛等待结束，尚需差异审阅与后续更广性能/字体矩阵、全部TODO实现；未提交/推送，未知test.png保留，不标记项目或目标完成。
+
+2026-10-08 较早片段版本workspace终态：原session54420退出0，日志`/tmp/rzpdf-fragment-node-workspace.log`，51组结果合计1001项通过，完整测试及文档测试到终态。此门禁单元654项，不覆盖后补生命周期、单片段表复用及新增656项断言，不能声明最新生产版本全量验收完成。最新独立workspace原session74387仍活跃，当前image_transform，继续等待原进程；fuzz暂缓，未提交。
+
+2026-10-08 最新完整工作区验收启动：当前生产版本656项单元、14项公共集成及真实字体两模式已有分项证据；为弥补较早workspace版本覆盖不足，独立启动cargo test --workspace --locked，session74387，日志`/tmp/rzpdf-current-owner-workspace.log`，尚未终态。旧session54420继续owned_document，没有终止或重启旧进程。无生产改动，diff空白检查通过；未知test.png保留，fuzz暂缓，未提交/推送，不声明全任务完成。
+
+2026-10-08 解析失败测试预算假阳性排除：新增断言要求非法片段返回错误但不是ResourceLimit，防止额度不足导致测试未到达语法片段路径却误通过。session70871退出0，单/多donor定向两变体通过，保留所有者/预算及修复后重试检查仍通过，日志`/tmp/rzpdf-fragment-parse-stage-validation.log`。仅测试变更，最新全656项先前门禁不包含此后补断言；原完整workspace仍运行，fuzz暂缓。
+
+2026-10-08 单片段表复用真实字体复验终态：session56828/98188生成退出0，最新生产引擎生成`output/pdf/rzpdf-cjk-cross-span-owner.pdf`及`output/pdf/rzpdf-cjk-cross-span-partial-owner.pdf`。两份qpdf结构、MuPDF精确文字/独立后缀坐标及四负例通过；72 DPI八页PNG与生命周期版本已验收图逐页cmp字节一致，部分结束事件编辑页目视复核无缺字/重叠/裁切。按PDF技能完成独立渲染，沿用MuPDF，不改系统依赖。取代顶部“单片段表复用后尚未再次复验”的状态，仍仅固定水平Noto Sans SC两层共享Form，不表示整个字体矩阵或性能验收；完整workspace原session54420继续nested_image_edit，fuzz暂缓。
+
+2026-10-08 最新全部单元收敛终态：原session58455退出0，`cargo test -p pdf --lib --locked`656项全部通过、0失败/忽略，日志`/tmp/rzpdf-fragment-owner-final-all-units.log`。实际覆盖最新单片段表复用、大选区增长与512KiB拒绝重试、乱序/重复索引及新增解析失败所有者保持。未修改生产代码；公共集成14项证据仍对应当前生产版本，原workspace session54420较早版本继续至metadata，未终态。完整项目/P3/性能总任务不勾选完成，fuzz暂缓。
+
+2026-10-08 解析失败所有者补验终态：session98268退出0，新增单元1项通过（单/多donor两变体），非法片段拒绝、donor及实际预算保持、修复后重试成功、结果释放live归零。日志`/tmp/rzpdf-fragment-parse-owner-validation.log`；生产逻辑未变，不宣称最新全656项已跑完。原workspace session54420继续至jpeg_embedding，未终态；fuzz暂缓。
+
+2026-10-08 合并解析失败所有权测试：新增invalid_fragment_parse_preserves_single_and_multiple_donors，单/多donor分别以未闭合字符串片段触发解析拒绝，检查所有者和预算保持，修复为合法片段后成功消耗donor并释放预算归零。覆盖单表移交和多表预留路径，生产逻辑未变；session98268运行，日志`/tmp/rzpdf-fragment-parse-owner-validation.log`，未验收。此前655项不覆盖此新增单元，原完整workspace继续运行，fuzz暂缓。
+
+2026-10-08 单片段表复用门禁终态：session14217退出0，最新PDF单元655项通过；session87737退出0，公共嵌套集成14项通过。覆盖大选区低预算拒绝/原端点重试、合并乱序/重复索引所有者保持及跨调用错误/panic回滚。未单独复测峰值或真实字体产物，不用此前测量声明该优化额外收益；原完整workspace session54420基于更早生产版本继续运行，当前image_replacement，不能替代此次全工作区验收。fuzz暂缓。
+
+2026-10-08 单片段表所有权复用：finish_text_event_fragments只有一份donor时，解析成功后直接移交其实际元数据Vec及租约，不再为同一表分配第二份目标；多donor仍提前预留聚合表，所有fallible验证/解析先于消耗所有者。零donor仍保留空目标表，未改变公开签名/配额/事务。最新全部PDF单元session14217与公共集成session87737运行，日志`/tmp/rzpdf-single-fragment-owner-units.log`、`/tmp/rzpdf-single-fragment-owner-integration.log`，未验收，不复用旧655项或原workspace作为本次改动证据。fuzz暂缓。
+
+2026-10-08 发布路径局部审阅：检查commit_prepared_span、build_prepared_bottom_up、SpanFormOutput/Retention及rebuild_parent_with_text_plan。当前事务包住底向上Form插入/局部资源重绑/根发布，源身份与预算准备在发布前验证，流与资源的实际所有者保留至事务结果消耗，父编辑借原操作索引片段而非改写程序索引。发现仍有规划完整程序到发布再次重建的开销，列为明确待评估项；不是已实现优化，也不声明整个3300行模块已审阅。原workspace session54420运行至image_hit，未终态；fuzz暂缓。
+
+2026-10-08 差异与说明收敛：git diff --check退出0；核对mod.rs仅接入span_tree、nested_edit.rs仅公共跨调用分支/注释及内部复用可见性，未改无关模块。内容编辑文档同步最新655项单元、事件规模峰值和512KiB拒绝原端点重试，明确采样不是通用线性复杂度/最低额度。大块span_tree新增仍需完整审阅，不能仅凭小入口差异宣称全部差异无关项已排除；未知test.png保持未跟踪且未提交。完整workspace原session54420运行到image_extraction，未终态；fuzz暂缓。
+
+2026-10-08 大选区拒绝重试及最新单元终态：session64093退出0，六组定向通过，512事件两模式在512KiB返回ResourceLimit、live归零、峰值不超过额度、完整保存字节不变，同一原快照/端点重试成功且共享页与严格重开保持。session54434退出0，最新PDF单元655项全部通过（含增长新项及乱序/重复索引后补断言），日志`/tmp/rzpdf-many-event-final-all-units.log`。原workspace session54420尚未终态，其较早单元654项不当作新增第655项覆盖。性能总任务、真实复杂字体及整体项目未完成，fuzz暂缓。
+
+2026-10-08 大选区低预算拒绝扩展：512事件普通/补偿先以独立512KiB预算要求ResourceLimit，核对预算live归零、峰值不越额度和完整保存字节不变；随后沿原root/端点以独立预算重试，并继续原共享页/严格重开/未选位置断言。仅补测试，session64093运行，日志`/tmp/rzpdf-many-event-rejection-retry.log`；最新全部PDF单元亦启动，日志`/tmp/rzpdf-many-event-final-all-units.log`，均未验收，未借旧654项证明新增第655项。完整workspace原session54420继续至identity，fuzz暂缓。
+
+2026-10-08 大选区事件增长终态：session33739退出0，六组普通/补偿定向全部通过；每调用8/64/256个Tj（两调用共16/128/512事件）的tracked peak普通139506/223452/764651字节，补偿143087/345810/1322710字节。成功live归零、XZ文字、共享页原文字、严格重开及未选根Z坐标保持。512事件补偿约1.32MB，明显高于小选区，不保证512KiB成功；16MiB为测量上限，不是最低额度/RSS，三个采样点不证明线性复杂度。新增1项单元需后续完整单元门禁；原workspace较早编译版本不覆盖此新增测试，fuzz暂缓。
+
+2026-10-08 大选区事件增长测量启动：新增selected_span_many_events_measures_growth_and_releases_budget，固定Courier共享Form两调用，每调用8/64/256个Tj事件，普通/补偿六组。每次用独立16MiB预算测量完整内部选区编辑，检查live归零、增长峰值、文字XZ、共享原页及严格重开后未选根事件Z坐标保持。session33739运行，日志`/tmp/rzpdf-many-event-growth-validation.log`，未验收，不宣称线性复杂度/真实字体或最低额度。原workspace session54420继续运行，未重启；fuzz暂缓。
+
+2026-10-08 重复索引补验终态：session78973退出0，共享祖先定向普通/补偿两模式通过；重复和乱序拒绝、真实所有者/预算保持、释放重复片段后回到原值及重试合并均通过。四调用峰值仍150571/153316字节；日志`/tmp/rzpdf-fragment-duplicate-validation.log`。当前收敛清单拆出已证实的重建、生命周期、峰值和失败重试子任务，不勾选整个性能任务。原workspace session54420继续至feature_versions，尚未终态；fuzz暂缓。
+
+2026-10-08 重复片段索引回归补充：在真实共享祖先测试构造第二份同操作索引片段，要求finish拒绝重复索引、两份donor保持Some、实际存活预算不变；移回原donor并释放重复片段后预算回到原值，再沿原额度拒绝/重试链成功。仅补断言，未改变生产逻辑；session78973运行，日志`/tmp/rzpdf-fragment-duplicate-validation.log`，未验收。完整workspace原session54420仍活跃，不重新启动，不将其较早编译单元当作本断言证据；fuzz暂缓。
+
+2026-10-08 片段乱序拒绝补验终态：session54485退出0，shared_ancestor_publication定向两模式通过。新增断言验证乱序finish拒绝且donor保持Some、原预算live不变，恢复顺序后零额度拒绝也保留所有者，再成功合并及释放回到基线；四调用完整操作峰值仍普通150571/补偿153316字节。仅补测试，不修改生产逻辑；内容编辑文档同步最新生命周期门禁、真实字体复验及两/四调用峰值，避免旧“待验收”误导。原完整workspace session54420运行至display_payload_budget，未终态，不借其覆盖后补断言，fuzz暂缓。
+
+2026-10-08 生命周期优化真实字体复验终态：session18178/49100均退出0，以最新生产引擎重新生成整事件/部分结束事件模式，产物`output/pdf/rzpdf-cjk-cross-span-lifetime.pdf`及`output/pdf/rzpdf-cjk-cross-span-partial-lifetime.pdf`。两份qpdf结构、MuPDF精确文字及后缀坐标通过；脚本普通/-O均拒绝四负例。72 DPI八页PNG分别与优化前已验收图cmp逐字节一致，目视复核默认四页及部分模式编辑两页（部分基线与默认相同）无缺字/重叠/裁切或图片变化。PDF技能用于独立渲染验收，沿用MuPDF而不修改Poppler依赖。仅固定水平Noto Sans SC与两层共享Form，不能推广全部字体/竖排/TJ或整个P3；完整workspace session54420仍运行，当前进入content_program，fuzz暂缓。
+
+2026-10-08 四调用峰值终态：原session24209退出0，定向测试两模式通过；全新严格重开Courier文档跨两层共享祖先四调用，内部replace_selected_text_span从展开选区、准备到事务发布的tracked peak普通150571字节、补偿153316字节，返回live=0。AXBC文字、共享页ABC×4、严格保存重开及补偿末尾B/C坐标保持通过；日志内callback panic为预期回滚用例。独立8MiB预算只作为测量上限，结果不包含调用方预先持有快照/字符提取、公共包装的前置端点认证或未跟踪分配，不是RSS、最低成功额度或全部字体性能验收。该测试不同于早期512KiB拒绝的较复杂四调用集成样本，不据此推断后者现在可在512KiB成功。原workspace继续运行，最新真实字体验收尚待复跑；fuzz暂缓。
+
+2026-10-08 生命周期公共集成终态及四调用测量：原session3258退出0，nested_adjusted_text14项全部通过；最新生命周期版本已有15项选区模块及654项PDF单元通过。shared_ancestor_publication测试新增全新严格重开文档、独立8MiB预算下跨四调用整操作测量（原文ABC×4→AXBC），验证live归零、共享页保持、严格重开及补偿结束后缀位置。session24209定向运行，日志`/tmp/rzpdf-four-call-peak-validation.log`，尚无四调用峰值结论，不将两调用约41%改善推广；原workspace session54420继续运行，fuzz暂缓。
+
+2026-10-08 生命周期全部单元终态：原session90213退出0，最新PDF单元654项全部通过，日志`/tmp/rzpdf-metrics-lifetime-all-units.log`。公共集成session3258与完整workspace session54420仍活跃，不能据单元结果宣称二者通过；下一步核对原进程终态、测量四调用并复验真实字体样本，性能待办不整体勾选。
+
+2026-10-08 临时字体生命周期选区终态：原session22944退出0，选区模块15项通过（日志中的callback panic为预期catch_unwind回滚用例，最终0失败）。根/两调用含路径/图像邻接四变体tracked peak为139736/141056/140129/141449字节，相较片段重构前一版本236423/237743/236816/238136各减少96687字节，约40.6%–40.9%；只证明此固定样本的跟踪预算，不是RSS、四调用或所有真实字体。公共集成原session3258尚未终态；最新全部PDF单元已启动，日志`/tmp/rzpdf-metrics-lifetime-all-units.log`。原workspace继续运行，未混用版本证据；内容编辑文档合并了过时公共入口及阶段状态，fuzz暂缓。
+
+2026-10-08 编辑临时字体生命周期收敛：确认Tj/TJ/引号片段返回独立BudgetedBytes，无字体或编码缓冲借用；PreparedEvent改为仅持有原索引、片段及操作数。完成边界验证、字符计数和补偿序列化后，事件临时BudgetedTextMetrics和编码BudgetedBytes随真实分配一起释放，不裸克隆、不仅退租约。新选区模块与公共集成日志`/tmp/rzpdf-metrics-lifetime-span-suite.log`、`/tmp/rzpdf-metrics-lifetime-public-integration.log`运行中（等待原workspace构建锁），未验收。原session54420的workspace以实际编译时点为准，不借其证明本次后补生命周期改动；fuzz暂缓。
+
+2026-10-08 片段重构公共集成终态：原session41880退出0，nested_adjusted_text14项全部通过，包括跨四调用普通/补偿、合成CID横/竖排、共享页、额度拒绝后原端点重试与外层错误/panic回滚。完整workspace原session54420继续运行，未终态；本次不得声明整个工作区或真实字体视觉复验通过。下一步保留原进程核对完整门禁，并继续分析重复字体度量的实际持有成本；不提交未知test.png，fuzz暂缓。
+
+2026-10-08 片段重构单元终态：session54847选区模块15项通过，涵盖新donor失败保留及重试路径；session10769全部PDF单元654项通过，均退出0。四变体tracked peak为236423/237743/236816/238136字节，比此前各少144字节；主要移除逐事件全程序构建，不将微小峰值改善解释为整体内存收敛。session34742为较早编译中间版本定向通过，不替代最终15项/654项证据。公共14项集成尚在原session41880，完整workspace已启动，日志`/tmp/rzpdf-fragment-node-workspace.log`，不得复用前次1001项作为本次全工作区结果。fuzz暂缓。
+
+2026-10-08 多事件节点重建重构：新增TextEventFragments区分预算化片段与完整TextEventEditPlan；跨调用先生成原索引片段，再每节点一次完成完整程序重建，去掉逐事件完整程序与旧merge中间结果。原顶层/同叶入口通过包装沿用片段构建，保持公开签名；所有聚合配额/顺序验证、解析及分配仍在消耗donor之前完成，失败保留donor及租约。合并失败/预算释放测试改为直接覆盖新片段路径。最新选区模块`/tmp/rzpdf-fragment-node-span-suite.log`和14项公共集成`/tmp/rzpdf-fragment-node-public-integration.log`运行中，未验收，不借此前门禁声明本次重构正确或性能改善；fuzz暂缓。
+
+2026-10-08 单计划优化定向终态：session24262退出0，根/两调用四变体及路径/图像邻接、共享页、失败重试、严格重开通过；session98221退出0，nested_adjusted_text全部14项通过，包括跨四调用CID、额度拒绝及外层错误/panic回滚。四变体tracked peak仍为236567/237887/236960/238280字节，与优化前相同：本次确实省去单donor的重复重解析，但没有降低该样本的全流程峰值，不宣称内存性能收敛。下一步需处理多donor逐事件完整程序重建及持有的重复度量；未重新运行完整workspace，fuzz暂缓。
+
+2026-10-08 单计划节点重复重建优化：build_selected_span_plans在节点仅含一个非空donor时直接移交完整TextEventEditPlan及其预算所有权，跳过相同程序的merge重解析；多donor仍走原聚合路径，不放宽配额/事务约束。最新定向门禁日志`/tmp/rzpdf-single-donor-optimization.log`及公共集成`/tmp/rzpdf-single-donor-public-integration.log`运行中，未验收，不能借此前1001项证明本次生产改动。README同步修正基础版本的旧“待验收”描述，性能任务仍未完成，fuzz暂缓。
+
+2026-10-08 部分结束事件真实字体验收：compare_cjk_span新增--partial，末次调用只删中文前缀，保留同一Tj中的Hello PDF及下一事件的空格PDF；session44663生成退出0，结果你好！Hello PDF PDF。qpdf结构、MuPDF精确文本及整个13字符后缀x/y独立坐标保持（0.002点容差）通过，普通控制左移至少10点。脚本普通/-O均通过且拒绝四负例，默认/部分模式互用均因text mismatch退出1。72 DPI第三/四页目视无缺字/重叠/裁切，前两页与已验收默认基线PNG cmp一致。生产引擎未变，未借此前workspace门禁声明新示例被覆盖；真实竖排/混合字体/TJ复杂选区仍待办，fuzz暂缓。
+
+2026-10-08 独立跨调用验证器加固：`check-cjk-span.py`以显式ValueError检查代替assert，防止python -O禁用验收；argparse明确输入及--self-test，未知选项退出2。正常/优化模式均通过正例并拒绝四负例；复现生成、结构、stext、渲染命令与固定样本范围已写入`docs/cjk-creation-validation.md`。只加固检查脚本/文档，不改变PDF引擎生产逻辑，不将此结果推广为全部字体或P3完成。
+
+2026-10-08 固定真实字体跨调用独立验收：四页72 DPI MuPDF PNG全部目视，无缺字/重叠/裁切；按PDF技能核对基线两行及原第二页图片、补偿/普通两页。新增`docs/check-cjk-span.py`读取MuPDF stext，四页精确文字、补偿PDF独立x/y原位（容差0.002）、普通控制向左至少10点且y保持通过；--self-test拒绝交换对照页/错误坐标/错误文字/缺页四负例，命令退出0。此前qpdf结构及本库严格重开通过。仅固定真实静态Noto Sans SC水平两层共享Form跨调用缩短，不代表真实竖排、所有字体、字形新增/排版或整个P3完成。Poppler缺依赖，使用MuPDF独立渲染，未修改系统依赖；fuzz暂缓。
+
+2026-10-08 真实跨调用样本生成与首轮独立检查：session42311退出0，本库生成四页并检查补偿/普通末尾坐标、基线保持与严格重开；qpdf --check通过，MuPDF文字提取确认两基线句及两编辑页你好！/PDF。Poppler启动因缺libtiff.5.dylib退出134，改用现有MuPDF完成72 DPI四页PNG与stext XML，不修改系统依赖。已目视第3/4页，无缺字/裁切，补偿PDF保留右侧而普通左移；尚需第1/2页目视、独立精确坐标自动断言及负例，不能声明完整真实字体跨调用验收。产物`output/pdf/rzpdf-cjk-cross-span.pdf`，中间文件`tmp/pdfs/rzpdf-cjk-cross-span-*`，fuzz暂缓。
+
+2026-10-08 真实字体跨调用对照示例：新增`pdf/examples/compare_cjk_span.rs`，复用真实嵌入字体构建共享两层Form两次调用、复制补偿/普通页，用双端来源span跨调用编辑。要求文本你好！ PDF、补偿末尾PDF位置保持而普通左移、基线不变及严格重开四页解释。session42311运行，日志`/tmp/rzpdf-real-cjk-cross-span.log`，输出`output/pdf/rzpdf-cjk-cross-span.pdf`，尚未验收；后续须qpdf、独立文本/坐标及渲染目视，不将本库坐标当作视觉验收。PDF技能用于独立渲染核验，仍由rzpdf生成样本，fuzz暂缓。
+
+2026-10-08 邻接全单元终态：session94639退出0，最新PDF单元654项全部通过，日志`/tmp/rzpdf-cross-span-neighbors-final-units.log`，涵盖本轮路径/图像邻接及严格重开四变体；完整workspace1001项仍对应此前生产代码与CID版本，不混淆门禁范围。下一步真实字体跨调用视觉样本复用`create_cjk --images`输入、`compare_cjk_advance`的Form包装和`docs/check-cjk-advance.sh`独立坐标/文本核验，需新增跨调用样本与对应检查模式，不把现有同调用--nested/--events结果当作跨调用验收；独立工具pdftoppm/mutool/qpdf已确认可用，PDF视觉技能已读取。fuzz暂缓。
+
+2026-10-08 图像邻接严格重开终态：session20191退出0，根/两调用四变体定向1项通过；两页图像数量、RGB像素、1×1尺寸、六分量矩阵在编辑后及严格重开保持，路径操作字节保持、文字/补偿后缀/共享页/失败重试同时通过。日志`/tmp/rzpdf-span-image-neighbor-roundtrip.log`，tracked peak四变体236567/237887/236960/238280字节，成功归零。已启动最新PDF全单元门禁`/tmp/rzpdf-cross-span-neighbors-final-units.log`，尚未终态；此前workspace1001项涵盖生产代码与CID集成，不覆盖本轮后补邻接断言，不把操作/像素提取当作独立阅读器视觉验收。fuzz暂缓。
+
+2026-10-08 图像邻接编译修正及严格重开扩展：session77241退出101，新增测试使用不支持PartialEq的Matrix直接比较；改为比较a/b/c/d/e/f六分量，不改生产矩阵类型。补严格保存重开后两页图像数量、像素、1×1尺寸及矩阵保持断言。最新session20191运行，日志`/tmp/rzpdf-span-image-neighbor-roundtrip.log`，尚未验收；此前路径样本成功不证明图像扩展，fuzz暂缓。
+
+2026-10-08 路径邻接终态与图像扩展：session37842退出0，路径邻接四变体定向1项通过，日志`/tmp/rzpdf-span-nontext-neighbor-fixed.log`。随后在两Form之间加入页面级RGB图像Do及独立矩阵，要求编辑页/共享页图像数量、像素数据、尺寸及矩阵保持，验证展开文字规划跳过图像；新增代码晚于该门禁，最新日志`/tmp/rzpdf-span-image-neighbor-validation.log`运行中，尚未验收，不宣称严格重开图像/独立视觉覆盖。
+
+2026-10-08 邻接样本编译修正：session61927退出101，E0596来自新增测试中edited_page调用可变字符提取但变量未声明mut；已修正，仅测试代码变更。重新启动session37842，日志`/tmp/rzpdf-span-nontext-neighbor-fixed.log`，尚未验收；未借前一门禁或编译失败声明路径邻接通过。
+
+2026-10-08 非文本邻接回归扩展：根/两调用四变体样本在叶AB与C事件之间插入独立填充矩形，在根中间文字前插入描边矩形；编辑后要求根和选中复制叶的原路径操作字节保持，仍检查XBC、共享页全文、普通/补偿后缀、失败重试及严格重开。最新定向session61927运行，日志`/tmp/rzpdf-span-nontext-neighbor-validation.log`，尚未验收；不借前一峰值或完整workspace结果证明改变后的样本，也不把操作字节保持当作独立视觉或图像邻接验收。fuzz暂缓。
+
+2026-10-08 不同Form对象与峰值终态：session73128退出0，最新根/两调用定向1项通过，四变体普通共享230323、补偿共享231643、普通不同对象230716、补偿不同对象232036字节tracked peak，成功返回live=0；日志`/tmp/rzpdf-distinct-form-span-peak-validation.log`。这是独立预算下完整内部编辑的实际租约峰值，不含外部已持有快照或未跟踪分配，不是四调用峰值、RSS或最小成功额度。结合session66920完整workspace1001项及14项嵌套集成，基础公开跨调用入口任务可勾选；真实字体/独立视觉/更多邻接及性能优化继续待办，整体TODO未完成，fuzz暂缓，改动未提交且test.png保留。
+
+2026-10-08 公共跨调用workspace终态：session66920退出0，`cargo test --workspace --locked`完整通过，日志`/tmp/rzpdf-public-cross-invocation-workspace.log`；PDF单元654项、渲染38项、全部PDF集成及文档测试通过，嵌套集成14项明确包含跨调用CID样本。不同Form对象/独立峰值变体不借此较早单元二进制验收，已启动最新定向`selected_span_prepares_root_text_between_shared_form_calls -- --nocapture`，日志`/tmp/rzpdf-distinct-form-span-peak-validation.log`，尚未终态。该门禁不代表真实字体视觉、性能优化及整个TODO完成，fuzz暂缓。
+
+2026-10-08 workspace嵌套文字阶段终态：session66920日志明确显示nested_adjusted_text运行14项并全部通过，包含新增`cross_invocation_mixed_cid_span_checks_boundaries_and_signed_advance`，因此本轮该集成二进制实际编入了启动后新增CID样本；以实际测试名/计数为证，不再将CID样本列为未验收。覆盖合成Type0横/竖排、普通/补偿及B/空/B空格跨四调用、断码拒绝与重试、共享页/旧叶/严格重开及补偿后缀坐标。不同Form对象及独立峰值变体仍需最新单元定向验证；完整workspace现进入nested_image_edit，尚未终态，不能据阶段结果声明完整通过或真实字体视觉验收。
+
+2026-10-08 完整workspace阶段结果：session66920编译完成，PDF单元654项通过、0失败/忽略，现进入adjusted_text及后续集成测试；日志`/tmp/rzpdf-public-cross-invocation-workspace.log`。进程仍存活，尚无完整workspace终态；晚于编译的CID/不同Form对象/独立峰值样本仍需最新定向验收，不借此阶段结果覆盖。
+
+2026-10-08 不同Form对象覆盖扩展：内部根文字/两调用样本增加shared_form=true/false，与普通/补偿组成四种变体；false创建独立ObjectId的第二Form，仍要求ABCMABC→XBC、共享页全文保持、失败后原端点重试、严格重开及补偿后缀坐标。每种成功操作使用独立预算打印tracked peak，待最新定向验证，不能把同对象重复调用结果推广为不同对象矩阵已通过。session66920完整workspace经句柄和cargo/rustc进程核对仍在编译，不重启；新增变体晚于启动，后续单独验收。
+
+2026-10-08 跨调用CID与峰值样本扩展：新增`cross_invocation_mixed_cid_span_checks_boundaries_and_signed_advance`，合成Type0混合单/双字节CMap、横/竖排W/W2、普通/补偿及B/空/B空格替换跨四调用，要求断码拒绝后stamp/保存字节保持、原端点重试、共享页/旧叶/严格重开及补偿后缀坐标。内部根/两调用样本用独立OperationBudget记录成功编辑的tracked peak并断言返回live=0，避免先前失败/选择探针污染峰值；不等同进程RSS或四调用最低额度。均晚于当前session66920 workspace启动，尚未验收，待其终态后运行最新定向样本；当前句柄仍存活。真实字体/独立视觉及内存优化仍待完成，fuzz暂缓。
+
+2026-10-08 公共回滚矩阵终态：session56327退出0，nested_adjusted_text全部13项通过，日志`/tmp/rzpdf-public-cross-invocation-rollback-final.log`。覆盖四调用普通/补偿、非法结束偏移/不可编码/8 MiB预算拒绝后原端点重试、外层错误及panic恢复完整保存字节/旧Form后刷新重试、共享页/后缀坐标/严格重开。当前源码完整workspace门禁已启动，日志`/tmp/rzpdf-public-cross-invocation-workspace.log`，尚未终态；不把13项集成结果当作完整workspace或全部字体/视觉验收。fuzz暂缓。
+
+2026-10-08 公共失败矩阵首轮诊断：session11373退出101，11项通过、跨调用额度样本1项失败；大替换拒绝后的512 KiB小替换重试仍报operation live bytes，不是文档回滚断言失败。四调用同时持有字体/节点计划需更高峰值，样本预算调整为内部已验证的8 MiB并将拒绝输入同步增至8 MiB，不改变生产预算限制，不宣称512 KiB可编辑四调用。新增外层事务在跨调用成功发布后主动错误/panic恢复保存字节/原Form、刷新快照重试样本。最新完整嵌套集成日志`/tmp/rzpdf-public-cross-invocation-rollback-final.log`运行中，尚未验收。
+
+2026-10-08 公共跨调用首轮集成终态：session19291退出0，nested_adjusted_text全部11项通过，包含两层共享祖先四调用普通/补偿跨选区、共享页、后缀坐标及严格重开；日志`/tmp/rzpdf-public-cross-invocation-span-integration.log`。新增失败矩阵另由session11373运行，日志`/tmp/rzpdf-public-cross-invocation-failure-matrix.log`，尚未验收；首轮结果不证明后增断言。完整workspace及更广字体/晚发布失败仍待补，fuzz暂缓。
+
+2026-10-08 公共跨调用失败矩阵扩展：共享祖先四调用样本增加非法结束偏移、不可编码Unicode失败后的stamp及完整保存字节不变，随后原端点成功编辑；新增普通/补偿跨调用512 KiB操作预算拒绝样本，要求原叶/祖先对象、Resources、stamp及保存字节不变并用原端点小替换重试和严格重开。均晚于session19291编译，需后续最新门禁；当前集成进程经句柄/进程核对仍存活，不重复启动，不将新增断言算作已验收。
+
+2026-10-08 公共跨调用入口接入：session10090退出0，内部失败重试定向1项通过（反向、不可编码、零预算保存字节不变及原端点重试）。不同调用链的公共span转入预算化选区/调用树/逐节点计划及单事务发布，同调用分支保持原实现；旧拒绝不同调用断言改为拒绝反向跨调用。集成门禁session19291运行，日志`/tmp/rzpdf-public-cross-invocation-span-integration.log`，尚未验收。完整workspace、更多字体及晚失败矩阵仍待完成，fuzz暂缓。
+
+2026-10-08 公共跨调用集成样本草稿：`nested_adjusted_text.rs`新增两层共享祖先四次调用的普通/补偿样本，预期跨调用编辑后AXHCD、共享页全文不变、严格重开一致及补偿后保留字符坐标不变。公共入口尚未接入，故此新测试暂不具备通过条件；待session10090内部失败重试门禁终态后接入接口，并将旧“不同调用必拒绝”断言改为反向跨调用拒绝，再运行完整集成门禁，不将草稿计为验收。
+
+2026-10-08 普通/补偿混合样本终态：session69955退出0，定向1项通过，日志`/tmp/rzpdf-selected-span-mixed-matrix-latest.log`，覆盖XBC后缀坐标、共享页及严格重开。后增反向范围、不可编码Unicode、零预算失败及原端点重试断言由新一轮`/tmp/rzpdf-selected-span-failure-retry-latest.log`验证，尚未验收；公共接口继续保持原限制，待失败门禁后接入。
+
+2026-10-08 内部发布门禁终态与失败重试：session96798退出0，`/tmp/rzpdf-selected-span-plan-publication-full-units.log`确认PDF单元654项通过；仅证明该次编译版本。最新普通/补偿混合样本由session69955运行，日志`/tmp/rzpdf-selected-span-mixed-matrix-latest.log`，尚未终态。其编译后又补不可编码Unicode及零预算失败断言：完整保存字节不变、预算释放、复用原端点成功重试；需后续最新门禁，不借用69955结果。公共跨调用入口仍未开放，fuzz暂缓。
+
+2026-10-08 内部发布普通/补偿混合矩阵：根/共享Form样本扩展为两模式，原文字ABCMABC，选区覆盖前一次Form和根文字及末次Form的A，保留末次BC；要求选中页XBC、共享页ABCMABC、严格重开一致，并在补偿模式检查BC原坐标。事件组相应[1,1,1,0,2]，空TJ仍保留。新样本晚于session96798编译，需后续最新门禁；公共跨调用入口仍未开放，较晚失败及更多字体/图像/非文本邻接矩阵待补，fuzz暂缓。
+
+逐事件计划合并门禁终态：原session19173退出0，普通/补偿两事件合并及零预算不消费、计数/片段顺序/释放断言通过。最新多节点计划与内部发布完整PDF单元已启动，日志 /tmp/rzpdf-selected-span-plan-publication-full-units.log，尚待结果；旧合并门禁不覆盖新端到端流程。
+
+2026-10-08 多节点选区计划及内部发布接入：新增 build_selected_span_plans，认证选区/准备表，按节点分组逐事件生成原作用域度量计划，只首事件插入新文字，无字符串TJ不伪造计划，节点内合并并检查跨节点字符总量。新增 replace_selected_text_span 内部串联收集/树/映射/准备/分组/计划/单事务发布。混合根样本增加共享页、结果X/共享页ABMAB、持有预算恢复及严格重开验证。新代码晚于session19173编译，尚未门禁；需普通/补偿完整矩阵、较晚规划拒绝/提交错误回滚及公共入口验收，fuzz暂缓，改动未提交。
+
+分组完整PDF单元终态：原session34439退出0，654项通过，包括根/嵌套事件分组。最新单节点计划合并定向已启动，日志 /tmp/rzpdf-span-node-event-plan-merge-validation.log，尚待结果；旧654项不覆盖合并器新增代码。
+
+2026-10-08 单节点逐事件计划合并：新增 merge_text_event_plans，检查原事件严格顺序/数量及聚合字符配额，所有表分配和最终原程序重建成功后才消费donor计划，转移原字体/编码/片段所有者并保留真实容量计费；失败不消费donor。共享祖先普通/补偿样本增加两事件[1,4]合并、计数(3,1)、零预算拒绝原计划保持及合并drop恢复额度。新代码晚于session34439编译，不能借用旧分组门禁证明；还需将分组生产事件接入多节点计划并单事务发布，公共编辑仍未开放，fuzz暂缓。
+
+混合根选区门禁终态：原session1375退出0，真实页面根事件/两次共享Form准备及同位置新修订拒绝通过。最新分组完整PDF单元已启动，日志 /tmp/rzpdf-selected-span-grouping-full-units.log，尚待结果；旧混合根结果不覆盖分组新增代码。
+
+2026-10-08 选区事件节点分组：新增 SpanEventGroups，预算化持有节点偏移及事件索引表，构建时另持有实际容量游标表，保留原展开顺序在各节点的投影；节点越界/映射长度异常及同节点原操作重复或倒序拒绝。混合根样本新增根[2]、首Form[0,1]、末Form[3]的分组检查及持有/drop额度恢复。代码晚于session1375编译，需后续门禁；尚未组合每事件文本计划与多叶发布，公开跨Form接口仍未开放，fuzz暂缓。
+
+生产选区准备PDF单元终态：原session75287退出0，653项通过，包含新准备入口与旧准备器回归。最新混合根事件/旧修订样本定向已启动，日志 /tmp/rzpdf-selected-span-mixed-root-validation.log，尚待結果；旧653项不覆盖新样本。
+
+2026-10-08 根/嵌套混合真实选区样本：新增 selected_span_prepares_root_text_between_shared_form_calls，页面包含同一Form两次调用及中间页面级(M)文字；选区事件节点预期[1,1,0,2]，空TJ保留，根文字范围与两个Form准备均需成功。随后以相同原操作/字符串仅增加尾注释生成新修订，旧选区配新根应拒绝且预算不变，drop全部所有者后额度归零。该测试晚于session75287编译，待原进程终态后最新门禁；仍需分组及多叶计划组合，不开放公共跨调用编辑，fuzz暂缓。
+
+来源认证门禁终态：原session8550退出0，正确选区认证及错误页面/其他页面快照拒绝与临时预算恢复通过。随后启动最新完整PDF单元，日志 /tmp/rzpdf-selected-span-preparation-full-units.log，包含新生产准备入口和旧准备器回归，尚待结果；不能借用旧定向结果宣称新入口通过。
+
+2026-10-08 完整选区生产准备入口：抽出 prepare_span_nodes 复用唯一节点预算化准备；旧来源入口保留原路径/叶位置校验。新增 prepare_selected_span，先核对选区stamp/页面ID与当前根，再认证实际页面，直接准备映射树、核对全部原事件；根节点事件按页面程序验证，不再借助伪造NestedDrawSource。共享祖先认证样本改用新入口，移除测试每事件来源复制。新增代码晚于session8550编译，旧结果不证明新入口；还需真实根事件混合矩阵、事件分组及多叶编辑计划，公共编辑仍未开放，fuzz暂缓。
+
+完整选区树PDF单元终态：原session87166退出0，653项通过、0失败，包括完整选区建树/根事件/中间调用/节点配额。随后启动最新选区来源认证定向，日志 /tmp/rzpdf-span-selection-source-validation.log，尚待结果；旧653项不覆盖后写来源字段/认证入口。
+
+2026-10-08 选区来源认证：SpanSelection保留原DocumentStamp及页面ID，新增validate_span_selection核对映射/准备表树身份、选区与根身份、当前页面来源，逐事件检查原操作字节位置及完整字符串范围/裁剪端点；无字符串TJ与真实空字符串严格区分。共享样本以每事件测试来源准备完整选区树，新增正确验证及错误页面/其他页面快照拒绝、临时预算恢复断言；生产选择准备仍需去掉此测试用来源复制并支持根事件。代码晚于session87166编译，旧结果不证明新增认证。多叶计划/公开编辑未完成，fuzz暂缓，改动未提交。
+
+2026-10-08 完整选区树构建：树映射原session10409退出0。新增 from_selection，从全部选区事件路径构建树及事件叶表，复用 from_paths 前缀去重/调用冲突/节点配额，旧来源入口保留既有验证；无需额外复制借用路径表，页面级空路径映射根。共享祖先测试改用完整选区建树，新增根事件/中间调用/精确6节点边界与5节点拒绝释放测试。当前完整PDF单元门禁已启动，日志 /tmp/rzpdf-span-complete-selection-tree-units.log，尚待结果；旧映射结果不覆盖新建树。原程序认证、事件分组、多叶计划组合及公共编辑仍待完成，fuzz暂缓，改动未提交。
+
+选区所有权门禁终态：原session23767退出0，描述表/路径/裁剪结果一致性及持有/drop预算释放通过。最新树映射定向已启动，日志 /tmp/rzpdf-span-selection-tree-mapping-validation.log，尚待结果；旧门禁不覆盖树映射新增代码。
+
+2026-10-08 选区树映射：新增 SpanMappedSelection，借用原选区/树，预算化持有事件对应节点表；逐完整FormInvocation（含原索引/字节位置/ID）沿父子匹配，空路径映射页面根，缺少任一选中调用拒绝，不用相同Form对象ID冒充同调用。共享样本追加8事件两叶映射、所有者身份、映射额度持有/drop恢复及缺节点失败释放断言。此新增晚于session23767编译，需后续独立验收；仍需从完整选区构建覆盖所有中间调用的树、原程序认证、事件分组与多叶计划组合，不开放公共编辑，fuzz暂缓。
+
+裁剪门禁终态：原session61460退出0，跨两叶部分范围及同事件双端裁剪通过。随后启动最新选区所有权定向，日志 /tmp/rzpdf-span-selection-ownership-validation.log，尚待结果；旧裁剪门禁不覆盖新描述表。
+
+2026-10-08 预算化选区描述持有：新增 SpanSelection/SpanSelectedEvent 与 collect_expanded_text_span，计数后保留每个原事件的调用路径、操作索引/字节位置、裁剪代码范围及首事件标记；事件表及每条路径的真实容量同池持有，不复制全部内容程序。空路径预留给嵌套端点之间的页面级事件。当前实现通过重复受限遍历收集，不宣称线性/单遍或完成树映射。新增描述一致性、持有时额度非零、drop后归零断言；这是session61460编译后新增代码，需另行门禁，不能借用旧裁剪/652项结果。多叶计划组合、顶层/嵌套混合树映射及公开编辑仍未完成，fuzz暂缓。
+
+字符码范围完整PDF单元终态：原session3198退出0，652项通过、0失败，包含两项独立TJ槽位/引号/非法参数范围样本。随后启动最新裁剪范围定向测试，日志 /tmp/rzpdf-span-clipped-ranges-validation.log，结果待确认；652项旧门禁不覆盖后写裁剪入口。
+
+2026-10-08 原端点裁剪接入：新增内部 visit_expanded_text_code_ranges，将已经认证/排序的展开选区逐事件映射成原字符码字节范围，首尾按原端点裁剪，None只表示没有字符串的空/纯数字TJ，Some空范围仍是实际字符串的合法边界，并标记首事件供后续插入文本。共享祖先样本新增跨两叶首偏移1/末偏移0、4个无字符串事件保留、同事件双端裁剪及预算释放断言。此新增在session3198编译后写入，需原进程终态后验证最新源码，不借用旧门禁证明；字体码边界及多叶计划组合仍待完成，公开接口未开放，fuzz暂缓。
+
+字符码范围接入门禁终态：原session93087退出0，共享祖先选区样本内的字符串范围/空及纯数字TJ无范围断言通过。已启动当前源码完整PDF单元命令 cargo test -p pdf --lib --locked，日志 /tmp/rzpdf-span-code-range-full-units.log，包含随后新增两项独立范围样本，结果待确认。
+
+2026-10-08 字符码范围独立样本：追加 full_event_ranges_keep_tj_numeric_slots_and_quote_operands 与 full_event_ranges_reject_invalid_shows_without_fabricating_endpoints，验证带数字槽位TJ首/末字符串位置、空字符串Tj、空/纯数字TJ、两种引号及错误元素/参数拒绝。这些新增测试尚未执行；原session93087已完成编译且测试进程仍存活，不重启，不以此前992项工作区门禁证明新增范围辅助。多叶计划组合及公开接口仍待完成，fuzz暂缓。
+
+定位门禁终态：原session25610退出0，跨两次叶调用的8事件定位、首尾标记、反向范围/错误字节位置的零回调与预算释放通过（共享祖先普通/补偿样本）。此结果不覆盖后写的 full_event_range 辅助；最新定向已启动，日志 /tmp/rzpdf-span-code-range-validation.log，尚待结果。
+
+2026-10-08 选区到字符码范围辅助：新增 full_event_range，独立验证 Tj/TJ/引号参数，返回首末字符串槽位及原字节边界；空/纯数字 TJ 返回无可编辑字符串，保留其选区顺序，不伪造字符串端点。选区样本新增4个字符串事件范围及4个无字符串事件断言。该改动在session25610编译后写入，旧进程结果不能证明新增辅助覆盖；待原定位门禁终态后运行最新定向验收。字体边界、部分端点裁剪、多叶计划组合及公开API仍待实现，fuzz暂缓。
+
+2026-10-08 跨调用选区定位：新增内部 visit_expanded_text_span，两次预算化遍历，先认证根并找到双端调用路径/原操作/字节位置，检查字符串槽位及字节偏移和正向顺序，再按展开顺序回调完整闭区间事件并标记首尾。无需为全部事件复制路径；错误端点/反向范围在选区回调前拒绝，仍由字体编辑规划验证完整字符码边界。共享祖先样本新增跨两叶8事件（含空/纯数字TJ）、原路径及首尾标记、反向/错误字节位置零回调和预算释放断言。当前定向session25610运行，日志 /tmp/rzpdf-expanded-span-selection-validation.log，尚未验收；旧992项workspace结果不证明此新增代码。尚未组合多叶计划并开放公共跨调用编辑，fuzz暂缓，改动未提交。
+
+2026-10-08 完整回归终态：cargo test --workspace --locked 原session56430退出0，取代下方所有该进程“运行中”描述。主代码迭代遍历、原调用者状态和共享祖先发布进入完整回归；最新边界追加由定向日志独立证明，公开跨不同Form选区仍未开放，整体TODO未完成。改动未提交，fuzz暂缓。
+
+2026-10-08 完整回归阶段结果：原session56430日志显示PDF单元649项通过、0失败，并进入 adjusted_text 集成测试。该649项编译范围含初版512层小栈样本，不含后加事件配额/深度拒绝的新断言；最新两项边界由原session57302定向退出0独立证明。整个workspace尚未终态，不勾选完整验收。
+
+2026-10-08 最新边界验收终态：原 session57302 退出0，/tmp/rzpdf-expanded-boundaries-validation.log 显示5项通过（其中2项为本次遍历边界，3项既有字形展开测试）。明确覆盖512层Form在256 KiB线程栈成功、深度上限511拒绝、16个空TJ通过/第17个拒绝，以及上述成功/失败后的预算释放和页面保持。取代下方该定向测试“待锁/未验收”状态；不代替完整workspace验收。完整回归原session56430已完成编译并进入测试，仍未终态；整体目标未完成，fuzz暂缓，改动未提交。
+
+2026-10-08 深度边界：512层小栈样本扩展为 max_depth=512 成功、511在最深层事件前拒绝，两条路径均检查预算归零。启动当前源码定向命令 cargo test -p pdf --lib --locked expanded_，日志 /tmp/rzpdf-expanded-boundaries-validation.log；它会正常等待既有workspace编译锁，不终止或重启旧回归。新配额与深度边界尚未验收，workspace原session56430仍运行。
+
+2026-10-08 文本事件配额边界：新增 max_objects=16 时16个空 TJ 通过、17个空 TJ 在第17个回调前拒绝的测试，检查已访问计数、失败后原页面内容及预算释放。该新增测试是在 session56430 编译启动后写入，不借用该进程结果证明覆盖；待完整工作区进程终态后运行当前源码的新增定向验收。当前 session56430 经句柄及进程检查仍存活，日志 /tmp/rzpdf-iterative-span-workspace-validation.log 处于编译阶段，不重启。fuzz 暂缓，完整公开跨调用选区尚未完成。
+
+2026-10-08 迭代遍历验证进展：主工作树原 session44722 退出0，PDF单元648项通过，覆盖迭代遍历及共享祖先样本的16事件/回调失败/panic/零预算断言。随后新增独立512层Form、256 KiB线程栈回归，尚未运行验证；已启动包含此最新源码的 cargo test --workspace --locked，日志 /tmp/rzpdf-iterative-span-workspace-validation.log。此前旧工作区日志已到文档测试尾部，但不作为最新代码验收。仍需新增深层样本结果、更多配额边界与完整公开跨调用选区，改动未提交。
+
+2026-10-08 原调用顺序事件遍历（当前状态）：分类样本已补齐 Form BBox，旧副本单元日志显示 648 项通过；这不覆盖下述最新修改。内部 visit_expanded_text_events 已由递归改成预算化显式帧栈，帧持有 PreparedForm 及其资源所有者；保留来源认证、文本操作数检查、循环/深度/节点/事件/操作/解码工作总量限制。当前样本要求四次两层调用访问16个事件，包含空 TJ 与纯数字 TJ，并检查原位置/路径；新增回调失败、panic 和零预算后的预算释放断言。最新主工作树 cargo test -p pdf --lib --locked 在 session44722 编译验证中，尚未确认通过，之后仍需完整 workspace 验收、深层调用及更多配额边界测试。尚未组合完整跨调用公开选区；fuzz 暂缓，改动未提交，整体目标未完成。
+
+2026-10-08 展开前Do分类：新增Page::form_call_at_operation_with_budget，按原scope预算化解析XObject字典/绑定/流及Subtype，Form返回原操作索引/字节位置/条目ID，Image不进入文本递归，非Do不递归，缺失绑定/非流/不支持Subtype拒绝；完整Form结构仍由单调用准备器验证。新增分类位置保留、图像排除、缺失绑定错误及临时额度释放回基线单元；当前仍是展开辅助入口，不是完整文本事件遍历，不用字符提取冒充空/纯数字TJ覆盖。完整PDF单元新门禁 `/tmp/rzpdf-span-call-classification-full.log` 运行中，新增部分未验收。主旧工作区回归继续，范围展开仍待实施，fuzz暂缓，改动未提交。
+
+原调用者状态门禁终态：原session31185退出0，`/tmp/rzpdf-span-inherited-metrics-full.log` 647项通过、0失败/忽略，取代下文运行中状态；页面到两层叶的字体/间距/负水平缩放继承、普通/补偿公共祖先发布、较晚拒绝回滚和新快照重试均通过。仍需完整选区事件展开和其他字体/状态/错误矩阵，整体任务未完成。
+
+2026-10-08 多层原调用者文字状态：唯一节点准备原session56060退出0，`/tmp/rzpdf-span-unique-preparation-full.log` 647项通过、0失败。增加span_text_metrics_for_operation，校验树/节点及当前根，沿各原父程序Do前缀传递预算化文字状态，最终在叶原事件处取得度量，不裸克隆字体；路径祖先定位有重复扫描，不宣称线性CPU。两层公共祖先测试改为叶不设置Tf，从页面继承Courier/12Tf/2Tc/3Tw/-75Tz，两个叶普通/补偿计划均调用新入口，继续要求后缀/其他调用坐标保持、共享隔离及较晚拒绝回滚/重试。完整单元新门禁 `/tmp/rzpdf-span-inherited-metrics-full.log` 运行中，新增状态继承未验收，不扩大为全部字体/竖排/所有调用者状态矩阵。主旧完整工作区回归继续，fuzz暂缓，改动未提交。
+
+2026-10-08 唯一节点准备接入：补齐资源的完整单元原session91111退出0，`/tmp/rzpdf-span-integrated-full-units-fixtures.log` 647项通过/0失败。继续增加document内部prepare_span_forms，认证页面根、核对来源槽/原路径/文本几何标志，逐唯一节点准备Form，检查祖先ID循环、累计根及全部节点解码字节/操作数，最后校验全部文本叶索引/字节位置；共享前缀不再通过重复完整链准备。两层共享祖先测试的初次准备/新快照重试改走此入口，增加错误页面根和错误叶字节位置拒绝、预算释放；旧链去重保留作对照。新增完整单元门禁 `/tmp/rzpdf-span-unique-preparation-full.log` 运行中，新增路径未验收，不能借用647旧版结果。范围展开/继承/完整多分支矩阵待实现，主旧工作区回归继续，fuzz暂缓，改动未提交。
+
+2026-10-08 完整单元资源校正/单调用准备：原session63723退出101，647项中597通过/50失败，失败日志为隔离副本未复制仓库tests/path-test.pdf导致文件不存在，不能验收；补齐仓库tests资源后重跑完整PDF单元，日志 `/tmp/rzpdf-span-integrated-full-units-fixtures.log` 运行中。新增Page::prepare_form_call_with_budget只准备一个原调用，检查Do/操作数/字节位置、有效XObject条目ID、Form结构及预算化解码/字典/scope，保留页面fallback；调用方负责根来源认证、祖先循环和总工作限额，尚未接入逐唯一节点遍历。旧链接口不改；此新增代码同步纳入本轮编译，但不能以编译证明调用方缺口完成。范围展开仍缺空/纯数字TJ事件完整枚举，fuzz暂缓，改动未提交，整体目标未完成。
+
+加强回滚门禁终态：原session72725退出0，`/tmp/rzpdf-span-rollback-resources.log` 11项通过、0失败，失败后两页资源/原Form完整对象保持及严格重开通过。随后将主模块注册及当前源码同步到独立副本，启动完整PDF单元 `cargo test -p pdf --lib --locked --offline`，日志 `/tmp/rzpdf-span-integrated-full-units.log`，运行中；它不再过滤既有单元，但仍不是整个工作区/集成测试验收。
+
+2026-10-08 内部模块集成：主document/mod.rs接入span_tree，原型转为内部编译模块，公开跨调用span仍拒绝、不改变公开承诺；docs/content-editing.md说明单事务发布、总计费、树身份和预算持有，并明确范围展开/继承/临时重复分配/完整矩阵缺口。加强回滚资源门禁原session72725仍运行（`/tmp/rzpdf-span-rollback-resources.log`）；接入后的完整单元门禁待原进程结束启动，尚未验收。正在运行的旧完整工作区门禁只证明其原已编译范围，不能当作本次集成完整证明，后续必须覆盖当前源码。fuzz暂缓，改动未提交，整体目标未完成。
+
+晚祖先拒绝门禁终态：原session92584退出0，`/tmp/rzpdf-span-late-ancestor-rejection.log` 11项通过、0失败，输出总量拒绝及普通/补偿两模式较晚祖先拒绝/预算清理/新快照重试通过。随后已同步回滚资源/完整对象/严格重开加强检查并启动 `/tmp/rzpdf-span-rollback-resources.log` 独立门禁，运行中，取代下文未同步状态；新增检查尚未验收。
+
+2026-10-08 回滚证据加强：主草稿补较晚祖先拒绝后两页资源字典、原叶/祖先完整对象相等，以及失败状态严格保存重开两页仍为ABCABCABCABC；不只比较根内容字节。共享前缀准备去重同时比较原程序/字典/有效scope，拒绝同内容不同资源的准备结果。原session92584上一版拒绝门禁仍确认存活（`/tmp/rzpdf-span-late-ancestor-rejection.log`），未覆盖该隔离副本源码；新增检查尚未同步/验收，需原门禁终态后另跑。主完整回归继续，fuzz暂缓，改动未提交，整体目标未完成。
+
+2026-10-08 多叶计费/晚祖先拒绝：原session75891退出0，`/tmp/rzpdf-span-aggregate-chars.log` 11项通过，输入总量4精确边界/限额3拒绝通过。继续补输出总量5超过4且各叶计划单独合规的拒绝/恢复原计划；在真实两层测试准备表的公共祖先注入预算化F标记，使两个子叶已插入后祖先PdfStream构造精确返回UnsupportedFeature，检查编辑页/共享页恢复、预算回到仍持有叶计划的基线，再用新根快照与保留计划重试。普通/补偿两模式运行，属确定性拒绝/回滚测试，不是fuzz。新隔离门禁 `/tmp/rzpdf-span-late-ancestor-rejection.log` 运行中，新增部分未验收；公共API仍未开放，改动未提交，整体目标未完成。
+
+公共祖先门禁终态：原session61821退出0，`/tmp/rzpdf-span-shared-ancestor-final.log` 11项通过、0失败（636项过滤），普通/补偿两模式真实共享祖先发布、严格重开及后缀/未选调用坐标验证通过。新增多叶字符计数随后已同步并启动 `/tmp/rzpdf-span-aggregate-chars.log` 独立门禁，运行中，取代下文尚未同步状态；新增总量检查尚未验收。
+
+2026-10-08 多叶总字符计费：TextEventEditPlan保留既有逐事件校验所得输入/输出字符计数，统一事务在任何写入前累计所有节点计划并分别校验 max_text_chars/溢出，避免多个单叶合规却整体超限。公共祖先测试增加两叶总输入4/输出1、精确限额4通过、限额3拒绝且内容和预算保持；只是发布前总量校验，尚不等于范围展开阶段提前计费。上一版公共祖先门禁原session61821仍确认运行（`/tmp/rzpdf-span-shared-ancestor-final.log`），尚未终态，因此新增计数接口/测试尚未同步到隔离副本，不借用旧结果；需先收取结果再运行新增门禁。fuzz暂缓，改动未提交，整体目标未完成。
+
+2026-10-08 真实跨叶文本发布确认：原session16221退出0，`/tmp/rzpdf-span-transaction-text.log` 10项通过、0失败，两个真实叶普通计划一次发布、编辑页X/共享页ABAB及预算回基线验证通过。继续新增两层共享祖先测试，选择同外层的两个叶调用，普通/补偿两模式替换与清空，要求同一公共祖先合并、未选外层调用坐标不变、旧叶/外层流保持、共享页保持、严格重开；补偿模式检查两后缀C位置。首轮测试误用不存在的PdfStream::data方法，改raw_data后隔离日志 `/tmp/rzpdf-span-shared-ancestor-final.log` 运行中，新增测试尚未验收。仍缺完整来源范围展开、全目标字符计费/作用域继承、多分支晚错误/panic矩阵，公共API未开放，fuzz暂缓，改动未提交。
+
+2026-10-08 实际发布回滚校正：原session39852退出101（9项通过/1项失败），回滚内容恢复但修订号使旧根快照失效；改为取得新根快照后重试，不绕过来源校验。原session49882退出0，`/tmp/rzpdf-span-transaction-publish-final.log` 10项通过，真实双调用发布/共享页保持/外层错误回滚及新快照重试/严格保存重开通过，取代上一轮“原快照重试”的错误假设。继续为两个真实叶生成普通文本计划，第一AB改X、第二AB清空，要求严格重开编辑页X、共享页仍ABAB、全部计划释放回预算基线；新日志 `/tmp/rzpdf-span-transaction-text.log` 运行中，尚未验收。该样本页/叶同字体作用域，不证明跨作用域继承或补偿、多层公共祖先矩阵；公共span仍未开放，fuzz暂缓，改动未提交。
+
+2026-10-08 多分支实际发布原型：未接入模块增加内部 `commit_prepared_span`，验证计划表数量，在一次预算化事务/页面根快照提交内从叶到根构建，插入新Form并按新子ID准备局部绑定，页面根注册各新顶层Form后一次合并；全部流保留所有者/绑定租约随结果表持有，编辑字节按全部节点累计限额。仅把现有预算化局部绑定与Do构造辅助函数改为pub(super)供同层调用，主完整回归仍针对85ff816已编译源范围。隔离原session41652退出0，10项既有测试通过，证明新内部接口可编译，不证明发布行为已验收。随后新增真实双调用发布、共享页保持、外层错误回滚/原快照重试及严格保存重开测试，日志 `/tmp/rzpdf-span-transaction-publish.log` 运行中。公共跨调用span仍未开放，范围展开/全部字符计费/多层公共祖先及晚失败矩阵待验证，fuzz暂缓，改动未提交，整体目标未完成。
+
+流所有者分离门禁终态：原session74287退出0，`/tmp/rzpdf-span-form-retention.log` 10项通过、0失败（636项过滤），取代下文该门禁待确认状态。下一步接对象插入/子Form资源重绑和根合并的同一事务，不能把保留所有者接口视为发布功能完成。
+
+2026-10-08 流插入前所有者分离：长度检查原session6764退出0，`/tmp/rzpdf-span-form-length.log` 10项通过、0失败。物化结果拆分为PdfStream与 `SpanFormRetention`，`into_parts` 不克隆、不释放预算，保留所有者继续覆盖已分离流及原程序/字典/资源，必须持有到发布结束；新测试验证分离时额度不变、丢弃流不提前解除发布保留额度、释放所有者回到基线。隔离原session74287、日志 `/tmp/rzpdf-span-form-retention.log` 运行中，未验收；仍未将流插入文档、未实现真实多分支事务。主完整回归继续，nested_adjusted_text 10项通过，fuzz暂缓，改动未提交。
+
+Form物化上一版终态：原session62988退出0，10项通过、0失败（636项过滤），`/tmp/rzpdf-span-form-output.log`。随后已同步新增长度检查/测试并启动独立门禁 `/tmp/rzpdf-span-form-length.log`，运行中，取代下文“尚未同步”状态；新增长度约束尚未验收。
+
+2026-10-08 Form物化长度前置检查：主草稿在Resources/内容缓冲分配前同时检查 max_raw_stream_bytes 和 max_decoded_bytes；真实Form测试新增两种上限少一字节拒绝和所有预算释放回树基线。原session62988物化上一版隔离测试进程仍确认存活（`/tmp/rzpdf-span-form-output.log`），尚未终态，因此新增长度检查/测试尚未同步到临时副本，也未验收；需先收取原结果再运行新门禁，不覆盖活跃门禁源码。完整工作区原进程仍运行，整体目标未完成，fuzz暂缓，改动未提交。
+
+2026-10-08 Form流物化准备：树身份门禁原session46078退出0，`/tmp/rzpdf-span-prepared-identity.log` 10项通过、0失败。继续增加 `SpanFormOutput`，用合并程序和有效Resources构造预算化PdfStream，持有真实中间字典/资源、原Form及程序所有者，字段析构顺序确保资源先于其租约释放；不插入对象、不发布页面。真实准备表测试增加叶节点流物化、Resources存在、根看到两个准备结果、全部释放回树预算基线。隔离门禁日志 `/tmp/rzpdf-span-form-output.log` 运行中，新增部分未验收。实际子Form新ID资源重绑、根合并与单事务提交仍待实现，主完整回归继续，fuzz暂缓，改动未提交。
+
+2026-10-08 准备表消费门禁：原session12814退出0，`/tmp/rzpdf-span-real-forms-build-final.log` 10项通过、0失败（636项过滤），取代下文待确认状态；真实双调用/重复来源去重、晚链失败释放、子节点先于根、结果持有预算验证通过。继续将 `SpanPreparedForms` 生命周期绑定原树，并在消费前检查引用身份，防止同节点数的其他树套用该表；新增零回调/准备表释放测试，原session46078、日志 `/tmp/rzpdf-span-prepared-identity.log` 已编译、进程仍在运行，尚未验收。主完整回归仍运行，jpeg_embedding 4项通过；原型实际文档写入/事务发布仍待实现，fuzz暂缓，改动未提交。
+
+2026-10-08 准备表消费推进：原session33263退出101，9项通过/1项失败，真实测试Form缺BBox，被页面校验正常拒绝；样本补齐BBox。树增加 `build_prepared_bottom_up`，消费节点Form所有者并提供已完成子结果，根必须无Form、非根必须有Form；结果表保留实际Form/租约到调用方释放。新测试确认两个调用节点先于根准备、保留所有者期间计费、释放回树基线。首轮构建闭包泛型推断失败，指定结果类型后重跑原session12814，日志 `/tmp/rzpdf-span-real-forms-build-final.log`，运行中未验收。仍不注册资源、不插入对象、不发布页面；主完整回归继续，image_transform 4项已通过。fuzz暂缓，改动未提交，整体目标未完成。
+
+2026-10-08 真实调用链表准备：原型增加 `SpanPreparedForms` 与 `prepare_forms`，调用页面预算化准备器校验每个来源，按树节点移动真实字典/有效作用域/内容程序所有者；重复来源共享节点、不同调用不合并，拒绝深度或共享程序不一致，较晚失败释放整表。当前仍先准备完整链再丢弃重复前缀，存在临时重复分配，未满足完整的唯一前缀准备优化；页面根不放入Form表，也不写入文档。新增真实同Form双调用及重复字形来源、晚错误清理/重试测试，隔离原 session33263 日志 `/tmp/rzpdf-span-real-forms.log` 已编译、运行中，未验收。主完整回归原进程仍运行；实际树作用域重绑和单事务发布尚未接入，改动未提交，fuzz暂缓。
+
+真实叶计划重试门禁终态：原 session36266 退出0，`/tmp/rzpdf-span-real-plan-retry.log` 9项通过、0失败（636项过滤），取代下文运行中状态；第二绑定失败后计划预算保留、同计划重试成功均通过。完整工作区回归已通过 image_remove 2项，仍未终态。
+
+2026-10-08 真实叶计划组合准备：`TextEventEditPlan::original_replacements` 只读借用已有原始片段，字体/字符代码/片段预算仍由计划持有；树原型的 `rebuild_parent_with_text_plan` 使用预算化描述表接入父程序批量合并。真实 Courier 文档测试覆盖普通双引号和补偿展开后的兄弟 Do 索引、未发布内容保持及计划/合并结果分别释放。首轮测试误将双引号补偿的 Tw/Tc/T*/TJ 四操作计为三，修正后原 session64665 退出0，9项通过、0失败，日志 `/tmp/rzpdf-span-real-plan-final.log`。继续补第二绑定错误的精确载荷、计划预算仍持有及同计划重试，新增门禁原 session36266，日志 `/tmp/rzpdf-span-real-plan-retry.log`，运行中，不借用上一版结果。主工作区完整回归仍针对提交85ff816已编译源码，本次只读计划接口变更另行验证；原型仍未接入实际资源/发布链。改动未提交，fuzz 暂缓，整体目标未完成。
+
+2026-10-08 多分支局部编辑组合：原型增加 `rebuild_parent_with_replacements`，把父程序自己的替换片段与全部子 Do 绑定按同一原始索引排序、一次重建；重叠/逆序/越界的局部位置在绑定前拒绝，检查替换数量额度，并按前置片段操作数增减定位最终 Do。新测试覆盖文本展开成两操作及删除成零操作、兄弟绑定不丢失、未知邻接保持、与子调用冲突时零回调和预算释放；隔离门禁日志 `/tmp/rzpdf-span-local-merge.log`，8 项通过、0 失败（636 项过滤）。这解决父节点同时有局部编辑和子调用时的索引组合基础，不证明真实 scope、叶计划或文档发布已接入；主生产代码冻结，完整工作区回归继续，已通过 image_extraction 9 项。本次改动未提交，fuzz 暂缓，整体目标未完成。
+
+2026-10-08 提交后推进：未接入的 `span_tree` 增加全部原调用前置校验测试（较晚字节位置错误时绑定回调次数必须为零）及第二绑定 panic 的精确载荷、预算释放、原内容不变测试。首轮测试错误地对 `Option<u64>` 加整数，修正后隔离测试命令退出 0，7 项通过；日志 `/tmp/rzpdf-span-parent-preflight-final.log`。主生产模块未接入该原型；完整工作区回归原进程仍运行，已通过 image_display_translation 3 项，整体结果未确认。下一步仍需组合真实叶编辑计划、作用域及公共祖先资源，并通过单事务发布；跨调用编辑未完成，fuzz 暂缓，本次改动尚未提交。
 
 工作区包含 `pdf`、`render`、`font-data` 三个 crate。现有代码支持文件/字节/Reader 读取、基础对象与 xref 表/流解析、对象流加载、常见内容解释、DisplayList、Skia 渲染、对象增删改、页面增删、内容追加/替换和全量保存。
 
@@ -36,6 +955,7 @@
 - [ ] AR-03（P0-10）增加操作级 Budget，覆盖临时解码、转换、对象克隆、缓存及保存缓冲。验收：多个单项未超限但合计超限时拒绝；失败释放额度，原生后端未计费范围有明确说明。
   - [x] 独立活跃字节额度、共享状态和不可复制的所有权租约；失败预留不改计数。OperationBudget/MemoryLease原语及Limits独立配置已实现，部分文字范围结果/元数据已接入；字体、源码重建、事务、缓存及保存尚未贯通，不代表完整操作预算完成。
   - [ ] 文字编辑入口贯通字体/编码、ContentProgram及Form复制，返回缓冲携带额度，不在函数返回时提前释放。
+    - [ ] 字体资源副本逐对象生命周期：当前font_binding只按前缀操作聚合租约，下一步以内部非Clone拥有对象联合PdfObject与可选MemoryLease，字段顺序保证先销毁对象后归还额度。font_scope_resource返回资源对象所有者，类别字典仅在查询/复制时存活；ext_state_font仅转移字体所有者，大小副本与Font数组用后释放。混合模式解析核心需支持借用拥有结果，预算/普通路径共用类型与错误验证，BM数组仍校验全部元素；不可为提前释放额度而留下无租约对象。验收：长BM数组元素峰值不累计、Tf/gs真实资源共存少1拒绝及释放邻居重试、返回派生字体租约保持、类型错误/异池/unwind归零；之后复跑字体专项、公共编辑与统一工作区。此项不包含首次源缓存或原生内存总量约束。
     - [ ] 字体结果所有权：增加不可裸Clone的预算字体所有者，字体派生数据及其租约一起返回；顶层编码/范围编辑借用该所有者，持有至提交返回，q/Q共享同一所有者而非另发无租约副本。
     - [ ] SimpleFont构造：BaseFont、Encoding、AFM及ToUnicode派生数据分配前预留；Descriptor的FontFile解码使用同池，预算字节所有权移交字体，不先普通decode再补记。
     - [ ] Type0构造：Encoding/ToUnicode CMap、DescendantFonts、CID宽度/映射与字体程序副本贯通同池；提前确定HashMap表的可计费存储策略，不能仅按元素数猜测桶容量。
@@ -52,7 +972,7 @@
       - [x] Form预检与拥有副本：普通/预算共享字段验证核心，预算对象/引用数组/数值/Resources/Group分配前预留，BBox/Matrix数值采用栈数组；返回仅保留资源/Group租约。准备链XObject/Form对象解析已同池，首次源缓存仍未计费；间接字段、null语义、错误类型、峰值拒绝及unwind清理已验收。
       - [x] 局部XObject绑定/Form.Resources重建：预算字典替换先克隆保留值与新值、再原子交换，覆盖键/表扩容旧新共存；FmEdit名称由栈缓冲生成后预算复制，返回租约保留至事务返回。验证碰撞命名、峰值拒绝原字典不变、释放恢复/unwind及深度/键长/条目限制；页根注册、父/根程序和流输出仍待接入。
   - [ ] 解码/图片/事务克隆按容量与共存峰值计费，明确持久缓存转移及保留额度。
-    - [ ] 工作对象表增长：DocumentStore.try_insert_object与reserve_entry目前直接HashMap.try_reserve，预算事务仅计费回滚数组/载荷。先确定可在分配前准确计费的表存储（不能以HashMap.capacity乘条目尺寸推测控制桶）；在插入、更新缺失ID、删除缺失ID三条入口统一接入事务预算作用域。嵌套同池/异池与普通事务混用须有明确规则，旧新表共存须计费，成功持久化和失败回滚须保持所有权。验收：触发扩容前拒绝不消耗对象号、不新增键、不改变原对象；错误/unwind及内层回滚后外层仍可重试，回滚复用现有存储不额外分配。对外entries返回HashMap的兼容性需随存储方案处理，不开放声称完整峰值约束的新接口。
+    - [x] 工作对象表增长：DocumentStore采用hashbrown与TableAllocator，在实际Layout分配前预留，覆盖控制区/对齐及旧新表共存，不以capacity乘条目尺寸估算。try_insert_object与reserve_entry使插入、更新缺失ID、删除缺失ID共用预算表分配；事务作用域同池嵌套，异池拒绝，普通内层事务继承外层预算和可失败数组快照。回滚快照恢复/销毁后退出表作用域，仅最外层将保留表存储转为持久内存；原有持久分配不追溯计费。state.rs的table_growth_budget_rejects_insert_update_delete_and_restores_retry、table_budget_inherits_plain_savepoints_rejects_foreign_pool_and_unwinds及table_allocator.rs专项覆盖扩容峰值少1拒绝、内容/对象号保持、足额重试、嵌套回滚/unwind与邻居额度。entries改为只读StoreEntries视图，隐藏具体表类型，但原显式HashMap类型使用者需适配；store_entries公开查询/遍历专项已通过。全工作区67632退出0、1065项通过，源码指纹见本文顶部。控制结构/预算Rc状态与对象载荷另计，不代表完整AR-03。
       - 当前实现：提交a270aca已引入hashbrown 0.16.1与allocator-api2 0.2.21，TableAllocator在分配前按真实Layout预留，两个内联槽持有扩容旧新租约；同池嵌套、普通内层继承、异池拒绝、回滚及最外层转持久已接入。插入/更新缺失ID/删除缺失ID峰值拒绝与重试专项、工作区938项回归均通过。entries已迁移为StoreEntries只读视图，仓库内下游编译通过，外部下游兼容性未承诺；补充公开接口查询/借用/遍历专项中。上条为原验收要求，不再代表尚未实现；完整AR-03仍未完成。
   - [x] 固定Compressed/ObjStm保存组合：合法xref流样本中四压缩对象冷加载，原始/Flate对象流与Preserve/FlateUnencoded四组合的小额度拒绝不发布缓存、释放归零；拒绝后编辑压缩对象、充足额度保存不会被源展开覆盖，与独立普通保存字节一致且严格重开保留页/修改值。仅覆盖固定样本，不表示兼容性/持久总量/后端内存完整验收。
   - [x] 固定普通xref源流保存冷加载：未引用64 KiB流在严格打开时未加载，小额度保存拒绝不发布该缓存、额度归零且修订号不变；充足额度重试输出一致，缓存转为持久内存后普通/预算保存与页面读取不变。只覆盖此固定样本，不代表Compressed/ObjStm完整保存或持久缓存总量验收。
@@ -2107,7 +3027,7 @@ P0 的普通回归、错误处理、预算和真实样本登记贯穿上述工�
 
 ## 目标与范围
 
-首个可交付版本：新建包含中英文、图片和路径的 PDF；读取现有 PDF；提取文字；增删重排页面；水印；合并拆分；可靠保存。
+首个可交付版本为 v0.1：限定支持范围内的新建中英文、图片和路径 PDF、读取与基础提取、页面增删/复制/重排/旋转/裁剪、合并/选页拆分和可靠保存。正式支持需逐项验收；水印和覆盖内容先作为可选项，不阻塞 v0.1。详见 [v0.1 清单](docs/releases/v0.1.md)。
 
 后续版本：内容级编辑、复杂渲染、批注、表单、附件、加解密、增量保存。PDF 2.0、PDF/A、PDF/UA、数字签名和 OCR 单独定义支持矩阵与里程碑；OCR 属于可选扩展。
 
@@ -2183,6 +3103,39 @@ P0 的普通回归、错误处理、预算和真实样本登记贯穿上述工�
 - [ ] P3-04 提供图片替换与移动、路径修改；处理共享 XObject 的复制后修改。
   - [x] 固定edit_content两页对照独立验证：qpdf结构检查、MuPDF文字提取及逐页渲染确认文字替换、图片旋转/单次删除、红路径删除和原页隔离。仅覆盖Helvetica英文与顶层图片/路径，复杂字体/Form/内联与完整视觉矩阵仍未验收。
 - [ ] P3-05 实现字体子集化与字符映射更新；确保修改后文本提取正确。
+  - [x] 固定反向Arial水平→NotoSC竖排B双CID双层跨调用：36066生成/严格重开及原共享父子Form隔离，95571十四XML负例，66059/25846四字体源GID/复合闭包/轮廓/度量/保留表/校验和/许可及三字体负例，72464源字典/八负例均退出0；qpdf结构、源绝对坐标/后缀补偿与第三调用位置、三个Identity-H/W及尾Identity-V/W/W2、三页96dpi实际逐页目视无缺字/重叠/裁切均通过。样本output/pdf/rzpdf-latin-subset-horizontal-vertical-nested-span-edit.pdf，日志/tmp/rzpdf-reverse-span-{generate,negatives,fonts,integrated,dictionary}.log。仅固定Tj/24pt与18pt/Tc场景，不代表全部状态/shaping/字体类型或完整P3-05。
+  - [x] 固定NotoSC竖排→Arial水平双CID双层跨调用：79432生成/严格重开与共享父子Form隔离、19646坐标字典、83631四TTF源语义/轮廓/度量/保留表/校验和/许可及三字体负例、28113最终方向负例均退出0；qpdf、逐字符绝对坐标/各段书写方向/尾18pt与2Tc推进、十五XML负例、三个Identity-V的W/W2及一个Identity-H的W源度量与七字典负例、三页96dpi实际目视无缺字/重叠/裁切均通过。输出output/pdf/rzpdf-cjk-subset-vertical-cid-nested-span-edit.pdf，日志/tmp/rzpdf-vertical-cid-span-{generate,independent,fonts,final}.log。28113同时回归Courier混合十五XML/四字典负例通过。不代表反向水平→竖排或全部字体/状态矩阵。
+  - [x] 固定真实NotoSC单层竖排跨调用：77678生成退出0，73314字体/字典联合校验退出0，69725最终绝对坐标复验退出0；三页严格重开/共享Form隔离、qpdf、源度量绝对及相对坐标、十一XML/四字典/三字体负例、三TTF语义与许可、三页96dpi逐页目视通过。样本output/pdf/rzpdf-cjk-subset-vertical-span-edit.pdf，日志/tmp/rzpdf-vertical-span-{generate,independent,absolute}.log。仅固定直接CID/Tj场景。
+  - [x] 固定NotoSC竖排→Courier水平双层跨调用：69259生成、7758坐标/字典、33526抽取字体联合校验均退出0；三页严格重开与原Form隔离、qpdf、各段wmode/dir/字体/字号、竖排源原点及水平尾18pt/2Tc绝对位置/补偿、十三XML/四字典/三字体负例、三TTF源语义/保留表/许可、三页96dpi实际目视通过。样本output/pdf/rzpdf-cjk-subset-vertical-mixed-nested-span-edit.pdf，日志/tmp/rzpdf-vertical-mixed-span-{generate,independent,fonts}.log。6091校验器旧水平Arial/水平混合Courier/单层竖排/双层竖排回归退出0；不代表双CID混合尾源、反向模式或完整字体矩阵。
+  - [x] 固定真实NotoSC双层竖排跨调用：edit_subset_span --cjk --nested --vertical三页自然/补偿对照，原父子Form/共享页隔离与严格重开文字、qpdf结构、精确文字/字体/字号/源vmtx推进/补偿及第三调用坐标、十XML负例、三抽取字体源GID/轮廓/度量/校验和/保留表/许可及三字体负例、Identity-V/W/W2源度量及四字典负例、三页96dpi逐页目视均通过。生成81856、字体36980、字典41255退出0；日志/tmp/rzpdf-vertical-nested-span-{generate,independent,dictionary}.log，样本output/pdf/rzpdf-cjk-subset-vertical-nested-span-edit.pdf。仅此固定Tj直接CID双层场景，不代表单层、混合书写、shaping或完整P3-05。
+  - [x] 字体W/W2构建预算收口：checked_mul预检数值对象数/容量字节（W2每CID三对象）并使用显式Limits；预算化入口持有实际数组capacity/扩容共存所有者至发布完成。水平W与竖排W2共用机制，不以Unicode字集数量或字体字节预算代替；补精确/少一字节、相邻预算保留、失败不修改文档及释放重试。旧无预算API保留契约，明确尚未入池的完整字体解析/文档常驻对象成本。
+    - [x] 竖排公开子集注册聚合预算边界：public_subset_registration_budget_boundary_rolls_back_and_retries现覆盖水平/竖排入口，使用有效vhea/vmtx字体分别测峰值；精确额度成功、少一字节失败且文档字节不变、相邻一字节租约导致失败且保留、释放后重试成功、返回live=0及严格重开Identity-V/W/W2均通过。最终专项95089退出0，日志/tmp/rzpdf-metric-vertical-boundary-final.log；仅此公开注册边界，不代替全部字体/自动编辑矩阵。
+    - [x] 同时计入每个PdfNumber的lexeme字符串实际capacity与非空W/W2的外层数组，不能只计Vec<PdfObject>槽位。核对embedded_font.rs发现旧number路径创建拥有String的PdfNumber；构造器须在分配前保留额度，实际容量核对后持有租约直至事务发布/回滚结束。预算从子集入口显式传入共同内部构造路径，旧整字体无预算入口保留兼容契约；发布后的常驻成本与操作预算边界需写明。预分配固定长度数组避免逐项增长，同时覆盖字符串分配失败、水平/竖排合计额度及失败后重试。
+    - [x] 租约所有权覆盖自动编辑的外层提交：subset_text_edit的PreparedSubsetEdit/PreparedSubsetFragment已经持有EmbeddedSubsetFontObjects，可复用该所有权链携带度量租约，不能在embed_truetype_font_impl内部字体注册事务返回时提前释放。公开注册入口需明确何时转为文档常驻内存，内部编辑入口须测试字体注册成功而后续内容提交失败的释放与回滚，以及后续分配与字体数组共存的预算峰值。
+  - [x] 固定真实双CID源混合双层跨调用：Arial→NotoSC尾B和NotoSC→Arial尾B，独立TAILAA子集/18pt/2Tc，首源局部新子集/24pt/1Tc；严格重开、原父子Form隔离、qpdf、尾源FontTools度量的精确文字/坐标、八抽取字体语义/保留表/校验和/许可声明及各三字体/十XML负例、六页逐页目视通过。仅此水平Tj固定范围，不代替完整字体/状态/竖排矩阵。
+  - [x] 固定真实Arial/NotoSC→Courier双层混合跨调用：不同字体/字号/字距及双字节CID→单字节尾码，三页自然/补偿对照；严格重开、原Form不变、qpdf、精确文字/字体/坐标与Courier尾段-12.8pt度量、六抽取字体及三字体/八XML负例、六页目视均通过。仅此水平Tj固定范围，不代替完整混合字体或竖排矩阵。
+  - [x] 固定真实Arial/NotoSC双层跨调用自动子集：`edit_subset_span ... [--cjk] --nested`生成共享父子Form三调用、原/自然/补偿三页对照；严格重开、父子原对象不变、qpdf、独立精确文字/字体/字号/坐标、六份抽取字体语义/校验和/许可声明与负例、六页逐页目视均通过。抽取目录及终态见当前摘要。仅双层水平Tj固定范围，混合字体、竖排和完整P3-05仍待验收。
+  - [x] 公共子集入口固定12场景表策略：ZZZZ/fvar/gvar/COLR在两种策略下拒绝且不改文档，GSUB只在显式省略时接受，DSIG省略准确报告，预算释放正常。证据`/tmp/rzpdf-subset-public-table-policy.log`退出0；不表示变量/颜色/布局字体表已实现，不代替完整SFNT独立验收。
+  - [x] 固定合成 TrueType 跨调用自动子集八场景：自然/补偿 × BB/空删除 × 单/双层共享 Form；六种非法 CID 端点拒绝、预算释放、指定 error/panic 字节回滚、原父子 Form/另一页/第三调用隔离、严格重开文字和后缀坐标均通过。证据 `/tmp/rzpdf-cross-call-subset-multilevel.log` 退出 0；仅此矩阵，不代替真实字体、混合尾字体或完整 P3-05。
+  - [x] 固定真实 Arial/NotoSC 跨调用自动子集独立验收：三次共享 Form 分离位置样本，跨前两调用保留起末后缀，原页/自然/补偿三页对照；严格重开、qpdf、MuPDF 精确文本/字体/字号/前后坐标、六份抽取子集字体语义/校验和/许可及各七 XML/两字体负例、六页逐页目视均通过。证据 /tmp/rzpdf-real-subset-span-{latin,cjk}-independent.log 退出 0，中文会话 42495 已退出 0。仅此固定单层水平 Tj 范围，不代替真实多层/混合尾字体/竖排；不声称跨调用文本自动重排。
+  - [x] 固定Arial/NotoSC跨TJ新增字符三页对照：原共享字体页面、自然推进、补偿推进；跨三字符串到末项结束替换，原数值/注释保留，严格重开、qpdf、MuPDF精确文字/字体/字号/前缀及后续事件位置、六页目视、六份抽取子集字体语义/校验和/许可与XML/字体负例通过。仅此固定范围，不代替真实保留末端后缀、竖排、全边界或跨事件/Form矩阵。
+  - [x] 范围规划器与一次发布架构：subset_text_edit共用build_scoped_subset_text_fragment及作用域范围构造器，复用text_event_edit原索引片段表；后段按各自原字体先规划旧→空，首段局部新子集及旧→新补偿随后准备，页面/同leaf Form/跨调用树共用事务发布。Owned计划、字体、绑定、复制scope与表预算保留到发布结束，字符和展开/编辑字节累计检查；不逐事件公共提交，不刷新快照绕过原选区认证。1048项工作区基线及702项PDF单元联合回归覆盖原索引/多层混合状态/共享资源/预算/error/panic回滚与刷新重试，新增聚合额度专项通过。此项仅验收规划发布架构，真实字体完整矩阵和P3-05总项另行验收。
+  - [x] 固定静态Noto中文两页子集：44标量/45保留GID，独立FontTools校验和/映射/轮廓/度量/指令/许可与MuPDF精确文本、96DPI视觉通过；六检查器负例在Python -O下拒绝。不代表通用字体或自动覆盖扩充。
+  - [x] 固定本机Arial实际复合子集：17标量/26保留GID/5所选复合，组件原GID/轮廓/指令/许可、独立文本/渲染与六负例通过；系统源未改动、不入库。不代表所有复合flags、shaping或其他字体。
+  - [x] 固定单事件新增字符资源隔离：两页AA共享A子集，只在第一页首Tj切换B子集并恢复原字体，严格重开BA/AA、原字体及另一页资源源码不变、外层失败回滚/重试专项通过；仅显式操作序列流程，不是自动字体扩充或通用选区入口。
+  - [x] 保留现有embed_truetype_font整字体/不可变字集契约，另设embed_truetype_subset_font显式子集入口；整字体与子集内部参数分别为subset=false/true，不静默扩充既有句柄或共享页。公共注册往返/拒绝不变、新字符局部资源隔离及真实样本均有证据，当前1048项完整门禁覆盖生产实现；不代表全部字体类型或完整P3-05。
+  - [x] 子集权限预检：公共入口和build_subset均调用validate_outline_embedding(true,true)，公共注册测试以OS/2 v3的0x0100禁止子集位验证拒绝、保存字节及预算不变；702项联合回归该测试通过。静态TrueType为支持范围，公共表策略测试验证变量/颜色/未知表显式拒绝，必需glyf/loca检查不将CFF当作TrueType子集。许可仍须调用方确认，不代表提供变量实例化/CFF支持。
+  - [x] 实现预算化字形依赖闭包：GlyphLocations::subset_closure按唯一GID收集，加入必需GID0，迭代检查组件范围、循环、缓存子树深度及聚合根/字形/边工作量；复合双遍输入计费，组件借用解析和实际容量预算所有者保留。1048项门禁中的closure去重/峰值失败/unwind/循环范围与长路径及glyf/loca重建测试均通过；不依赖SimpleGlyph栅格展开，不声称旧解析器所有分配均已入池。下列原设计细项继续逐项核对，不自动随总闭包实现勾选。
+    - [x] 复用现有composite_glyf.rs记录解析：子集闭包调用共用try_new_with_budget/visit_components，不重复实现组件字节解析。validate_composite_dependencies保留原发生次数/深度摘要契约，不直接充当唯一集合；新subset_closure提供多根去重、必需GID0、迭代循环/缓存深度校验与实际容量预算，702项回归中的闭包去重/峰值/unwind/循环测试通过。expanded_glyf.rs仍是独立栅格展开路径，不宣称旧解析器全部入池。
+    - [x] 组件解析预算所有权：共用校验的借用遍历及try_new_with_budget已实现，预算化闭包复用该入口；原非预算try_new契约保留。实际capacity、分配前预留、相邻额度/释放重试有专项及1048项完整门禁证据，最新组件专项5项再次通过；不能据此宣称旧解析器所有分配均在池内。
+    - [x] 借用已检查loca/glyf并验证复合记录：子集直接复用GlyphLocations::try_new（checked_glyph_locations亦使用的范围验证器）及glyph_data，避免重复完整字体解析；复合体使用共用visit_components。负轮廓计数、字节/字参数、互斥变换、任意组件指令标志/末尾指令长度、首组件XY及保留位均有定向测试；逐字节截断、多组件、闭包嵌套/重复/空字形由704项联合日志覆盖。真实Arial复合子集及抽取字体语义/指令/组件原GID独立检查通过；不代表shaping或旧栅格路径全部预算化。
+  - [x] 静态TrueType原GID策略的SFNT写出与验证：重建glyf/长loca/cmap/head/name，原GID与numGlyphs及度量表保留，组件和CIDToGIDMap一致；目录排序/对齐/各表校验与整体B1B0AFBA，未知依赖拒绝、已知布局显式省略并报告。704项单元日志含writer边界/峰值/重开与表策略通过；真实Arial复合/Noto中英单多层/混合及固定竖排抽取字体按源校验轮廓、指令、度量、原样表、许可声明，独立文字坐标/渲染及负例通过。不提供GID重编号、变量/CFF/shaping；完整字符扩充/真实状态矩阵另项仍未完成，工作区新门禁尚待终态。
+    - [x] 修正head整体轮廓边界：来源绑定预算化闭包计算保留有轮廓字形头联合，忽略无轮廓/空复合，全空为零框，重建head及FontBBox。闭包5项、组装/公共注册10项专项通过；修正版Noto/Arial重生成后独立字段、七负例、精确文字及三页视觉通过。仅完成该字段修正，不代表全部字体语义或新版完整workspace验收。
+    - [x] CID接入采用明确的原GID保留策略；每个Unicode标量保留独立CID/宽度/ToUnicode，即使多个标量共享GID也不合并。内部只读glyph_mappings供闭包与cmap写出直接使用，不反解析CIDToGIDMap。共享GID及非BMP的编码表测试已由1048项门禁覆盖；后补共享GID子集组装/公共插入/严格重开/另一页隔离专项退出0，证据`/tmp/rzpdf-subset-shared-gid-public.log`。不提供GID重编号；未来若新增该策略，须保持CID与Unicode稳定并另行验收。
+  - [ ] 扩展编辑字符映射：新增字符先验证原字体覆盖，再以事务复制局部字体资源、更新宽度/CIDToGIDMap/ToUnicode及文本编码；原FontFile和共享页保持不变。拒绝、预算不足、外层error/panic回滚及刷新重试需覆盖；已有不可编码拒绝不等于新增字符支持。
+    - [x] 自动覆盖扩充入口机制已接入：SubsetTextEditOptions显式完整源，validate_subset_source认证兼容字形/度量；单字符串/TJ/页面事件/同leaf/展开跨调用入口按原快照规划，保留前后缀字集、事务局部注册与字体恢复、按各自状态度量及失败回滚。702项PDF单元日志含automatic_subset_string/TJ/cross_event/nested/cross_call和聚合额度通过，真实单/双层及Courier混合固定样本独立验收通过；不自动修改旧不可变字体句柄，不是字体回退或自动排版。
+    - [ ] 自动覆盖扩充完整验收：继续补两种嵌入CID源之间的真实混合、竖排及其余状态/边界矩阵；总字符映射任务保持未完成。上项只确认机制落地，不以固定水平样本代替完整交付。
+  - [ ] 实际字体闭环：简单及复合字形、重复/空格/中文、多页共享与新增字符样本；严格保存重开、精确文本、独立渲染及资源隔离检查。记录支持范围和未知表策略，完整通过之前本项不勾选。
 - [ ] P3-06 区分视觉覆盖与真正删除内容；如提供脱敏功能，建立残留内容检查。
 
 验收：指定内容修改可追溯到原操作符；未修改的内容及未知操作保留；共享资源修改不影响非目标页面；明确无法编辑的场景。
@@ -2227,7 +3180,7 @@ P0 的普通回归、错误处理、预算和真实样本登记贯穿上述工�
 
 ## 执行与完成规则
 
-### 下一轮实施顺序
+### 历史里程碑与依赖参考（不作为当前执行顺序）
 
 本轮文档整理明确：当前处于基础能力加固阶段，不能将已有解析、渲染及低层对象修改接口视为完整 PDF 编辑器。当前工作区的既有测试记录见上方实施记录，本轮不重新宣称测试验收。
 
@@ -2253,12 +3206,12 @@ M4 的高频兼容性问题可与 M1/M2 并行推进；不能以“完整支持 
 4. 推进 P1-01～P1-04：先解耦读取源与文档状态，再实现新建文档、PageBuilder、ResourceManager 和 ContentBuilder。
 5. 推进 P1-05～P1-10：实现中英文字体与图片嵌入、可靠保存及端到端示例；通过独立阅读器验证后再进入 P2。
 
-用户已要求按本清单实施；按上述依赖顺序持续推进，涉及外部发布或新增权限时另行确认。
+上述顺序保留为历史依赖参考。当前按 v0.1 清单推进：先盘点与检查点，再补发布阻塞项、冻结候选版本、完成验收，最后在用户确认后提交/打标签/发布。版本计划本身不授权推送或外部发布。
 
 ### 通用完成规则
 
-1. 首版重点为 P0 + P1 + P2；先保证相关功能的正确性前置。按用户 2026-10-04 调整，fuzz 暂缓期间继续 P1/P2，不把 P0 所有专项完成作为功能实施的硬性等待条件。
+1. 首版只验收 P0/P1/P2 中映射到 v0.1 的子范围，不要求整个技术阶段清空。fuzz 按用户要求暂缓；与正式支持路径直接相关的崩溃、静默损坏、共享污染和失败回滚问题仍为发布阻塞项。
 2. 每项完成后记录实现位置、验证命令、结果和限制，再勾选；不以已有函数名或测试数量代替验收。
 3. 读写验证同时包含本库往返、独立结构检查和独立渲染；避免读写两端共享缺陷。
 4. 新功能优先在现有 crate 内按模块实现；只在后端替换、依赖隔离或复用需求明确时拆 crate。
-5. 首版 8–12 周仅作为一名熟悉 Rust/PDF 开发者的粗略规划，需在 P0 测试基线与兼容性范围确定后重新估算。
+5. 排期以 ROADMAP 的粗估及 v0.1 差距盘点为准，不沿用历史首版估时作为交付承诺；冻结范围后再估算剩余工作。

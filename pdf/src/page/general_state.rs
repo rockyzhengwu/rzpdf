@@ -50,12 +50,12 @@ pub(crate) fn resolve_blend_mode<R: std::io::Read + std::io::Seek>(
     resolve_blend_mode_using(value, ctx.limits(), &mut |object| ctx.resolve_owned(object))
 }
 
-pub(crate) fn resolve_blend_mode_using(
+pub(crate) fn resolve_blend_mode_using<O: std::borrow::Borrow<crate::objects::PdfObject>>(
     value: &crate::objects::PdfObject,
     limits: crate::parser::options::Limits,
     resolve: &mut impl FnMut(
         &crate::objects::PdfObject,
-    ) -> crate::error::PdfResult<crate::objects::PdfObject>,
+    ) -> crate::error::PdfResult<O>,
 ) -> crate::error::PdfResult<Option<BlendMode>> {
     use crate::{error::PdfError, objects::PdfObject};
     let name_mode = |value: &PdfObject| {
@@ -67,15 +67,17 @@ pub(crate) fn resolve_blend_mode_using(
         }
         Ok(BlendMode::from_pdf_name(name.name()))
     };
-    match resolve(value)? {
-        PdfObject::PdfName(name) => name_mode(&PdfObject::PdfName(name)),
+    let owned = resolve(value)?;
+    match owned.borrow() {
+        PdfObject::PdfName(_) => name_mode(owned.borrow()),
         PdfObject::PdfArray(array) => {
             if array.len() > limits.max_objects {
                 return Err(PdfError::ResourceLimit("blend mode array entries".into()));
             }
             let mut result = None;
-            for value in &array {
-                let mode = name_mode(&resolve(value)?)?;
+            for value in array {
+                let element = resolve(value)?;
+                let mode = name_mode(element.borrow())?;
                 if result.is_none() {
                     result = mode;
                 }

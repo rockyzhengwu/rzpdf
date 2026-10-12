@@ -1,5 +1,64 @@
 # 中英文整字体构建验证
 
+## 跨Form调用真实字体选区（2026-10-08）
+
+连续路径索引版复验（当前冻结源码）：原51039两模式生成退出0，`output/pdf/rzpdf-cjk-mixed-font-indexed.pdf`及`output/pdf/rzpdf-cjk-same-chain-indexed.pdf`严格重开、qpdf、MuPDF精确文字/后缀坐标和-O负例通过；mixed核对三段Noto/Helvetica绑定与字号，七负例拒绝，same-chain四负例拒绝。八页72DPI PNG逐模式与旧基线cmp字节一致；mixed四页及same-chain新第一页目视正常，其余页与已查看基线一致。只验证固定水平嵌入CJK+标准14字体及同链夹子Form，当前完整回归99029仍在运行。
+
+混合字体检查加固：检查脚本逐一核对固定基线三段的文字、字体和字号（Noto Sans SC/24、Helvetica/18、Noto Sans SC/24），不只检查两种字体名称出现。新增子字体误绑定、子字号错误和父字体误绑定三负例；当前mixed-font XML普通/-O均拒绝全部七负例，默认/partial/same-chain仍各四负例通过。此为固定样本独立检查，不是通用字体符合性验证；PDF生产引擎未修改。
+
+混合字体验收：`compare_cjk_span --mixed-font`父Form采用嵌入Noto Sans SC/24Tf，夹子Form使用Helvetica/18Tf/2Tc。session27044生成退出0，产物`output/pdf/rzpdf-cjk-mixed-font-span.pdf`；qpdf结构、MuPDF精确两句中文夹Hello PDF基线与编辑你好！ PDF、独立后缀坐标、四负例及python3 -O通过。XML明确区分NotoSansSC和Helvetica，检查脚本要求两者存在。第一页面目视字体/字距正常，第二至四页PNG与已验收same-chain样本cmp字节一致；按PDF技能使用MuPDF验证。仅真实嵌入水平CJK+标准14字体，不是双嵌入字体、真实竖排或完整字体矩阵。
+
+```sh
+cargo run -p pdf --example compare_cjk_span --locked -- output/pdf/rzpdf-cjk-images.pdf output/pdf/rzpdf-cjk-mixed-font-span.pdf --mixed-font
+mutool draw -F stext -o tmp/pdfs/rzpdf-cjk-mixed-font-span.xml output/pdf/rzpdf-cjk-mixed-font-span.pdf
+python3 -O docs/check-cjk-span.py tmp/pdfs/rzpdf-cjk-mixed-font-span.xml --mixed-font --self-test
+```
+
+同链夹子Form真实字体样本：`compare_cjk_span --same-chain`构建父Form两个中文事件，中间夹子Form事件；基线三行，编辑后精确文字`你好！ PDF`。端点同链/子事件不同链由示例校验，普通/补偿两种编辑页严格重开。生成session23177退出0，qpdf结构、MuPDF精确文字/末尾坐标及普通/-O四负例通过；默认与same-chain检查模式互用均因精确基线文字不符退出1。四页72 DPI PNG逐页目视无缺字/重叠/裁切，原第二页图片PNG与unified基线cmp一致；补偿页尾PDF保持原坐标，普通页左移。仅固定水平Noto Sans SC，不代表真实竖排或全字体矩阵。
+
+```sh
+cargo run -p pdf --example compare_cjk_span --locked -- output/pdf/rzpdf-cjk-images.pdf output/pdf/rzpdf-cjk-same-chain-span.pdf --same-chain
+qpdf --check output/pdf/rzpdf-cjk-same-chain-span.pdf
+mutool draw -F stext -o tmp/pdfs/rzpdf-cjk-same-chain-span.xml output/pdf/rzpdf-cjk-same-chain-span.pdf
+python3 -O docs/check-cjk-span.py tmp/pdfs/rzpdf-cjk-same-chain-span.xml --same-chain --self-test
+mutool draw -r 72 -o tmp/pdfs/rzpdf-cjk-same-chain-span-%d.png output/pdf/rzpdf-cjk-same-chain-span.pdf
+```
+
+公共span统一入口后最新复验：session95710/74173生成两种unified产物均退出0；独立检查session95377退出0，两份qpdf结构、MuPDF精确文字/后缀坐标及四负例通过，部分模式使用python3 -O。72 DPI八页PNG与reuse版逐页cmp字节一致，部分模式两编辑页目视无缺字/重叠/裁切。此固定不同调用链样本只证明最新入口无回归，不替代同链夹子Form真实字体视觉矩阵。按PDF技能完成MuPDF独立渲染，未改系统依赖。
+
+叶节点规划程序复用后复验：默认/部分模式生成会话58000/86700均退出0，产物为`output/pdf/rzpdf-cjk-cross-span-reuse.pdf`及`output/pdf/rzpdf-cjk-cross-span-partial-reuse.pdf`。两份qpdf结构、MuPDF精确文字/独立后缀坐标和四个变异负例通过（部分模式使用python3 -O）；72 DPI八页PNG与owner版本逐页cmp字节一致，部分模式编辑两页目视复核无缺字/重叠/裁切。按PDF技能渲染复验，沿用MuPDF，不改系统依赖；仅覆盖本节固定水平真实字体样本。
+
+单片段表复用后的最新复验：生成`output/pdf/rzpdf-cjk-cross-span-owner.pdf`及`output/pdf/rzpdf-cjk-cross-span-partial-owner.pdf`均退出0；两份qpdf、独立精确文字/后缀坐标及四负例通过。72 DPI八页PNG与下述生命周期产物逐页cmp字节一致，部分保留编辑两页目视复核正常。只证明固定样本的最新生产版本输出保持，不代表全字体、性能或最新完整workspace验收。
+
+最新生命周期优化后复验：重新运行示例两种模式，分别生成`output/pdf/rzpdf-cjk-cross-span-lifetime.pdf`与`output/pdf/rzpdf-cjk-cross-span-partial-lifetime.pdf`，运行均退出0。qpdf、独立精确文字/坐标及脚本普通/-O四负例全部通过；MuPDF 72 DPI八页PNG分别与优化前下述产物逐字节一致，目视复核未见缺字/重叠/裁切或图片变化。此证据覆盖最新生产引擎对本节固定样本的输出，不代表完整工作区或通用字体性能验收。
+
+固定示例`compare_cjk_span`复用已有两页`create_cjk --images`字体资源，构建同一叶Form的两层、两次调用。四页分别为基线、原第二页、补偿编辑和普通编辑。选区从首次调用句首到第二次调用句尾，保留第二次调用后续` PDF`事件；结果为`你好！ PDF`，补偿页末尾位置不变，普通页左移。
+
+```sh
+cargo run -p pdf --example compare_cjk_span --locked -- output/pdf/rzpdf-cjk-images.pdf output/pdf/rzpdf-cjk-cross-span.pdf
+qpdf --check output/pdf/rzpdf-cjk-cross-span.pdf
+mutool draw -F stext -o tmp/pdfs/rzpdf-cjk-cross-span.xml output/pdf/rzpdf-cjk-cross-span.pdf
+python3 docs/check-cjk-span.py tmp/pdfs/rzpdf-cjk-cross-span.xml --self-test
+mutool draw -r 72 -o tmp/pdfs/rzpdf-cjk-cross-span-%d.png output/pdf/rzpdf-cjk-cross-span.pdf
+```
+
+本库生成运行退出0，严格重开四页解释通过；qpdf结构检查通过。MuPDF四页精确字符文本、末尾P/D/F独立x/y坐标保持（容差0.002点），普通控制左移至少10点且y保持通过。脚本拒绝交换编辑页、错误坐标、错误文本和缺页四负例；普通及`python3 -O`模式均验证通过，未知选项退出2。四页72 DPI图像已目视，无缺字、裁切或重叠。系统Poppler因缺libtiff.5.dylib无法启动，使用MuPDF独立渲染，未修改系统依赖。
+
+仅验收固定静态Noto Sans SC水平共享Form跨调用缩短，不包含真实竖排、不同字体混合、新增字形、TJ选区、通用搜索或排版适配。检查脚本只接受该固定样本，不是通用PDF验证器；源字体不新增入库，fuzz继续暂缓。
+
+部分结束事件模式使用`--partial`：选区结束在第二次调用中文前缀之后，保留同一Tj的`Hello PDF`和下一事件的` PDF`，精确结果为`你好！Hello PDF PDF`。
+
+```sh
+cargo run -p pdf --example compare_cjk_span --locked -- output/pdf/rzpdf-cjk-images.pdf output/pdf/rzpdf-cjk-cross-span-partial.pdf --partial
+qpdf --check output/pdf/rzpdf-cjk-cross-span-partial.pdf
+mutool draw -F stext -o tmp/pdfs/rzpdf-cjk-cross-span-partial.xml output/pdf/rzpdf-cjk-cross-span-partial.pdf
+python3 docs/check-cjk-span.py tmp/pdfs/rzpdf-cjk-cross-span-partial.xml --partial --self-test
+python3 -O docs/check-cjk-span.py tmp/pdfs/rzpdf-cjk-cross-span-partial.xml --partial --self-test
+mutool draw -r 72 -o tmp/pdfs/rzpdf-cjk-cross-span-partial-%d.png output/pdf/rzpdf-cjk-cross-span-partial.pdf
+```
+
+部分模式生成退出0，qpdf及独立检查通过；验证范围扩至全部13个保留字符，包括空格，而不只末尾PDF。四个变异负例均拒绝，默认/部分模式互用均因精确文字不符退出1。编辑两页72 DPI目视无缺字、重叠或裁切；前两页PNG与已验收默认基线逐字节一致。按PDF技能完成独立渲染，沿用MuPDF以避开本机Poppler缺失依赖，不修改系统环境。仅增加示例/检查脚本，不改变引擎生产代码，不宣称完整字体矩阵完成。
+
 ## 两层Form真实中文推进补偿（2026-10-08）
 
 `compare_cjk_advance`新增可选`--nested`：先把含中文/图片和后续PDF事件的第一页包装为两层Form，再复制补偿/无补偿页，调用嵌套Unicode补偿/普通替换入口。固定输出仍为基线、原第二页、补偿、无补偿；使用原嵌入静态Noto Sans SC字体，不用合成字形替代真实字体。本例由rzpdf生成，独立工具只用于核验。
@@ -166,3 +225,31 @@ mutool draw -r 96 -o tmp/pdfs/rzpdf-cjk-nested-event-%d.png output/pdf/rzpdf-cjk
 产物`output/pdf/rzpdf-cjk-nested-event-advance.pdf`的SHA-256为`da41b67db3a02b2ea18605ac294591cecba60de76a7978e8f91c85db92ec7050`。此证据仅覆盖固定真实水平字体、相邻两Tj和同一两层Form调用内范围；不代表真实竖排、跨不同Form、所有TJ/字体切换矩阵或完整P3验收。
 
 顶层`--events`原session39731及原默认CLI原session67694也已退出0，分别生成`output/pdf/rzpdf-cjk-event-advance.pdf`与`output/pdf/rzpdf-cjk-advance-cli-regression.pdf`。两文件都通过`bash docs/check-cjk-advance.sh FILE.pdf`独立结构/坐标/文本复验，日志`/tmp/rzpdf-cjk-event-independent.log`与`/tmp/rzpdf-cjk-event-default-independent.log`。顶层跨事件四页另以96DPI MuPDF渲染，对应PNG逐页与已查看的嵌套跨事件PNG用cmp完全一致；原session17875退出0。原默认单事件CLI仍有效，不能据此宣称所有新模式或错误参数组合完整验收。
+
+## 固定 TJ 数组补充验收（2026-10-08）
+
+连续路径索引版最新复验：生成14322及独立验证69734均退出0，产物`output/pdf/rzpdf-cjk-tj-inside-indexed.pdf`严格重开、qpdf、MuPDF精确文字/13字符坐标、QDF原间距及-O四XML/三QDF负例通过。四页72DPI PNG逐页目视正常，并与优化前内部边界样本逐页cmp字节一致。只是当前固定水平真实字体内部TJ边界验证；完整工作区99029仍运行，不据此宣称全部字体或性能任务完成。
+
+内部边界变体 `--tj-inside` 已通过：第一个数组字符串包含“你好，世界！Hello”，结束位置为中文编码长度，保留同字符串Hello及第二字符串“ PDF”。产物 `output/pdf/rzpdf-cjk-tj-inside-span.pdf`，生成会话22711退出0并严格重开；qpdf、MuPDF精确文字/13字符后缀坐标、Python -O四负例及四页PNG逐页目视通过。QDF核对原始及两种重建均保留-125/75数值。此变体只扩展一个内部字体码边界，不代表任意编码或完整TJ矩阵。
+
+`compare_cjk_span INPUT OUTPUT --tj` 生成两次嵌套调用的真实 Noto Sans SC 样本。数组为 `[<中文> -125 <Hello PDF> 75] TJ`，结束端点位于第一个字符串末尾，保留英文及下一文本事件。产物为 `output/pdf/rzpdf-cjk-tj-span.pdf`。
+
+生成会话47106退出0，保存后严格重开通过。qpdf结构检查、MuPDF文字与全13字符后缀坐标检查（`docs/check-cjk-span.py XML --partial --self-test`）及Python `-O`检查均通过，四负例均拒绝。QDF内容流核对原数值-125/75在普通和补偿重建中保留；四页PNG逐页目视无缺字、重叠或裁切。此处用引擎生成以验收引擎，Poppler依赖缺失沿用MuPDF渲染替代。
+
+`--tj`只覆盖第一字符串末尾，`--tj-inside`补充其内部字体码边界；两者均不覆盖竖排或全部TJ排列。上述样本验收时生产代码未改，1005项门禁仅覆盖当时生产范围；后续单叶辅助函数清理须另行回归。
+
+可复现内部边界验证（末尾边界将文件名和生成参数改为`--tj`）：
+
+```sh
+cargo run -p pdf --example compare_cjk_span --locked -- output/pdf/rzpdf-cjk-images.pdf output/pdf/rzpdf-cjk-tj-inside-span.pdf --tj-inside
+qpdf --check output/pdf/rzpdf-cjk-tj-inside-span.pdf
+mutool draw -F stext -o tmp/pdfs/rzpdf-cjk-tj-inside-span.xml output/pdf/rzpdf-cjk-tj-inside-span.pdf
+python3 -O docs/check-cjk-span.py tmp/pdfs/rzpdf-cjk-tj-inside-span.xml --partial --self-test
+mutool draw -r 72 -o tmp/pdfs/rzpdf-cjk-tj-inside-span-%d.png output/pdf/rzpdf-cjk-tj-inside-span.pdf
+qpdf --qdf --object-streams=disable output/pdf/rzpdf-cjk-tj-inside-span.pdf tmp/pdfs/rzpdf-cjk-tj-inside-span.qdf.pdf
+rg -a -n '^.*-125 .*75\] TJ' tmp/pdfs/rzpdf-cjk-tj-inside-span.qdf.pdf
+```
+
+XML检查验证可见文字和坐标；最后一条命令另核对实际内容流的原数值仍存在。PNG仍须人工复核，不能以文字检查代替视觉验收。
+
+内容流数值现可自动检查：完成上述QDF生成后，使用 `python3 -O docs/check-cjk-span.py XML --partial --tj-qdf QDF.pdf --self-test`。固定样本的五个原始/重建间距数组必须各保留一次-125和75且顺序不变；独立尾事件可能另生成补偿TJ，不错误要求全部TJ只有五个。脚本额外拒绝负间距变更、正间距变更及操作符变更三个QDF负例；两种边界样本通过，混合字体和同链XML检查回归通过。这是固定qpdf输出语法检查，不是通用PDF解析器，也不自动认证两个输入来自同一PDF；调用者须从同一产物生成XML/QDF。

@@ -11,7 +11,20 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install native build dependencies
-        run: sudo apt-get update && sudo apt-get install -y clang libfontconfig1-dev libfreetype6-dev libgl1-mesa-dev nasm ninja-build pkg-config
+        run: sudo apt-get update && sudo apt-get install -y clang libfontconfig1-dev libfreetype6-dev libgl1-mesa-dev nasm ninja-build pkg-config qpdf mupdf-tools jq libxml2-utils
       - uses: Swatinem/rust-cache@v2
       - run: rustc --version && cargo --version
       - run: cargo test --workspace --locked
+      - name: Validate v0.1 creation with independent tools
+        run: |
+          mkdir -p output/pdf/ci-v01
+          cargo run -p pdf --example create_document --locked -- output/pdf/ci-v01/created.pdf
+          bash docs/check-creation-example.sh output/pdf/ci-v01/created.pdf
+          mutool draw -r 72 -o output/pdf/ci-v01/created-%d.png output/pdf/ci-v01/created.pdf
+      - name: Preserve v0.1 creation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v01-creation-${{ github.run_id }}
+          path: output/pdf/ci-v01/
+          if-no-files-found: ignore

@@ -24,12 +24,14 @@ use crate::{
 pub mod catalog;
 mod content_edit;
 mod text_event_edit;
+pub mod subset_text_edit;
 pub mod cross_ref_table;
 pub mod embedded_font;
 pub mod identity;
 pub mod metadata;
 mod nested_edit;
 pub mod owned;
+mod span_tree;
 pub use owned::Document;
 mod page_copy;
 mod page_geometry;

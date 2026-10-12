@@ -42,6 +42,43 @@ struct ArrayReplacementBytes {
     lease: Option<crate::budget::MemoryLease>,
 }
 
+#[cfg(test)]
+mod subset_tj_split_tests {
+    use super::*;
+    use crate::budget::OperationBudget;
+
+    #[test]
+    fn subset_tj_split_preserves_lexical_numbers_comments_and_neighbors() {
+        let options = ParseOptions::default();
+        let source = b"[17(A) % before\n -125 (B\\103D) +75 % after\n(E) -3] TJ";
+        let program = ContentProgram::from_decoded_bytes(source.to_vec(), options).unwrap();
+        let pool = OperationBudget::new(1024 * 1024);
+        let neighbor = pool.reserve(7).unwrap();
+        let (left, right) = program.text_array_split_string_fragments_with_budget(
+            0, 3, 1..2, options, &pool).unwrap();
+        assert_eq!(left.as_slice(), b"[17(A) % before\n -125 <42>] TJ\n");
+        assert_eq!(right.as_slice(), b"[<44> +75 % after\n(E) -3] TJ\n");
+        for fragment in [&left, &right] {
+            let parsed = ContentProgram::from_decoded_bytes(fragment.as_slice().to_vec(), options).unwrap();
+            assert_eq!(parsed.operations().len(), 1);
+            assert_eq!(parsed.operations()[0].operator.name(), "TJ");
+        }
+        drop((left, right));
+        assert_eq!(pool.live_bytes(), 7);
+        for (item, range) in [(0, 0..0), (3, 2..1), (3, 0..4), (9, 0..0)] {
+            assert!(program.text_array_split_string_fragments_with_budget(
+                0, item, range, options, &pool).is_err());
+            assert_eq!(pool.live_bytes(), 7);
+        }
+        let short = OperationBudget::new(1);
+        assert!(program.text_array_split_string_fragments_with_budget(
+            0, 3, 1..2, options, &short).is_err());
+        assert_eq!(short.live_bytes(), 0);
+        drop(neighbor);
+        assert_eq!(pool.live_bytes(), 0);
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ArrayAdjustmentPlan<'a> {
     AfterString(f32),
@@ -708,6 +745,89 @@ impl ContentProgram {
             index, replacements, options, Some(budget), None,
         )?;
         crate::budget::BudgetedBytes::from_reserved_vec(replacement.bytes, replacement.lease.unwrap())
+    }
+
+    /// Split a TJ around one decoded string range for an intervening local Tf
+    /// sequence. Both returned operations use the original font. Numeric tokens,
+    /// comments and untouched strings remain byte-for-byte in their original order.
+    /// The caller validates font character boundaries and supplies the middle
+    /// sequence; this helper neither registers a font nor publishes an edit.
+    pub(crate) fn text_array_split_string_fragments_with_budget(
+        &self,
+        index: usize,
+        item_index: usize,
+        range: Range<usize>,
+        options: ParseOptions,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<(crate::budget::BudgetedBytes, crate::budget::BudgetedBytes)> {
+        let operation = self.operations.get(index).ok_or_else(||
+            PdfError::ContentParseError("TJ split operation out of range".into()))?;
+        if operation.operator.name() != "TJ" || operation.operator.num_operands() != 1 {
+            return Err(PdfError::UnsupportedFeature("TJ split requires an array show".into()));
+        }
+        let array = operation.operator.get_as_array(0)?;
+        let codes = array.get(item_index).and_then(|item| item.as_string())
+            .ok_or_else(|| PdfError::ContentParseError("TJ split requires a string item".into()))?.bytes();
+        if range.start > range.end || range.end > codes.len() {
+            return Err(PdfError::ContentParseError("TJ split string range".into()));
+        }
+        if array.len() > options.limits.max_objects {
+            return Err(PdfError::ResourceLimit("TJ split array items".into()));
+        }
+        let source = &self.source[operation.lexical_range.clone()];
+        let limit = options.limits.max_decoded_bytes.min(options.limits.max_raw_stream_bytes);
+        if source.len() > limit {
+            return Err(PdfError::ResourceLimit("TJ split source bytes".into()));
+        }
+        let mut parser = SyntaxParser::with_options(
+            StreamReader::try_new(Cursor::new(source))?, options);
+        let opening = parser.get_next_word_with_budget(budget)?;
+        if opening.raw() != b"[" {
+            return Err(PdfError::ContentParseError("TJ split opening delimiter".into()));
+        }
+        drop(opening);
+        let mut selected = None;
+        for (index, item) in array.into_iter().enumerate() {
+            if item.as_string().is_none() && item.as_number().is_none() {
+                return Err(PdfError::ContentParseError("TJ item must be string or number".into()));
+            }
+            let start = usize::try_from(parser.position())
+                .map_err(|_| PdfError::ResourceLimit("TJ split offset".into()))?;
+            let (parsed, _lease) = parser.get_content_object_with_budget(budget)?;
+            let end = usize::try_from(parser.position())
+                .map_err(|_| PdfError::ResourceLimit("TJ split offset".into()))?;
+            if end > source.len() || &parsed != item {
+                return Err(PdfError::ContentParseError("TJ split source mismatch".into()));
+            }
+            if index == item_index {
+                selected = Some((skip_source_prefix(source, start, end), end));
+            }
+        }
+        let (start, end) = selected.ok_or_else(||
+            PdfError::ContentParseError("TJ split missing string".into()))?;
+        let prefix = super::content_builder::ContentBuilder::encoded_text_with_budget(
+            &codes[..range.start], options.limits, budget)?;
+        let suffix = super::content_builder::ContentBuilder::encoded_text_with_budget(
+            &codes[range.end..], options.limits, budget)?;
+        // encoded_text_with_budget produces exactly a hex token followed by
+        // " Tj\n". Retain only that token inside each resulting TJ array.
+        let prefix_token = &prefix.as_slice()[..prefix.as_slice().len() - 4];
+        let suffix_token = &suffix.as_slice()[..suffix.as_slice().len() - 4];
+        let build = |parts: &[&[u8]]| -> PdfResult<crate::budget::BudgetedBytes> {
+            let length = parts.iter().try_fold(0usize, |total, part|
+                total.checked_add(part.len()).filter(|&size| size <= limit)
+                    .ok_or_else(|| PdfError::ResourceLimit("TJ split fragment bytes".into())))?;
+            let mut lease = budget.reserve(length)?;
+            let mut bytes = Vec::new();
+            bytes.try_reserve_exact(length)
+                .map_err(|_| PdfError::ResourceLimit("TJ split allocation".into()))?;
+            lease.resize(bytes.capacity())?;
+            for part in parts { bytes.extend_from_slice(part); }
+            crate::budget::BudgetedBytes::from_reserved_vec(bytes, lease)
+        };
+        let left = build(&[&source[..start], prefix_token, b"] TJ\n"])?;
+        let right = build(&[b"[", suffix_token, &source[end..], b"\n"])?;
+        Ok((left, right))
     }
 
     /// Build ordinary encoded text without changing its Tj/quote operator.

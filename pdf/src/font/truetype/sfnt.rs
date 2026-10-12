@@ -3,6 +3,16 @@ use std::collections::HashMap;
 use super::reader::TrueTypeReader;
 use crate::error::{PdfError, PdfResult};
 
+/// SFNT unsigned big-endian word sum, with virtual zero padding. For head's
+/// directory checksum, its checkSumAdjustment bytes must already be zero.
+pub(crate) fn table_checksum(data: &[u8]) -> u32 {
+    data.chunks(4).fold(0u32, |sum, chunk| {
+        let mut word = [0; 4];
+        word[..chunk.len()].copy_from_slice(chunk);
+        sum.wrapping_add(u32::from_be_bytes(word))
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct TableRecord {
     tag: String,
@@ -12,6 +22,10 @@ pub struct TableRecord {
 }
 
 impl TableRecord {
+    pub(crate) fn tag(&self) -> &str {
+        &self.tag
+    }
+
     pub fn try_new(reader: &mut TrueTypeReader) -> PdfResult<Self> {
         let tag = reader.read_tag()?;
         let check_sum = reader.read_be_u32()?;
@@ -94,11 +108,51 @@ impl Sfnt {
     pub fn get_table(&self, name: &str) -> Option<&TableRecord> {
         self.tables.get(name)
     }
+
+    /// Borrowed, unordered records for explicit subset table policy. A writer
+    /// must sort its output directory by tag; hash iteration is not file order.
+    pub(crate) fn table_records(&self) -> impl ExactSizeIterator<Item = &TableRecord> {
+        self.tables.values()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checksum_handles_virtual_padding_wraparound_and_font_adjustment() {
+        assert_eq!(table_checksum(&[]), 0);
+        assert_eq!(table_checksum(&[1]), 0x01000000);
+        assert_eq!(table_checksum(&[1, 2]), 0x01020000);
+        assert_eq!(table_checksum(&[1, 2, 3]), 0x01020300);
+        assert_eq!(table_checksum(&[1, 2, 3, 4, 5]), 0x06020304);
+        assert_eq!(table_checksum(&[255, 255, 255, 255, 0, 0, 0, 1]), 0);
+        let mut font = [0u8; 16];
+        font[..4].copy_from_slice(&0x00010000u32.to_be_bytes());
+        let adjustment = 0xB1B0AFBAu32.wrapping_sub(table_checksum(&font));
+        font[8..12].copy_from_slice(&adjustment.to_be_bytes());
+        assert_eq!(table_checksum(&font), 0xB1B0AFBA);
+    }
+
+    #[test]
+    fn record_iteration_includes_unknown_tables_without_copying() {
+        let mut font = vec![0, 1, 0, 0, 0, 2, 0, 32, 0, 1, 0, 0];
+        for tag in [b"head", b"ZZZZ"] {
+            font.extend_from_slice(tag);
+            font.extend_from_slice(&0u32.to_be_bytes());
+            font.extend_from_slice(&44u32.to_be_bytes());
+            font.extend_from_slice(&0u32.to_be_bytes());
+        }
+        let sfnt = Sfnt::try_new(&mut TrueTypeReader::new(&font)).unwrap();
+        assert_eq!(sfnt.table_records().len(), 2);
+        let mut tags: Vec<_> = sfnt.table_records().map(TableRecord::tag).collect();
+        tags.sort_unstable();
+        assert_eq!(tags, ["ZZZZ", "head"]);
+        for record in sfnt.table_records() {
+            assert!(std::ptr::eq(record, sfnt.get_table(record.tag()).unwrap()));
+        }
+    }
 
     #[test]
     fn sfnt_limits_are_checked_before_table_allocation() {

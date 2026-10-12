@@ -1,5 +1,6 @@
 pub mod cmap;
 pub mod composite_glyf;
+pub(crate) mod glyph_subset;
 pub mod expanded_glyf;
 pub mod glyf;
 pub mod horizontal;
@@ -7,3 +8,4 @@ pub mod loca;
 pub mod os2;
 pub mod outline_hit;
 pub mod post;
+pub mod vertical;

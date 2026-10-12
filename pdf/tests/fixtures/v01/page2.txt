@@ -1,0 +1,5 @@
+%%MediaBox 0 0 240 160
+%%Rotate 90
+%%Font F0 Helvetica Latin
+BT /F0 16 Tf 20 120 Td (External producer - page 2) Tj ET
+0 0.5 0 rg 20 30 80 40 re f

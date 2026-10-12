@@ -31,6 +31,18 @@ pub struct NestedTextCodePosition<'a> {
 }
 
 impl NestedDrawSource {
+    /// Qualify a page-level text event for an expanded page/Form selection.
+    /// An empty invocation chain denotes the page root, not a Form leaf.
+    /// Ordinary nested-edit APIs still require a nonempty Form chain.
+    pub fn from_page_text(source: &super::text_object::TextDrawSource) -> Self {
+        Self {
+            invocations: Vec::new(),
+            operation_index: source.operation_index,
+            operator_byte_offset: source.operator_byte_offset,
+            geometry_operation_indices: Vec::new(),
+        }
+    }
+
     pub(crate) fn validate_limits(
         &self,
         limits: &crate::parser::options::Limits,
@@ -97,10 +109,88 @@ mod tests {
     use crate::parser::options::Limits;
 
     #[test]
+    fn budgeted_call_classification_keeps_images_out_of_form_paths() {
+        use crate::{
+            document::{PdfDocument, resource_manager::ResourceKind},
+            objects::{PdfObject, pdf_stream::PdfStream},
+        };
+        let doc = PdfDocument::new().unwrap();
+        doc.add_page(0).unwrap();
+        let form = crate::parser::syntax::SyntaxParser::new(
+            crate::io::stream_reader::StreamReader::try_new(std::io::Cursor::new(
+                b"<< /Type /XObject /Subtype /Form /BBox [0 0 200 200] >>".to_vec(),
+            ))
+            .unwrap(),
+        )
+        .get_object()
+        .unwrap()
+        .into_dict()
+        .unwrap();
+        let id = doc
+            .try_insert_object(PdfObject::PdfStream(
+                PdfStream::from_decoded_data(form, b"q Q".to_vec()).unwrap(),
+            ))
+            .unwrap();
+        let form_name = doc
+            .resources()
+            .register_existing(0, ResourceKind::Form, id)
+            .unwrap();
+        let image = crate::parser::syntax::SyntaxParser::new(crate::io::stream_reader::StreamReader::try_new(
+            std::io::Cursor::new(b"<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceRGB >>".to_vec()),
+        ).unwrap()).get_object().unwrap().into_dict().unwrap();
+        let image = doc
+            .try_insert_object(PdfObject::PdfStream(
+                PdfStream::from_decoded_data(image, vec![0, 0, 0]).unwrap(),
+            ))
+            .unwrap();
+        let image_name = doc
+            .resources()
+            .register_existing(0, ResourceKind::Image, image)
+            .unwrap();
+        let page = doc.get_page(0).unwrap();
+        let program = ContentProgram::from_decoded_bytes(
+            format!("q /{form_name} Do /{image_name} Do /Missing Do").into_bytes(),
+            Default::default(),
+        )
+        .unwrap();
+        let pool = crate::budget::OperationBudget::new(1024 * 1024);
+        let (scope, scope_lease) = page.resource_with_budget(&pool).unwrap();
+        let baseline = pool.live_bytes();
+        assert!(
+            page.form_call_at_operation_with_budget(&program, 0, &scope, &pool)
+                .unwrap()
+                .is_none()
+        );
+        let call = page
+            .form_call_at_operation_with_budget(&program, 1, &scope, &pool)
+            .unwrap()
+            .unwrap();
+        assert_eq!(call.form_id, Some(id));
+        assert_eq!(call.operation_index, 1);
+        assert_eq!(
+            call.operator_byte_offset,
+            program.operations()[1].operator.byte_offset()
+        );
+        assert!(
+            page.form_call_at_operation_with_budget(&program, 2, &scope, &pool)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            page.form_call_at_operation_with_budget(&program, 3, &scope, &pool)
+                .is_err()
+        );
+        assert_eq!(pool.live_bytes(), baseline);
+        drop(scope);
+        drop(scope_lease);
+        assert_eq!(pool.live_bytes(), 0);
+    }
+
+    #[test]
     fn prepared_form_copies_outlive_chain_iterator_and_clean_unwind() {
         use crate::{
             budget::OperationBudget,
-            objects::{pdf_dict::PdfDict, pdf_name::PdfName, PdfObject},
+            objects::{PdfObject, pdf_dict::PdfDict, pdf_name::PdfName},
         };
         let pool = OperationBudget::new(65536);
         let neighbor = pool.reserve(7).unwrap();
@@ -302,6 +392,12 @@ pub(crate) struct BudgetedFormChain {
     _lease: crate::budget::MemoryLease,
 }
 
+impl BudgetedFormChain {
+    pub(crate) fn last_mut(&mut self) -> Option<&mut PreparedForm> {
+        self.forms.last_mut()
+    }
+}
+
 impl std::ops::Deref for BudgetedFormChain {
     type Target = [PreparedForm];
     fn deref(&self) -> &[PreparedForm] {
@@ -411,6 +507,123 @@ impl<R: std::io::Read + std::io::Seek> super::PdfPage<'_, R> {
             forms,
             _lease: lease.unwrap(),
         })
+    }
+
+    /// Prepare one original call for a validated tree traversal. The caller must
+    /// authenticate the page root, check ancestor cycles and aggregate work.
+    pub(crate) fn prepare_form_call_with_budget(
+        &self,
+        original: &ContentProgram,
+        scope: &crate::objects::pdf_dict::PdfDict,
+        page_scope: &crate::objects::pdf_dict::PdfDict,
+        call: &FormInvocation,
+        budget: &crate::budget::OperationBudget,
+    ) -> crate::error::PdfResult<PreparedForm> {
+        use crate::error::PdfError;
+        let operation = &original
+            .operations()
+            .get(call.operation_index)
+            .ok_or_else(|| PdfError::PageResourceError("Nested call index missing".into()))?
+            .operator;
+        if operation.name() != "Do"
+            || operation.num_operands() != 1
+            || operation.byte_offset() != call.operator_byte_offset
+        {
+            return Err(PdfError::PageResourceError(
+                "Nested Form call position mismatch".into(),
+            ));
+        }
+        let name = operation.get_as_name(0)?.name();
+        let entries = scope
+            .get("XObject")
+            .ok_or_else(|| PdfError::PageResourceError("Nested XObject scope missing".into()))?;
+        let (entries, _entries_lease) = self.ctx.resolve_owned_with_budget(entries, budget)?;
+        let entries = entries.as_dict().ok_or_else(|| {
+            PdfError::PageResourceError("Nested XObject scope must be a dictionary".into())
+        })?;
+        let entry = entries
+            .get(name)
+            .ok_or_else(|| PdfError::PageResourceError("Nested Form resource missing".into()))?;
+        if entry.as_object_id() != call.form_id {
+            return Err(PdfError::PageResourceError(
+                "Nested Form identity mismatch".into(),
+            ));
+        }
+        let (object, _object_lease) = self.ctx.resolve_owned_with_budget(entry, budget)?;
+        let (form, _preflight_lease) =
+            super::pdf_form::PdfForm::try_new_with_budget(&object, self.ctx, budget)?;
+        let effective_scope = form.resources.as_ref().unwrap_or(page_scope);
+        let stream = object
+            .as_stream()
+            .ok_or_else(|| PdfError::PageResourceError("Nested Form must be stream".into()))?;
+        let program = PreparedProgram::Budgeted(ContentProgram::from_decoded_bytes_with_budget(
+            stream.decode_data_with_budget(self.ctx, budget)?,
+            self.ctx.options(),
+            budget,
+        )?);
+        let (dictionary, mut copies_lease) =
+            crate::objects::clone_dict_with_budget(stream.dict(), budget, self.ctx.limits(), 0)?;
+        let (resource_scope, mut scope_lease) =
+            crate::objects::clone_dict_with_budget(effective_scope, budget, self.ctx.limits(), 0)?;
+        copies_lease.absorb(&mut scope_lease)?;
+        Ok(PreparedForm {
+            dictionary,
+            resource_scope,
+            program,
+            copies_lease: Some(copies_lease),
+        })
+    }
+
+    /// Resolve a Do in its effective original scope. Images are not recursive
+    /// text containers; only Forms return invocation provenance to the walker.
+    pub(crate) fn form_call_at_operation_with_budget(
+        &self,
+        program: &ContentProgram,
+        index: usize,
+        scope: &crate::objects::pdf_dict::PdfDict,
+        budget: &crate::budget::OperationBudget,
+    ) -> crate::error::PdfResult<Option<FormInvocation>> {
+        use crate::error::PdfError;
+        let op = &program
+            .operations()
+            .get(index)
+            .ok_or_else(|| PdfError::PageResourceError("span operation missing".into()))?
+            .operator;
+        if op.name() != "Do" {
+            return Ok(None);
+        }
+        if op.num_operands() != 1 {
+            return Err(PdfError::PageResourceError("span Do operand count".into()));
+        }
+        let name = op.get_as_name(0)?.name();
+        let entries = scope
+            .get("XObject")
+            .ok_or_else(|| PdfError::PageResourceError("span XObject scope missing".into()))?;
+        let (entries, _entries_lease) = self.ctx.resolve_owned_with_budget(entries, budget)?;
+        let entries = entries.as_dict().ok_or_else(|| {
+            PdfError::PageResourceError("span XObject scope must be a dictionary".into())
+        })?;
+        let entry = entries
+            .get(name)
+            .ok_or_else(|| PdfError::PageResourceError("span XObject binding missing".into()))?;
+        let (object, _object_lease) = self.ctx.resolve_owned_with_budget(entry, budget)?;
+        let stream = object
+            .as_stream()
+            .ok_or_else(|| PdfError::PageResourceError("span XObject must be a stream".into()))?;
+        let subtype = stream
+            .dict()
+            .get("Subtype")
+            .ok_or_else(|| PdfError::PageResourceError("span XObject subtype missing".into()))?;
+        let (subtype, _subtype_lease) = self.ctx.resolve_owned_with_budget(subtype, budget)?;
+        match subtype.as_name().map(|name| name.name()) {
+            Some("Form") => Ok(Some(FormInvocation {
+                form_id: entry.as_object_id(),
+                operation_index: index,
+                operator_byte_offset: op.byte_offset(),
+            })),
+            Some("Image") => Ok(None),
+            _ => Err(PdfError::UnsupportedFeature("span XObject subtype".into())),
+        }
     }
 
     fn prepare_form_chain_inner(
