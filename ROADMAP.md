@@ -1,12 +1,14 @@
 # 版本路线
 
-更新日期：2026-10-13。
+更新日期：2026-10-14。
 
 ## 当前目标
 
-**v0.1、v0.2 与 v0.3 的限定范围均已完成本地工程验收，尚未打标签或发布。** 各版验收记录见 [v0.1](docs/releases/v0.1-acceptance.md)、[v0.2](docs/releases/v0.2-acceptance.md) 与 [v0.3](docs/releases/v0.3-acceptance.md)；v0.3 仅承诺[冻结的字体与公开文件矩阵](docs/releases/v0.3-support.md)。下一产品阶段是 v0.4 的文档交互范围盘点，不自动扩大现有字体/兼容性承诺。P0～P5 是长期技术分类，不再按整个阶段全部完成后才交付；[TODO.md](TODO.md) 保留技术任务和历史证据。
+**v0.1～v0.4 的限定范围已完成本地工程验收，尚未打标签或发布。v0.4 的最终完整回归由用户确认全部通过，可进入 v0.5 实现。** 各版验收记录见 [v0.1](docs/releases/v0.1-acceptance.md)、[v0.2](docs/releases/v0.2-acceptance.md)、[v0.3](docs/releases/v0.3-acceptance.md) 与 [v0.4](docs/releases/v0.4-acceptance.md)；v0.4 仅承诺[冻结的交互支持矩阵](docs/releases/v0.4-support.md)，不表示任意 PDF 表单、批注或附件均受支持。P0～P5 是长期技术分类，不再按整个阶段全部完成后才交付；[TODO.md](TODO.md) 保留技术任务和历史证据。
 
 v0.2 的范围、开工前盘点和最终结论见 [版本清单](docs/releases/v0.2.md)与 [支持矩阵](docs/releases/v0.2-support.md)。
+
+v0.5 的源码盘点、分阶段实施任务和验收门禁见 [v0.5 计划](docs/releases/v0.5.md)。按增量保存、限定 R=6 加解密、外部签名接口三个阶段推进；不承诺加密增量保存或加密签名组合，当前尚无 v0.5 已验收能力。
 
 已有后续版本能力保留代码与测试，在相应验收完成前标为实验支持。正式支持指通过已声明场景和样本验收，不表示支持任意 PDF，也不表示 v1.0 前公共 API 已稳定。
 

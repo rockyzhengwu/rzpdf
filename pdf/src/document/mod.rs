@@ -21,13 +21,19 @@ use crate::{
     pdf_context::PDFContext,
 };
 
+pub mod acroform;
+pub mod annotations;
+pub mod attachments;
+pub mod bookmarks;
 pub mod catalog;
 mod content_edit;
 mod text_event_edit;
 pub mod subset_text_edit;
 pub mod cross_ref_table;
+pub mod destinations;
 pub mod embedded_font;
 pub mod identity;
+pub mod links;
 pub mod metadata;
 mod nested_edit;
 pub mod owned;
@@ -480,6 +486,36 @@ impl<R: Seek + Read> PdfDocument<R> {
         let page_count = self.try_page_count()? as u32;
         if pagenum >= page_count {
             return Err(PdfError::PageNotExist);
+        }
+
+        // Removing a referenced page would leave an outline destination dangling.
+        // Reject until page-deletion destination remapping is implemented.
+        let root = self.ctx.get_root_owned()?;
+        let has_named_targets = if let Some(names) = root.get("Names") {
+            self.ctx
+                .resolve(names)?
+                .as_dict()
+                .is_some_and(|dict| dict.get("Dests").is_some())
+        } else {
+            false
+        };
+        if root.get("Outlines").is_some() || root.get("Dests").is_some() || has_named_targets {
+            return Err(PdfError::UnsupportedFeature(
+                "page deletion with document navigation requires destination remapping".into(),
+            ));
+        }
+        for entry in self.collect_page_entries()? {
+            if let Some(annotations) = entry.page_dict.get("Annots") {
+                let annotations = self.ctx.resolve(annotations)?;
+                let annotations = annotations.as_array().ok_or_else(|| {
+                    PdfError::DocumentError("Annots must be an array".into())
+                })?;
+                if annotations.len() > 0 {
+                    return Err(PdfError::UnsupportedFeature(
+                        "page deletion with annotations requires relationship cleanup".into(),
+                    ));
+                }
+            }
         }
 
         let location = self.page_location(pagenum)?;

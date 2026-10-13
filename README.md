@@ -91,6 +91,8 @@ The creation, merge, and page-selection examples replace an existing regular out
 
 rzpdf is still in early development. The v0.1 core workflows, limited v0.2 content-editing scope, and the fixed v0.3 font and external-document matrix have passed local engineering checks; no version has been formally released, and APIs may change. Validate the library against your own documents before production use.
 
+The bounded [v0.4 interaction subset](docs/releases/v0.4.md) has passed local engineering acceptance: flat bookmarks and named destinations, page and URI links, Square annotations, document attachments, and basic text/checkbox AcroForm fields. The [support matrix](docs/releases/v0.4-support.md) lists exact limits; these APIs are not a general annotation or forms implementation.
+
 Text extraction does not reconstruct general reading order or paragraphs. Chinese support does not include complete font shaping, and rendering does not cover every PDF feature. Full annotation and form support, incremental saving, signatures, secure redaction, and OCR are outside the current scope. Covering text or removing a drawing operation is not secure erasure.
 
 For input limits, supported fonts and images, and verified platforms, see the [v0.1 support matrix](docs/releases/v0.1-support.md), [v0.2 editing support matrix](docs/releases/v0.2-support.md), and [v0.3 font/document matrix](docs/releases/v0.3-support.md). In v0.3, an unknown unembedded font is an explicit missing-font case; declared aliases are substitutes, not exact reproduction. One selected public Chinese PDF requires compatible parsing of its original bytes, and the positive static-font tests do not imply support for arbitrary CJK or vertical fonts.
@@ -99,8 +101,8 @@ For input limits, supported fonts and images, and verified platforms, see the [v
 
 - Guides: [text extraction](docs/text-extraction.md) · [image extraction](docs/image-extraction.md) · [content editing](docs/content-editing.md)
 - Design: [architecture](docs/architecture.md) · [cache and lifecycle](docs/cache-lifecycle.md)
-- Releases: [roadmap](ROADMAP.md) · [changelog](CHANGELOG.md)
-- Development and verification: [tasks and implementation history](TODO.md) · [testing](docs/testing.md) · [v0.1 acceptance](docs/releases/v0.1-acceptance.md) · [v0.2 acceptance](docs/releases/v0.2-acceptance.md) · [v0.3 acceptance](docs/releases/v0.3-acceptance.md)
+- Releases: [roadmap](ROADMAP.md) · [v0.4 interaction scope](docs/releases/v0.4.md) · [changelog](CHANGELOG.md)
+- Development and verification: [tasks and implementation history](TODO.md) · [testing](docs/testing.md) · [v0.1 acceptance](docs/releases/v0.1-acceptance.md) · [v0.2 acceptance](docs/releases/v0.2-acceptance.md) · [v0.3 acceptance](docs/releases/v0.3-acceptance.md) · [v0.4 acceptance](docs/releases/v0.4-acceptance.md)
 
 The workspace has three crates: `pdf` provides the core, `render` provides the Skia backend, and `font-data` supplies bundled fonts and mapping data.
 
