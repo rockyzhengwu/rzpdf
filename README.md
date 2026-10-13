@@ -12,7 +12,7 @@ rzpdf 是一个持续演进的 PDF 工具库：从创建带文字和图片的文
 - **读取与提取**：解析文档，获取页面几何，提取文字、图片及绘制位置，并查看解析诊断。
 - **组织页面**：增删、复制、重排、旋转和裁剪页面；跨文档导入、合并和按指定顺序选页。
 - **读写闭环**：从文件或字节打开文档，修改后保存到字节、Writer 或文件，支持保留编码流和压缩未编码流。
-- **渲染与编辑**：提供独立的 Skia 渲染后端；文字、图片和路径的内容编辑接口正在完善，当前按实验能力使用。
+- **渲染与编辑**：提供独立的 Skia 渲染后端；支持限定字体与来源范围内的文字、图片和路径编辑，以及一层非 Group Form 的定点编辑。
 
 中文创建支持嵌入静态 TrueType 字体；标准西文字体提供显式编码接口。文字提取保留绘制顺序和坐标，方便构建后续处理流程。
 
@@ -89,18 +89,18 @@ cargo run -p render --locked --example render_document -- input.pdf preview 144 
 
 ## 当前适用范围
 
-项目处于早期开发阶段：v0.1 基础工作流已在冻结范围内验收，尚未正式发布，API 仍可能调整。用于实际业务前，请先用自己的样本验证。
+项目处于早期开发阶段：v0.1 基础工作流和 v0.2 限定内容编辑均已通过工程验收，尚未正式发布，API 仍可能调整。用于实际业务前，请先用自己的样本验证。
 
 文字提取不是通用阅读顺序或段落还原；中文支持不等于完整字体排版；渲染也不承诺覆盖所有 PDF 特性。完整批注与表单、增量保存、签名、真正脱敏及 OCR 不属于当前版本范围。覆盖文字或删除绘制操作不等于安全擦除。
 
-具体输入限制、字体与图片支持及平台验证范围见 [支持矩阵](docs/releases/v0.1-support.md)。
+具体输入限制、字体与图片支持及平台验证范围见 [v0.1 支持矩阵](docs/releases/v0.1-support.md)和 [v0.2 编辑支持矩阵](docs/releases/v0.2-support.md)。
 
 ## 文档与开发
 
-- 使用指南：[文字提取](docs/text-extraction.md) · [图片提取](docs/image-extraction.md) · [内容编辑（实验）](docs/content-editing.md)
+- 使用指南：[文字提取](docs/text-extraction.md) · [图片提取](docs/image-extraction.md) · [内容编辑](docs/content-editing.md)
 - 项目设计：[架构](docs/architecture.md) · [缓存与生命周期](docs/cache-lifecycle.md)
 - 版本演进：[路线图](ROADMAP.md) · [变更记录](CHANGELOG.md)
-- 开发与验证：[任务与实施记录](TODO.md) · [测试说明](docs/testing.md) · [v0.1 验收记录](docs/releases/v0.1-acceptance.md)
+- 开发与验证：[任务与实施记录](TODO.md) · [测试说明](docs/testing.md) · [v0.1 验收记录](docs/releases/v0.1-acceptance.md) · [v0.2 验收记录](docs/releases/v0.2-acceptance.md)
 
 工作区由三个 crate 组成：`pdf` 提供核心能力，`render` 提供 Skia 渲染后端，`font-data` 提供内置字体与映射数据。
 
