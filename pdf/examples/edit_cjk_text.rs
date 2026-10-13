@@ -22,15 +22,28 @@ fn main() -> PdfResult<()> {
     }
     let original = doc.get_page(0)?.content_program()?;
     doc.copy_page(0, 2)?;
-    let snapshot = doc.get_page(2)?.content_program()?;
-    let operation = snapshot
-        .operations()
-        .iter()
-        .enumerate()
-        .filter(|(_, op)| op.operator.name() == "Tj")
-        .nth(1)
-        .map(|(index, _)| index)
-        .ok_or_else(|| PdfError::ObjectError("Second Tj missing".into()))?;
+    let mut page = doc.get_page(2)?;
+    let snapshot = page.content_program()?;
+    let report = page.extract_characters_paint_order_report()?;
+    if !report.matches_program(&snapshot) || !doc.is_stamp_current(report.source_stamp()) {
+        return Err(PdfError::DocumentError("CJK text source is stale".into()));
+    }
+    let selected = report
+        .characters
+        .windows(2)
+        .find(|chars| {
+            chars[0].unicode.as_deref() == Some("世") && chars[1].unicode.as_deref() == Some("界")
+        })
+        .ok_or_else(|| PdfError::ObjectError("Expected CJK text missing".into()))?;
+    let source = selected[0]
+        .source
+        .ok_or_else(|| PdfError::ObjectError("CJK text has no page source".into()))?;
+    if selected[1].source != Some(source) {
+        return Err(PdfError::ObjectError(
+            "CJK selection spans text operations".into(),
+        ));
+    }
+    let operation = source.operation_index;
     let font_name = snapshot.operations()[..operation]
         .iter()
         .rev()
@@ -40,7 +53,6 @@ fn main() -> PdfResult<()> {
         .get_as_name(0)?
         .name()
         .to_owned();
-    let page = doc.get_page(2)?;
     let old = snapshot.operations()[operation]
         .operator
         .get_as_string(0)?
@@ -50,9 +62,17 @@ fn main() -> PdfResult<()> {
             "Expected original CJK sentence".into(),
         ));
     }
-    // Range coordinates are decoded character-code bytes, not Unicode indices.
-    let start = page.encode_text_for_font(&font_name, "你好，")?.len();
-    let end = start + page.encode_text_for_font(&font_name, "世界")?.len();
+    // Range coordinates come from decoded character-code byte positions.
+    let start = selected[0]
+        .decoded_code_range
+        .as_ref()
+        .ok_or_else(|| PdfError::ObjectError("CJK start has no code range".into()))?
+        .start;
+    let end = selected[1]
+        .decoded_code_range
+        .as_ref()
+        .ok_or_else(|| PdfError::ObjectError("CJK end has no code range".into()))?
+        .end;
     drop(page);
     let stamp = doc.stamp();
     if doc

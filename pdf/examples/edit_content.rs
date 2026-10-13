@@ -1,7 +1,7 @@
 use pdf::{
     document::{owned::Document, resource_manager::StandardFont},
     error::{PdfError, PdfResult},
-    page::page_builder::PageBuilder,
+    page::{page_builder::PageBuilder, page_object::PageObject},
     parser::syntax::ParseMode,
 };
 
@@ -22,29 +22,112 @@ fn main() -> PdfResult<()> {
     ).into_bytes())?;
     doc.copy_page(0, 1)?;
     doc.edit_transaction(|editing| {
-        let snapshot = editing.get_page(1)?.content_program()?;
-        editing.replace_page_text_range(1, &snapshot, 3, None, 0..8, "Edited")?;
-        let snapshot = editing.get_page(1)?.content_program()?;
-        editing.transform_page_image_draw_display(1, &snapshot, 7, [0., 1., -1., 0., 320., 80.])?;
-        let snapshot = editing.get_page(1)?.content_program()?;
-        let second_image = snapshot
-            .operations()
+        let mut page = editing.get_page(1)?;
+        let snapshot = page.content_program()?;
+        let report = page.extract_characters_paint_order_report()?;
+        if !report.matches_program(&snapshot) || !editing.is_stamp_current(report.source_stamp()) {
+            return Err(PdfError::DocumentError("text source is stale".into()));
+        }
+        let prefix = report
+            .characters
+            .get(..8)
+            .ok_or_else(|| PdfError::DocumentError("expected title prefix is missing".into()))?;
+        if prefix
             .iter()
-            .enumerate()
-            .filter(|(_, op)| op.operator.name() == "Do")
+            .filter_map(|ch| ch.unicode.as_deref())
+            .collect::<String>()
+            != "Original"
+        {
+            return Err(PdfError::DocumentError("unexpected title prefix".into()));
+        }
+        let source = prefix[0]
+            .source
+            .ok_or_else(|| PdfError::DocumentError("title has no page source".into()))?;
+        let start = prefix[0]
+            .decoded_code_range
+            .as_ref()
+            .ok_or_else(|| PdfError::DocumentError("title has no character range".into()))?
+            .start;
+        let end = prefix[7]
+            .decoded_code_range
+            .as_ref()
+            .ok_or_else(|| PdfError::DocumentError("title has no character range".into()))?
+            .end;
+        if !prefix
+            .iter()
+            .all(|ch| ch.source == Some(source) && ch.array_item_index.is_none())
+        {
+            return Err(PdfError::DocumentError(
+                "title spans several text operations".into(),
+            ));
+        }
+        editing.replace_page_text_range(
+            1,
+            &snapshot,
+            source.operation_index,
+            None,
+            start..end,
+            "Edited",
+        )?;
+        let mut page = editing.get_page(1)?;
+        let snapshot = page.content_program()?;
+        let display = page.display_list()?;
+        if !display.matches_program(&snapshot) {
+            return Err(PdfError::DocumentError(
+                "image display source is stale".into(),
+            ));
+        }
+        let first_image = display
+            .objects()
+            .iter()
+            .find_map(|object| {
+                if let PageObject::Image(image) = object {
+                    image.source()
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| PdfError::DocumentError("first image is missing".into()))?;
+        editing.transform_page_image_draw_display(
+            1,
+            &snapshot,
+            first_image.operation_index,
+            [0., 1., -1., 0., 320., 80.],
+        )?;
+        let mut page = editing.get_page(1)?;
+        let snapshot = page.content_program()?;
+        let report = page.extract_images_paint_order_report()?;
+        if !report.matches_program(&snapshot) || !editing.is_stamp_current(report.source_stamp()) {
+            return Err(PdfError::DocumentError("image source is stale".into()));
+        }
+        let second_image = report
+            .images
+            .into_iter()
+            .filter_map(|draw| draw.source())
             .nth(1)
-            .map(|(index, _)| index)
+            .map(|source| source.operation_index)
             .ok_or_else(|| PdfError::ObjectError("second image missing".into()))?;
         editing.remove_page_image_draw(1, &snapshot, second_image)?;
-        let snapshot = editing.get_page(1)?.content_program()?;
-        let red_rectangle = snapshot
-            .operations()
+        let mut page = editing.get_page(1)?;
+        let snapshot = page.content_program()?;
+        let display = page.display_list()?;
+        if !display.matches_program(&snapshot) {
+            return Err(PdfError::DocumentError(
+                "path display source is stale".into(),
+            ));
+        }
+        let red_path = display
+            .objects()
             .iter()
-            .position(|op| {
-                op.operator.name() == "re" && op.operator.get_as_f32(0).ok() == Some(40.)
+            .find_map(|object| {
+                if let PageObject::Path(path) = object {
+                    path.source()
+                } else {
+                    None
+                }
             })
-            .ok_or_else(|| PdfError::ObjectError("red rectangle missing".into()))?;
-        editing.remove_page_path_draw(1, &snapshot, red_rectangle + 1)
+            .ok_or_else(|| PdfError::ObjectError("red path missing".into()))?;
+        editing.remove_page_path_draw(1, &snapshot, red_path.painting_operation_index)
     })?;
     let bytes = doc.save_to_bytes()?;
     let reopened = Document::from_bytes_with_mode(bytes, ParseMode::Strict)?;
