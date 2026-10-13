@@ -23,9 +23,12 @@ fn main() -> PdfResult<()> {
     }
     doc.copy_page(0, 2)?;
     doc.edit_transaction(|editing| {
-        let green = editing
-            .resources()
-            .embed_rgb_image(2, 2, 1, vec![0, 170, 70, 0, 170, 70])?;
+        let green = editing.resources().embed_rgba_image(
+            2,
+            2,
+            1,
+            vec![0, 170, 70, 128, 0, 170, 70, 128],
+        )?;
         let resources = editing.get_page(2)?.resource()?;
         let green_id = resources
             .get("XObject")

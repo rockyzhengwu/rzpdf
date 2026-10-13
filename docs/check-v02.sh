@@ -25,10 +25,18 @@ cargo run -p pdf --example edit_content --locked -- "$task_output/content-edited
 bash docs/check-content-edit-example.sh "$task_output/content-edited.pdf"
 mutool draw -q -r 96 -o "$task_output/content-%d.png" "$task_output/content-edited.pdf"
 
+cargo run -p pdf --example edit_text_operators_v02 --locked -- "$task_output/text-operators.pdf"
+bash docs/check-v02-text-operators.sh \
+    "$task_output/text-operators.pdf" "$task_output/text-operators-check"
+
 cargo run -p pdf --example edit_cjk_text --locked -- \
     "$task_output/v01/cjk.pdf" "$task_output/cjk-edited.pdf"
 bash docs/check-cjk-page-edit.sh "$task_output/cjk-edited.pdf" --text-edit
+bash docs/check-v02-cjk-edit.sh "$task_output/cjk-edited.pdf"
+mutool draw -q -r 96 -o "$task_output/cjk-source-%d.png" "$task_output/v01/cjk.pdf"
 mutool draw -q -r 96 -o "$task_output/cjk-edit-%d.png" "$task_output/cjk-edited.pdf"
+cmp "$task_output/cjk-source-1.png" "$task_output/cjk-edit-1.png"
+cmp "$task_output/cjk-source-2.png" "$task_output/cjk-edit-2.png"
 
 cargo run -p pdf --example edit_external_v02 --locked -- \
     pdf/tests/fixtures/v01/mupdf.pdf "$task_output/external-edited.pdf"
