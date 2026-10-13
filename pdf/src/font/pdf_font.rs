@@ -15,6 +15,16 @@ pub enum Font {
     Type0(Type0),
 }
 
+/// How a font program was selected for drawing; extraction may still be possible
+/// when the result is `Missing`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FontProgramSource {
+    Embedded,
+    BundledBase14,
+    DeclaredSubstitute { base14_name: String },
+    Missing,
+}
+
 /// Bound input preflight work before constructing encoding tables.
 pub(crate) fn encoding_character_count(
     text: &str,
@@ -38,6 +48,37 @@ pub(crate) fn encoding_character_count(
 #[cfg(test)]
 mod encoding_input_tests {
     use super::*;
+
+    #[test]
+    fn font_program_source_distinguishes_builtin_alias_and_missing() {
+        use crate::{
+            document::owned::Document,
+            objects::{PdfObject, pdf_name::PdfName},
+        };
+        let doc = Document::new().unwrap();
+        for (name, expected) in [
+            ("Courier", FontProgramSource::BundledBase14),
+            (
+                "Arial",
+                FontProgramSource::DeclaredSubstitute {
+                    base14_name: "Helvetica".into(),
+                },
+            ),
+            ("Unlisted-Font", FontProgramSource::Missing),
+        ] {
+            let mut dict = PdfDict::default();
+            dict.insert(
+                "Subtype".into(),
+                PdfObject::PdfName(PdfName::new("Type1".into())),
+            );
+            dict.insert(
+                "BaseFont".into(),
+                PdfObject::PdfName(PdfName::new(name.into())),
+            );
+            let font = Font::try_new(&dict, doc.ctx()).unwrap();
+            assert_eq!(font.font_program_source(), expected);
+        }
+    }
 
     #[test]
     fn two_font_results_share_one_pool_and_recover_after_coexistence_rejection() {
@@ -447,6 +488,23 @@ impl Font {
         match self {
             Font::Simple(s) => s.fontfile(),
             Font::Type0(t) => t.fontfile(),
+        }
+    }
+
+    pub fn font_program_source(&self) -> FontProgramSource {
+        match self {
+            Font::Simple(font) if font.has_embedded_program() => FontProgramSource::Embedded,
+            Font::Simple(font) => {
+                match super::builtin_font::find_builtin_font(font.base_font()) {
+                    Some(name) if name == font.base_font() => FontProgramSource::BundledBase14,
+                    Some(name) => FontProgramSource::DeclaredSubstitute {
+                        base14_name: name.to_owned(),
+                    },
+                    None => FontProgramSource::Missing,
+                }
+            }
+            Font::Type0(font) if font.fontfile().is_some() => FontProgramSource::Embedded,
+            Font::Type0(_) => FontProgramSource::Missing,
         }
     }
 }

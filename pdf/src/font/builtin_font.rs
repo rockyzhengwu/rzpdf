@@ -22,10 +22,9 @@ pub fn get_char_width(char: CharCode) -> Option<f32> {
 }
 
 pub fn load_builtin_font_data(name: &str) -> Option<&[u8]> {
-    match BASE_14_FONTNAME.get(name) {
-        Some(fname) => get_builtin_font_data(fname),
-        None => get_builtin_font_data("Helvetica"),
-    }
+    BASE_14_FONTNAME
+        .get(name)
+        .and_then(|font_name| get_builtin_font_data(font_name))
 }
 
 pub fn load_builtin_metrics(name: &str) -> Option<&[u8]> {
@@ -110,4 +109,24 @@ lazy_static! {
         map.insert("ZapfDingbats", "ZapfDingbats");
         map
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{find_builtin_font, load_builtin_font_data};
+
+    #[test]
+    fn unknown_font_is_not_silently_replaced() {
+        assert_eq!(find_builtin_font("Unlisted-Font"), None);
+        assert_eq!(load_builtin_font_data("Unlisted-Font"), None);
+    }
+
+    #[test]
+    fn declared_alias_resolves_to_builtin_program() {
+        assert_eq!(find_builtin_font("Arial"), Some("Helvetica"));
+        assert_eq!(
+            load_builtin_font_data("Arial"),
+            load_builtin_font_data("Helvetica")
+        );
+    }
 }

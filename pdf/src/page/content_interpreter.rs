@@ -42,6 +42,7 @@ pub struct Interpreter<'a, R: Seek + Read> {
     path_clip_type: FillType,
     path_start: Point,
     in_text_object: bool,
+    marked_content_depth: usize,
     text_chars: usize,
     path_segments: usize,
     operation_index: usize,
@@ -751,6 +752,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             path_clip_type: FillType::default(),
             path_start: Point::default(),
             in_text_object: false,
+            marked_content_depth: 0,
             text_chars: 0,
             path_segments: 0,
             operation_index: 0,
@@ -786,6 +788,11 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
         if self.in_text_object {
             return Err(PdfError::PageOperatorError(
                 "content ends before matching ET".into(),
+            ));
+        }
+        if self.marked_content_depth != 0 {
+            return Err(PdfError::PageOperatorError(
+                "content ends before matching EMC".into(),
             ));
         }
         if !self.state_stack.is_empty() {
@@ -987,6 +994,33 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                     return Err(PdfError::PageOperatorError("ET without matching BT".into()));
                 }
                 self.in_text_object = false;
+            }
+
+            // These delimiters do not alter painting. MCID-only BDC is safe
+            // for visual/text interpretation; richer properties such as
+            // ActualText and optional-content visibility remain diagnostic.
+            "BMC" => {
+                op.get_as_name(0)?;
+                self.marked_content_depth = self.marked_content_depth.checked_add(1)
+                    .filter(|depth| *depth <= self.ctx.limits().max_content_operations)
+                    .ok_or_else(|| PdfError::ResourceLimit("marked content depth".into()))?;
+            }
+            "BDC" => {
+                op.get_as_name(0)?;
+                let mcid_only = op.operand(1)?.as_dict().is_some_and(|dict| {
+                    dict.into_iter().count() == 1
+                        && dict.get("MCID").and_then(PdfObject::as_u32).is_some()
+                });
+                if !mcid_only {
+                    self.unsupported_operator(&op)?;
+                }
+                self.marked_content_depth = self.marked_content_depth.checked_add(1)
+                    .filter(|depth| *depth <= self.ctx.limits().max_content_operations)
+                    .ok_or_else(|| PdfError::ResourceLimit("marked content depth".into()))?;
+            }
+            "EMC" => {
+                self.marked_content_depth = self.marked_content_depth.checked_sub(1)
+                    .ok_or_else(|| PdfError::PageOperatorError("EMC without matching BMC".into()))?;
             }
 
             _ => {

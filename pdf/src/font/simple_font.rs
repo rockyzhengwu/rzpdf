@@ -1156,4 +1156,8 @@ impl SimpleFont {
             load_builtin_font_data(&self.base_font)
         }
     }
+
+    pub fn has_embedded_program(&self) -> bool {
+        self.descriptor.fontfile().is_some()
+    }
 }

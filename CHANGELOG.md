@@ -2,7 +2,17 @@
 
 本文件只记录交付变化，不替代长期任务池或原始测试日志。版本范围见 [ROADMAP](ROADMAP.md)。
 
-## Unreleased — v0.2 限定范围已验收
+## Unreleased — v0.3 固定字体与公开文件矩阵
+
+在冻结的静态字体和两份公开 PDF 范围内，补充 Courier/WinAnsi、中文
+Identity-H/V、复合字形子集编辑及保存重开的独立校验；缺失字体和字形不再
+静默退回或跳过，字体来源可区分嵌入、Core 14、显式替代和缺失。支持 MCID-only
+标记内容的视觉/普通文字遍历，并改善细路径抗锯齿。`font-data`
+改为从只读输入向 Cargo `OUT_DIR` 生成数据，不再写回 `src`。具体支持边界、
+原始中文 PDF 的兼容模式限制和验证证据见 [v0.3 支持矩阵](docs/releases/v0.3-support.md)
+及 [验收记录](docs/releases/v0.3-acceptance.md)。未打标签或发布。
+
+## v0.2 限定范围已验收
 
 2026-10-13 实现候选 `89b98a3` 的 V02-01～07 全部通过：锁定依赖完整回归 1,069 项通过，v0.1 基础门禁复验通过，qpdf/MuPDF 独立结构、文字、位置和画面检查通过。新增来源驱动的内容编辑、中文、四类文字操作、独立生产者及一层 Form 示例与 v0.2 自动门禁；核心库生产代码未改动。正式范围与限制见 [支持矩阵](docs/releases/v0.2-support.md)，过程与归档见 [验收记录](docs/releases/v0.2-acceptance.md)。尚未打标签或发布。
 

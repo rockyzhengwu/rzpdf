@@ -1,6 +1,12 @@
-pub mod afm;
-pub mod cmap;
-pub mod fonts;
+pub mod afm {
+    include!(concat!(env!("OUT_DIR"), "/afm.rs"));
+}
+pub mod cmap {
+    include!(concat!(env!("OUT_DIR"), "/cmap.rs"));
+}
+pub mod fonts {
+    include!(concat!(env!("OUT_DIR"), "/fonts.rs"));
+}
 
 pub fn get_builtin_font_data(name: &str) -> Option<&[u8]> {
     match name {
@@ -39,5 +45,19 @@ pub fn get_builtin_font_matrices(name: &str) -> Option<&[u8]> {
         "Times-Roman" => Some(afm::times_roman::DATA),
         "ZapfDingbats" => Some(afm::zapfdingbats::DATA),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundled_inputs_are_available_from_read_only_sources() {
+        assert!(get_builtin_font_data("Helvetica").unwrap().starts_with(&[0x80, 0x01]));
+        assert!(get_builtin_font_matrices("Courier").unwrap().starts_with(b"StartFontMetrics"));
+        assert!(cmap::get_predefine_cmap_data("Identity-H").is_some());
+        assert!(cmap::get_predefine_cmap_data("Identity-V").is_some());
+        assert!(cmap::get_predefine_cmap_data("Not-A-CMap").is_none());
     }
 }

@@ -322,6 +322,7 @@ impl SkiaRender {
         self.surface.canvas().save();
         self.pathbuilder.reset();
         self.paint.reset();
+        self.paint.set_anti_alias(true);
         let result = (|| -> PdfResult<()> {
             self.set_clip(&pathobject.graphic_state().clip_path)?;
             let path_m44 =
@@ -470,7 +471,10 @@ impl Device for SkiaRender {
             let fontmgr = FontMgr::new();
             let data = font
                 .fontfile()
-                .ok_or_else(|| PdfError::FontError("font has no renderable program".into()))?;
+                .ok_or_else(|| PdfError::FontError(format!(
+                    "font '{}' has no embedded or declared substitute program",
+                    font.name()
+                )))?;
             let typeface = fontmgr
                 .new_from_data(data, 0)
                 .ok_or_else(|| PdfError::FontError("Skia rejected font program".into()))?;
@@ -501,16 +505,22 @@ impl Device for SkiaRender {
                         "text position transform overflows".into(),
                     ));
                 }
-                if let Some(glyph) = font.get_glyph(char_item.charcode()) {
-                    match glyph {
-                        GlyphDesc::Gid(gid) => {
-                            glyphs.push(gid as u16);
-                            positions.push(skia_safe::Point::new(x, y));
-                        }
-                        GlyphDesc::Name(name) => {
-                            // TODO
-                            println!("{:?}", name);
-                        }
+                match font.get_glyph(char_item.charcode()) {
+                    Some(GlyphDesc::Gid(gid)) if gid != 0 && gid <= u16::MAX as u32 => {
+                        glyphs.push(gid as u16);
+                        positions.push(skia_safe::Point::new(x, y));
+                    }
+                    Some(GlyphDesc::Name(name)) => {
+                        return Err(PdfError::UnsupportedFeature(format!(
+                            "font '{}' uses unresolved glyph name '{}'",
+                            font.name(), name
+                        )));
+                    }
+                    _ => {
+                        return Err(PdfError::FontError(format!(
+                            "font '{}' has no drawable glyph for character code {}",
+                            font.name(), char_item.charcode().code()
+                        )));
                     }
                 }
             }
