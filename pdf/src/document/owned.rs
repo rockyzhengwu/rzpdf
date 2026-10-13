@@ -8,7 +8,28 @@ use std::{
     io::{BufReader, Cursor, Read, Seek},
     ops::Deref,
     path::Path,
+    rc::Rc,
 };
+
+/// The parser and future incremental writer share one immutable allocation.
+/// Rc<Vec<u8>> retains the incoming Vec allocation (Rc<[u8]> would copy it).
+#[derive(Clone)]
+struct SourceBytes(Rc<Vec<u8>>);
+
+impl AsRef<[u8]> for SourceBytes {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+}
+
+// Retained for the incremental writer, introduced in the next implementation
+// slice. Reader/file constructors intentionally do not claim stable snapshots.
+#[allow(dead_code)]
+struct SourceBaseline {
+    bytes: SourceBytes,
+    last_xref_offset: u64,
+    mode: ParseMode,
+}
 
 /// Owned seekable input. No Send/Sync guarantee is imposed by the facade.
 pub trait DocumentReader: Read + Seek {}
@@ -20,6 +41,8 @@ pub type OwnedReader = Box<dyn DocumentReader>;
 /// Reader inputs must be 'static; borrowed readers can use the legacy API.
 pub struct Document {
     inner: PdfDocument<OwnedReader>,
+    #[allow(dead_code)] // Consumed by incremental preflight in the next slice.
+    source_baseline: Option<SourceBaseline>,
 }
 
 impl Document {
@@ -29,6 +52,7 @@ impl Document {
     pub fn new_with_options(options: ParseOptions) -> PdfResult<Self> {
         Ok(Self {
             inner: PdfDocument::create_with_options(options)?,
+            source_baseline: None,
         })
     }
     pub fn new_with_version(version: super::save_options::PdfVersion) -> PdfResult<Self> {
@@ -40,6 +64,7 @@ impl Document {
     ) -> PdfResult<Self> {
         Ok(Self {
             inner: PdfDocument::create_with_version_and_options(version, options)?,
+            source_baseline: None,
         })
     }
     pub fn from_reader<R: Read + Seek + 'static>(reader: R) -> PdfResult<Self> {
@@ -52,6 +77,7 @@ impl Document {
         let reader: OwnedReader = Box::new(reader);
         Ok(Self {
             inner: PdfDocument::from_reader_with_options(reader, options)?,
+            source_baseline: None,
         })
     }
     pub fn from_reader_with_mode<R: Read + Seek + 'static>(
@@ -67,13 +93,32 @@ impl Document {
         )
     }
     pub fn from_bytes(bytes: Vec<u8>) -> PdfResult<Self> {
-        Self::from_reader(Cursor::new(bytes))
+        Self::from_bytes_with_options(bytes, ParseOptions::default())
     }
     pub fn from_bytes_with_options(bytes: Vec<u8>, options: ParseOptions) -> PdfResult<Self> {
-        Self::from_reader_with_options(Cursor::new(bytes), options)
+        let bytes = SourceBytes(Rc::new(bytes));
+        let reader: OwnedReader = Box::new(Cursor::new(bytes.clone()));
+        let inner = PdfDocument::from_reader_with_options(reader, options)?;
+        let last_xref_offset = inner.source_xref_offset.ok_or_else(|| {
+            PdfError::DocumentError("parsed source is missing its xref address".into())
+        })?;
+        Ok(Self {
+            inner,
+            source_baseline: Some(SourceBaseline {
+                bytes,
+                last_xref_offset,
+                mode: options.mode,
+            }),
+        })
     }
     pub fn from_bytes_with_mode(bytes: Vec<u8>, mode: ParseMode) -> PdfResult<Self> {
-        Self::from_reader_with_mode(Cursor::new(bytes), mode)
+        Self::from_bytes_with_options(
+            bytes,
+            ParseOptions {
+                mode,
+                ..Default::default()
+            },
+        )
     }
     pub fn open<P: AsRef<Path>>(path: P) -> PdfResult<Self> {
         Self::open_with_options(path, ParseOptions::default())
@@ -104,5 +149,110 @@ impl Deref for Document {
     type Target = PdfDocument<OwnedReader>;
     fn deref(&self) -> &Self::Target {
         &self.inner
+    }
+}
+
+#[cfg(test)]
+mod source_baseline_tests {
+    use super::*;
+    use crate::document::metadata::InfoTextField;
+
+    fn source() -> Vec<u8> {
+        let document = Document::new().unwrap();
+        document.add_page(0).unwrap();
+        document.save_to_bytes().unwrap()
+    }
+
+    #[test]
+    fn owned_source_baseline_retains_the_incoming_allocation_and_exact_bytes() {
+        let mut bytes = source();
+        bytes.extend_from_slice(b" \r\n");
+        let address = bytes.as_ptr();
+        let expected = bytes.clone();
+        let document = Document::from_bytes_with_mode(bytes, ParseMode::Strict).unwrap();
+        let baseline = document.source_baseline.as_ref().unwrap();
+        assert_eq!(baseline.bytes.as_ref().as_ptr(), address);
+        assert_eq!(baseline.bytes.as_ref(), expected);
+        assert_eq!(Rc::strong_count(&baseline.bytes.0), 2);
+        assert_eq!(baseline.mode, ParseMode::Strict);
+        let offset = usize::try_from(baseline.last_xref_offset).unwrap();
+        assert!(baseline.bytes.as_ref()[offset..].starts_with(b"xref"));
+    }
+
+    #[test]
+    fn owned_source_baseline_does_not_rebase_after_edit_rollback_or_full_save() {
+        let bytes = source();
+        let document = Document::from_bytes_with_mode(bytes.clone(), ParseMode::Strict).unwrap();
+        let baseline_offset = document.source_baseline.as_ref().unwrap().last_xref_offset;
+        let result: PdfResult<()> = document.edit_transaction(|doc| {
+            doc.set_info_text(InfoTextField::Title, Some("rolled back"))?;
+            Err(PdfError::DocumentError("rollback".into()))
+        });
+        assert!(result.is_err());
+        assert_eq!(document.info_text(InfoTextField::Title).unwrap(), None);
+        document
+            .set_info_text(InfoTextField::Title, Some("edited"))
+            .unwrap();
+        let stamp = document.stamp();
+        let commit = document.commit_revision();
+        let rewritten = document.save_to_bytes().unwrap();
+        assert!(document.is_stamp_current(&stamp));
+        assert_eq!(document.commit_revision(), commit);
+        let baseline = document.source_baseline.as_ref().unwrap();
+        assert_eq!(baseline.bytes.as_ref(), bytes);
+        assert_eq!(baseline.last_xref_offset, baseline_offset);
+        assert_ne!(rewritten, bytes);
+        let reopened = Document::from_bytes_with_mode(rewritten, ParseMode::Strict).unwrap();
+        assert_eq!(
+            reopened.info_text(InfoTextField::Title).unwrap().as_deref(),
+            Some("edited")
+        );
+    }
+
+    #[test]
+    fn owned_source_baseline_records_latest_revision_not_its_prev() {
+        let mut bytes = source();
+        let original = Document::from_bytes_with_mode(bytes.clone(), ParseMode::Strict).unwrap();
+        let prev = original.source_baseline.as_ref().unwrap().last_xref_offset;
+        let trailer = original.ctx().trailer();
+        let size = trailer
+            .get("Size")
+            .unwrap()
+            .as_number()
+            .unwrap()
+            .as_u64_checked()
+            .unwrap();
+        let root = trailer.get("Root").unwrap().as_object_id().unwrap();
+        let latest = bytes.len();
+        bytes.extend_from_slice(format!(
+            "xref\n0 1\n0000000000 65535 f \ntrailer\n<< /Size {size} /Root {} {} R /Prev {prev} >>\nstartxref\n{latest}\n%%EOF\n",
+            root.obj_num(), root.gen_num(),
+        ).as_bytes());
+        let document = Document::from_bytes_with_mode(bytes, ParseMode::Strict).unwrap();
+        assert_eq!(
+            document.source_baseline.as_ref().unwrap().last_xref_offset,
+            latest as u64
+        );
+        assert_ne!(latest as u64, prev);
+        assert_eq!(document.try_page_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn owned_source_baseline_does_not_trust_mutable_readers_or_new_documents() {
+        assert!(Document::new().unwrap().source_baseline.is_none());
+        let bytes = source();
+        let document =
+            Document::from_reader_with_mode(Cursor::new(bytes.clone()), ParseMode::Strict).unwrap();
+        assert!(document.source_baseline.is_none());
+        let compatible = Document::from_bytes(bytes.clone()).unwrap();
+        assert_eq!(
+            compatible.source_baseline.as_ref().unwrap().mode,
+            ParseMode::Compatible
+        );
+        let legacy = PdfDocument::from_bytes_with_mode(bytes, ParseMode::Strict).unwrap();
+        assert_eq!(
+            compatible.save_to_bytes().unwrap(),
+            legacy.save_to_bytes().unwrap()
+        );
     }
 }

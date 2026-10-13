@@ -15,7 +15,7 @@ use crate::{
     },
     page::{content_builder::ContentBuilder, PdfPage},
     parser::{
-        parser::{parse_xref, PdfParser},
+        parser::{parse_xref_with_offset, PdfParser},
         syntax::SyntaxParser,
     },
     pdf_context::PDFContext,
@@ -55,6 +55,8 @@ use page_tree::PageTreeEntry;
 pub struct PdfDocument<R: Seek + Read> {
     ctx: PDFContext<R>,
     catalog: Catalog,
+    // A merged xref table alone cannot identify the latest revision address.
+    source_xref_offset: Option<u64>,
 }
 
 impl PdfDocument<BufReader<File>> {
@@ -170,7 +172,11 @@ impl<R: Seek + Read> PdfDocument<R> {
         )?;
         ctx.try_insert_object(PdfObject::PdfDict(root))?;
         let catalog = Catalog::try_new(&ctx)?;
-        Ok(Self { ctx, catalog })
+        Ok(Self {
+            ctx,
+            catalog,
+            source_xref_offset: None,
+        })
     }
 
     pub(crate) fn ctx(&self) -> &PDFContext<R> {
@@ -201,11 +207,15 @@ impl<R: Seek + Read> PdfDocument<R> {
         let reader = StreamReader::try_new(reader)?;
         let mut syntax = SyntaxParser::with_options(reader, options);
         let version = syntax.read_header()?.version().to_string();
-        let cross_ref_table = parse_xref(&mut syntax)?;
+        let (cross_ref_table, source_xref_offset) = parse_xref_with_offset(&mut syntax)?;
         let parser = PdfParser::new(syntax.with_xref_table(cross_ref_table.clone()));
         let ctx = PDFContext::try_new_with_version(parser, cross_ref_table, version)?;
         let catalog = Catalog::try_new(&ctx)?;
-        Ok(PdfDocument { ctx, catalog })
+        Ok(PdfDocument {
+            ctx,
+            catalog,
+            source_xref_offset: Some(source_xref_offset),
+        })
     }
 
     /// Source header version. Catalog /Version, if present, remains in the

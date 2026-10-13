@@ -11,12 +11,19 @@ use crate::{
 };
 
 pub fn parse_xref<R: Seek + Read>(syntax: &mut SyntaxParser<R>) -> PdfResult<CrossRefTable> {
+    parse_xref_with_offset(syntax).map(|(xref, _)| xref)
+}
+
+/// Preserve the actual latest revision address before merging older revisions.
+pub(crate) fn parse_xref_with_offset<R: Seek + Read>(
+    syntax: &mut SyntaxParser<R>,
+) -> PdfResult<(CrossRefTable, u64)> {
     let last_xref_offset = find_start_xref(syntax)?;
     let xref = load_xref_chain(syntax, last_xref_offset)?;
     if syntax.mode() == crate::parser::syntax::ParseMode::Strict {
         validate_strict_xref_table(&xref)?;
     }
-    Ok(xref)
+    Ok((xref, last_xref_offset))
 }
 fn load_xref_chain<R: Seek + Read>(
     syntax: &mut SyntaxParser<R>,
