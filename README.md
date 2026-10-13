@@ -1,47 +1,47 @@
 # rzpdf
 
-**用 Rust 构建、读取和处理 PDF。**
+**Build, read, and work with PDFs in Rust.**
 
-rzpdf 是一个持续演进的 PDF 工具库：从创建带文字和图片的文档，到提取内容、组织页面，再到逐步完善内容编辑与渲染，让 PDF 工作流在同一套对象模型中连接起来。
+rzpdf is an evolving PDF toolkit that brings document creation, content extraction, page organization, editing, and rendering into one object model.
 
-适合在 Rust 应用中集成 PDF 生成、内容提取和页面处理，也为需要深入操作文档对象与资源的开发者提供基础能力。
+It is designed for Rust applications that need to generate PDFs, extract content, or work with pages and document resources.
 
-## 从创建到处理
+## From creation to editing
 
-- **创建文档**：配置页面尺寸，绘制文字、路径和图片，写入 Info / XMP 元数据。
-- **读取与提取**：解析文档，获取页面几何，提取文字、图片及绘制位置，并查看解析诊断。
-- **组织页面**：增删、复制、重排、旋转和裁剪页面；跨文档导入、合并和按指定顺序选页。
-- **读写闭环**：从文件或字节打开文档，修改后保存到字节、Writer 或文件，支持保留编码流和压缩未编码流。
-- **渲染与编辑**：提供独立的 Skia 渲染后端；支持限定字体与来源范围内的文字、图片和路径编辑，以及一层非 Group Form 的定点编辑。
+- **Create documents:** Set page sizes, draw text, paths, and images, and write Info or XMP metadata.
+- **Read and extract:** Parse documents, inspect page geometry, extract text, images, and drawing positions, and review parser diagnostics.
+- **Organize pages:** Add, remove, copy, reorder, rotate, and crop pages; import pages across documents, merge files, or select pages in a specified order.
+- **Open and save:** Load from a file or bytes and save to bytes, a writer, or a file, with options to preserve encoded streams or compress unencoded streams.
+- **Render and edit:** Use a separate Skia renderer, or edit text, images, and paths within the documented font and source limits, including targeted edits in one-level, non-Group Forms.
 
-中文创建支持嵌入静态 TrueType 字体；标准西文字体提供显式编码接口。文字提取保留绘制顺序和坐标，方便构建后续处理流程。
+Chinese text creation supports embedded static TrueType fonts. Standard Western fonts have explicit text-encoding APIs. Text extraction preserves drawing order and coordinates for downstream processing.
 
-## 为什么是 rzpdf
+## Why rzpdf?
 
-**不止生成，也能处理已有文档。** 创建、解析、页面操作与保存共享文档模型，不必把 PDF 仅仅当作最终输出。
+**Work with existing PDFs, not just new ones.** Creation, parsing, page operations, and saving share a document model, so a PDF need not be only the final output.
 
-**核心与渲染分离。** PDF 核心不依赖 Skia，需要页面预览或图像输出时再接入渲染后端。
+**Keep the core separate from rendering.** The PDF core does not depend on Skia; add the renderer when you need previews or image output.
 
-**把修改正确性放在前面。** 高层修改接口使用事务、修订检查与共享资源隔离，帮助避免一次编辑意外影响其他页面。
+**Make edits deliberately.** Higher-level editing APIs use transactions, revision checks, and shared-resource isolation to help prevent an edit from affecting other pages unexpectedly.
 
-**支持范围有据可查。** 通过回归测试、独立工具检查和固定样本视觉验证建立边界，不把“已有接口”当作“完整兼容”。
+**Know what is supported.** Regression tests, independent-tool checks, and visual checks against fixed samples define the supported scope. An available API does not imply universal PDF compatibility.
 
-## 快速开始
+## Quick start
 
-当前建议从源码运行示例。需要支持 Rust 2024 edition 的工具链；首次构建涉及 FreeType、JPEG 等原生依赖，渲染模块还涉及 Skia，请预留构建时间。
+For now, start by running the examples from source. You need a toolchain that supports Rust 2024 edition. The first build uses native dependencies including FreeType and JPEG; building the renderer also involves Skia and may take some time.
 
 ```bash
 git clone https://github.com/rockyzhengwu/rzpdf.git
 cd rzpdf
 
-# 创建两页包含文字、图片和元数据的 PDF
+# Create a two-page PDF with text, images, and metadata
 cargo run -p pdf --locked --example create_document -- created.pdf
 
-# 按绘制顺序提取文字
+# Extract text in drawing order
 cargo run -p pdf --locked --example extract_text -- created.pdf
 ```
 
-### 在代码中创建 PDF
+### Create a PDF in Rust
 
 ```rust
 use pdf::{
@@ -70,52 +70,52 @@ fn main() -> PdfResult<()> {
 }
 ```
 
-页面坐标使用 PDF 用户空间，默认页面原点在左下角。文字必须按所用字体编码，不能直接把中文 UTF-8 当作 PDF 字符码；中文示例见 [create_cjk.rs](pdf/examples/create_cjk.rs)。
+Page coordinates use PDF user space, with the origin at the lower left by default. Text must be encoded for the selected font; Chinese UTF-8 cannot be used directly as PDF character codes. See [create_cjk.rs](pdf/examples/create_cjk.rs) for a Chinese text example.
 
-### 更多工作流
+### More workflows
 
 ```bash
-# 合并文档
+# Merge documents
 cargo run -p pdf --locked --example merge_documents -- merged.pdf first.pdf second.pdf
 
-# 按指定顺序提取页面（索引从 0 开始）
+# Select pages in a specified order (zero-based indexes)
 cargo run -p pdf --locked --example extract_pages -- selected.pdf input.pdf 3 0
 
-# 将页面渲染为 PNG（输出目录中的目标文件须不存在）
+# Render pages as PNGs (target files in the output directory must not exist)
 cargo run -p render --locked --example render_document -- input.pdf preview 144 144
 ```
 
-创建、合并和选页示例会替换指定的现有普通输出文件，请使用新的输出路径。更多示例见 [pdf/examples](pdf/examples) 和 [render/examples](render/examples)。
+The creation, merge, and page-selection examples replace an existing regular output file at the specified path. Use a fresh output path when you need to keep an existing file. More examples are available in [pdf/examples](pdf/examples) and [render/examples](render/examples).
 
-## 当前适用范围
+## Current scope
 
-项目处于早期开发阶段：v0.1 基础工作流和 v0.2 限定内容编辑均已通过工程验收，尚未正式发布，API 仍可能调整。用于实际业务前，请先用自己的样本验证。
+rzpdf is still in early development. The v0.1 core workflows and the limited v0.2 content-editing scope have passed engineering acceptance, but neither version has been formally released, and APIs may change. Validate the library against your own documents before production use.
 
-文字提取不是通用阅读顺序或段落还原；中文支持不等于完整字体排版；渲染也不承诺覆盖所有 PDF 特性。完整批注与表单、增量保存、签名、真正脱敏及 OCR 不属于当前版本范围。覆盖文字或删除绘制操作不等于安全擦除。
+Text extraction does not reconstruct general reading order or paragraphs. Chinese support does not include complete font shaping, and rendering does not cover every PDF feature. Full annotation and form support, incremental saving, signatures, secure redaction, and OCR are outside the current scope. Covering text or removing a drawing operation is not secure erasure.
 
-具体输入限制、字体与图片支持及平台验证范围见 [v0.1 支持矩阵](docs/releases/v0.1-support.md)和 [v0.2 编辑支持矩阵](docs/releases/v0.2-support.md)。
+For input limits, supported fonts and images, and verified platforms, see the [v0.1 support matrix](docs/releases/v0.1-support.md) and [v0.2 editing support matrix](docs/releases/v0.2-support.md). The [v0.3 plan](docs/releases/v0.3.md) describes future font and compatibility work; it is not an accepted feature set.
 
-## 文档与开发
+## Documentation and development
 
-- 使用指南：[文字提取](docs/text-extraction.md) · [图片提取](docs/image-extraction.md) · [内容编辑](docs/content-editing.md)
-- 项目设计：[架构](docs/architecture.md) · [缓存与生命周期](docs/cache-lifecycle.md)
-- 版本演进：[路线图](ROADMAP.md) · [变更记录](CHANGELOG.md)
-- 开发与验证：[任务与实施记录](TODO.md) · [测试说明](docs/testing.md) · [v0.1 验收记录](docs/releases/v0.1-acceptance.md) · [v0.2 验收记录](docs/releases/v0.2-acceptance.md)
+- Guides: [text extraction](docs/text-extraction.md) · [image extraction](docs/image-extraction.md) · [content editing](docs/content-editing.md)
+- Design: [architecture](docs/architecture.md) · [cache and lifecycle](docs/cache-lifecycle.md)
+- Releases: [roadmap](ROADMAP.md) · [changelog](CHANGELOG.md)
+- Development and verification: [tasks and implementation history](TODO.md) · [testing](docs/testing.md) · [v0.1 acceptance](docs/releases/v0.1-acceptance.md) · [v0.2 acceptance](docs/releases/v0.2-acceptance.md)
 
-工作区由三个 crate 组成：`pdf` 提供核心能力，`render` 提供 Skia 渲染后端，`font-data` 提供内置字体与映射数据。
+The workspace has three crates: `pdf` provides the core, `render` provides the Skia backend, and `font-data` supplies bundled fonts and mapping data.
 
-运行回归测试：
+Run the regression tests with:
 
 ```bash
 cargo test --workspace --locked
 ```
 
-欢迎提交包含最小复现和预期结果的 issue。贡献代码时请附相应测试；涉及字体或 PDF 样本时，请确认可以公开分发。
+Issues with a minimal reproduction and expected result are welcome. Please include relevant tests with code contributions, and confirm that any contributed font or PDF samples can be redistributed.
 
-## 许可证
+## License
 
-项目使用 [GNU GPL v3](LICENSE)。内置字体、字宽数据及 CMap 另有来源和许可要求，见 [第三方数据声明](font-data/NOTICE.md)；分发时不能仅附项目根许可证。
+The project is licensed under [GNU GPL v3](LICENSE). Bundled fonts, font metrics, and CMaps have separate provenance and license requirements; see the [third-party data notice](font-data/NOTICE.md). The repository's root license alone is not sufficient for redistribution.
 
 ---
 
-原 README 中的详细接口说明和逐次开发状态已移至 [历史归档](docs/readme-history.md)，当前使用与开发请以上述专题文档为准。
+Detailed API notes and development status from the previous README are preserved in the [historical archive](docs/readme-history.md). Use the linked topic guides for current information.
