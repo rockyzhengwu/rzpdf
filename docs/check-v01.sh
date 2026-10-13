@@ -20,9 +20,13 @@ git diff --binary > "$task_output/tracked.patch"
 git ls-files --others --exclude-standard > "$task_output/untracked.txt"
 # Include untracked implementation, fixtures and gate scripts, unlike HEAD alone.
 task_sources() {
-    rg --files --hidden -g '!.git/**' -g '!fuzz/**' -g '!target/**' -g '!output/**' -g '!tmp/**' \
-        -g '*.rs' -g Cargo.toml -g Cargo.lock -g 'pdf/tests/fixtures/v01/**' \
-        -g 'docs/check-*.sh' -g 'docs/generate-v01-fixture.sh' -g '.github/workflows/ci.yml' |
+    rg --files --hidden -g '*.rs' -g Cargo.toml -g Cargo.lock -g 'pdf/tests/fixtures/v01/**' \
+        -g 'docs/check-*.sh' -g 'docs/check-*.py' -g 'docs/generate-v01-fixture.sh' \
+        -g '.github/workflows/ci.yml' -g 'font-data/cmap-provenance.json' \
+        -g 'font-data/cmaps/**' -g 'font-data/fonts/**' -g 'font-data/afm/**' \
+        -g 'font-data/licenses/**' -g 'docs/licenses/**' \
+        -g '!.git/**' -g '!fuzz/**' -g '!target/**' -g '!output/**' -g '!tmp/**' \
+        -g '!font-data/src/cmap.rs' -g '!font-data/src/fonts/**' -g '!font-data/src/afm/**' |
         LC_ALL=C sort
 }
 task_sources > "$task_output/source-files.txt"
@@ -31,11 +35,12 @@ while IFS= read -r task_file; do
 done < "$task_output/source-files.txt" > "$task_output/source.sha256"
 rustc --version
 cargo --version
-for task_tool in qpdf mutool jq xmllint; do
+for task_tool in qpdf mutool jq xmllint python3; do
     command -v "$task_tool" >/dev/null || { echo "Missing tool: $task_tool" >&2; exit 2; }
 done
 qpdf --version
 mutool -v
+python3 docs/check-cmap-data.py
 qpdf --check pdf/tests/fixtures/v01/mupdf.pdf
 # Validate required inputs before starting the expensive full regression.
 : "${RZPDF_CJK_FONT:?Supply a licensed static TrueType CJK font}"

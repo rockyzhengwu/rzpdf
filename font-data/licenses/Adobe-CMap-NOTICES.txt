@@ -1,6 +1,7 @@
-Distinct copyright/license blocks copied from the 54 bundled CMaps that
-retain Adobe notices. This does not assign a license to the 16 maps without
-such a block; see ../NOTICE.md for the unresolved provenance review.
+Distinct copyright/license blocks copied from the 54 retained bundled CMaps.
+The 11 replacements retain their own Adobe notices and are also covered by
+Adobe-CMap-LICENSE.md. The five unannotated factoring helpers were removed;
+see ../NOTICE.md for provenance and binary-distribution notice requirements.
 
 %%Copyright: -----------------------------------------------------------
 %%Copyright: Copyright 1990-2015 Adobe Systems Incorporated.

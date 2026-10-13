@@ -14,6 +14,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y clang libfontconfig1-dev libfreetype6-dev libgl1-mesa-dev nasm ninja-build pkg-config qpdf mupdf-tools jq libxml2-utils
       - uses: Swatinem/rust-cache@v2
       - run: rustc --version && cargo --version
+      - name: Verify bundled CMap provenance and mappings
+        run: python3 docs/check-cmap-data.py
       - run: cargo test --workspace --locked
       - name: Validate v0.1 creation with independent tools
         run: |

@@ -12,6 +12,8 @@
 
 下文保留现有接口和验证说明；其具体限制仍然有效，不构成所有 PDF 文件均受支持的承诺。
 
+第三方字体和CMap的来源、许可及分发要求见 [数据声明](font-data/NOTICE.md)。CMap来源/映射可离线执行 `python3 docs/check-cmap-data.py` 校验；分发包含这些数据的二进制时须附相关版权及许可声明，不能仅附仓库根许可证。旧的非标准 `GBK-X` / `UniCNS-X` / `UniGB-X` / `UniJIS-X` / `UniKS-X` 内置辅助名称已移除，使用对应标准编码名称。
+
 `replace_page_form_draw(page, &snapshot, operation, &form_handle)` 用同文档Form替换顶层一次Do调用，事务注册页面局部资源名并复制变化内容流，保留重复调用和共享页面。外文档句柄与过期快照拒绝，跨文档Form须先导入；不修改嵌套叶内容或自动匹配替换Form尺寸/Matrix。实色路径Skia像素回归验证单次颜色/尺寸替换、邻接及共享页整图保持和严格保存重开。
 
 `remove_page_form_draw(page, &snapshot, operation)` 删除顶层Contents中一次Form Do调用，保留共享Form对象、重复调用及其他页面；要求当前页面快照，拒绝图片Do和offline叶流快照。它不是嵌套Form内容编辑或安全擦除，已有事务回滚及严格保存重开回归。

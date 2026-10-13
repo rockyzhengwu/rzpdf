@@ -1,0 +1,556 @@
+{
+  "repository": "https://github.com/adobe-type-tools/cmap-resources",
+  "commit": "ecd209bb8c9b7d9a4a7e58900df179cefb92abbb",
+  "release": "20190730",
+  "license": "BSD-3-Clause",
+  "license_file": "font-data/licenses/Adobe-CMap-LICENSE.md",
+  "license_sha256": "feb8b068a417681821823ef2e8995072aa111121fa11f8664038f78717f4497c",
+  "replacements": [
+    {
+      "name": "GBK-EUC-H",
+      "upstream_path": "Adobe-GB1-5/CMap/GBK-EUC-H",
+      "sha256": "6c88b308f122966de14696d819800bc89be2538fa14fa41f474e36b20cea11c6"
+    },
+    {
+      "name": "GBK2K-H",
+      "upstream_path": "Adobe-GB1-5/CMap/GBK2K-H",
+      "sha256": "c7693cc2b7b235dad5ecd428ecc0d56cf9e5245c05eb992816a6cdcb446c97b1"
+    },
+    {
+      "name": "GBKp-EUC-H",
+      "upstream_path": "Adobe-GB1-5/CMap/GBKp-EUC-H",
+      "sha256": "d6ef0e6c393bd065f5b646b7dc87fe8df88f3608a9264fb5727b552418352d5a"
+    },
+    {
+      "name": "UniCNS-UCS2-H",
+      "upstream_path": "Adobe-CNS1-7/CMap/UniCNS-UCS2-H",
+      "sha256": "fe9c7f1557d58875bc4a16edf377ee0d8c579eaee778135adefbbed1f868c017"
+    },
+    {
+      "name": "UniCNS-UTF16-H",
+      "upstream_path": "Adobe-CNS1-7/CMap/UniCNS-UTF16-H",
+      "sha256": "074d175c8c6827184d064f2c48cbe0ba4957bd525fd864184717518acf4db970"
+    },
+    {
+      "name": "UniGB-UCS2-H",
+      "upstream_path": "Adobe-GB1-5/CMap/UniGB-UCS2-H",
+      "sha256": "d2b100a68c016190347c6e0ecee3e7d6d1accd7395d7e803bf88b7ffef156725"
+    },
+    {
+      "name": "UniGB-UTF16-H",
+      "upstream_path": "Adobe-GB1-5/CMap/UniGB-UTF16-H",
+      "sha256": "4edbe1789ffb0564c14e1b245bbd01eb56bc41326f75d8b041de6847d2ee1d20"
+    },
+    {
+      "name": "UniJIS-UCS2-H",
+      "upstream_path": "Adobe-Japan1-7/CMap/UniJIS-UCS2-H",
+      "sha256": "05d064e6b373edf83890e26d7d2a2339482fad265eaf0a2b92ab528af33b5a54"
+    },
+    {
+      "name": "UniJIS-UTF16-H",
+      "upstream_path": "Adobe-Japan1-7/CMap/UniJIS-UTF16-H",
+      "sha256": "8ad46dbc4bd9b62943ad8f0c3c41928a97f0a7f7d36a69bb57bafb0e73e513bc"
+    },
+    {
+      "name": "UniKS-UCS2-H",
+      "upstream_path": "Adobe-Korea1-2/CMap/UniKS-UCS2-H",
+      "sha256": "bb28e3e84154f49c311128a5700cc0187ce4957b10f18dee88089002db7e5501"
+    },
+    {
+      "name": "UniKS-UTF16-H",
+      "upstream_path": "Adobe-Korea1-2/CMap/UniKS-UTF16-H",
+      "sha256": "0a1dc38d8dd4e1f55b5a3ab978a2b091109f88f4d08587bbb7864370cda8cfd5"
+    }
+  ],
+  "removed_helpers": [
+    "GBK-X",
+    "UniCNS-X",
+    "UniGB-X",
+    "UniJIS-X",
+    "UniKS-X"
+  ],
+  "regressions": [
+    {
+      "name": "GBK-EUC-H",
+      "entries": 22118,
+      "mapping_md5": "e8c1338e093e6aa1cdee3a4b72005a81",
+      "codespaces": [
+        [
+          1,
+          0,
+          128
+        ],
+        [
+          2,
+          33088,
+          65278
+        ]
+      ],
+      "wmode": 0
+    },
+    {
+      "name": "GBK-EUC-V",
+      "entries": 22118,
+      "mapping_md5": "87af218234e447ec64faa12a63b8b1e5",
+      "codespaces": [
+        [
+          1,
+          0,
+          128
+        ],
+        [
+          2,
+          33088,
+          65278
+        ]
+      ],
+      "wmode": 1
+    },
+    {
+      "name": "GBK2K-H",
+      "entries": 30224,
+      "mapping_md5": "4658e7f68722bbd544c8e6c9f3bb31b1",
+      "codespaces": [
+        [
+          1,
+          0,
+          127
+        ],
+        [
+          2,
+          33088,
+          65278
+        ],
+        [
+          4,
+          2167439664,
+          4265213497
+        ]
+      ],
+      "wmode": 0
+    },
+    {
+      "name": "GBK2K-V",
+      "entries": 30224,
+      "mapping_md5": "338e93e85e571e85d461d26d8a258f31",
+      "codespaces": [
+        [
+          1,
+          0,
+          127
+        ],
+        [
+          2,
+          33088,
+          65278
+        ],
+        [
+          4,
+          2167439664,
+          4265213497
+        ]
+      ],
+      "wmode": 1
+    },
+    {
+      "name": "GBKp-EUC-H",
+      "entries": 22118,
+      "mapping_md5": "37764fd9ffa87263761d5dc85af95524",
+      "codespaces": [
+        [
+          1,
+          0,
+          128
+        ],
+        [
+          2,
+          33088,
+          65278
+        ]
+      ],
+      "wmode": 0
+    },
+    {
+      "name": "GBKp-EUC-V",
+      "entries": 22118,
+      "mapping_md5": "4bf1b33f11670d3906bd5369139d4c40",
+      "codespaces": [
+        [
+          1,
+          0,
+          128
+        ],
+        [
+          2,
+          33088,
+          65278
+        ]
+      ],
+      "wmode": 1
+    },
+    {
+      "name": "UniCNS-UCS2-H",
+      "entries": 18285,
+      "mapping_md5": "21c3c3db9da67a58970414b742cb0d49",
+      "codespaces": [
+        [
+          2,
+          0,
+          55295
+        ],
+        [
+          2,
+          57344,
+          65535
+        ]
+      ],
+      "wmode": 0
+    },
+    {
+      "name": "UniCNS-UCS2-V",
+      "entries": 18285,
+      "mapping_md5": "2fe07fbd339754fb3892051a00ac6ce4",
+      "codespaces": [
+        [
+          2,
+          0,
+          55295
+        ],
+        [
+          2,
+          57344,
+          65535
+        ]
+      ],
+      "wmode": 1
+    },
+    {
+      "name": "UniCNS-UTF16-H",
+      "entries": 23715,
+      "mapping_md5": "0fb4a7ca40c918a92c3139bd63c57f50",
+      "codespaces": [
+        [
+          2,
+          0,
+          55295
+        ],
+        [
+          2,
+          57344,
+          65535
+        ],
+        [
+          4,
+          3623934976,
+          3690979327
+        ]
+      ],
+      "wmode": 0
+    },
+    {
+      "name": "UniCNS-UTF16-V",
+      "entries": 23715,
+      "mapping_md5": "db91ec62b1a16ced5bfb616e2bf47958",
+      "codespaces": [
+        [
+          2,
+          0,
+          55295
+        ],
+        [
+          2,
+          57344,
+          65535
+        ],
+        [
+          4,
+          3623934976,
+          3690979327
+        ]
+      ],
+      "wmode": 1
+    },
+    {
+      "name": "UniGB-UCS2-H",
+      "entries": 28840,
+      "mapping_md5": "136f847ccdd0bae47a56f9c6af88e009",
+      "codespaces": [
+        [
+          2,
+          0,
+          55295
+        ],
+        [
+          2,
+          57344,
+          65535
+        ]
+      ],
+      "wmode": 0
+    },
+    {
+      "name": "UniGB-UCS2-V",
+      "entries": 28840,
+      "mapping_md5": "6e8f1a6a4a7fd6aedde876ce658640a3",
+      "codespaces": [
+        [
+          2,
+          0,
+          55295
+        ],
+        [
+          2,
+          57344,
+          65535
+        ]
+      ],
+      "wmode": 1
+    },
+    {
+      "name": "UniGB-UTF16-H",
+      "entries": 30217,
+      "mapping_md5": "2ef44db33c7ee8c48c2618982f497d2b",
+      "codespaces": [
+        [
+          2,
+          0,
+          55295
+        ],
+        [
+          2,
+          57344,
+          65535
+        ],
+        [
+          4,
+          3623934976,
+          3690979327
+        ]
+      ],
+      "wmode": 0
+    },
+    {
+      "name": "UniGB-UTF16-V",
+      "entries": 30217,
+      "mapping_md5": "4e1e3f289cf96d214ee2aab0b2650d20",
+      "codespaces": [
+        [
+          2,
+          0,
+          55295
+        ],
+        [
+          2,
+          57344,
+          65535
+        ],
+        [
+          4,
+          3623934976,
+          3690979327
+        ]
+      ],
+      "wmode": 1
+    },
+    {
+      "name": "UniJIS-UCS2-H",
+      "entries": 9772,
+      "mapping_md5": "1d60625dae74ea77c513ff43293e44e9",
+      "codespaces": [
+        [
+          2,
+          0,
+          55295
+        ],
+        [
+          2,
+          57344,
+          65535
+        ]
+      ],
+      "wmode": 0
+    },
+    {
+      "name": "UniJIS-UCS2-HW-H",
+      "entries": 9772,
+      "mapping_md5": "b3696a09497538b3d62f4611d4ec5aef",
+      "codespaces": [
+        [
+          2,
+          0,
+          55295
+        ],
+        [
+          2,
+          57344,
+          65535
+        ]
+      ],
+      "wmode": 0
+    },
+    {
+      "name": "UniJIS-UCS2-HW-V",
+      "entries": 9772,
+      "mapping_md5": "117deb4ba1dbac42c041ba6c2b31c8f9",
+      "codespaces": [
+        [
+          2,
+          0,
+          55295
+        ],
+        [
+          2,
+          57344,
+          65535
+        ]
+      ],
+      "wmode": 1
+    },
+    {
+      "name": "UniJIS-UCS2-V",
+      "entries": 9772,
+      "mapping_md5": "c1f05ec90524fbc28ad3ccec6b5130d0",
+      "codespaces": [
+        [
+          2,
+          0,
+          55295
+        ],
+        [
+          2,
+          57344,
+          65535
+        ]
+      ],
+      "wmode": 1
+    },
+    {
+      "name": "UniJIS-UTF16-H",
+      "entries": 15889,
+      "mapping_md5": "c0d7277a5dc59531e80f9d632e88918f",
+      "codespaces": [
+        [
+          2,
+          0,
+          55295
+        ],
+        [
+          2,
+          57344,
+          65535
+        ],
+        [
+          4,
+          3623934976,
+          3690979327
+        ]
+      ],
+      "wmode": 0
+    },
+    {
+      "name": "UniJIS-UTF16-V",
+      "entries": 15889,
+      "mapping_md5": "009634b57bc56250359c37837fbb2d78",
+      "codespaces": [
+        [
+          2,
+          0,
+          55295
+        ],
+        [
+          2,
+          57344,
+          65535
+        ],
+        [
+          4,
+          3623934976,
+          3690979327
+        ]
+      ],
+      "wmode": 1
+    },
+    {
+      "name": "UniKS-UCS2-H",
+      "entries": 17326,
+      "mapping_md5": "e43678376bdcd75098fe8dc0f824d3f3",
+      "codespaces": [
+        [
+          2,
+          0,
+          55295
+        ],
+        [
+          2,
+          57344,
+          65535
+        ]
+      ],
+      "wmode": 0
+    },
+    {
+      "name": "UniKS-UCS2-V",
+      "entries": 17326,
+      "mapping_md5": "a606142b63043155aa5fdc0a807f71fb",
+      "codespaces": [
+        [
+          2,
+          0,
+          55295
+        ],
+        [
+          2,
+          57344,
+          65535
+        ]
+      ],
+      "wmode": 1
+    },
+    {
+      "name": "UniKS-UTF16-H",
+      "entries": 17488,
+      "mapping_md5": "579d45b508c921460d02dac0affc4d8c",
+      "codespaces": [
+        [
+          2,
+          0,
+          55295
+        ],
+        [
+          2,
+          57344,
+          65535
+        ],
+        [
+          4,
+          3623934976,
+          3690979327
+        ]
+      ],
+      "wmode": 0
+    },
+    {
+      "name": "UniKS-UTF16-V",
+      "entries": 17488,
+      "mapping_md5": "a760418afe4e4dbf03fe56e20874127b",
+      "codespaces": [
+        [
+          2,
+          0,
+          55295
+        ],
+        [
+          2,
+          57344,
+          65535
+        ],
+        [
+          4,
+          3623934976,
+          3690979327
+        ]
+      ],
+      "wmode": 1
+    }
+  ]
+}

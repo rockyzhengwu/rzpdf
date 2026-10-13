@@ -824,3 +824,259 @@ fn bytes_to_u32(bytes: &[u8]) -> u32 {
     }
     res
 }
+
+#[cfg(test)]
+mod licensed_cmap_regressions {
+    use super::Cmap;
+    use md5::{Digest, Md5};
+
+    #[test]
+    fn adobe_replacement_preserves_effective_cids_and_inherited_encodings() {
+        // Captured before replacement, independently checked against Adobe
+        // release 20190730. MD5 is a regression fingerprint, not a trust check.
+        type Case = (
+            &'static str,
+            usize,
+            &'static str,
+            Option<u8>,
+            &'static [(u8, u32, u32)],
+        );
+        let cases: &[Case] = &[
+            (
+                "GBK-EUC-H",
+                22118,
+                "e8c1338e093e6aa1cdee3a4b72005a81",
+                Some(0),
+                &[(1, 0, 128), (2, 33088, 65278)],
+            ),
+            (
+                "GBK-EUC-V",
+                22118,
+                "87af218234e447ec64faa12a63b8b1e5",
+                Some(1),
+                &[(1, 0, 128), (2, 33088, 65278)],
+            ),
+            (
+                "GBK2K-H",
+                30224,
+                "4658e7f68722bbd544c8e6c9f3bb31b1",
+                Some(0),
+                &[(1, 0, 127), (2, 33088, 65278), (4, 2167439664, 4265213497)],
+            ),
+            (
+                "GBK2K-V",
+                30224,
+                "338e93e85e571e85d461d26d8a258f31",
+                Some(1),
+                &[(1, 0, 127), (2, 33088, 65278), (4, 2167439664, 4265213497)],
+            ),
+            (
+                "GBKp-EUC-H",
+                22118,
+                "37764fd9ffa87263761d5dc85af95524",
+                Some(0),
+                &[(1, 0, 128), (2, 33088, 65278)],
+            ),
+            (
+                "GBKp-EUC-V",
+                22118,
+                "4bf1b33f11670d3906bd5369139d4c40",
+                Some(1),
+                &[(1, 0, 128), (2, 33088, 65278)],
+            ),
+            (
+                "UniCNS-UCS2-H",
+                18285,
+                "21c3c3db9da67a58970414b742cb0d49",
+                Some(0),
+                &[(2, 0, 55295), (2, 57344, 65535)],
+            ),
+            (
+                "UniCNS-UCS2-V",
+                18285,
+                "2fe07fbd339754fb3892051a00ac6ce4",
+                Some(1),
+                &[(2, 0, 55295), (2, 57344, 65535)],
+            ),
+            (
+                "UniCNS-UTF16-H",
+                23715,
+                "0fb4a7ca40c918a92c3139bd63c57f50",
+                Some(0),
+                &[
+                    (2, 0, 55295),
+                    (2, 57344, 65535),
+                    (4, 3623934976, 3690979327),
+                ],
+            ),
+            (
+                "UniCNS-UTF16-V",
+                23715,
+                "db91ec62b1a16ced5bfb616e2bf47958",
+                Some(1),
+                &[
+                    (2, 0, 55295),
+                    (2, 57344, 65535),
+                    (4, 3623934976, 3690979327),
+                ],
+            ),
+            (
+                "UniGB-UCS2-H",
+                28840,
+                "136f847ccdd0bae47a56f9c6af88e009",
+                Some(0),
+                &[(2, 0, 55295), (2, 57344, 65535)],
+            ),
+            (
+                "UniGB-UCS2-V",
+                28840,
+                "6e8f1a6a4a7fd6aedde876ce658640a3",
+                Some(1),
+                &[(2, 0, 55295), (2, 57344, 65535)],
+            ),
+            (
+                "UniGB-UTF16-H",
+                30217,
+                "2ef44db33c7ee8c48c2618982f497d2b",
+                Some(0),
+                &[
+                    (2, 0, 55295),
+                    (2, 57344, 65535),
+                    (4, 3623934976, 3690979327),
+                ],
+            ),
+            (
+                "UniGB-UTF16-V",
+                30217,
+                "4e1e3f289cf96d214ee2aab0b2650d20",
+                Some(1),
+                &[
+                    (2, 0, 55295),
+                    (2, 57344, 65535),
+                    (4, 3623934976, 3690979327),
+                ],
+            ),
+            (
+                "UniJIS-UCS2-H",
+                9772,
+                "1d60625dae74ea77c513ff43293e44e9",
+                Some(0),
+                &[(2, 0, 55295), (2, 57344, 65535)],
+            ),
+            (
+                "UniJIS-UCS2-HW-H",
+                9772,
+                "b3696a09497538b3d62f4611d4ec5aef",
+                Some(0),
+                &[(2, 0, 55295), (2, 57344, 65535)],
+            ),
+            (
+                "UniJIS-UCS2-HW-V",
+                9772,
+                "117deb4ba1dbac42c041ba6c2b31c8f9",
+                Some(1),
+                &[(2, 0, 55295), (2, 57344, 65535)],
+            ),
+            (
+                "UniJIS-UCS2-V",
+                9772,
+                "c1f05ec90524fbc28ad3ccec6b5130d0",
+                Some(1),
+                &[(2, 0, 55295), (2, 57344, 65535)],
+            ),
+            (
+                "UniJIS-UTF16-H",
+                15889,
+                "c0d7277a5dc59531e80f9d632e88918f",
+                Some(0),
+                &[
+                    (2, 0, 55295),
+                    (2, 57344, 65535),
+                    (4, 3623934976, 3690979327),
+                ],
+            ),
+            (
+                "UniJIS-UTF16-V",
+                15889,
+                "009634b57bc56250359c37837fbb2d78",
+                Some(1),
+                &[
+                    (2, 0, 55295),
+                    (2, 57344, 65535),
+                    (4, 3623934976, 3690979327),
+                ],
+            ),
+            (
+                "UniKS-UCS2-H",
+                17326,
+                "e43678376bdcd75098fe8dc0f824d3f3",
+                Some(0),
+                &[(2, 0, 55295), (2, 57344, 65535)],
+            ),
+            (
+                "UniKS-UCS2-V",
+                17326,
+                "a606142b63043155aa5fdc0a807f71fb",
+                Some(1),
+                &[(2, 0, 55295), (2, 57344, 65535)],
+            ),
+            (
+                "UniKS-UTF16-H",
+                17488,
+                "579d45b508c921460d02dac0affc4d8c",
+                Some(0),
+                &[
+                    (2, 0, 55295),
+                    (2, 57344, 65535),
+                    (4, 3623934976, 3690979327),
+                ],
+            ),
+            (
+                "UniKS-UTF16-V",
+                17488,
+                "a760418afe4e4dbf03fe56e20874127b",
+                Some(1),
+                &[
+                    (2, 0, 55295),
+                    (2, 57344, 65535),
+                    (4, 3623934976, 3690979327),
+                ],
+            ),
+        ];
+        for &(name, count, expected_md5, wmode, spaces) in cases {
+            let cmap = Cmap::new_from_predefined(name).unwrap();
+            assert_eq!(cmap.wmode(), wmode, "{name}");
+            let mut actual_spaces: Vec<_> = cmap
+                .code_space_range
+                .iter()
+                .map(|s| (s.size, s.low, s.high))
+                .collect();
+            actual_spaces.sort_unstable();
+            assert_eq!(actual_spaces, spaces, "{name}");
+            let mut entries: Vec<_> = cmap
+                .code_to_cids
+                .iter()
+                .filter(|(code, cid)| {
+                    **cid != 0
+                        && cmap
+                            .code_space_range
+                            .iter()
+                            .any(|s| s.is_contain_code(**code))
+                })
+                .map(|(code, cid)| (*code, *cid))
+                .collect();
+            entries.sort_unstable();
+            assert_eq!(entries.len(), count, "{name}");
+            let mut digest = Md5::new();
+            for (code, cid) in entries {
+                digest.update(code.to_be_bytes());
+                digest.update(cid.to_be_bytes());
+            }
+            assert_eq!(format!("{:x}", digest.finalize()), expected_md5, "{name}");
+        }
+        for name in ["GBK-X", "UniCNS-X", "UniGB-X", "UniJIS-X", "UniKS-X"] {
+            assert!(font_data::cmap::get_predefine_cmap_data(name).is_none());
+            assert!(Cmap::new_from_predefined(name).is_err());
+        }
+    }
+}
