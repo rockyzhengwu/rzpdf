@@ -116,7 +116,7 @@ Issues with a minimal reproduction and expected result are welcome. Please inclu
 
 ## License
 
-The project is licensed under [GNU GPL v3](LICENSE). Bundled fonts, font metrics, and CMaps have separate provenance and license requirements; see the [third-party data notice](font-data/NOTICE.md). The repository's root license alone is not sufficient for redistribution.
+Project-owned code is licensed under the [GNU Affero General Public License v3.0 only](LICENSE) (`AGPL-3.0-only`). Bundled fonts, font metrics, and CMaps retain their separate licenses; see the [third-party data notice](font-data/NOTICE.md). The repository's root license alone is not sufficient for redistribution. See the [license transition record](docs/licensing.md) for scope and historical versions.
 
 ---
 

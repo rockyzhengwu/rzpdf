@@ -1,3 +1,6 @@
 [workspace]
 members = ["pdf","render","font-data"]
 resolver = "3"
+
+[workspace.package]
+license = "AGPL-3.0-only"
