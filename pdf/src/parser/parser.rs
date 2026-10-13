@@ -246,6 +246,15 @@ pub fn parse_xref_stream<R: Seek + Read>(
             }
             match t {
                 0 => {
+                    // Compact xref streams commonly encode the reserved free
+                    // object zero as (0, 0, 0), including qpdf. It is never
+                    // allocatable; retain its semantic sentinel generation.
+                    // Do not normalize live entries or other generations.
+                    let gennum = if num == 0 && offset == 0 && gennum == 0 {
+                        65535
+                    } else {
+                        gennum
+                    };
                     entries.insert(
                         num as u32,
                         ObjectInfo::new(num, offset as u64, gennum, ObjectState::Free),
@@ -325,6 +334,7 @@ fn parse_xref_section<R: Seek + Read>(
             }
         }
         objects.extend(objs);
+        next_word = syntax.get_next_word()?;
     }
     if !next_word.is_equal(b"trailer") {
         return Ok(None);
@@ -491,15 +501,26 @@ fn validate_strict_xref_table(xref: &CrossRefTable) -> PdfResult<()> {
             "strict mode requires object 0 to be a free cross-reference entry".to_string(),
         ));
     }
-    if zero.offset() != 0 {
-        return Err(PdfError::ParserError(
-            "strict mode requires object 0 free entry to have offset 0".to_string(),
-        ));
-    }
     if zero.gennum() != 65535 {
         return Err(PdfError::ParserError(
             "strict mode requires object 0 free entry to have generation 65535".to_string(),
         ));
+    }
+    // Object zero points to the first reusable free entry, not necessarily
+    // back to itself. Bound traversal without allocating a visited table.
+    let mut next = zero.offset();
+    let mut traversed = 0;
+    while next != 0 {
+        if traversed >= xref.objects().len() {
+            return Err(PdfError::InvalidReference("cycle in xref free list".into()));
+        }
+        traversed += 1;
+        let number = u32::try_from(next).map_err(|_| PdfError::InvalidReference("xref free-list number overflow".into()))?;
+        let info = xref.lookup(&number).ok_or_else(|| PdfError::InvalidReference("missing xref free-list entry".into()))?;
+        if !matches!(info.state(), ObjectState::Free) || info.gennum() > 65535 {
+            return Err(PdfError::InvalidReference("invalid xref free-list entry".into()));
+        }
+        next = info.offset();
     }
     Ok(())
 }
@@ -687,6 +708,44 @@ mod tests {
         assert!(matches!(free.state(), ObjectState::Free));
         let in_use = xref.lookup(&1).unwrap();
         assert!(matches!(in_use.state(), ObjectState::Normal));
+    }
+
+    #[test]
+    fn multiple_xref_subsections_advance_in_strict_and_compatible_modes() {
+        let bytes = b"%PDF-1.7\nxref\n0 1\n0000000000 65535 f \n3 1\n0000000123 00007 n \ntrailer\n<< /Size 4 >>\nstartxref\n9\n%%EOF\n";
+        for mode in [ParseMode::Strict, ParseMode::Compatible] {
+            let reader = StreamReader::try_new(Cursor::new(bytes)).unwrap();
+            let table = parse_xref(&mut SyntaxParser::with_mode(reader, mode)).unwrap();
+            assert_eq!(table.lookup(&3).unwrap().offset(), 123);
+            assert_eq!(table.lookup(&3).unwrap().gennum(), 7);
+        }
+    }
+
+    #[test]
+    fn strict_free_list_accepts_a_chain_and_rejects_cycles_live_and_missing_targets() {
+        for (target, entry, accepts) in [
+            (1, "0000000000 00008 f ", true),
+            (1, "0000000001 00008 f ", false),
+            (1, "0000000010 00008 n ", false),
+            (3, "0000000000 00008 f ", false),
+        ] {
+            let bytes = format!("%PDF-1.7\nxref\n0 2\n{target:010} 65535 f \n{entry}\ntrailer\n<< /Size 2 >>\nstartxref\n9\n%%EOF\n");
+            let reader = StreamReader::try_new(Cursor::new(bytes.into_bytes())).unwrap();
+            assert_eq!(parse_xref(&mut SyntaxParser::with_mode(reader, ParseMode::Strict)).is_ok(), accepts);
+        }
+    }
+
+    #[test]
+    fn compact_xref_stream_reserved_zero_is_normalized_but_other_generations_are_not() {
+        for (generation, accepts) in [(0u8, true), (1, false)] {
+            let mut bytes = b"1 0 obj\n<< /Type /XRef /Size 1 /W [1 1 1] /Length 3 >>\nstream\n".to_vec();
+            bytes.extend_from_slice(&[0, 0, generation]);
+            bytes.extend_from_slice(b"\nendstream\nendobj\nstartxref\n0\n%%EOF\n");
+            let reader = StreamReader::try_new(Cursor::new(bytes)).unwrap();
+            let result = parse_xref(&mut SyntaxParser::with_mode(reader, ParseMode::Strict));
+            assert_eq!(result.is_ok(), accepts);
+            if let Ok(table) = result { assert_eq!(table.lookup(&0).unwrap().gennum(), 65535); }
+        }
     }
 
     #[test]

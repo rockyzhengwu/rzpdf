@@ -24,11 +24,11 @@ impl AsRef<[u8]> for SourceBytes {
 
 // Retained for the incremental writer, introduced in the next implementation
 // slice. Reader/file constructors intentionally do not claim stable snapshots.
-#[allow(dead_code)]
 struct SourceBaseline {
     bytes: SourceBytes,
     last_xref_offset: u64,
     mode: ParseMode,
+    original_trailer: crate::objects::pdf_dict::PdfDict,
 }
 
 /// Owned seekable input. No Send/Sync guarantee is imposed by the facade.
@@ -41,11 +41,66 @@ pub type OwnedReader = Box<dyn DocumentReader>;
 /// Reader inputs must be 'static; borrowed readers can use the legacy API.
 pub struct Document {
     inner: PdfDocument<OwnedReader>,
-    #[allow(dead_code)] // Consumed by incremental preflight in the next slice.
     source_baseline: Option<SourceBaseline>,
 }
 
 impl Document {
+    /// Append changes to a strict, immutable byte source without rebasing this
+    /// document. Reopen the output to append a subsequent revision.
+    /// Old content remains in the original prefix; this is not secure erasure.
+    /// New documents and file/reader inputs must use full save or be reopened
+    /// with `from_bytes_with_mode(bytes, ParseMode::Strict)` first.
+    pub fn save_incremental_to_bytes(&self) -> PdfResult<Vec<u8>> {
+        self.save_incremental_to_bytes_with_options(Default::default())
+    }
+
+    pub fn save_incremental_to_bytes_with_options(
+        &self,
+        options: super::save_options::IncrementalSaveOptions,
+    ) -> PdfResult<Vec<u8>> {
+        let budget = self.inner.ctx().limits().operation_budget();
+        let bytes = self.save_incremental_with_budget(options, &budget)?;
+        let (bytes, _lease) = bytes.into_reserved_parts();
+        Ok(bytes)
+    }
+
+    pub fn save_incremental_with_budget(
+        &self,
+        options: super::save_options::IncrementalSaveOptions,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<crate::budget::BudgetedBytes> {
+        let baseline = self.source_baseline.as_ref().ok_or_else(|| {
+            PdfError::UnsupportedFeature(
+                "incremental save requires an immutable byte source".into(),
+            )
+        })?;
+        if baseline.mode != ParseMode::Strict {
+            return Err(PdfError::UnsupportedFeature(
+                "incremental save requires strict source parsing".into(),
+            ));
+        }
+        crate::writer::write_incremental(
+            &self.inner,
+            baseline.bytes.as_ref(),
+            baseline.last_xref_offset,
+            &baseline.original_trailer,
+            options,
+            budget,
+        )
+    }
+
+    /// Serialization finishes before writing. A failing caller-owned writer
+    /// may contain partial output; neither source nor document is committed.
+    pub fn save_incremental_to_writer<W: std::io::Write>(&self, output: &mut W) -> PdfResult<()> {
+        output.write_all(&self.save_incremental_to_bytes()?)?;
+        Ok(())
+    }
+
+    /// Atomically replace an independent output file. Never appends in place.
+    pub fn save_incremental_to_file<P: AsRef<Path>>(&self, path: P) -> PdfResult<()> {
+        crate::writer::save_bytes_atomically(path.as_ref(), &self.save_incremental_to_bytes()?)
+    }
+
     pub fn new() -> PdfResult<Self> {
         Self::new_with_options(ParseOptions::default())
     }
@@ -102,12 +157,19 @@ impl Document {
         let last_xref_offset = inner.source_xref_offset.ok_or_else(|| {
             PdfError::DocumentError("parsed source is missing its xref address".into())
         })?;
+        let (original_trailer, _lease) = crate::objects::clone_dict_with_budget(
+            &inner.ctx().trailer(),
+            &options.limits.operation_budget(),
+            options.limits,
+            0,
+        )?;
         Ok(Self {
             inner,
             source_baseline: Some(SourceBaseline {
                 bytes,
                 last_xref_offset,
                 mode: options.mode,
+                original_trailer,
             }),
         })
     }

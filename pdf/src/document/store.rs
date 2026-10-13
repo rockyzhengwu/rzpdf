@@ -169,6 +169,12 @@ pub(crate) struct StoreSnapshot {
     next_obj_num: u32,
 }
 
+impl StoreSnapshot {
+    pub(crate) fn into_entries(self) -> Vec<(ObjectId, StoreEntry)> {
+        self.entries
+    }
+}
+
 impl DocumentStore {
     pub(crate) fn enter_table_budget(&self, budget: &crate::budget::OperationBudget) -> PdfResult<()> {
         self.entries.allocator().enter(budget)

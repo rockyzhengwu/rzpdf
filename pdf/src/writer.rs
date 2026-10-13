@@ -2,6 +2,8 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 mod feature_versions;
+mod incremental;
+pub(crate) use incremental::write_incremental;
 
 use crate::document::PdfDocument;
 use crate::error::{PdfError, PdfResult};
@@ -1340,7 +1342,7 @@ impl Drop for TemporaryOutput {
     }
 }
 
-fn save_bytes_atomically(path: &Path, bytes: &[u8]) -> PdfResult<()> {
+pub(crate) fn save_bytes_atomically(path: &Path, bytes: &[u8]) -> PdfResult<()> {
     save_file_atomically(path, |file| file.write_all(bytes))
 }
 

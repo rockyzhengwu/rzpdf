@@ -65,6 +65,22 @@ impl Default for SaveOptions {
     }
 }
 
+/// Append-only save configuration. Original bytes, including old text and
+/// attachments, remain recoverable: this is NOT redaction or secure erasure.
+#[derive(Debug, Clone, Copy)]
+pub struct IncrementalSaveOptions {
+    /// Includes the original byte prefix and the appended revision.
+    pub max_output_bytes: usize,
+}
+
+impl Default for IncrementalSaveOptions {
+    fn default() -> Self {
+        Self {
+            max_output_bytes: 512 * 1024 * 1024,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub enum StreamCompression {
     #[default]

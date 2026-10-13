@@ -872,6 +872,11 @@ impl<R: Seek + Read> PDFContext<R> {
             })
             .transpose()?
             .unwrap_or(1);
+        // /Size is also an allocation high-water mark. Do not reuse holes or
+        // numbers reserved by an earlier revision with a larger Size.
+        let next_obj_num = next_obj_num.max(
+            cross_ref_table.trailer().get("Size").and_then(PdfObject::as_u32).unwrap_or(0),
+        );
         let trailer = cross_ref_table.take_trailer();
         Ok(PDFContext {
             parser: Some(RefCell::new(parser)),
@@ -928,6 +933,17 @@ impl<R: Seek + Read> PDFContext<R> {
 
     pub fn trailer(&self) -> std::cell::Ref<'_, PdfDict> {
         self.state.trailer.borrow()
+    }
+
+    pub(crate) fn source_xref(&self) -> &CrossRefTable {
+        &self.cross_ref_table
+    }
+
+    pub(crate) fn save_changes_with_budget(
+        &self,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<(crate::document::store::StoreSnapshot, crate::budget::MemoryLease)> {
+        self.state.store.borrow().snapshot_with_budget(budget, self.limits)
     }
 
     pub(crate) fn replace_trailer(&self, trailer: PdfDict) -> PdfResult<()> {
@@ -1129,7 +1145,7 @@ impl<R: Seek + Read> PDFContext<R> {
         self.resolve_source_owned_with_budget(id, budget)
     }
 
-    fn resolve_source_owned_with_budget(
+    pub(crate) fn resolve_source_owned_with_budget(
         &self,
         id: ObjectId,
         budget: &crate::budget::OperationBudget,
