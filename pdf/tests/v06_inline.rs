@@ -669,3 +669,88 @@ fn inline_edit_preserves_neighbor_text_codes_positions_and_unmodified_bytes() {
     assert!(program.source_bytes().starts_with(prefix.as_bytes()));
     assert!(program.source_bytes().ends_with(suffix.as_bytes()));
 }
+
+#[test]
+fn inline_and_xobject_share_pixels_rotation_transform_and_clip() {
+    use pdf::page::page_builder::PageBuilder;
+    for rotation in [0, 90, 180, 270] {
+        let doc = Document::new().unwrap();
+        doc.add_page_with_builder(0, PageBuilder::default().rotation(rotation))
+            .unwrap();
+        let properties = dict(
+            "<< /Subtype /Image /Width 2 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceRGB >>",
+        );
+        let data = vec![255, 0, 0, 0, 0, 255];
+        let object = doc
+            .try_insert_object(PdfObject::PdfStream(PdfStream::new(
+                properties.clone(),
+                data.clone(),
+            )))
+            .unwrap();
+        let name = doc
+            .resources()
+            .register_existing(0, ResourceKind::Image, object)
+            .unwrap();
+        let image = InlineImage::new(properties, data, Limits::default()).unwrap();
+        let mut body = format!("q 0 0 200 200 re W n 0 20 -10 0 30 40 cm /{name} Do ").into_bytes();
+        body.extend_from_slice(&image.to_content_bytes(Limits::default()).unwrap());
+        body.extend_from_slice(b" Q");
+        doc.replace_page_contents(0, body).unwrap();
+        let report = doc
+            .get_page(0)
+            .unwrap()
+            .extract_images_paint_order_report()
+            .unwrap();
+        assert!(report.diagnostics.is_empty());
+        let a = &report.images[0];
+        let b = &report.images[1];
+        assert!(!a.image.is_inline());
+        assert!(b.image.is_inline());
+        assert_eq!(
+            a.image.rgba_buffer().unwrap(),
+            b.image.rgba_buffer().unwrap()
+        );
+        let components = |m: &pdf::geom::matrix::Matrix| [m.a(), m.b(), m.c(), m.d(), m.e(), m.f()];
+        assert_eq!(components(&a.matrix), components(&b.matrix));
+        assert!(!a.graphic_state.clip_path.is_empty());
+        assert_eq!(
+            a.graphic_state.clip_path.elements().len(),
+            b.graphic_state.clip_path.elements().len()
+        );
+    }
+}
+
+#[test]
+fn retained_inline_parser_budget_counts_payload_releases_and_retries() {
+    use pdf::budget::BudgetedBytes;
+    let bytes = raw(b" EI ");
+    let probe = OperationBudget::new(2 * 1024 * 1024);
+    let input = BudgetedBytes::copy_from_slice(&probe, &bytes).unwrap();
+    let parsed =
+        ContentProgram::from_decoded_bytes_with_budget(input, Default::default(), &probe).unwrap();
+    let peak = probe.peak_bytes();
+    assert!(probe.live_bytes() > bytes.len());
+    assert_eq!(
+        parsed.program().operations()[0]
+            .operator
+            .inline_image()
+            .unwrap()
+            .encoded_data(),
+        b" EI "
+    );
+    drop(parsed);
+    assert_eq!(probe.live_bytes(), 0);
+    let pool = OperationBudget::new(peak);
+    let neighbor = pool.reserve(1).unwrap();
+    let input = BudgetedBytes::copy_from_slice(&pool, &bytes).unwrap();
+    assert!(
+        ContentProgram::from_decoded_bytes_with_budget(input, Default::default(), &pool).is_err()
+    );
+    assert_eq!(pool.live_bytes(), 1);
+    drop(neighbor);
+    let input = BudgetedBytes::copy_from_slice(&pool, &bytes).unwrap();
+    let parsed =
+        ContentProgram::from_decoded_bytes_with_budget(input, Default::default(), &pool).unwrap();
+    drop(parsed);
+    assert_eq!(pool.live_bytes(), 0);
+}
