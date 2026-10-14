@@ -11,7 +11,8 @@ It is designed for Rust applications that need to generate PDFs, extract content
 - **Create documents:** Set page sizes, draw text, paths, and images, and write Info or XMP metadata.
 - **Read and extract:** Parse documents, inspect page geometry, extract text, images, and drawing positions, and review parser diagnostics.
 - **Organize pages:** Add, remove, copy, reorder, rotate, and crop pages; import pages across documents, merge files, or select pages in a specified order.
-- **Open and save:** Load from a file or bytes and save to bytes, a writer, or a file, with options to preserve encoded streams or compress unencoded streams.
+- **Open and save:** Load from a file or bytes, choose full rewrites or explicit append-only saves, and preserve encoded streams or compress unencoded streams within the documented input limits.
+- **Protect and sign:** Read and write AES-256 R6 password protection, inspect permissions, or prepare a single invisible approval signature for an external CMS signer. Private keys stay outside the PDF core.
 - **Render and edit:** Use a separate Skia renderer, or edit text, images, and paths within the documented font and source limits, including targeted edits in one-level, non-Group Forms.
 
 Chinese text creation supports embedded static TrueType fonts. Standard Western fonts have explicit text-encoding APIs. Text extraction preserves drawing order and coordinates for downstream processing.
@@ -89,20 +90,22 @@ The creation, merge, and page-selection examples replace an existing regular out
 
 ## Current scope
 
-rzpdf is still in early development. The v0.1 core workflows, limited v0.2 content-editing scope, and the fixed v0.3 font and external-document matrix have passed local engineering checks; no version has been formally released, and APIs may change. Validate the library against your own documents before production use.
+rzpdf is still in early development and APIs may change. Engineering checks cover documented workflows and fixed input matrices, not universal PDF compatibility. No version has been formally released; validate the library against your own documents before production use.
 
-The bounded [v0.4 interaction subset](docs/releases/v0.4.md) has passed local engineering acceptance: flat bookmarks and named destinations, page and URI links, Square annotations, document attachments, and basic text/checkbox AcroForm fields. The [support matrix](docs/releases/v0.4-support.md) lists exact limits; these APIs are not a general annotation or forms implementation.
+Document interactions cover flat bookmarks and named destinations, page and URI links, Square annotations, attachments, and basic text/checkbox AcroForm fields. The [interaction support matrix](docs/releases/v0.4-support.md) lists exact limits; these are not general annotation or forms APIs.
 
-Text extraction does not reconstruct general reading order or paragraphs. Chinese support does not include complete font shaping, and rendering does not cover every PDF feature. Full annotation and form support, incremental saving, signatures, secure redaction, and OCR are outside the current scope. Covering text or removing a drawing operation is not secure erasure.
+The [advanced saving APIs](docs/advanced-saving.md) provide bounded incremental saves, AES-256 R6 protection, and external detached CMS approval signing. These are separate workflows: encrypted incremental saves, encrypted signing and multi-signature updates are unsupported. Signing does not establish certificate trust; see the [v0.5 support matrix](docs/releases/v0.5-support.md).
+
+Text extraction does not reconstruct general reading order or paragraphs. Chinese support does not include complete font shaping, and rendering does not cover every PDF feature. Full annotation/form support, secure redaction and OCR remain outside the scope. Incremental saves retain historical bytes; covering text or removing a drawing operation is not secure erasure.
 
 For input limits, supported fonts and images, and verified platforms, see the [v0.1 support matrix](docs/releases/v0.1-support.md), [v0.2 editing support matrix](docs/releases/v0.2-support.md), and [v0.3 font/document matrix](docs/releases/v0.3-support.md). In v0.3, an unknown unembedded font is an explicit missing-font case; declared aliases are substitutes, not exact reproduction. One selected public Chinese PDF requires compatible parsing of its original bytes, and the positive static-font tests do not imply support for arbitrary CJK or vertical fonts.
 
 ## Documentation and development
 
-- Guides: [text extraction](docs/text-extraction.md) · [image extraction](docs/image-extraction.md) · [content editing](docs/content-editing.md)
+- Guides: [text extraction](docs/text-extraction.md) · [image extraction](docs/image-extraction.md) · [content editing](docs/content-editing.md) · [advanced saving](docs/advanced-saving.md)
 - Design: [architecture](docs/architecture.md) · [cache and lifecycle](docs/cache-lifecycle.md)
-- Releases: [roadmap](ROADMAP.md) · [v0.4 interaction scope](docs/releases/v0.4.md) · [changelog](CHANGELOG.md)
-- Development and verification: [tasks and implementation history](TODO.md) · [testing](docs/testing.md) · [v0.1 acceptance](docs/releases/v0.1-acceptance.md) · [v0.2 acceptance](docs/releases/v0.2-acceptance.md) · [v0.3 acceptance](docs/releases/v0.3-acceptance.md) · [v0.4 acceptance](docs/releases/v0.4-acceptance.md)
+- Releases: [roadmap](ROADMAP.md) · [interaction scope](docs/releases/v0.4.md) · [advanced saving scope](docs/releases/v0.5-support.md) · [changelog](CHANGELOG.md)
+- Development and verification: [tasks and implementation history](TODO.md) · [testing](docs/testing.md) · [v0.1 acceptance](docs/releases/v0.1-acceptance.md) · [v0.2 acceptance](docs/releases/v0.2-acceptance.md) · [v0.3 acceptance](docs/releases/v0.3-acceptance.md) · [v0.4 acceptance](docs/releases/v0.4-acceptance.md) · [v0.5 acceptance](docs/releases/v0.5-acceptance.md)
 
 The workspace has three crates: `pdf` provides the core, `render` provides the Skia backend, and `font-data` supplies bundled fonts and mapping data.
 
@@ -116,7 +119,7 @@ Issues with a minimal reproduction and expected result are welcome. Please inclu
 
 ## License
 
-Project-owned code is licensed under the [GNU Affero General Public License v3.0 only](LICENSE) (`AGPL-3.0-only`). Bundled fonts, font metrics, and CMaps retain their separate licenses; see the [third-party data notice](font-data/NOTICE.md). The repository's root license alone is not sufficient for redistribution. See the [license transition record](docs/licensing.md) for scope and historical versions.
+Project-owned code is licensed under the [GNU Affero General Public License v3.0 only](LICENSE) (`AGPL-3.0-only`). Bundled fonts, font metrics, and CMaps retain their separate licenses; see the [third-party data notice](font-data/NOTICE.md). Dependencies also retain their licenses; see the [security dependency review](docs/releases/v0.5-dependencies.md). The repository's root license alone is not sufficient for redistribution. See the [license transition record](docs/licensing.md) for scope and historical versions.
 
 ---
 

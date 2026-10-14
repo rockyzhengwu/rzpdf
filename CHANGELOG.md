@@ -2,6 +2,18 @@
 
 本文件只记录交付变化，不替代长期任务池或原始测试日志。版本范围见 [ROADMAP](ROADMAP.md)。
 
+## Unreleased — v0.5 高级保存与安全（最终回归中）
+
+新增三个独立工作流，默认保存仍是全量重写：
+
+- 显式增量保存：严格 owned-bytes 输入、传统/流式/混合引用、多级 Prev 链及普通对象新增/替换/删除；保留原字节，不隐式 rebase，不提供源文件原地追加。
+- Standard AES-256 / R=6 密码保护：用户/所有者认证、权限报告、对象级解密及全量 Preserve/Remove/Set；默认保存保留保护，已有保护的移除或替换要求所有者授权。
+- 外部 detached CMS 签名：不可变 prepare/complete 两阶段、单个不可见批准签名、SHA-256 / RSA PKCS#1 v1.5 完整性检查、准备令牌失效/重复使用保护及已签来源编辑拒绝。核心不处理私钥，不将结构报告当成证书信任验证。
+
+加密增量保存、加密签名、多签追加、R=2–5、可见签名、PAdES 和在线信任服务不在本版范围。混合引用历史可增量保存，但签名前须显式全量规范化并重开。增量删除不等于安全擦除。
+
+新增独立 qpdf/libqpdf、MuPDF、pypdf、pyHanko 互操作门禁、预算/权限/回滚负例和固定 1/10/100 MiB 保存基线。升级锁定的 quick-xml、tar、bitstream-io，修复审查中发现的既有依赖问题；新增密码学依赖许可保持独立。`FilterContext` 增加解密状态字段，旧占位 SecurityHandler 改为真实实现；迁移及错误契约见 [高级保存指南](docs/advanced-saving.md)，精确范围见 [支持矩阵](docs/releases/v0.5-support.md)，实测结果见 [验收记录](docs/releases/v0.5-acceptance.md)。未打标签、推送或发布，Cargo 包版本未修改。
+
 ## Unreleased — 项目自有代码许可证变更
 
 2026-10-14，根据维护者确认的代码来源，将项目自有代码从 GPLv3 改为 `AGPL-3.0-only`，同步根 LICENSE、README 和 Cargo 包元数据。第三方字体、度量、CMap 及其他独立授权材料的许可不变；此前版本的授权不撤销，历史提交不重写。范围与来源见 [许可证变更记录](docs/licensing.md)。
