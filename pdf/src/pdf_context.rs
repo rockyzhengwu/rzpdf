@@ -8,7 +8,7 @@ use crate::objects::object_streams::ObjectStreams;
 use crate::{
     document::cross_ref_table::CrossRefTable,
     error::{PdfError, PdfResult},
-    objects::{object_id::ObjectId, pdf_dict::PdfDict, pdf_reference::PdfReference, PdfObject},
+    objects::{PdfObject, object_id::ObjectId, pdf_dict::PdfDict, pdf_reference::PdfReference},
     parser::parser::PdfParser,
 };
 
@@ -24,6 +24,10 @@ pub struct PDFContext<R: Seek + Read> {
     color_depth: Cell<usize>,
     cached_stream_bytes: Cell<usize>,
     source_resolution_depth: Cell<usize>,
+    security: Option<crate::security::SecurityHandler>,
+    encryption_dictionary_id: Option<ObjectId>,
+    form_edit_depth: Cell<u32>,
+    source_has_signatures: OnceCell<bool>,
     state: crate::document::state::DocumentState,
 }
 
@@ -89,10 +93,11 @@ mod loading_tests {
         );
         drop((ids, lease));
         assert_eq!(pool.live_bytes(), 0);
-        assert!(ctx
-            .object_for_write_with_budget(added, &pool)
-            .unwrap()
-            .is_none());
+        assert!(
+            ctx.object_for_write_with_budget(added, &pool)
+                .unwrap()
+                .is_none()
+        );
         let (object, lease) = ctx
             .object_for_write_with_budget(original, &pool)
             .unwrap()
@@ -244,9 +249,11 @@ mod loading_tests {
             assert!(invalid.loading_objects.borrow().is_empty());
             assert_eq!(invalid.cached_stream_bytes.get(), 0);
             for number in [1, 2, 10] {
-                assert!(invalid.indirect_objects[&ObjectId::new(number, 0)]
-                    .get()
-                    .is_none());
+                assert!(
+                    invalid.indirect_objects[&ObjectId::new(number, 0)]
+                        .get()
+                        .is_none()
+                );
             }
         }
     }
@@ -362,9 +369,10 @@ mod loading_tests {
             drop(lease);
             assert_eq!(budget.live_bytes(), 0);
         }
-        assert!(ctx
-            .with_source_resolution(|| ctx.resolve_owned_with_budget(&reference, &budget))
-            .is_err());
+        assert!(
+            ctx.with_source_resolution(|| ctx.resolve_owned_with_budget(&reference, &budget))
+                .is_err()
+        );
         assert_eq!(ctx.source_resolution_depth.get(), 0);
         assert_eq!(budget.live_bytes(), 0);
         ctx.delete_object(id).unwrap();
@@ -723,7 +731,7 @@ mod loading_tests {
 
     #[test]
     fn source_resolution_scope_is_restored_after_error_and_unwind() {
-        use std::panic::{catch_unwind, AssertUnwindSafe};
+        use std::panic::{AssertUnwindSafe, catch_unwind};
         let ctx: PDFContext<std::io::Cursor<Vec<u8>>> =
             PDFContext::new_without_source(PdfDict::default(), Default::default());
         let id = ctx.try_insert_object(PdfObject::PdfNull).unwrap();
@@ -734,12 +742,14 @@ mod loading_tests {
         assert!(result.is_err());
         assert_eq!(ctx.source_resolution_depth.get(), 0);
         assert_eq!(ctx.resolve_object_owned(id).unwrap(), PdfObject::PdfNull);
-        assert!(catch_unwind(AssertUnwindSafe(|| {
-            let _: PdfResult<()> = ctx.with_source_resolution(|| {
-                panic!("scope unwind");
-            });
-        }))
-        .is_err());
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                let _: PdfResult<()> = ctx.with_source_resolution(|| {
+                    panic!("scope unwind");
+                });
+            }))
+            .is_err()
+        );
         assert_eq!(ctx.source_resolution_depth.get(), 0);
         assert_eq!(ctx.resolve_object_owned(id).unwrap(), PdfObject::PdfNull);
     }
@@ -817,6 +827,10 @@ impl<R: Seek + Read> PDFContext<R> {
             color_depth: Cell::new(0),
             cached_stream_bytes: Cell::new(0),
             source_resolution_depth: Cell::new(0),
+            security: None,
+            encryption_dictionary_id: None,
+            form_edit_depth: Cell::new(0),
+            source_has_signatures: OnceCell::new(),
         }
     }
 
@@ -841,14 +855,77 @@ impl<R: Seek + Read> PDFContext<R> {
 
     pub(crate) fn try_new_with_version(
         parser: PdfParser<R>,
+        cross_ref_table: CrossRefTable,
+        source_version: String,
+    ) -> PdfResult<Self> {
+        Self::try_new_with_version_and_password(parser, cross_ref_table, source_version, None)
+    }
+
+    pub(crate) fn try_new_with_version_and_password(
+        mut parser: PdfParser<R>,
         mut cross_ref_table: CrossRefTable,
         source_version: String,
+        password: Option<&[u8]>,
     ) -> PdfResult<Self> {
         let limits = parser.limits();
         let mode = parser.mode();
         if cross_ref_table.objects().len() > limits.max_objects {
             return Err(PdfError::ResourceLimit("document object count".into()));
         }
+        let budget = limits.operation_budget();
+        let mut encryption_dictionary_id = None;
+        let security = match cross_ref_table.trailer().get("Encrypt") {
+            None | Some(PdfObject::PdfNull) => None,
+            Some(encrypt) => {
+                let (_lease, encrypt) = if let Some(id) = encrypt.as_object_id() {
+                    encryption_dictionary_id = Some(id);
+                    let info = cross_ref_table
+                        .lookup_id(id)
+                        .filter(|info| matches!(info.state(), ObjectState::Normal))
+                        .ok_or_else(|| {
+                            PdfError::MalformedSecurity(
+                                "Encrypt must be an uncompressed dictionary".into(),
+                            )
+                        })?;
+                    let (value, lease) = parser.parse_indirect_obj_checked_with_budget(
+                        info.offset(),
+                        id,
+                        &budget,
+                    )?;
+                    (lease, value)
+                } else {
+                    let (value, lease) =
+                        crate::objects::clone_object_with_budget(encrypt, &budget, limits, 0)?;
+                    (lease, value)
+                };
+                let dict = encrypt.as_dict().ok_or_else(|| {
+                    PdfError::MalformedSecurity("Encrypt must be a dictionary".into())
+                })?;
+                // Authenticate before Catalog/source objects are published.
+                let handler = crate::security::SecurityHandler::authenticate(
+                    dict, password, limits, &budget,
+                )?;
+                let ids = cross_ref_table
+                    .trailer()
+                    .get("ID")
+                    .and_then(PdfObject::as_array)
+                    .filter(|ids| ids.len() == 2)
+                    .ok_or_else(|| {
+                        PdfError::MalformedSecurity(
+                            "encrypted document requires two file IDs".into(),
+                        )
+                    })?;
+                if ids
+                    .into_iter()
+                    .any(|id| id.as_string().is_none_or(|value| value.bytes().is_empty()))
+                {
+                    return Err(PdfError::MalformedSecurity(
+                        "file IDs must be nonempty strings".into(),
+                    ));
+                }
+                Some(handler)
+            }
+        };
         let mut indirect_objects = HashMap::new();
         for (objnum, objinfo) in cross_ref_table.objects() {
             if matches!(objinfo.state(), ObjectState::Free) {
@@ -875,7 +952,11 @@ impl<R: Seek + Read> PDFContext<R> {
         // /Size is also an allocation high-water mark. Do not reuse holes or
         // numbers reserved by an earlier revision with a larger Size.
         let next_obj_num = next_obj_num.max(
-            cross_ref_table.trailer().get("Size").and_then(PdfObject::as_u32).unwrap_or(0),
+            cross_ref_table
+                .trailer()
+                .get("Size")
+                .and_then(PdfObject::as_u32)
+                .unwrap_or(0),
         );
         let trailer = cross_ref_table.take_trailer();
         Ok(PDFContext {
@@ -894,6 +975,10 @@ impl<R: Seek + Read> PDFContext<R> {
             color_depth: Cell::new(0),
             cached_stream_bytes: Cell::new(0),
             source_resolution_depth: Cell::new(0),
+            security,
+            encryption_dictionary_id,
+            form_edit_depth: Cell::new(0),
+            source_has_signatures: OnceCell::new(),
         })
     }
 
@@ -942,8 +1027,14 @@ impl<R: Seek + Read> PDFContext<R> {
     pub(crate) fn save_changes_with_budget(
         &self,
         budget: &crate::budget::OperationBudget,
-    ) -> PdfResult<(crate::document::store::StoreSnapshot, crate::budget::MemoryLease)> {
-        self.state.store.borrow().snapshot_with_budget(budget, self.limits)
+    ) -> PdfResult<(
+        crate::document::store::StoreSnapshot,
+        crate::budget::MemoryLease,
+    )> {
+        self.state
+            .store
+            .borrow()
+            .snapshot_with_budget(budget, self.limits)
     }
 
     pub(crate) fn replace_trailer(&self, trailer: PdfDict) -> PdfResult<()> {
@@ -973,8 +1064,102 @@ impl<R: Seek + Read> PDFContext<R> {
         &self.state.source_version
     }
 
+    pub(crate) fn source_security(&self) -> Option<&crate::security::SecurityHandler> {
+        self.security.as_ref()
+    }
+
+    pub(crate) fn encryption_dictionary_id(&self) -> Option<ObjectId> {
+        self.encryption_dictionary_id
+    }
+
+    pub(crate) fn require_annotation_permission(&self) -> PdfResult<()> {
+        self.require_permission("annotations", |p| p.annotate)
+    }
+
+    pub(crate) fn require_assembly_permission(&self) -> PdfResult<()> {
+        self.require_permission("document assembly", |p| p.assemble)
+    }
+
+    fn require_permission(
+        &self,
+        operation: &str,
+        allowed: impl FnOnce(crate::security::Permissions) -> bool,
+    ) -> PdfResult<()> {
+        if let Some(handler) = &self.security {
+            let report = handler.report();
+            if report.authentication == crate::security::Authentication::User
+                && !allowed(report.permissions)
+            {
+                return Err(PdfError::PermissionDenied(operation.into()));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn with_form_edit<T>(&self, edit: impl FnOnce() -> PdfResult<T>) -> PdfResult<T> {
+        if self.security.as_ref().is_some_and(|handler| {
+            handler.report().authentication != crate::security::Authentication::Owner
+                && !handler.report().permissions.fill_forms
+        }) {
+            return Err(PdfError::PermissionDenied("form filling".into()));
+        }
+        struct Grant<'a>(&'a Cell<u32>, u32);
+        impl Drop for Grant<'_> {
+            fn drop(&mut self) {
+                self.0.set(self.1);
+            }
+        }
+        let previous = self.form_edit_depth.get();
+        self.form_edit_depth.set(
+            previous
+                .checked_add(1)
+                .ok_or_else(|| PdfError::ResourceLimit("form edit depth".into()))?,
+        );
+        let _grant = Grant(&self.form_edit_depth, previous);
+        edit()
+    }
+
     fn next_revision(&self) -> PdfResult<u64> {
+        self.require_unsigned_source()?;
+        if self.form_edit_depth.get() == 0
+            && self.security.as_ref().is_some_and(|handler| {
+                handler.report().authentication != crate::security::Authentication::Owner
+                    && !handler.report().permissions.modify
+            })
+        {
+            return Err(PdfError::PermissionDenied("document modification".into()));
+        }
         self.state.next_revision()
+    }
+
+    pub(crate) fn require_unsigned_source(&self) -> PdfResult<()> {
+        let signed = if let Some(value) = self.source_has_signatures.get() {
+            *value
+        } else {
+            let budget = self.limits.operation_budget();
+            let mut signed = false;
+            for info in self.source_xref().objects().values() {
+                if matches!(info.state(), ObjectState::Free)
+                    || Some(info.object_id()) == self.encryption_dictionary_id
+                {
+                    continue;
+                }
+                let (object, _lease) =
+                    self.resolve_source_owned_with_budget(info.object_id(), &budget)?;
+                if crate::signatures::has_signature(&object, self.limits, 0)? {
+                    signed = true;
+                    break;
+                }
+            }
+            let _ = self.source_has_signatures.set(signed);
+            signed
+        };
+        if signed {
+            return Err(PdfError::UnsupportedFeature(
+                "editing or rewriting signature-bearing source is unsupported".into(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn limits(&self) -> crate::parser::options::Limits {
@@ -1131,13 +1316,13 @@ impl<R: Seek + Read> PDFContext<R> {
             let store = self.state.store.borrow();
             match store.entry(id) {
                 Some(StoreEntry::Upsert(object)) => {
-                    return crate::objects::clone_object_with_budget(object, budget, self.limits, 0)
+                    return crate::objects::clone_object_with_budget(object, budget, self.limits, 0);
                 }
                 Some(StoreEntry::Deleted) => {
                     return Err(PdfError::ObjectError(format!(
                         "object has been deleted: {:?}",
                         id
-                    )))
+                    )));
                 }
                 None => {}
             }
@@ -1194,6 +1379,19 @@ impl<R: Seek + Read> PDFContext<R> {
                 .borrow_mut()
                 .parse_indirect_obj_checked_with_budget(info.offset(), id, budget)?;
             (lease, source)
+        };
+        let mut _decrypted_lease = None;
+        let source = if Some(id) != self.encryption_dictionary_id {
+            if let Some(handler) = &self.security {
+                let (object, lease) = self
+                    .with_source_resolution(|| handler.transform(self, &source, false, budget))?;
+                _decrypted_lease = Some(lease);
+                object
+            } else {
+                source
+            }
+        } else {
+            source
         };
         let bytes = source
             .as_stream()
@@ -1269,7 +1467,7 @@ impl<R: Seek + Read> PDFContext<R> {
             match store.entry(id) {
                 Some(StoreEntry::Upsert(object)) => {
                     return crate::objects::clone_object_with_budget(object, budget, self.limits, 0)
-                        .map(Some)
+                        .map(Some);
                 }
                 Some(StoreEntry::Deleted) => return Ok(None),
                 None => {}
@@ -1417,6 +1615,20 @@ impl<R: Seek + Read> PDFContext<R> {
             .ok_or_else(|| PdfError::InvalidReference("document has no source objects".into()))?
             .borrow_mut()
             .parse_indirect_obj_checked(offset, expected)?;
+        let mut _decrypted_lease = None;
+        let obj = if Some(expected) != self.encryption_dictionary_id {
+            if let Some(handler) = &self.security {
+                let (object, lease) = self.with_source_resolution(|| {
+                    handler.transform(self, &obj, false, &self.limits.operation_budget())
+                })?;
+                _decrypted_lease = Some(lease);
+                object
+            } else {
+                obj
+            }
+        } else {
+            obj
+        };
         let bytes = obj
             .as_stream()
             .map(|stream| stream.raw_data().len())

@@ -42,6 +42,7 @@ impl<R: Read + Seek> PdfDocument<R> {
     /// Rotate clockwise relative to the effective (possibly inherited) rotation.
     /// Changes only the leaf page; content, annotations and parent stay unchanged.
     pub fn rotate_page(&self, page_index: u32, degrees: i32) -> PdfResult<()> {
+        self.ctx().require_assembly_permission()?;
         if degrees % 90 != 0 {
             return Err(PdfError::DocumentError(
                 "Page rotation must be a multiple of 90".into(),
@@ -68,6 +69,7 @@ impl<R: Read + Seek> PdfDocument<R> {
     /// Set absolute clockwise rotation, normalized to 0/90/180/270 degrees.
     /// Changes only the leaf page dictionary, not its inherited parent.
     pub fn set_page_rotation(&self, page_index: u32, degrees: i32) -> PdfResult<()> {
+        self.ctx().require_assembly_permission()?;
         if degrees % 90 != 0 {
             return Err(PdfError::DocumentError(
                 "Page rotation must be a multiple of 90".into(),

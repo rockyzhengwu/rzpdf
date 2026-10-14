@@ -15,6 +15,7 @@ impl<R: Read + Seek> PdfDocument<R> {
     /// Low-level mutation of shared streams/resources affects both pages; use
     /// page-scoped replacement/resource APIs for copy-on-write editing.
     pub fn copy_page(&self, source_index: u32, insertion_index: u32) -> PdfResult<ObjectId> {
+        self.ctx().require_assembly_permission()?;
         let source = self.page_location(source_index)?;
         if insertion_index as usize > self.try_page_count()? {
             return Err(PdfError::PageNotExist);

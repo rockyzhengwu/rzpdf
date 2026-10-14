@@ -141,4 +141,6 @@ for kind, flags in [("linearized", ["--linearize"]), ("encrypted", ["--encrypt",
     if target.exists():
         raise AssertionError("rejected input created output")
 
-print(json.dumps({"versions": versions, "results": results, "legacy_warnings": LEGACY_WARNINGS, "evidence": str(EVIDENCE), "visual_review": "pending"}, indent=2))
+report = {"versions": versions, "results": results, "legacy_warnings": LEGACY_WARNINGS, "evidence": str(EVIDENCE), "visual_review": "pending"}
+(EVIDENCE / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+print(json.dumps(report, indent=2))

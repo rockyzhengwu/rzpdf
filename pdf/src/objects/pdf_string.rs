@@ -130,6 +130,10 @@ impl PdfString {
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
+
+    pub(crate) fn with_bytes(&self, bytes: Vec<u8>) -> Self {
+        Self { bytes, is_hex: self.is_hex }
+    }
     pub fn raw_bytes(&self) -> Vec<u8> {
         self.bytes.clone()
     }

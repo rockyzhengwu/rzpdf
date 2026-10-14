@@ -45,6 +45,40 @@ pub struct Document {
 }
 
 impl Document {
+    pub(crate) fn signature_source(&self) -> PdfResult<Option<&[u8]>> {
+        if let Some(source) = &self.source_baseline {
+            if source.mode != ParseMode::Strict {
+                return Err(PdfError::UnsupportedFeature(
+                    "signatures require strict immutable input".into(),
+                ));
+            }
+            return Ok(Some(source.bytes.as_ref()));
+        }
+        if self.inner.source_xref_offset.is_some() {
+            return Err(PdfError::UnsupportedFeature(
+                "signatures require immutable byte input".into(),
+            ));
+        }
+        Ok(None)
+    }
+
+    pub(crate) fn append_signature_with_budget(
+        &self,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<crate::budget::BudgetedBytes> {
+        let source = self
+            .source_baseline
+            .as_ref()
+            .ok_or_else(|| PdfError::UnsupportedFeature("missing signature baseline".into()))?;
+        crate::writer::write_signature_incremental(
+            &self.inner,
+            source.bytes.as_ref(),
+            source.last_xref_offset,
+            &source.original_trailer,
+            Default::default(),
+            budget,
+        )
+    }
     /// Append changes to a strict, immutable byte source without rebasing this
     /// document. Reopen the output to append a subsequent revision.
     /// Old content remains in the original prefix; this is not secure erasure.
@@ -151,9 +185,29 @@ impl Document {
         Self::from_bytes_with_options(bytes, ParseOptions::default())
     }
     pub fn from_bytes_with_options(bytes: Vec<u8>, options: ParseOptions) -> PdfResult<Self> {
+        Self::from_bytes_with_password_bytes(bytes, options, None)
+    }
+
+    pub fn from_bytes_with_password(bytes: Vec<u8>, password: &str) -> PdfResult<Self> {
+        Self::from_bytes_with_password_and_options(bytes, password, ParseOptions::default())
+    }
+
+    pub fn from_bytes_with_password_and_options(
+        bytes: Vec<u8>,
+        password: &str,
+        options: ParseOptions,
+    ) -> PdfResult<Self> {
+        Self::from_bytes_with_password_bytes(bytes, options, Some(password.as_bytes()))
+    }
+
+    fn from_bytes_with_password_bytes(
+        bytes: Vec<u8>,
+        options: ParseOptions,
+        password: Option<&[u8]>,
+    ) -> PdfResult<Self> {
         let bytes = SourceBytes(Rc::new(bytes));
         let reader: OwnedReader = Box::new(Cursor::new(bytes.clone()));
-        let inner = PdfDocument::from_reader_with_options(reader, options)?;
+        let inner = PdfDocument::from_reader_with_password_bytes(reader, options, password)?;
         let last_xref_offset = inner.source_xref_offset.ok_or_else(|| {
             PdfError::DocumentError("parsed source is missing its xref address".into())
         })?;
@@ -189,6 +243,24 @@ impl Document {
         let file = File::open(path)
             .map_err(|error| PdfError::IOError(format!("open document failed: {error}")))?;
         Self::from_reader_with_options(BufReader::new(file), options)
+    }
+
+    pub fn open_with_password<P: AsRef<Path>>(path: P, password: &str) -> PdfResult<Self> {
+        Self::open_with_password_and_options(path, password, ParseOptions::default())
+    }
+
+    pub fn open_with_password_and_options<P: AsRef<Path>>(
+        path: P,
+        password: &str,
+        options: ParseOptions,
+    ) -> PdfResult<Self> {
+        let file = File::open(path)
+            .map_err(|_| PdfError::IOError("open protected document failed".into()))?;
+        let reader: OwnedReader = Box::new(BufReader::new(file));
+        Ok(Self {
+            inner: PdfDocument::from_reader_with_password_and_options(reader, password, options)?,
+            source_baseline: None,
+        })
     }
     pub fn open_with_mode<P: AsRef<Path>>(path: P, mode: ParseMode) -> PdfResult<Self> {
         Self::open_with_options(

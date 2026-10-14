@@ -3,13 +3,14 @@ use std::io::Write;
 use std::path::Path;
 mod feature_versions;
 mod incremental;
-pub(crate) use incremental::write_incremental;
+mod protection;
+pub(crate) use incremental::{write_incremental, write_signature_incremental};
 
 use crate::document::PdfDocument;
 use crate::error::{PdfError, PdfResult};
 use crate::objects::{
-    object_id::ObjectId, pdf_array::PdfArray, pdf_dict::PdfDict, pdf_name::PdfName,
-    pdf_stream::PdfStream, pdf_string::PdfString, PdfObject,
+    PdfObject, object_id::ObjectId, pdf_array::PdfArray, pdf_dict::PdfDict, pdf_name::PdfName,
+    pdf_stream::PdfStream, pdf_string::PdfString,
 };
 
 pub fn save_document<R: std::io::Read + std::io::Seek>(
@@ -45,6 +46,16 @@ fn write_document_with_options<R: std::io::Read + std::io::Seek>(
     document: &PdfDocument<R>,
     options: crate::document::save_options::SaveOptions,
 ) -> PdfResult<Vec<u8>> {
+    if document.ctx().source_security().is_some() {
+        let budget = document.ctx().limits().operation_budget();
+        let bytes = write_protected_document_with_budget(
+            document,
+            options,
+            crate::security::SaveSecurity::Preserve,
+            &budget,
+        )?;
+        return Ok(bytes.into_reserved_parts().0);
+    }
     let mut output = Vec::new();
     write_document_output(document, options, &mut output)?;
     Ok(output)
@@ -53,10 +64,91 @@ fn write_document_with_options<R: std::io::Read + std::io::Seek>(
 fn write_document_output<R: std::io::Read + std::io::Seek>(
     document: &PdfDocument<R>,
     options: crate::document::save_options::SaveOptions,
+    output: &mut impl OutputBuffer,
+) -> PdfResult<()> {
+    write_document_output_with_security(
+        document,
+        options,
+        crate::security::SaveSecurity::Preserve,
+        output,
+    )
+}
+
+fn write_protected_document_with_budget<R: std::io::Read + std::io::Seek>(
+    document: &PdfDocument<R>,
+    options: crate::document::save_options::SaveOptions,
+    policy: crate::security::SaveSecurity<'_>,
+    budget: &crate::budget::OperationBudget,
+) -> PdfResult<crate::budget::BudgetedBytes> {
+    let mut output = SerializationOutput {
+        bytes: crate::budget::BudgetedBytes::copy_from_slice(budget, &[])?,
+        limits: document.ctx().limits(),
+        capacity_limit: options.max_output_bytes,
+    };
+    write_document_output_with_security(document, options, policy, &mut output)?;
+    Ok(output.bytes)
+}
+
+fn write_document_output_with_security<R: std::io::Read + std::io::Seek>(
+    document: &PdfDocument<R>,
+    mut options: crate::document::save_options::SaveOptions,
+    policy: crate::security::SaveSecurity<'_>,
     mut output: &mut impl OutputBuffer,
 ) -> PdfResult<()> {
     // Validate the latest Catalog override as well as the source Header.
     let budget = output.budget();
+    let crypto_budget = budget
+        .clone()
+        .unwrap_or_else(|| document.ctx().limits().operation_budget());
+    let source_security = document.ctx().source_security();
+    document.ctx().require_unsigned_source()?;
+    if source_security.is_none()
+        && document
+            .ctx()
+            .trailer()
+            .get("Encrypt")
+            .is_some_and(|value| !matches!(value, PdfObject::PdfNull))
+    {
+        return Err(PdfError::UnsupportedSecurity(
+            "unauthenticated encryption dictionary".into(),
+        ));
+    }
+    if !matches!(policy, crate::security::SaveSecurity::Preserve)
+        && source_security.is_some_and(|handler| {
+            handler.report().authentication != crate::security::Authentication::Owner
+        })
+    {
+        return Err(PdfError::PermissionDenied(
+            "changing document protection requires owner authentication".into(),
+        ));
+    }
+    let mut _new_security_lease = None;
+    let new_security = match policy {
+        crate::security::SaveSecurity::Set(settings) => {
+            if options
+                .version
+                .is_some_and(|version| version < crate::document::save_options::PdfVersion::V2_0)
+            {
+                return Err(PdfError::UnsupportedSecurity(
+                    "new AES-256 output requires PDF 2.0".into(),
+                ));
+            }
+            options.version = Some(crate::document::save_options::PdfVersion::V2_0);
+            let (handler, lease) = crate::security::SecurityHandler::generate(
+                settings,
+                document.ctx().limits(),
+                &crypto_budget,
+            )?;
+            _new_security_lease = Some(lease);
+            Some(handler)
+        }
+        _ => None,
+    };
+    let security = match policy {
+        crate::security::SaveSecurity::Preserve => source_security,
+        crate::security::SaveSecurity::Remove => None,
+        crate::security::SaveSecurity::Set(_) => new_security.as_ref(),
+    };
     let effective = match budget.as_ref() {
         Some(budget) => document.effective_version_with_budget(budget)?,
         None => document.effective_version()?,
@@ -82,15 +174,11 @@ fn write_document_output<R: std::io::Read + std::io::Seek>(
             "Flate output requires PDF 1.2 or later; select an explicit version upgrade".into(),
         ));
     }
-    if document
-        .ctx()
-        .trailer()
-        .get("Encrypt")
-        .is_some_and(|obj| !matches!(obj, PdfObject::PdfNull))
-    {
-        return Err(PdfError::UnsupportedFeature(
-            "saving encrypted documents requires a document security handler".into(),
-        ));
+    if security.is_some() {
+        document.validate_security_version(
+            effective.max(options.version.unwrap_or(effective)),
+            &crypto_budget,
+        )?;
     }
     validate_serialization_nodes_with_budget(
         document
@@ -126,7 +214,19 @@ fn write_document_output<R: std::io::Read + std::io::Seek>(
         (None, document.ctx().serializable_object_ids())
     };
     let max_obj_num = object_ids.iter().map(|id| id.obj_num()).max().unwrap_or(0);
-    let size = max_obj_num
+    let encryption_id = if security.is_some() {
+        Some(ObjectId::new(
+            max_obj_num
+                .checked_add(1)
+                .ok_or_else(|| PdfError::ResourceLimit("Encrypt object number overflow".into()))?,
+            0,
+        ))
+    } else {
+        None
+    };
+    let size = encryption_id
+        .map(|id| id.obj_num())
+        .unwrap_or(max_obj_num)
         .checked_add(1)
         .ok_or_else(|| PdfError::ResourceLimit("xref output Size overflow".into()))?;
     let (_xref_lease, mut xref_entries) = {
@@ -186,6 +286,20 @@ fn write_document_output<R: std::io::Read + std::io::Seek>(
                 effective.max(options.version.unwrap_or(effective)),
                 budget.as_ref(),
             )?;
+            let mut _encoded_lease = None;
+            let obj = if let Some(handler) = security {
+                let (object, lease) =
+                    handler.transform(document.ctx(), &obj, true, &crypto_budget)?;
+                _encoded_lease = Some(lease);
+                object
+            } else if source_security.is_some() {
+                let (object, lease) =
+                    crate::security::transform::plain_output(document.ctx(), &obj, &crypto_budget)?;
+                _encoded_lease = Some(lease);
+                object
+            } else {
+                obj
+            };
             xref_entries[object_id.obj_num() as usize] =
                 (output.len() as u64, object_id.gen_num(), b'n');
             append_formatted_output(
@@ -198,11 +312,46 @@ fn write_document_output<R: std::io::Read + std::io::Seek>(
         }
     }
 
+    if let (Some(id), Some(handler)) = (encryption_id, security) {
+        validate_serialization_nodes_with_budget(
+            handler.dictionary.into_iter().map(|(_, value)| (value, 2)),
+            1,
+            document.ctx().limits(),
+            Some(&crypto_budget),
+        )?;
+        xref_entries[id.obj_num() as usize] = (output.len() as u64, 0, b'n');
+        append_formatted_output(
+            &mut output,
+            format_args!("{} 0 obj\n", id.obj_num()),
+            options.max_output_bytes,
+        )?;
+        write_dict_limited(&mut output, &handler.dictionary, options.max_output_bytes)?;
+        append_output(&mut output, b"\nendobj\n", options.max_output_bytes)?;
+    }
+
     let xref_offset = output.len() as u64;
     write_xref_table(&mut output, &xref_entries, options.max_output_bytes)?;
+    let mut _protected_trailer_lease = None;
+    let protected_trailer = if security.is_some()
+        || source_security.is_some()
+        || matches!(policy, crate::security::SaveSecurity::Remove)
+    {
+        let (dict, lease) = protection::trailer(
+            &document.ctx().trailer(),
+            encryption_id,
+            document.ctx().limits(),
+            &crypto_budget,
+        )?;
+        _protected_trailer_lease = Some(lease);
+        Some(dict)
+    } else {
+        None
+    };
     write_trailer_limited(
         &mut output,
-        &document.ctx().trailer(),
+        protected_trailer
+            .as_ref()
+            .unwrap_or(&document.ctx().trailer()),
         size,
         document.ctx().limits(),
         options.max_output_bytes,
@@ -389,7 +538,7 @@ fn prepare_document_output_object<R: std::io::Read + std::io::Seek>(
 ) -> PdfResult<PdfObject> {
     use crate::{
         document::save_options::StreamCompression,
-        objects::pdf_stream::{resolve_setting_reference, PdfStream},
+        objects::pdf_stream::{PdfStream, resolve_setting_reference},
     };
     if !matches!(compression, StreamCompression::FlateUnencoded) {
         return Ok(object);
@@ -1286,6 +1435,49 @@ fn validated_number_lexeme(number: &crate::objects::pdf_number::PdfNumber) -> Pd
 }
 
 impl<R: std::io::Read + std::io::Seek> PdfDocument<R> {
+    pub fn save_to_bytes_with_security(
+        &self,
+        options: crate::document::save_options::SaveOptions,
+        policy: crate::security::SaveSecurity<'_>,
+    ) -> PdfResult<Vec<u8>> {
+        let budget = self.ctx().limits().operation_budget();
+        Ok(self
+            .save_with_security_and_budget(options, policy, &budget)?
+            .into_reserved_parts()
+            .0)
+    }
+
+    pub fn save_with_security_and_budget(
+        &self,
+        options: crate::document::save_options::SaveOptions,
+        policy: crate::security::SaveSecurity<'_>,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<crate::budget::BudgetedBytes> {
+        write_protected_document_with_budget(self, options, policy, budget)
+    }
+
+    pub fn save_to_writer_with_security<W: Write>(
+        &self,
+        output: &mut W,
+        options: crate::document::save_options::SaveOptions,
+        policy: crate::security::SaveSecurity<'_>,
+    ) -> PdfResult<()> {
+        output.write_all(&self.save_to_bytes_with_security(options, policy)?)?;
+        Ok(())
+    }
+
+    pub fn save_to_file_with_security<P: AsRef<Path>>(
+        &self,
+        path: P,
+        options: crate::document::save_options::SaveOptions,
+        policy: crate::security::SaveSecurity<'_>,
+    ) -> PdfResult<()> {
+        save_bytes_atomically(
+            path.as_ref(),
+            &self.save_to_bytes_with_security(options, policy)?,
+        )
+    }
+
     pub fn save_to_bytes(&self) -> PdfResult<Vec<u8>> {
         write_document(self)
     }
@@ -1472,15 +1664,17 @@ mod tests {
             let insufficient = OperationBudget::new(peak - 1);
             assert!(super::compress_with_budget(&input, &insufficient, Limits::default()).is_err());
             assert_eq!(insufficient.live_bytes(), 0);
-            assert!(super::compress_with_budget(
-                &input,
-                &pool,
-                Limits {
-                    max_raw_stream_bytes: expected.len() - 1,
-                    ..Default::default()
-                }
-            )
-            .is_err());
+            assert!(
+                super::compress_with_budget(
+                    &input,
+                    &pool,
+                    Limits {
+                        max_raw_stream_bytes: expected.len() - 1,
+                        ..Default::default()
+                    }
+                )
+                .is_err()
+            );
             assert_eq!(pool.live_bytes(), 0);
         }
     }
@@ -1494,12 +1688,14 @@ mod tests {
         assert_eq!(&token.bytes[..token.len], b"18446744073709551615\n");
         let long = [b'x'; 65];
         let mut unchanged = b"prefix".to_vec();
-        assert!(super::append_formatted_output(
-            &mut unchanged,
-            format_args!("{}", std::str::from_utf8(&long).unwrap()),
-            usize::MAX
-        )
-        .is_err());
+        assert!(
+            super::append_formatted_output(
+                &mut unchanged,
+                format_args!("{}", std::str::from_utf8(&long).unwrap()),
+                usize::MAX
+            )
+            .is_err()
+        );
         assert_eq!(unchanged, b"prefix");
         let entries = [(9_999_999_999, 65535, b'f'), (0, 0, b'n')];
         let expected = b"xref\n0 2\n9999999999 65535 f \n0000000000 00000 n \n";
@@ -1992,15 +2188,17 @@ mod tests {
             ));
             assert_eq!(small.live_bytes(), 0);
             assert_eq!(doc.revision(), revision);
-            assert!(super::write_document_with_budget(
-                &doc,
-                SaveOptions {
-                    max_output_bytes: expected.len() - 1,
-                    ..options
-                },
-                &pool
-            )
-            .is_err());
+            assert!(
+                super::write_document_with_budget(
+                    &doc,
+                    SaveOptions {
+                        max_output_bytes: expected.len() - 1,
+                        ..options
+                    },
+                    &pool
+                )
+                .is_err()
+            );
             assert_eq!(pool.live_bytes(), 0);
             let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let _output = super::write_document_with_budget(&doc, options, &pool).unwrap();
@@ -2058,15 +2256,17 @@ mod tests {
                 Err(PdfError::ResourceLimit(_))
             ));
             assert_eq!(small.live_bytes(), 0);
-            assert!(super::serialize_object_with_budget(
-                &object,
-                Limits {
-                    max_decoded_bytes: length - 1,
-                    ..Default::default()
-                },
-                &pool
-            )
-            .is_err());
+            assert!(
+                super::serialize_object_with_budget(
+                    &object,
+                    Limits {
+                        max_decoded_bytes: length - 1,
+                        ..Default::default()
+                    },
+                    &pool
+                )
+                .is_err()
+            );
             assert_eq!(pool.live_bytes(), 0);
             let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let _output =
@@ -2085,7 +2285,7 @@ mod tests {
     fn trailer_direct_streams_are_rejected_before_writing_without_mutation() {
         use crate::{
             document::PdfDocument,
-            objects::{pdf_array::PdfArray, pdf_dict::PdfDict, pdf_stream::PdfStream, PdfObject},
+            objects::{PdfObject, pdf_array::PdfArray, pdf_dict::PdfDict, pdf_stream::PdfStream},
         };
         for nested in 0..3 {
             let doc = PdfDocument::new().unwrap();
@@ -2201,22 +2401,26 @@ mod tests {
         let invalid = PdfObject::PdfArray(PdfArray::from_items(vec![PdfObject::PdfStream(
             PdfStream::new(PdfDict::default(), vec![]),
         )]));
-        assert!(super::validate_serialization_nodes_with_budget(
-            std::iter::once((&invalid, 1)),
-            0,
-            Limits::default(),
-            Some(&pool)
-        )
-        .is_err());
+        assert!(
+            super::validate_serialization_nodes_with_budget(
+                std::iter::once((&invalid, 1)),
+                0,
+                Limits::default(),
+                Some(&pool)
+            )
+            .is_err()
+        );
         assert_eq!(pool.live_bytes(), 0);
         let empty = OperationBudget::new(0);
-        assert!(super::validate_serialization_nodes_with_budget(
-            std::iter::once((&object, 1)),
-            0,
-            Limits::default(),
-            Some(&empty)
-        )
-        .is_err());
+        assert!(
+            super::validate_serialization_nodes_with_budget(
+                std::iter::once((&object, 1)),
+                0,
+                Limits::default(),
+                Some(&empty)
+            )
+            .is_err()
+        );
         assert_eq!(empty.live_bytes(), 0);
     }
 
@@ -2296,7 +2500,7 @@ mod tests {
     #[test]
     fn trailer_serialization_respects_remaining_output_budget() {
         use crate::{
-            objects::{pdf_dict::PdfDict, pdf_string::PdfString, PdfObject},
+            objects::{PdfObject, pdf_dict::PdfDict, pdf_string::PdfString},
             parser::options::Limits,
         };
         let limits = Limits::default();
@@ -2327,7 +2531,7 @@ mod tests {
 
     #[test]
     fn token_preflight_uses_exact_escaped_length_before_output() {
-        use crate::objects::{pdf_name::PdfName, pdf_string::PdfString, PdfObject};
+        use crate::objects::{PdfObject, pdf_name::PdfName, pdf_string::PdfString};
         let string = PdfObject::PdfString(PdfString::new((0..=255).collect(), false));
         let name = PdfObject::PdfName(PdfName::new("A /#中文".into()));
         for object in [string, name] {
@@ -2349,7 +2553,7 @@ mod tests {
     #[test]
     fn limited_serialization_bounds_nested_containers_and_stream_copy() {
         use crate::objects::{
-            pdf_array::PdfArray, pdf_dict::PdfDict, pdf_stream::PdfStream, PdfObject,
+            PdfObject, pdf_array::PdfArray, pdf_dict::PdfDict, pdf_stream::PdfStream,
         };
         let mut array = PdfArray::default();
         for _ in 0..20 {
@@ -2400,7 +2604,7 @@ mod tests {
     fn compression_budget_bounds_finish_bytes_and_input() {
         use crate::{
             document::save_options::StreamCompression,
-            objects::{pdf_dict::PdfDict, pdf_stream::PdfStream, PdfObject},
+            objects::{PdfObject, pdf_dict::PdfDict, pdf_stream::PdfStream},
             parser::options::Limits,
         };
         let empty = PdfObject::PdfStream(PdfStream::new(PdfDict::default(), Vec::new()));
@@ -2411,12 +2615,14 @@ mod tests {
             max_raw_stream_bytes: length,
             ..Default::default()
         };
-        assert!(super::prepare_output_object_with_limits(
-            empty.clone(),
-            StreamCompression::FlateUnencoded,
-            limits
-        )
-        .is_ok());
+        assert!(
+            super::prepare_output_object_with_limits(
+                empty.clone(),
+                StreamCompression::FlateUnencoded,
+                limits
+            )
+            .is_ok()
+        );
         assert!(matches!(
             super::prepare_output_object_with_limits(
                 empty,
@@ -2463,7 +2669,7 @@ mod tests {
     fn output_compression_preserves_encoded_streams_and_rejects_ambiguous_parameters() {
         use crate::{
             document::save_options::StreamCompression,
-            objects::{pdf_dict::PdfDict, pdf_name::PdfName, pdf_stream::PdfStream, PdfObject},
+            objects::{PdfObject, pdf_dict::PdfDict, pdf_name::PdfName, pdf_stream::PdfStream},
         };
         let mut dict = PdfDict::default();
         dict.try_insert(
@@ -2694,7 +2900,7 @@ mod tests {
     #[test]
     fn serialization_preflight_bounds_direct_nesting_and_nodes() {
         use crate::{
-            objects::{pdf_array::PdfArray, PdfObject},
+            objects::{PdfObject, pdf_array::PdfArray},
             parser::options::Limits,
         };
         let mut object = PdfObject::PdfNull;
@@ -2709,42 +2915,50 @@ mod tests {
             ..Default::default()
         };
         assert!(super::validate_serialization_graph(&object, limits).is_ok());
-        assert!(super::validate_serialization_nodes(
-            std::iter::once((&object, 2)),
-            1,
-            Limits {
-                max_depth: 5,
-                max_objects: 5,
-                ..limits
-            }
-        )
-        .is_ok());
-        assert!(super::validate_serialization_nodes(
-            std::iter::once((&object, 2)),
-            1,
-            Limits {
-                max_depth: 4,
-                max_objects: 5,
-                ..limits
-            }
-        )
-        .is_err());
-        assert!(super::validate_serialization_graph(
-            &object,
-            Limits {
-                max_depth: 3,
-                ..limits
-            }
-        )
-        .is_err());
-        assert!(super::validate_serialization_graph(
-            &object,
-            Limits {
-                max_objects: 3,
-                ..limits
-            }
-        )
-        .is_err());
+        assert!(
+            super::validate_serialization_nodes(
+                std::iter::once((&object, 2)),
+                1,
+                Limits {
+                    max_depth: 5,
+                    max_objects: 5,
+                    ..limits
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            super::validate_serialization_nodes(
+                std::iter::once((&object, 2)),
+                1,
+                Limits {
+                    max_depth: 4,
+                    max_objects: 5,
+                    ..limits
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            super::validate_serialization_graph(
+                &object,
+                Limits {
+                    max_depth: 3,
+                    ..limits
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            super::validate_serialization_graph(
+                &object,
+                Limits {
+                    max_objects: 3,
+                    ..limits
+                }
+            )
+            .is_err()
+        );
     }
     #[test]
     fn xref_output_checks_sparse_slot_count_before_allocation() {
@@ -2811,8 +3025,8 @@ mod tests {
     use crate::{
         document::PdfDocument,
         objects::{
-            pdf_array::PdfArray, pdf_dict::PdfDict, pdf_name::PdfName, pdf_number::PdfNumber,
-            pdf_reference::PdfReference, pdf_string::PdfString, PdfObject,
+            PdfObject, pdf_array::PdfArray, pdf_dict::PdfDict, pdf_name::PdfName,
+            pdf_number::PdfNumber, pdf_reference::PdfReference, pdf_string::PdfString,
         },
         page::content_builder::ContentBuilder,
     };
@@ -3492,7 +3706,7 @@ mod tests {
     }
 
     #[test]
-    fn encrypted_document_save_is_rejected_before_writing() {
+    fn unsupported_encryption_is_rejected_at_open_before_writing() {
         let doc = PdfDocument::open("../tests/path-test.pdf").unwrap();
         let bytes = doc.save_to_bytes().unwrap();
         let trailer_offset = bytes
@@ -3505,11 +3719,43 @@ mod tests {
         let position = trailer.windows(2).position(|w| w == b"<<").unwrap() + 2;
         trailer.splice(position..position, b" /Encrypt <<>>".iter().copied());
         encrypted.extend(trailer);
-        let encrypted = PdfDocument::from_bytes(encrypted).unwrap();
         assert!(matches!(
-            encrypted.save_to_bytes(),
-            Err(crate::error::PdfError::UnsupportedFeature(_))
+            PdfDocument::from_bytes(encrypted),
+            Err(crate::error::PdfError::UnsupportedSecurity(_))
         ));
+    }
+
+    #[test]
+    fn removing_mutable_encrypt_entries_cannot_make_default_save_plaintext() {
+        use crate::{
+            document::Document,
+            error::PdfError,
+            security::{EncryptionOptions, SaveSecurity},
+        };
+        let created = Document::new().unwrap();
+        created.add_page(0).unwrap();
+        let settings = EncryptionOptions::new("user", "owner").unwrap();
+        let bytes = created
+            .save_to_bytes_with_security(Default::default(), SaveSecurity::Set(&settings))
+            .unwrap();
+        let owner = Document::from_bytes_with_password(bytes, "owner").unwrap();
+        let id = owner.ctx().encryption_dictionary_id().unwrap();
+        owner.update_object(id, PdfObject::PdfNull).unwrap();
+        let mut trailer = owner.ctx().trailer().clone();
+        trailer.remove("Encrypt");
+        owner.ctx().replace_trailer(trailer).unwrap();
+        let bytes = owner.save_to_bytes().unwrap();
+        assert!(matches!(
+            Document::from_bytes(bytes.clone()),
+            Err(PdfError::PasswordRequired)
+        ));
+        assert_eq!(
+            Document::from_bytes_with_password(bytes, "user")
+                .unwrap()
+                .try_page_count()
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -3529,7 +3775,10 @@ mod tests {
         // sh is now implemented for types 2/3; keep this diagnostic fixture
         // genuinely unsupported rather than referencing a missing resource.
         let mut shading = PdfDict::default();
-        shading.insert("ShadingType".into(), PdfObject::PdfNumber(crate::objects::pdf_number::PdfNumber::new(7.0)));
+        shading.insert(
+            "ShadingType".into(),
+            PdfObject::PdfNumber(crate::objects::pdf_number::PdfNumber::new(7.0)),
+        );
         let mut shadings = PdfDict::default();
         shadings.insert("S".into(), PdfObject::PdfDict(shading));
         resources.insert("Shading".into(), PdfObject::PdfDict(shadings));
@@ -3838,9 +4087,11 @@ mod tests {
                 panic!("Expected path");
             };
             assert_eq!(first.graphic_state().clip_path.elements().len(), 1);
-            assert!(first.graphic_state().clip_path.elements()[0]
-                .path
-                .is_empty());
+            assert!(
+                first.graphic_state().clip_path.elements()[0]
+                    .path
+                    .is_empty()
+            );
             let PageObject::Path(second) = &list.objects()[1] else {
                 panic!("Expected path");
             };
@@ -3877,13 +4128,14 @@ mod tests {
         assert_eq!((curve.p1().x(), curve.p1().y()), (10.0, 20.0));
         doc.replace_page_contents(index, b"10 20 m 30 40 l n S".to_vec())
             .unwrap();
-        assert!(doc
-            .get_page(index)
-            .unwrap()
-            .display_list()
-            .unwrap()
-            .objects()
-            .is_empty());
+        assert!(
+            doc.get_page(index)
+                .unwrap()
+                .display_list()
+                .unwrap()
+                .objects()
+                .is_empty()
+        );
     }
 
     #[test]

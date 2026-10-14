@@ -162,7 +162,11 @@ fn source_preflight_cannot_be_bypassed_by_overwriting_signature_objects() {
         let id = created.try_insert_object(PdfObject::PdfDict(dict)).unwrap();
         let source = created.save_to_bytes().unwrap();
         let document = open(source);
-        document.update_object(id, PdfObject::PdfNull).unwrap();
+        if key == "Linearized" {
+            document.update_object(id, PdfObject::PdfNull).unwrap();
+        } else {
+            assert!(document.update_object(id, PdfObject::PdfNull).is_err());
+        }
         assert!(
             matches!(
                 document.save_incremental_to_bytes(),

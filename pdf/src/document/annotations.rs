@@ -107,6 +107,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         rect: [f32; 4],
         color: [f32; 3],
     ) -> PdfResult<()> {
+        self.ctx().require_annotation_permission()?;
         if self.effective_version()? < super::save_options::PdfVersion::V1_4 {
             return Err(PdfError::UnsupportedFeature(
                 "Square annotation writing requires PDF 1.4 or later".into(),

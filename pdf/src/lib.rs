@@ -14,3 +14,5 @@ pub mod parser;
 pub mod path;
 pub mod pdf_context;
 pub mod writer;
+pub mod security;
+pub mod signatures;

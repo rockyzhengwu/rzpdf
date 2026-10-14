@@ -13,11 +13,14 @@ pub mod run_length;
 
 use crate::{
     error::{PdfError, PdfResult},
-    objects::{pdf_dict::PdfDict, PdfObject},
+    objects::{PdfObject, pdf_dict::PdfDict},
 };
 
 #[derive(Clone, Copy)]
 pub struct FilterContext<'a> {
+    /// True only when a document parser already applied the explicit Crypt
+    /// stage. Does not authenticate or decrypt caller-owned ciphertext.
+    pub crypt_already_processed: bool,
     pub stream_dict: Option<&'a PdfDict>,
     pub jbig2_globals: Option<&'a [u8]>,
     pub max_decoded_bytes: usize,
@@ -27,6 +30,7 @@ pub struct FilterContext<'a> {
 impl Default for FilterContext<'_> {
     fn default() -> Self {
         Self {
+            crypt_already_processed: false,
             stream_dict: None,
             jbig2_globals: None,
             max_decoded_bytes: crate::parser::options::Limits::default().max_decoded_bytes,
@@ -320,7 +324,14 @@ pub fn apply_filter_with_context(
         }
         "Crypt" => {
             check_output_size(0, input.len(), context.max_decoded_bytes, "Crypt")?;
-            crypt::crypt_decode(input, params)
+            crypt::crypt_decode(
+                input,
+                if context.crypt_already_processed {
+                    None
+                } else {
+                    params
+                },
+            )
         }
         "JPXDecode" => jpx::jpx_decode(input, params, context),
         "JBIG2Decode" => jbig2::jbig2_decode(input, params, context),
@@ -376,9 +387,16 @@ pub fn apply_filter_with_budget(
         "LZW" | "LZWDecode" => {
             lzw::lzw_decode_with_budget(input, params, context.max_decoded_bytes, budget)
         }
-        "Crypt" => {
-            crypt::crypt_decode_with_budget(input, params, context.max_decoded_bytes, budget)
-        }
+        "Crypt" => crypt::crypt_decode_with_budget(
+            input,
+            if context.crypt_already_processed {
+                None
+            } else {
+                params
+            },
+            context.max_decoded_bytes,
+            budget,
+        ),
         "DCT" | "DCTDecode" => dct::dct_decode_with_budget(input, context, budget),
         "CCF" | "CCITTFaxDecode" => {
             ccittfax::ccittfax_decode_with_budget(input, params, context.max_decoded_bytes, budget)

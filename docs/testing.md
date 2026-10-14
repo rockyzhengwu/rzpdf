@@ -1,5 +1,31 @@
 # 解析回归与异常输入验证
 
+## v0.5 专项和独立门禁
+
+当前完成状态以 [v0.5 验收记录](releases/v0.5-acceptance.md) 为准。
+普通 Rust 回归不依赖 Poppler、qpdf 或 OpenSSL；独立互操作门禁需另行运行，
+缺工具不算通过。没有开启 fuzz，也不需要修复本机 Poppler 的旧 libtiff 依赖。
+
+```bash
+cargo test -p pdf --locked --test v05_incremental --test v05_security --test v05_signatures
+cargo build -p pdf --locked --example v05_incremental --example v05_security --example v05_sign
+PYTHONPATH=tmp/pdfs/v05-verifiers:tmp/pdfs/python python3 docs/check-v05-incremental.py
+PYTHONPATH=tmp/pdfs/v05-verifiers:tmp/pdfs/python python3 docs/check-v05-security.py
+PYTHONPATH=tmp/pdfs/v05-sign-verifiers:tmp/pdfs/v05-verifiers-py311:tmp/pdfs/python python3.11 docs/check-v05-signatures.py
+python3 docs/check-cmap-data.py
+cargo test --workspace --locked -j 2 --timings
+```
+
+示例的独立环境是本地隔离的 pikepdf/libqpdf、pypdf 和 pyHanko；脚本会生成
+新的 `tmp/pdfs/v05-*` 证据目录及 report.json，不覆盖旧证据。签名门禁只生成
+合成测试证书/私钥；信任根显式指定为该本地测试证书，关闭网络证书抓取，
+不能解释为生产证书可信。原始日志、退出码、固定源码提交和视觉复核需登记。
+
+编译的 `-j 2` 与测试 `-- --test-threads=2` 是两种不同并发控制。
+本机 macOS 曾在进程启动和过程宏动态库加载时长时间无输出；先看是否已出现
+`running N tests`、CPU 和采样栈，不把尚未启动的测试当作通过或 PDF 死循环。
+临时签名仅用于本地生成产物，未修改系统安全策略；不要求使用者禁用安全检查。
+
 ## 操作级对象表预算接入（2026-10-08，回归通过）
 
 工作区最终验收：原session1967退出0，`cargo test --workspace --locked --offline --quiet` 共46组、938项通过、0失败、0忽略，日志 `/tmp/rzpdf-table-budget-full-workspace.log`。Rust源码在验收期间保持冻结；此结果取代下段的待确认状态，不表示完整AR-03已完成。

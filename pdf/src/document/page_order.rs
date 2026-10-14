@@ -10,6 +10,7 @@ impl<R: Read + Seek> PdfDocument<R> {
     /// Keeps page IDs, tree slots and Counts; materializes inherited attributes
     /// when a page moves to a different parent. Does not rewrite outlines/labels.
     pub fn reorder_pages(&self, order: &[u32]) -> PdfResult<()> {
+        self.ctx().require_assembly_permission()?;
         let entries = self.collect_page_entries()?;
         if order.len() != entries.len() {
             return Err(PdfError::DocumentError(

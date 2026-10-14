@@ -39,7 +39,16 @@ impl ObjectInfo {
     }
 
     pub fn object_id(&self) -> ObjectId {
-        ObjectId::new(self.objnum, self.gennum)
+        // The third xref-stream field is an index for compressed entries, not
+        // a generation. Their logical indirect object ID always has generation 0.
+        ObjectId::new(
+            self.objnum,
+            if matches!(self.state, ObjectState::Compressed) {
+                0
+            } else {
+                self.gennum
+            },
+        )
     }
 }
 
@@ -119,6 +128,7 @@ mod tests {
         assert!(table.lookup_id(ObjectId::new(1, 3)).is_some());
         assert!(table.lookup_id(ObjectId::new(1, 0)).is_none());
         assert!(table.lookup_id(ObjectId::new(2, 0)).is_some());
+        assert_eq!(table.lookup(&2).unwrap().object_id(), ObjectId::new(2, 0));
         for generation in [1, 7, u32::MAX] {
             assert!(table.lookup_id(ObjectId::new(2, generation)).is_none());
         }

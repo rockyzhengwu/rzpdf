@@ -195,6 +195,7 @@ pub fn parse_xref_stream<R: Seek + Read>(
                 jbig2_globals: None,
                 max_decoded_bytes: syntax.limits().max_decoded_bytes,
                 max_image_pixels: syntax.limits().max_image_pixels,
+                crypt_already_processed: false,
             },
         )
         .map_err(|e| PdfError::ParserError(format!("xref stream filter decode failed: {e}")))?,

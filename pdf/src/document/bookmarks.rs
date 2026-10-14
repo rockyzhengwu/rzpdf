@@ -165,6 +165,7 @@ impl<R: Read + Seek> PdfDocument<R> {
     /// Append a top-level bookmark pointing at the entire page (`/Fit`).
     /// Existing nested/action outlines are left untouched and rejected.
     pub fn add_flat_bookmark(&self, title: &str, page_index: u32) -> PdfResult<()> {
+        self.ctx().require_assembly_permission()?;
         let title = PdfString::from_text_with_limits(title, &self.ctx().limits())?;
         self.edit_transaction(|doc| {
             let page = doc.page_location(page_index)?;
@@ -227,6 +228,7 @@ impl<R: Read + Seek> PdfDocument<R> {
 
     /// Rename one supported top-level bookmark by zero-based outline position.
     pub fn rename_flat_bookmark(&self, index: usize, title: &str) -> PdfResult<()> {
+        self.ctx().require_assembly_permission()?;
         let title = PdfString::from_text_with_limits(title, &self.ctx().limits())?;
         self.edit_transaction(|doc| {
             let (_, nodes) = doc.flat_bookmark_nodes()?;
@@ -245,6 +247,7 @@ impl<R: Read + Seek> PdfDocument<R> {
     /// Unlink one supported top-level bookmark. Old object bytes may remain in
     /// the file; this is not a secure deletion operation.
     pub fn remove_flat_bookmark(&self, index: usize) -> PdfResult<()> {
+        self.ctx().require_assembly_permission()?;
         self.edit_transaction(|doc| {
             let (root_id, nodes) = doc.flat_bookmark_nodes()?;
             let root_id = root_id.ok_or_else(|| PdfError::DocumentError("no Outlines".into()))?;

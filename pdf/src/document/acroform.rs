@@ -356,6 +356,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         field_name: &str,
         value: FormValue,
     ) -> PdfResult<()> {
+        self.ctx().require_annotation_permission()?;
         if self.effective_version()? < super::save_options::PdfVersion::V1_2 {
             return Err(PdfError::UnsupportedFeature(
                 "AcroForm requires PDF 1.2 or later".into(),
@@ -483,6 +484,11 @@ impl<R: Read + Seek> PdfDocument<R> {
     }
 
     pub fn set_form_value(&self, field_name: &str, value: FormValue) -> PdfResult<()> {
+        self.ctx()
+            .with_form_edit(|| self.set_form_value_inner(field_name, value))
+    }
+
+    fn set_form_value_inner(&self, field_name: &str, value: FormValue) -> PdfResult<()> {
         if self.effective_version()? < super::save_options::PdfVersion::V1_2 {
             return Err(PdfError::UnsupportedFeature(
                 "AcroForm requires PDF 1.2 or later".into(),

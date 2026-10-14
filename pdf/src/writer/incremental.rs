@@ -40,6 +40,7 @@ fn inspect(
     limits: Limits,
     depth: usize,
     nodes: &mut usize,
+    allow_signature: bool,
 ) -> PdfResult<()> {
     if depth > limits.max_depth || *nodes >= limits.max_objects {
         return Err(PdfError::ResourceLimit(
@@ -56,25 +57,44 @@ fn inspect(
         if dict.contains_key("Linearized") {
             return Err(unsupported("incremental save of linearized input"));
         }
-        if dict.contains_key("ByteRange")
-            || dict.contains_key("SigFlags")
-            || dict.contains_key("Perms")
-            || ["FT", "Type"].iter().any(|key| {
-                dict.get(key)
-                    .and_then(PdfObject::as_name)
-                    .is_some_and(|name| name.name() == "Sig")
-            })
+        if !allow_signature
+            && (dict.contains_key("ByteRange")
+                || dict
+                    .get("SigFlags")
+                    .is_some_and(|value| value.as_u32() != Some(0))
+                || dict.contains_key("Perms")
+                || ["FT", "Type"].iter().any(|key| {
+                    dict.get(key)
+                        .and_then(PdfObject::as_name)
+                        .is_some_and(|name| name.name() == "Sig")
+                }))
         {
             return Err(unsupported(
                 "incremental save of signed or signature-bearing input",
             ));
         }
         for (_, child) in dict {
-            inspect(child, changes, check_deleted, limits, depth + 1, nodes)?;
+            inspect(
+                child,
+                changes,
+                check_deleted,
+                limits,
+                depth + 1,
+                nodes,
+                allow_signature,
+            )?;
         }
     } else if let PdfObject::PdfArray(array) = object {
         for child in array {
-            inspect(child, changes, check_deleted, limits, depth + 1, nodes)?;
+            inspect(
+                child,
+                changes,
+                check_deleted,
+                limits,
+                depth + 1,
+                nodes,
+                allow_signature,
+            )?;
         }
     } else if let PdfObject::PdfReference(reference) = object {
         if check_deleted && matches!(entry(changes, reference.id()), Some(StoreEntry::Deleted)) {
@@ -153,6 +173,31 @@ pub(crate) fn write_incremental<R: std::io::Read + std::io::Seek>(
     options: IncrementalSaveOptions,
     budget: &OperationBudget,
 ) -> PdfResult<BudgetedBytes> {
+    write_incremental_inner(document, source, prev, original, options, budget, false)
+}
+
+// Private capability: only signature preparation uses this on an isolated
+// unsigned snapshot. Source inspection is NEVER bypassed.
+pub(crate) fn write_signature_incremental<R: std::io::Read + std::io::Seek>(
+    document: &PdfDocument<R>,
+    source: &[u8],
+    prev: u64,
+    original: &PdfDict,
+    options: IncrementalSaveOptions,
+    budget: &OperationBudget,
+) -> PdfResult<BudgetedBytes> {
+    write_incremental_inner(document, source, prev, original, options, budget, true)
+}
+
+fn write_incremental_inner<R: std::io::Read + std::io::Seek>(
+    document: &PdfDocument<R>,
+    source: &[u8],
+    prev: u64,
+    original: &PdfDict,
+    options: IncrementalSaveOptions,
+    budget: &OperationBudget,
+    allow_signature: bool,
+) -> PdfResult<BudgetedBytes> {
     let limit = options.max_output_bytes;
     if source.len() > limit
         || prev
@@ -209,7 +254,7 @@ pub(crate) fn write_incremental<R: std::io::Read + std::io::Seek>(
                     .resolve_source_owned_with_budget(*id, budget)?;
                 (lease, object)
             };
-            inspect(&object, &changes, false, limits, 1, &mut 0)?;
+            inspect(&object, &changes, false, limits, 1, &mut 0, false)?;
             if structural_stream_type(&object).is_some() && entry(&changes, *id).is_some() {
                 return Err(unsupported(
                     "incremental edits to structural xref/object-stream containers",
@@ -267,11 +312,12 @@ pub(crate) fn write_incremental<R: std::io::Read + std::io::Seek>(
                 limits,
                 1,
                 &mut 0,
+                allow_signature,
             )?;
         }
     }
     for (_, object) in &current {
-        inspect(object, &changes, true, limits, 1, &mut 0)?;
+        inspect(object, &changes, true, limits, 1, &mut 0, allow_signature)?;
     }
     let mut output = SerializationOutput {
         bytes: BudgetedBytes::copy_from_slice(budget, &[])?,

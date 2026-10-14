@@ -10,12 +10,12 @@ use crate::{
     geom::rectangle::Rectangle,
     io::stream_reader::StreamReader,
     objects::{
-        object_id::ObjectId, pdf_array::PdfArray, pdf_dict::PdfDict, pdf_name::PdfName,
-        pdf_number::PdfNumber, pdf_reference::PdfReference, pdf_stream::PdfStream, PdfObject,
+        PdfObject, object_id::ObjectId, pdf_array::PdfArray, pdf_dict::PdfDict, pdf_name::PdfName,
+        pdf_number::PdfNumber, pdf_reference::PdfReference, pdf_stream::PdfStream,
     },
-    page::{content_builder::ContentBuilder, PdfPage},
+    page::{PdfPage, content_builder::ContentBuilder},
     parser::{
-        parser::{parse_xref_with_offset, PdfParser},
+        parser::{PdfParser, parse_xref_with_offset},
         syntax::SyntaxParser,
     },
     pdf_context::PDFContext,
@@ -27,8 +27,6 @@ pub mod attachments;
 pub mod bookmarks;
 pub mod catalog;
 mod content_edit;
-mod text_event_edit;
-pub mod subset_text_edit;
 pub mod cross_ref_table;
 pub mod destinations;
 pub mod embedded_font;
@@ -38,6 +36,8 @@ pub mod metadata;
 mod nested_edit;
 pub mod owned;
 mod span_tree;
+pub mod subset_text_edit;
+mod text_event_edit;
 pub use owned::Document;
 mod page_copy;
 mod page_geometry;
@@ -204,18 +204,106 @@ impl<R: Seek + Read> PdfDocument<R> {
         reader: R,
         options: crate::parser::options::ParseOptions,
     ) -> PdfResult<PdfDocument<R>> {
+        Self::from_reader_with_password_bytes(reader, options, None)
+    }
+
+    pub fn from_reader_with_password_and_options(
+        reader: R,
+        password: &str,
+        options: crate::parser::options::ParseOptions,
+    ) -> PdfResult<Self> {
+        Self::from_reader_with_password_bytes(reader, options, Some(password.as_bytes()))
+    }
+
+    pub(crate) fn from_reader_with_password_bytes(
+        reader: R,
+        options: crate::parser::options::ParseOptions,
+        password: Option<&[u8]>,
+    ) -> PdfResult<Self> {
         let reader = StreamReader::try_new(reader)?;
         let mut syntax = SyntaxParser::with_options(reader, options);
         let version = syntax.read_header()?.version().to_string();
         let (cross_ref_table, source_xref_offset) = parse_xref_with_offset(&mut syntax)?;
         let parser = PdfParser::new(syntax.with_xref_table(cross_ref_table.clone()));
-        let ctx = PDFContext::try_new_with_version(parser, cross_ref_table, version)?;
+        let ctx = PDFContext::try_new_with_version_and_password(
+            parser,
+            cross_ref_table,
+            version,
+            password,
+        )?;
         let catalog = Catalog::try_new(&ctx)?;
-        Ok(PdfDocument {
+        let document = PdfDocument {
             ctx,
             catalog,
             source_xref_offset: Some(source_xref_offset),
-        })
+        };
+        if document.ctx.source_security().is_some() {
+            let budget = document.ctx.limits().operation_budget();
+            document.validate_security_version(
+                document.effective_version_with_budget(&budget)?,
+                &budget,
+            )?;
+        }
+        Ok(document)
+    }
+
+    pub fn security_report(&self) -> Option<crate::security::SecurityReport> {
+        self.ctx.source_security().map(|handler| handler.report())
+    }
+
+    pub(crate) fn validate_security_version(
+        &self,
+        version: save_options::PdfVersion,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<()> {
+        if version >= save_options::PdfVersion::V2_0 {
+            return Ok(());
+        }
+        if version != save_options::PdfVersion::V1_7 {
+            return Err(PdfError::UnsupportedSecurity(
+                "R6 requires PDF 2.0 or PDF 1.7 extension level 8".into(),
+            ));
+        }
+        let root = self
+            .ctx
+            .trailer()
+            .get("Root")
+            .and_then(PdfObject::as_object_id)
+            .ok_or_else(|| PdfError::MalformedSecurity("encrypted Root must be indirect".into()))?;
+        let (mut value, mut lease) = self.ctx.resolve_owned_with_budget(
+            &PdfObject::PdfReference(PdfReference::from_id(root)),
+            budget,
+        )?;
+        for key in ["Extensions", "ADBE"] {
+            let next = value
+                .as_dict()
+                .and_then(|dict| dict.get(key))
+                .ok_or_else(|| {
+                    PdfError::UnsupportedSecurity("missing PDF 1.7 R6 extension declaration".into())
+                })?;
+            let (next, next_lease) = self.ctx.resolve_owned_with_budget(next, budget)?;
+            value = next;
+            lease = next_lease;
+        }
+        let dict = value
+            .as_dict()
+            .ok_or_else(|| PdfError::MalformedSecurity("R6 extension dictionary".into()))?;
+        if dict
+            .get("BaseVersion")
+            .and_then(PdfObject::as_name)
+            .is_none_or(|name| name.name() != "1.7")
+            || dict
+                .get("ExtensionLevel")
+                .and_then(PdfObject::as_u32)
+                .is_none_or(|level| level < 8)
+        {
+            return Err(PdfError::UnsupportedSecurity(
+                "R6 requires PDF 1.7 extension level 8".into(),
+            ));
+        }
+        drop(value);
+        drop(lease);
+        Ok(())
     }
 
     /// Source header version. Catalog /Version, if present, remains in the
@@ -409,6 +497,7 @@ impl<R: Seek + Read> PdfDocument<R> {
         pagenum: u32,
         builder: crate::page::page_builder::PageBuilder,
     ) -> PdfResult<()> {
+        self.ctx().require_assembly_permission()?;
         builder.validate()?;
         if let Some(unit) = builder.user_unit {
             if self.effective_version()? < save_options::PdfVersion::V1_6 {
@@ -489,6 +578,7 @@ impl<R: Seek + Read> PdfDocument<R> {
     }
 
     pub fn delete_page(&self, pagenum: u32) -> PdfResult<()> {
+        self.ctx().require_assembly_permission()?;
         self.edit_transaction(|doc| doc.delete_page_inner(pagenum))
     }
 
@@ -517,9 +607,9 @@ impl<R: Seek + Read> PdfDocument<R> {
         for entry in self.collect_page_entries()? {
             if let Some(annotations) = entry.page_dict.get("Annots") {
                 let annotations = self.ctx.resolve(annotations)?;
-                let annotations = annotations.as_array().ok_or_else(|| {
-                    PdfError::DocumentError("Annots must be an array".into())
-                })?;
+                let annotations = annotations
+                    .as_array()
+                    .ok_or_else(|| PdfError::DocumentError("Annots must be an array".into()))?;
                 if annotations.len() > 0 {
                     return Err(PdfError::UnsupportedFeature(
                         "page deletion with annotations requires relationship cleanup".into(),
@@ -1007,13 +1097,15 @@ mod builder_tests {
                 format!("{:?}", PdfObject::PdfArray(expected))
             );
         }
-        assert!(reopened
-            .get_page(0)
-            .unwrap()
-            .resource()
-            .unwrap()
-            .get("Custom")
-            .is_some());
+        assert!(
+            reopened
+                .get_page(0)
+                .unwrap()
+                .resource()
+                .unwrap()
+                .get("Custom")
+                .is_some()
+        );
         let content = reopened.ctx.resolve(page.get("Contents").unwrap()).unwrap();
         assert_eq!(
             content

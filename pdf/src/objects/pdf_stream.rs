@@ -21,6 +21,9 @@ pub struct PdfStream {
     dict: PdfDict,
     data: Vec<u8>,
     state: StreamDataState,
+    /// An authenticated source handler already processed the explicit Crypt
+    /// stage. Not a serialized key; new/raw caller streams start false.
+    crypt_processed: bool,
 }
 
 // Preserve PDF object equality: interpretation provenance is not PDF content.
@@ -36,6 +39,7 @@ impl PdfStream {
             dict,
             data,
             state: StreamDataState::RawEncoded,
+            crypt_processed: false,
         }
     }
 
@@ -102,6 +106,7 @@ impl PdfStream {
                 dict,
                 data,
                 state: StreamDataState::Decoded,
+                crypt_processed: false,
             },
             lease,
         ))
@@ -118,6 +123,9 @@ impl PdfStream {
     pub fn raw_data(&self) -> &[u8] {
         self.data.as_slice()
     }
+
+    pub(crate) fn crypt_processed(&self) -> bool { self.crypt_processed }
+    pub(crate) fn mark_crypt_processed(&mut self) { self.crypt_processed = true; }
 
     pub(crate) fn clone_with_budget(
         &self,
@@ -139,6 +147,7 @@ impl PdfStream {
                 dict,
                 data,
                 state: self.state,
+                crypt_processed: self.crypt_processed,
             },
             lease,
         ))
@@ -171,6 +180,7 @@ impl PdfStream {
         }
         self.data = data;
         self.state = StreamDataState::Decoded;
+        self.crypt_processed = false;
         Ok(self)
     }
 
@@ -272,6 +282,7 @@ impl PdfStream {
                     jbig2_globals: jbig2_globals.as_deref(),
                     max_decoded_bytes: ctx.limits().max_decoded_bytes,
                     max_image_pixels: ctx.limits().max_image_pixels,
+                    crypt_already_processed: self.crypt_processed,
                 },
             )
         } else {
@@ -318,7 +329,7 @@ pub(crate) fn resolve_setting_reference_with_budget<R: Seek + Read>(
     Ok((object, lease))
 }
 
-fn resolve_filter_setting_with_budget<R: Seek + Read>(
+pub(crate) fn resolve_filter_setting_with_budget<R: Seek + Read>(
     obj: &PdfObject,
     ctx: &PDFContext<R>,
     params: bool,

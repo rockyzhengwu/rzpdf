@@ -2,6 +2,24 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum PdfError {
+    #[error("document password required")]
+    PasswordRequired,
+
+    #[error("invalid document password")]
+    InvalidPassword,
+
+    #[error("unsupported document security: {0}")]
+    UnsupportedSecurity(String),
+
+    #[error("malformed document security: {0}")]
+    MalformedSecurity(String),
+
+    #[error("document permission denied: {0}")]
+    PermissionDenied(String),
+
+    #[error("cryptographic randomness unavailable")]
+    RandomnessUnavailable,
+
     #[error("unsupported feature: {0}")]
     UnsupportedFeature(String),
 

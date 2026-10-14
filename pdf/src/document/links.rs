@@ -189,6 +189,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         rect: [f32; 4],
         target_page: u32,
     ) -> PdfResult<()> {
+        self.ctx().require_annotation_permission()?;
         let rect = rectangle(rect)?;
         self.edit_transaction(|doc| {
             let target = doc.page_location(target_page)?;
@@ -205,6 +206,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         rect: [f32; 4],
         destination: &str,
     ) -> PdfResult<()> {
+        self.ctx().require_annotation_permission()?;
         let rect = rectangle(rect)?;
         let encoded = PdfString::from_text_with_limits(destination, &self.ctx().limits())?;
         self.edit_transaction(|doc| {
@@ -222,6 +224,7 @@ impl<R: Read + Seek> PdfDocument<R> {
     }
 
     pub fn add_uri_link(&self, page_index: u32, rect: [f32; 4], uri: &str) -> PdfResult<()> {
+        self.ctx().require_annotation_permission()?;
         let rect = rectangle(rect)?;
         if uri.is_empty()
             || uri.len() > self.ctx().limits().max_token_bytes

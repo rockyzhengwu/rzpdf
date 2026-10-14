@@ -131,6 +131,7 @@ impl<T: Read + Seek> PdfDocument<T> {
         &self,
         source: &PdfDocument<S>,
     ) -> PdfResult<Vec<ObjectHandle>> {
+        self.ctx().require_assembly_permission()?;
         let count = source.try_page_count()?;
         let insertion = u32::try_from(self.try_page_count()?)
             .map_err(|_| PdfError::ResourceLimit("Merge insertion index".into()))?;
