@@ -180,7 +180,7 @@ impl Document {
         options: SignatureOptions,
         budget: &OperationBudget,
     ) -> PdfResult<PreparedSignature> {
-        self.ctx().require_unsigned_source()?;
+        self.ctx().require_unsigned_source_with_budget(budget)?;
         if self.ctx().source_xref().has_hybrid_references() {
             return Err(invalid(
                 "hybrid-reference history unsupported; full-save and reopen first",
@@ -638,6 +638,45 @@ fn valid_algorithm_parameters(parameters: &Option<der::Any>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tiny_prepare_budget_does_not_publish_a_large_source_cache() {
+        use crate::{
+            budget::OperationBudget,
+            document::Document,
+            objects::{PdfObject, pdf_dict::PdfDict, pdf_stream::PdfStream},
+            parser::syntax::ParseMode,
+        };
+        let fixture = Document::new().unwrap();
+        fixture.add_page(0).unwrap();
+        let payload = fixture
+            .try_insert_object(PdfObject::PdfStream(PdfStream::new(
+                PdfDict::default(),
+                vec![b'x'; 65536],
+            )))
+            .unwrap();
+        let document =
+            Document::from_bytes_with_mode(fixture.save_to_bytes().unwrap(), ParseMode::Strict)
+                .unwrap();
+        assert!(!document.ctx().source_object_is_cached(payload));
+        let stamp = document.stamp();
+        let small = OperationBudget::new(8192);
+        assert!(
+            document
+                .prepare_signature_with_budget(Default::default(), &small)
+                .is_err()
+        );
+        assert_eq!(small.live_bytes(), 0);
+        assert!(!document.ctx().source_object_is_cached(payload));
+        assert!(document.is_stamp_current(&stamp));
+        let pool = OperationBudget::new(2 * 1024 * 1024);
+        let prepared = document
+            .prepare_signature_with_budget(Default::default(), &pool)
+            .unwrap();
+        assert!(document.ctx().source_object_is_cached(payload));
+        drop(prepared);
+        assert_eq!(pool.live_bytes(), 0);
+    }
+
     #[test]
     fn supported_algorithm_parameters_are_absent_or_empty_null_only() {
         use der::{Any, Decode};

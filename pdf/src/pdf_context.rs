@@ -1133,10 +1133,20 @@ impl<R: Seek + Read> PDFContext<R> {
     }
 
     pub(crate) fn require_unsigned_source(&self) -> PdfResult<()> {
+        let budget = self
+            .state
+            .active_operation_budget()
+            .unwrap_or_else(|| self.limits.operation_budget());
+        self.require_unsigned_source_with_budget(&budget)
+    }
+
+    pub(crate) fn require_unsigned_source_with_budget(
+        &self,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<()> {
         let signed = if let Some(value) = self.source_has_signatures.get() {
             *value
         } else {
-            let budget = self.limits.operation_budget();
             let mut signed = false;
             for info in self.source_xref().objects().values() {
                 if matches!(info.state(), ObjectState::Free)
@@ -1145,7 +1155,7 @@ impl<R: Seek + Read> PDFContext<R> {
                     continue;
                 }
                 let (object, _lease) =
-                    self.resolve_source_owned_with_budget(info.object_id(), &budget)?;
+                    self.resolve_source_owned_with_budget(info.object_id(), budget)?;
                 if crate::signatures::has_signature(&object, self.limits, 0)? {
                     signed = true;
                     break;
@@ -1316,7 +1326,12 @@ impl<R: Seek + Read> PDFContext<R> {
             let store = self.state.store.borrow();
             match store.entry(id) {
                 Some(StoreEntry::Upsert(object)) => {
-                    return crate::objects::clone_object_with_budget(object, budget, self.limits, 0);
+                    return crate::objects::clone_object_with_budget(
+                        object,
+                        budget,
+                        self.limits,
+                        0,
+                    );
                 }
                 Some(StoreEntry::Deleted) => {
                     return Err(PdfError::ObjectError(format!(
@@ -1466,8 +1481,13 @@ impl<R: Seek + Read> PDFContext<R> {
             let store = self.state.store.borrow();
             match store.entry(id) {
                 Some(StoreEntry::Upsert(object)) => {
-                    return crate::objects::clone_object_with_budget(object, budget, self.limits, 0)
-                        .map(Some);
+                    return crate::objects::clone_object_with_budget(
+                        object,
+                        budget,
+                        self.limits,
+                        0,
+                    )
+                    .map(Some);
                 }
                 Some(StoreEntry::Deleted) => return Ok(None),
                 None => {}

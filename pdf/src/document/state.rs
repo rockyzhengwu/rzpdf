@@ -21,6 +21,9 @@ pub(crate) struct DocumentState {
 }
 
 impl DocumentState {
+    pub(crate) fn active_operation_budget(&self) -> Option<crate::budget::OperationBudget> {
+        self.active_table_budget.borrow().as_ref().map(|(budget, _)| budget.clone())
+    }
     pub(crate) fn new(trailer: PdfDict, next_object_number: u32, source_version: String) -> Self {
         Self {
             source_version,

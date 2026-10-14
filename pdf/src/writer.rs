@@ -101,7 +101,9 @@ fn write_document_output_with_security<R: std::io::Read + std::io::Seek>(
         .clone()
         .unwrap_or_else(|| document.ctx().limits().operation_budget());
     let source_security = document.ctx().source_security();
-    document.ctx().require_unsigned_source()?;
+    document
+        .ctx()
+        .require_unsigned_source_with_budget(&crypto_budget)?;
     if source_security.is_none()
         && document
             .ctx()

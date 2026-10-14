@@ -81,7 +81,8 @@ for mode in ["disable", "generate", "hybrid"]:
         original = normalized
     else:
         run("qpdf", f"--object-streams={mode}", source, original)
-    signed = EVIDENCE / f"signed-{mode}.pdf"
+    case = "hybrid-normalized" if mode == "hybrid" else mode
+    signed = EVIDENCE / f"signed-{case}.pdf"
     assert "negative completion and retry checks passed" in run(EXAMPLE, original, signed, cert, key, "--self-test")
     assert signed.read_bytes().startswith(original.read_bytes())
     run("qpdf", "--check", signed)
@@ -100,7 +101,9 @@ for mode in ["disable", "generate", "hybrid"]:
     assert render(signed, f"signed-{mode}") == source_png
     inspection = run(EXAMPLE, "--inspect", signed)
     assert "covers_current=true" in inspection and "verification=NotPerformed" in inspection
-    results[mode] = {"sha256": hashlib.sha256(signed.read_bytes()).hexdigest(), "validation": status, "core_report": inspection}
+    results[case] = {"sha256": hashlib.sha256(signed.read_bytes()).hexdigest(), "validation": status, "core_report": inspection}
+    if mode == "hybrid":
+        results[case]["normalization"] = "explicit qpdf full rewrite; original hybrid and hybrid-history signing rejected"
 
     # Same-length, syntactically valid header mutation is covered by the hash.
     tampered = EVIDENCE / f"tampered-{mode}.pdf"
@@ -127,7 +130,7 @@ for mode in ["disable", "generate", "hybrid"]:
     assert appended_status["intact"] and appended_status["valid"]
     assert appended_status["coverage"] == "ENTIRE_REVISION"
     assert "covers_current=false" in run(EXAMPLE, "--inspect", appended)
-    results[mode]["append_validation"] = appended_status
+    results[case]["append_validation"] = appended_status
 
 report = {"evidence": str(EVIDENCE), "results": results, "visual_review": "pending", "trust": "synthetic explicit local root only; network fetching disabled", "versions": {"qpdf": run("qpdf", "--version"), "openssl": run("openssl", "version"), "mutool": run("mutool", "-v"), "pyHanko": pyhanko_version}}
 (EVIDENCE / "report.json").write_text(json.dumps(report, indent=2) + "\n")
