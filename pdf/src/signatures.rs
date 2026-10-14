@@ -629,6 +629,31 @@ fn skip_space(bytes: &[u8], mut pos: usize) -> PdfResult<usize> {
     }
 }
 
+fn valid_algorithm_parameters(parameters: &Option<der::Any>) -> bool {
+    use der::Tagged;
+    parameters
+        .as_ref()
+        .is_none_or(|value| value.tag() == der::Tag::Null && value.value().is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn supported_algorithm_parameters_are_absent_or_empty_null_only() {
+        use der::{Any, Decode};
+        assert!(super::valid_algorithm_parameters(&None));
+        assert!(super::valid_algorithm_parameters(&Some(
+            Any::from_der(b"\x05\x00").unwrap()
+        )));
+        assert!(!super::valid_algorithm_parameters(&Some(
+            Any::from_der(b"\x04\x00").unwrap()
+        )));
+        if let Ok(malformed_null) = Any::from_der(b"\x05\x01\x00") {
+            assert!(!super::valid_algorithm_parameters(&Some(malformed_null)));
+        }
+    }
+}
+
 fn validate_cms(bytes: &[u8], digest: &[u8; 32], budget: &OperationBudget) -> PdfResult<()> {
     use cms::{
         cert::CertificateChoices,
@@ -636,7 +661,7 @@ fn validate_cms(bytes: &[u8], digest: &[u8; 32], budget: &OperationBudget) -> Pd
         signed_data::{SignedData, SignerIdentifier},
     };
     use der::{
-        Decode, Encode, Tag, Tagged,
+        Decode, Encode,
         asn1::{ObjectIdentifier, OctetString},
     };
     let _allocation = budget.reserve(
@@ -663,17 +688,15 @@ fn validate_cms(bytes: &[u8], digest: &[u8; 32], budget: &OperationBudget) -> Pd
         || signed.signer_infos.0.len() != 1
         || signed.digest_algorithms.len() != 1
         || signed.digest_algorithms.get(0).unwrap().oid != sha256
+        || !valid_algorithm_parameters(&signed.digest_algorithms.get(0).unwrap().parameters)
     {
         return Err(invalid("single detached SHA-256 signer required"));
     }
     let signer = signed.signer_infos.0.get(0).unwrap();
     if signer.digest_alg.oid != sha256
+        || !valid_algorithm_parameters(&signer.digest_alg.parameters)
         || ![rsa, oid("1.2.840.113549.1.1.11")].contains(&signer.signature_algorithm.oid)
-        || signer
-            .signature_algorithm
-            .parameters
-            .as_ref()
-            .is_some_and(|p| p.tag() != Tag::Null)
+        || !valid_algorithm_parameters(&signer.signature_algorithm.parameters)
     {
         return Err(invalid("unsupported signature algorithm"));
     }
@@ -742,7 +765,7 @@ fn validate_cms(bytes: &[u8], digest: &[u8; 32], budget: &OperationBudget) -> Pd
         .ok_or_else(|| invalid("signing certificate missing"))?
         .tbs_certificate
         .subject_public_key_info;
-    if key.algorithm.oid != rsa {
+    if key.algorithm.oid != rsa || !valid_algorithm_parameters(&key.algorithm.parameters) {
         return Err(invalid("RSA certificate required"));
     }
     let key_bytes = key
