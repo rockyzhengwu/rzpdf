@@ -500,7 +500,8 @@ mod loading_tests {
     #[test]
     fn editing_count_does_not_double_charge_source_updates() {
         use crate::parser::options::{Limits, ParseOptions};
-        let reader = StreamReader::try_new(std::io::Cursor::new(Vec::<u8>::new())).unwrap();
+        let reader =
+            StreamReader::try_new(std::io::Cursor::new(b"1 0 obj null endobj".to_vec())).unwrap();
         let syntax = SyntaxParser::with_options(
             reader,
             ParseOptions {
@@ -1155,7 +1156,7 @@ impl<R: Seek + Read> PDFContext<R> {
                     continue;
                 }
                 let (object, _lease) =
-                    self.resolve_source_owned_with_budget(info.object_id(), budget)?;
+                    self.source_object_for_policy_with_budget(info.object_id(), budget)?;
                 if crate::signatures::has_signature(&object, self.limits, 0)? {
                     signed = true;
                     break;
@@ -1170,6 +1171,50 @@ impl<R: Seek + Read> PDFContext<R> {
             ));
         }
         Ok(())
+    }
+
+    // Policy validation is not materialization. In particular, replacing a
+    // normal source object must not publish its old body into the read cache.
+    // Compressed members reuse the bounded object-stream loader, which owns
+    // their decode-once semantics; already published source cells are reused.
+    fn source_object_for_policy_with_budget(
+        &self,
+        id: ObjectId,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<(PdfObject, crate::budget::MemoryLease)> {
+        let cell = self
+            .indirect_objects
+            .get(&id)
+            .ok_or_else(|| PdfError::InvalidReference("source policy object".into()))?;
+        if let Some(object) = cell.get() {
+            return crate::objects::clone_object_with_budget(object, budget, self.limits, 0);
+        }
+        let info = self
+            .source_xref()
+            .lookup_id(id)
+            .ok_or_else(|| PdfError::InvalidReference("source policy xref".into()))?;
+        if matches!(info.state(), ObjectState::Compressed) {
+            return self.resolve_source_owned_with_budget(id, budget);
+        }
+        if !matches!(info.state(), ObjectState::Normal) {
+            return Err(PdfError::InvalidReference(
+                "source policy free object".into(),
+            ));
+        }
+        let _guard = self.begin_loading_with_budget(id, budget)?;
+        let (object, lease) = self
+            .parser
+            .as_ref()
+            .ok_or_else(|| PdfError::InvalidReference("missing source parser".into()))?
+            .borrow_mut()
+            .parse_indirect_obj_checked_with_budget(info.offset(), id, budget)?;
+        if Some(id) != self.encryption_dictionary_id {
+            if let Some(handler) = &self.security {
+                return self
+                    .with_source_resolution(|| handler.transform(self, &object, false, budget));
+            }
+        }
+        Ok((object, lease))
     }
 
     pub fn limits(&self) -> crate::parser::options::Limits {
