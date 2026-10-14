@@ -11,7 +11,7 @@ cargo test -p pdf --locked --test v05_incremental --test v05_security --test v05
 cargo build -p pdf --locked --example v05_incremental --example v05_security --example v05_sign
 PYTHONPATH=tmp/pdfs/v05-verifiers:tmp/pdfs/python python3 docs/check-v05-incremental.py
 PYTHONPATH=tmp/pdfs/v05-verifiers:tmp/pdfs/python python3 docs/check-v05-security.py
-PYTHONPATH=tmp/pdfs/v05-sign-verifiers:tmp/pdfs/v05-verifiers-py311:tmp/pdfs/python python3.11 docs/check-v05-signatures.py
+PYTHONPATH=tmp/pdfs/v05-verifiers:tmp/pdfs/python python3 docs/check-v05-signatures.py
 python3 docs/check-cmap-data.py
 cargo test --workspace --locked -j 2 --timings
 ```

@@ -1,7 +1,7 @@
 """Independent synthetic signature gate (no production certificates/keys).
 
-PYTHONPATH=tmp/pdfs/v05-sign-verifiers:tmp/pdfs/v05-verifiers-py311:tmp/pdfs/python python3.11 docs/check-v05-signatures.py
-Requires OpenSSL, qpdf, MuPDF, pikepdf and pyHanko 0.31.0. No network trust fetch.
+PYTHONPATH=tmp/pdfs/v05-verifiers:tmp/pdfs/python python3 docs/check-v05-signatures.py
+Requires OpenSSL, qpdf, MuPDF, pikepdf and pyHanko 0.37.0. No network trust fetch.
 Evidence (including disposable private key) stays in ignored tmp/pdfs only.
 """
 import hashlib
@@ -14,6 +14,7 @@ import pikepdf
 from pypdf import PdfReader
 from asn1crypto import pem, x509
 from pyhanko.pdf_utils.reader import PdfFileReader
+from pyhanko.version import __version__ as pyhanko_version
 from pyhanko.sign.validation import validate_pdf_signature
 from pyhanko_certvalidator import ValidationContext
 
@@ -67,6 +68,17 @@ for mode in ["disable", "generate", "hybrid"]:
         prefix = raw.rsplit(b"startxref", 1)[0]
         offset = int(raw.rsplit(b"startxref", 1)[1].split()[0])
         original.write_bytes(prefix + (f"xref\n0 1\n0000000000 65535 f \ntrailer\n<< /Root {root.idnum} {root.generation} R /Info {info.idnum} {info.generation} R /Size {reader.trailer['/Size']} /ID [{ids}] /XRefStm {offset} >>\nstartxref\n{len(prefix)}\n%%EOF\n").encode())
+        rejected = EVIDENCE / "hybrid-must-not-sign.pdf"
+        assert "hybrid" in run(EXAMPLE, original, rejected, cert, key, succeeds=False)
+        assert not rejected.exists()
+        appended_unsigned = EVIDENCE / "hybrid-history.pdf"
+        run(ROOT / "target/debug/examples/v05_incremental", original, appended_unsigned, "hybrid history")
+        assert "hybrid" in run(EXAMPLE, appended_unsigned, rejected, cert, key, succeeds=False)
+        assert not rejected.exists()
+        # Explicit independent full normalization, not a hidden signing fallback.
+        normalized = EVIDENCE / "hybrid-normalized.pdf"
+        run("qpdf", "--object-streams=disable", original, normalized)
+        original = normalized
     else:
         run("qpdf", f"--object-streams={mode}", source, original)
     signed = EVIDENCE / f"signed-{mode}.pdf"
@@ -117,6 +129,6 @@ for mode in ["disable", "generate", "hybrid"]:
     assert "covers_current=false" in run(EXAMPLE, "--inspect", appended)
     results[mode]["append_validation"] = appended_status
 
-report = {"evidence": str(EVIDENCE), "results": results, "visual_review": "pending", "trust": "synthetic explicit local root only; network fetching disabled", "versions": {"qpdf": run("qpdf", "--version"), "openssl": run("openssl", "version"), "mutool": run("mutool", "-v"), "pyHanko": "0.31.0"}}
+report = {"evidence": str(EVIDENCE), "results": results, "visual_review": "pending", "trust": "synthetic explicit local root only; network fetching disabled", "versions": {"qpdf": run("qpdf", "--version"), "openssl": run("openssl", "version"), "mutool": run("mutool", "-v"), "pyHanko": pyhanko_version}}
 (EVIDENCE / "report.json").write_text(json.dumps(report, indent=2) + "\n")
 print(json.dumps(report, indent=2))

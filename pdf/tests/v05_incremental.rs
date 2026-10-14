@@ -388,6 +388,25 @@ fn deleting_old_compressed_info_does_not_treat_historical_xref_roots_as_live() {
 }
 
 #[test]
+fn signing_rejects_hybrid_history_until_explicit_full_rewrite_and_reopen() {
+    let document = open(compressed_source(true));
+    assert!(
+        matches!(document.prepare_signature(Default::default()), Err(PdfError::UnsupportedFeature(message)) if message.contains("hybrid"))
+    );
+    document
+        .set_info_text(InfoTextField::Title, Some("classic latest revision"))
+        .unwrap();
+    let appended = open(document.save_incremental_to_bytes().unwrap());
+    // Latest trailer is classic and omits XRefStm, but Prev remains hybrid.
+    assert!(
+        matches!(appended.prepare_signature(Default::default()), Err(PdfError::UnsupportedFeature(message)) if message.contains("hybrid"))
+    );
+    let normalized = open(appended.save_to_bytes().unwrap());
+    normalized.add_page(0).unwrap();
+    assert!(normalized.prepare_signature(Default::default()).is_ok());
+}
+
+#[test]
 fn structural_stream_containers_cannot_be_replaced_or_deleted_incrementally() {
     for (number, delete) in [(3, false), (4, true)] {
         let document = open(compressed_source(false));

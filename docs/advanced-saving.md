@@ -73,6 +73,10 @@ std::fs::write("signed.pdf", output)?;
 
 `v05_sign` demonstrates an OpenSSL backend. Only a single invisible approval
 signature on new/strict owned-byte unsigned, unencrypted input is supported.
+Signing accepts traditional xrefs and pure xref/object streams, but rejects
+hybrid-reference history because of cross-reader ambiguity. Full-rewrite and
+reopen such a document explicitly before signing; preparation never silently
+normalizes the source. Removing a mutable XRefStm key cannot hide the history.
 Up to 256 flat v0.4 text/checkbox fields are retained; XFA, complex fields, NeedAppearances,
 duplicate names and existing signatures are rejected. Owned source older than
 PDF 1.4 must first full-save at a newer version and reopen. New preparation uses

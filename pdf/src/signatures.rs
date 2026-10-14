@@ -181,6 +181,11 @@ impl Document {
         budget: &OperationBudget,
     ) -> PdfResult<PreparedSignature> {
         self.ctx().require_unsigned_source()?;
+        if self.ctx().source_xref().has_hybrid_references() {
+            return Err(invalid(
+                "hybrid-reference history unsupported; full-save and reopen first",
+            ));
+        }
         if self.security_report().is_some() {
             return Err(invalid("encrypted input unsupported"));
         }

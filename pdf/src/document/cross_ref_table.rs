@@ -56,6 +56,7 @@ impl ObjectInfo {
 pub struct CrossRefTable {
     objects: HashMap<u32, ObjectInfo>,
     trailer: PdfDict,
+    has_hybrid_references: bool,
 }
 
 impl CrossRefTable {
@@ -63,10 +64,24 @@ impl CrossRefTable {
         Self {
             objects: HashMap::new(),
             trailer: PdfDict::default(),
+            has_hybrid_references: false,
         }
     }
     pub fn new(objects: HashMap<u32, ObjectInfo>, trailer: PdfDict) -> Self {
-        Self { objects, trailer }
+        let has_hybrid_references = trailer
+            .get("XRefStm")
+            .is_some_and(|v| !matches!(v, crate::objects::PdfObject::PdfNull));
+        Self {
+            objects,
+            trailer,
+            has_hybrid_references,
+        }
+    }
+
+    /// Immutable source provenance, including older Prev revisions. Clearing
+    /// mutable trailer keys cannot erase a hybrid source's ambiguity.
+    pub(crate) fn has_hybrid_references(&self) -> bool {
+        self.has_hybrid_references
     }
 
     pub fn trailer(&self) -> &PdfDict {
@@ -79,12 +94,14 @@ impl CrossRefTable {
     }
 
     pub fn merge(&mut self, other: CrossRefTable) {
+        self.has_hybrid_references |= other.has_hybrid_references;
         for (key, obj) in other.objects {
             self.objects.insert(key, obj);
         }
     }
 
     pub fn merge_older(&mut self, other: CrossRefTable) {
+        self.has_hybrid_references |= other.has_hybrid_references;
         for (key, object) in other.objects {
             self.objects.entry(key).or_insert(object);
         }
@@ -114,6 +131,28 @@ impl CrossRefTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hybrid_provenance_survives_trailer_transfer_and_older_revision_merge() {
+        let mut trailer = PdfDict::default();
+        trailer
+            .try_insert(
+                "XRefStm".into(),
+                crate::objects::PdfObject::PdfNumber(crate::objects::pdf_number::PdfNumber::new(
+                    10.,
+                )),
+            )
+            .unwrap();
+        let mut old = CrossRefTable::new(HashMap::new(), trailer);
+        old.take_trailer();
+        assert!(old.has_hybrid_references());
+        let mut latest = CrossRefTable::new_empty();
+        latest.merge_older(old);
+        assert!(latest.has_hybrid_references());
+        let mut wrapper = CrossRefTable::new_empty();
+        wrapper.merge(latest);
+        assert!(wrapper.has_hybrid_references());
+    }
 
     #[test]
     fn lookup_checks_generation_without_using_compressed_index_as_generation() {
