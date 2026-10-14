@@ -53,12 +53,26 @@ impl<R: Read + Seek> ContentParser<R> {
                         && !matches!(raw, b"true" | b"false" | b"null")
                         && raw.first().is_some_and(|byte| !b"/[]()<>{}".contains(byte));
                     if is_op(raw) || bare_keyword {
-                        if word.is_equal(b"BI") {
+                        if matches!(raw,b"ID"|b"EI") {
                             self.syntax.set_pos(start)?;
-                            return Err(PdfError::UnsupportedFeature(format!(
-                                "inline image parsing at content byte {}",
-                                start
-                            )));
+                            return Err(PdfError::ContentParseError("ID/EI outside an inline image".into()));
+                        }
+                        if word.is_equal(b"BI") {
+                            let offset = self.syntax.position().saturating_sub(2);
+                            drop(word);
+                            if !operands.is_empty() {
+                                self.syntax.set_pos(start)?;
+                                return Err(PdfError::ContentParseError("BI cannot have ordinary operands".into()));
+                            }
+                            let local = self.syntax.limits().operation_budget();
+                            let pool = budget.unwrap_or(&local);
+                            match super::inline_image::read(&mut self.syntax, pool) {
+                                Ok((image, mut lease)) => {
+                                    if let Some(retained) = retained.as_mut() { retained.absorb(&mut lease)?; }
+                                    return Ok(Some(Operator::from_inline(image, offset)));
+                                }
+                                Err(error) => { self.syntax.set_pos(start)?; return Err(error); }
+                            }
                         }
                         let offset = self
                             .syntax
@@ -189,7 +203,7 @@ mod tests {
                 for _ in 0..2 {
                     assert!(matches!(
                         parser.read_operator(),
-                        Err(PdfError::UnsupportedFeature(_))
+                        Err(PdfError::EndofFile)
                     ));
                     assert_eq!(parser.position(), before);
                 }

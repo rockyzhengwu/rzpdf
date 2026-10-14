@@ -1,11 +1,14 @@
 # 图片提取接口
 
+内联 BI/ID/EI 和 JPX/JBIG2 基础入口见 [图像编解码指南](image-codecs.md)，具体输入范围见 [v0.6 矩阵](releases/v0.6-matrix.md)。`extract_inline_image_source(program, operation)` 返回经过页/修订认证的原载荷；内联来源没有命名资源，绘制事件通过 `image.is_inline()` 区分，解码结果仍走 paint-order API。
+
 页面目前提供以下入口，语义不同，不应混用：
 
 | 入口 | 返回内容 | 顺序与范围 |
 | --- | --- | --- |
 | `image_resource_names()` | 命名图片资源名 | 稳定字典序，包含未绘制资源 |
 | `extract_image_source(name)` | 原始流及字典、宽高、可选 BPC | 指定有效页资源，编码可以尚不支持 |
+| `extract_inline_image_source(program, operation)` | 类型化内联原字典、编码及数据范围 | 当前页和修订的一个 BI 内容项 |
 | `extract_decoded_image(name)` | `PdfImage` 规范化样本模型 | 指定有效页资源，不要求页面实际绘制 |
 | `extract_images_paint_order()` | `Vec<ImageObject>` | 解释器绘制顺序，重复绘制分别返回 |
 | `extract_images_paint_order_report()` | 图片绘制及诊断 | 同次解释保留被跳过操作的警告 |

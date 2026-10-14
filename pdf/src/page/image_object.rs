@@ -8,7 +8,7 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImageDrawSource {
     pub operation_index: usize,
-    /// Offset of the Do operator token, not its resource-name operand.
+    /// Offset of the Do or BI token, not a resource-name operand.
     pub operator_byte_offset: u64,
 }
 

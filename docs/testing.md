@@ -1,5 +1,19 @@
 # 解析回归与异常输入验证
 
+## v0.6 图像门禁
+
+普通专项不需要安装系统编解码器；二进制样本均已登记来源和 hash。
+
+```bash
+cargo test -p pdf --locked --test v06_inline --test v06_codecs -j 2 -- --test-threads=2
+cargo build -p pdf --example v06_images -p render --example render_document --locked -j 2
+PYTHONPATH=tmp/pdfs/v06-verifiers:tmp/pdfs/v05-verifiers:tmp/pdfs/python python3 docs/check-v06-images.py
+python3 docs/check-dependency-advisories.py
+cargo test --workspace --locked -j 2 --timings -- --test-threads=2
+```
+
+独立检查需要 Pillow、PyMuPDF、pikepdf、qpdf 和 MuPDF；版本见验收记录，不用 Poppler。依赖告警查询只代表查询时已登记的精确版本结果。PyMuPDF/MuPDF 负责 JPX/JBIG2 像素，qpdf/pikepdf 负责结构；pikepdf 的缺专用 JBIG2 decoder 提示不得当成像素通过。Skia 与独立解码像素生成的最近邻整页基线精确比较，MuPDF 另验几何和内部采样点。模糊测试继续暂缓。
+
 ## v0.5 专项和独立门禁
 
 当前完成状态以 [v0.5 验收记录](releases/v0.5-acceptance.md) 为准。

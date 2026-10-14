@@ -44,10 +44,25 @@ impl ImageExtractionReport {
 }
 
 impl<R: Read + Seek> PdfPage<'_, R> {
+    /// Read a top-level inline payload from a current, page-bound source snapshot.
+    /// Nested draws use nested_content_program and the same Operator accessor.
+    pub fn extract_inline_image_source(
+        &self,
+        program: &super::content_program::ContentProgram,
+        operation: usize,
+    ) -> PdfResult<super::inline_image::InlineImage> {
+        if !self.source_provenance().matches_program(program) {
+            return Err(PdfError::ObjectError("inline image source is foreign or stale".into()));
+        }
+        program.operations().get(operation)
+            .and_then(|o| o.operator.inline_image()).cloned()
+            .ok_or_else(|| PdfError::ObjectError("source operation is not an inline image".into()))
+    }
+
     /// Return interpreted image draws in paint order, including repeated draws.
     /// The matrix maps the unit image square into cropped/rotated display space
     /// (top-left origin, y downward). Payloads are decoded samples, not sources.
-    /// Coverage matches display_list: unsupported inline/Group paths may fail.
+    /// Coverage matches display_list: unsupported image/Group paths may fail.
     /// This convenience API discards diagnostics; prefer the report API when
     /// completeness matters, especially under compatible parsing.
     pub fn extract_images_paint_order(

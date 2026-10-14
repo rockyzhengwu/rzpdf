@@ -398,6 +398,8 @@ pub fn apply_filter_with_budget(
             budget,
         ),
         "DCT" | "DCTDecode" => dct::dct_decode_with_budget(input, context, budget),
+        "JPXDecode" => jpx::decode_with_budget(input, context, budget).map(|(_, bytes)| bytes),
+        "JBIG2Decode" => jbig2::decode_with_budget(input, context, budget),
         "CCF" | "CCITTFaxDecode" => {
             ccittfax::ccittfax_decode_with_budget(input, params, context.max_decoded_bytes, budget)
         }

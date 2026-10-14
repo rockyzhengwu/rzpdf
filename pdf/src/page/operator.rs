@@ -8,6 +8,7 @@ pub struct Operator {
     op: String,
     operands: Vec<PdfObject>,
     byte_offset: Option<u64>,
+    inline_image: Option<Box<super::inline_image::InlineImage>>,
 }
 impl Operator {
     pub fn new(op: String, operands: Vec<PdfObject>) -> Self {
@@ -15,6 +16,31 @@ impl Operator {
             op,
             operands,
             byte_offset: None,
+            inline_image: None,
+        }
+    }
+
+    pub(crate) fn from_inline(image: super::inline_image::InlineImage, offset: u64) -> Self {
+        Self {
+            op: "BI".into(),
+            operands: Vec::new(),
+            byte_offset: Some(offset),
+            inline_image: Some(Box::new(image)),
+        }
+    }
+
+    /// BI/ID/EI is one content item, not three ordinary operators.
+    pub fn inline_image(&self) -> Option<&super::inline_image::InlineImage> {
+        self.inline_image.as_deref()
+    }
+
+    pub(crate) fn same_inline_content(&self, other: &Self) -> bool {
+        match (self.inline_image(), other.inline_image()) {
+            (None, None) => true,
+            (Some(a), Some(b)) => {
+                a.dictionary() == b.dictionary() && a.encoded_data() == b.encoded_data()
+            }
+            _ => false,
         }
     }
 

@@ -923,6 +923,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             "M" => self.handle_miter_limit(op)?,
 
             "Do" => self.handle_do(op, device)?,
+            "BI" => self.handle_inline_image(op, device)?,
             "sh" => self.handle_shading(op, device)?,
             "m" => self.move_to(op)?,
             "l" => self.line_to(op)?,
@@ -2347,6 +2348,35 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
         ))
         .with_nested_source(self.nested_draw_source()?);
         device.do_shading(object)
+    }
+
+    fn handle_inline_image(&mut self, op: Operator, device: &mut dyn Device) -> PdfResult<()> {
+        if self.in_text_object { return Err(PdfError::PageOperatorError("inline image inside BT/ET".into())); }
+        let image = op.inline_image().ok_or_else(|| PdfError::PageOperatorError("BI requires a typed inline payload".into()))?;
+        device.preflight_draw(&self.current_state.graphic_state, None)?;
+        let mut dict = image.normalized_dict();
+        if let Some(name) = dict.get("ColorSpace").and_then(PdfObject::as_name) {
+            let default_key=match name.name() {"DeviceGray"=>Some("DefaultGray"),"DeviceRGB"=>Some("DefaultRGB"),"DeviceCMYK"=>Some("DefaultCMYK"),_=>None};
+            if let Some(key)=default_key {
+                let resources=self.resource_scope.clone().map(Ok).unwrap_or_else(||self.page.resource())?;
+                if let Some(colors)=resources.get("ColorSpace") {
+                    let colors=self.ctx.resolve(colors)?;
+                    let colors=colors.as_dict().ok_or_else(||PdfError::PageResourceError("ColorSpace resources must be a dictionary".into()))?;
+                    if colors.get(key).is_some_and(|v|!matches!(v,PdfObject::PdfNull)) {return Err(PdfError::UnsupportedFeature("inline default colour override outside v0.6 baseline".into()));}
+                }
+            }
+            if !matches!(name.name(), "DeviceGray" | "DeviceRGB" | "DeviceCMYK") {
+                let color = self.named_resource("ColorSpace", name.name())?;
+                dict.insert("ColorSpace".into(), color);
+            }
+        }
+        let stream = PdfObject::PdfStream(crate::objects::pdf_stream::PdfStream::new(dict, image.encoded_data().to_vec()));
+        let decoded = PdfImage::try_new(String::new(), &stream, self.ctx)?.mark_inline();
+        let matrix = Matrix::new(1.,0.,0.,-1.,0.,1.).checked_mul(&self.current_state.ctm())?.checked_mul(&self.page.page_matrix)?;
+        let drawing = ImageObject::new(matrix, decoded, self.current_state.graphic_state.clone())
+            .with_source(op.byte_offset().filter(|_| self.form_depth == 0).map(|operator_byte_offset| ImageDrawSource { operation_index:self.operation_index, operator_byte_offset }))
+            .with_nested_source(self.nested_draw_source()?);
+        device.do_image(drawing)
     }
 
     fn handle_do(&mut self, op: Operator, device: &mut dyn Device) -> PdfResult<()> {

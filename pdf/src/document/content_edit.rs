@@ -595,6 +595,9 @@ impl<R: Read + Seek> PdfDocument<R> {
             let target = expected.operations().get(operation).ok_or_else(|| {
                 PdfError::ObjectError("image operation index out of range".into())
             })?;
+            if target.operator.inline_image().is_some() {
+                return expected.without_operation(operation, self.ctx.options());
+            }
             if target.operator.name() != "Do" || target.operator.num_operands() != 1 {
                 return Err(PdfError::ObjectError(
                     "image removal requires a named Do".into(),
@@ -886,6 +889,9 @@ impl<R: Read + Seek> PdfDocument<R> {
             let target = expected.operations().get(operation).ok_or_else(|| {
                 PdfError::ObjectError("image operation index out of range".into())
             })?;
+            if target.operator.inline_image().is_some() {
+                return expected.with_transformed_image_operation(operation, matrix, self.ctx.options());
+            }
             if target.operator.name() != "Do" || target.operator.num_operands() != 1 {
                 return Err(PdfError::ObjectError(
                     "image transform requires one named Do".into(),
@@ -919,7 +925,27 @@ impl<R: Read + Seek> PdfDocument<R> {
         })
     }
 
-    /// Replace one top-level image Do, preserving its existing graphics transform.
+    /// Replace one top-level inline payload, preserving its graphics transform.
+    pub fn replace_page_inline_image_draw(
+        &self,
+        page: u32,
+        expected: &ContentProgram,
+        operation: usize,
+        image: &crate::page::inline_image::InlineImage,
+    ) -> PdfResult<()> {
+        self.commit_page_content_edit(page, expected, || {
+            if expected.operations().get(operation)
+                .and_then(|o| o.operator.inline_image()).is_none()
+            {
+                return Err(PdfError::ObjectError("replacement target is not an inline image".into()));
+            }
+            expected.with_replaced_operation(
+                operation, &image.to_content_bytes(self.ctx.limits())?, self.ctx.options(),
+            )
+        })
+    }
+
+    /// Replace one top-level image draw, preserving its existing graphics transform.
     /// Registers a page-local image name and copies only changed content streams.
     pub fn replace_page_image_draw(
         &self,
@@ -941,15 +967,15 @@ impl<R: Read + Seek> PdfDocument<R> {
             .operations()
             .get(operation)
             .ok_or_else(|| PdfError::ObjectError("image operation index out of range".into()))?;
-        if target.operator.name() != "Do" || target.operator.num_operands() != 1 {
+        if target.operator.inline_image().is_none() && (target.operator.name() != "Do" || target.operator.num_operands() != 1) {
             return Err(PdfError::ObjectError(
                 "image replacement requires one named Do".into(),
             ));
         }
-        let resource = target
-            .named_resource_use()?
-            .ok_or_else(|| PdfError::ObjectError("image resource name missing".into()))?;
-        self.get_page(page)?.extract_image_source(resource.name)?;
+        if target.operator.inline_image().is_none() {
+            let resource = target.named_resource_use()?.ok_or_else(|| PdfError::ObjectError("image resource name missing".into()))?;
+            self.get_page(page)?.extract_image_source(resource.name)?;
+        }
         let id = self.validate_handle(image)?;
         let object = self.resolve_object(id)?;
         let stream = object
@@ -1194,6 +1220,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         budget: Option<&crate::budget::OperationBudget>,
         edit: impl FnOnce() -> PdfResult<E>,
     ) -> PdfResult<()> {
+        self.ctx.require_content_edit_permission()?;
         if !expected
             .source_stamp()
             .is_some_and(|stamp| self.is_stamp_current(stamp))

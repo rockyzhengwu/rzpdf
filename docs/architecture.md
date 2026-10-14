@@ -107,6 +107,10 @@ Info 编辑已将 Trailer 纳入同一事务快照，错误/unwind 同时恢复 
 
 ## 6. 分开可编辑内容与渲染结果（P3/P4）
 
+v0.6 图像契约：内联 BI/ID/EI 是一个带 `InlineImage` 的完整 Operator，字典、原编码及 decoded-content 范围与解码像素分开；不创建虚拟 XObject 名或对象 ID。Page/Form 共用 ImageObject、Device 与原来源快照。替换/删除沿用文档/页/revision 校验及嵌套调用复制，权限/签后保护先于内容提交准备；相邻 BI 的字典和原载荷也纳入重建一致性检查。
+
+JPX 的元信息先于像素解码，JBIG2 的全局流和页数据在预算入口共用池，原编码流及 Globals 引用在保存/导入中保留。后端采用固定版本纯 Rust 依赖，不拆新 crate，不使用生产 subprocess；内部临时分配未接入 allocator，保守 scratch reservation 不等于进程 RSS/CPU 硬上限。具体颜色、位深、段类型、功能拒绝和平台条件见 [v0.6 输入矩阵](releases/v0.6-matrix.md)。这些路径不代表完整 AR-03 已关闭。
+
 当前预算检查分层如下，各层没有共享一个跨组件峰值额度池，AR-03仍未完成。
 
 | 层 | 计数与上限 | 时机与释放 |

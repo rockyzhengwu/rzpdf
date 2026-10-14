@@ -1120,7 +1120,8 @@ impl<R: Seek + Read> PDFContext<R> {
         edit()
     }
 
-    fn next_revision(&self) -> PdfResult<u64> {
+    /// Authenticate before edit preparation; denial must not invalidate sources.
+    pub(crate) fn require_content_edit_permission(&self) -> PdfResult<()> {
         self.require_unsigned_source()?;
         if self.form_edit_depth.get() == 0
             && self.security.as_ref().is_some_and(|handler| {
@@ -1130,6 +1131,11 @@ impl<R: Seek + Read> PDFContext<R> {
         {
             return Err(PdfError::PermissionDenied("document modification".into()));
         }
+        Ok(())
+    }
+
+    fn next_revision(&self) -> PdfResult<u64> {
+        self.require_content_edit_permission()?;
         self.state.next_revision()
     }
 

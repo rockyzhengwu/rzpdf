@@ -4,6 +4,35 @@ pub struct ContentBuilder {
 }
 
 impl ContentBuilder {
+    /// Append one typed inline image in an isolated graphics state.
+    pub fn draw_inline_image(
+        &mut self,
+        image: &super::inline_image::InlineImage,
+        matrix: [f32; 6],
+        limits: crate::parser::options::Limits,
+    ) -> crate::error::PdfResult<&mut Self> {
+        use crate::error::PdfError;
+        if limits.max_depth == 0 {
+            return Err(PdfError::ResourceLimit("inline builder graphics depth".into()));
+        }
+        if !matrix.into_iter().all(f32::is_finite) {
+            return Err(PdfError::ObjectError("inline image transform must be finite".into()));
+        }
+        let mut block = format!(
+            "q\n{} {} {} {} {} {} cm\n",
+            matrix[0], matrix[1], matrix[2], matrix[3], matrix[4], matrix[5]
+        ).into_bytes();
+        block.extend_from_slice(&image.to_content_bytes(limits)?);
+        block.extend_from_slice(b"Q\n");
+        crate::filter::check_output_size(
+            self.bytes.len(), block.len(), limits.max_raw_stream_bytes, "inline content builder bytes",
+        )?;
+        self.bytes.try_reserve_exact(block.len())
+            .map_err(|_| PdfError::ResourceLimit("inline content builder allocation".into()))?;
+        self.bytes.extend_from_slice(&block);
+        Ok(self)
+    }
+
     /// Serialize a checked Tf operation without unaccounted temporary strings.
     pub(crate) fn font_selection_with_budget(
         name: &str,

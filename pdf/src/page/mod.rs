@@ -28,6 +28,7 @@ pub mod graph_state;
 pub mod graphic_state;
 pub mod image_extraction;
 pub mod image_object;
+pub mod inline_image;
 pub mod opcode;
 pub mod operator;
 pub mod page_builder;

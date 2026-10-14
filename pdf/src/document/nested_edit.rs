@@ -644,11 +644,12 @@ impl<R: Read + Seek> PdfDocument<R> {
             .last_mut()
             .ok_or_else(|| PdfError::PageResourceError("Nested leaf absent".into()))?;
         let operation = &leaf.program.operations()[source.operation_index].operator;
-        if operation.name() != "Do" || operation.num_operands() != 1 {
+        if operation.inline_image().is_none() && (operation.name() != "Do" || operation.num_operands() != 1) {
             return Err(PdfError::ObjectError(
                 "Nested image edit requires a named Do".into(),
             ));
         }
+        if operation.inline_image().is_none() {
         let entries = self
             .ctx
             .resolve_owned(
@@ -681,6 +682,7 @@ impl<R: Read + Seek> PdfDocument<R> {
                 "Nested image target requires Subtype Image".into(),
             ));
         }
+        }
         let edited = match edit {
             NestedImageEdit::Replace(replacement) => {
                 let id = self.validate_handle(replacement)?;
@@ -711,7 +713,7 @@ impl<R: Read + Seek> PdfDocument<R> {
                     self.ctx.options(),
                 )?
             }
-            NestedImageEdit::Transform(matrix) => leaf.program.with_transformed_xobject_operation(
+            NestedImageEdit::Transform(matrix) => leaf.program.with_transformed_image_operation(
                 source.operation_index,
                 matrix,
                 self.ctx.options(),
@@ -804,6 +806,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         C: IntoIterator<Item = crate::page::source_provenance::PreparedForm>,
         C::IntoIter: DoubleEndedIterator + ExactSizeIterator,
     {
+        self.ctx.require_content_edit_permission()?;
         let mut retained_copies = budget.map(|pool| pool.reserve(0)).transpose()?;
         let edit = |doc: &Self| {
             doc.commit_page_content_edit_inner(page, root, budget, || {

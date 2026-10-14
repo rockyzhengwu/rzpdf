@@ -2,6 +2,7 @@
 name = "pdf"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.92"
 license.workspace = true
 
 [dependencies]
@@ -12,6 +13,8 @@ bitstream-io = "4.10.0"
 cbc = "0.1.2"
 fax = "0.2.7"
 flate2 = "1.1.9"
+hayro-jpeg2000 = { version = "=0.4.1", default-features = false, features = ["std"] }
+hayro-jbig2 = { version = "=0.3.1", default-features = false, features = ["std"] }
 freetype-rs = "0.38.0"
 lazy_static = "1.5.0"
 md-5 = "0.10.6"

@@ -1,5 +1,7 @@
 # 内容编辑
 
+v0.6 内联图像操作见 [图像编解码指南](image-codecs.md)：按当前来源快照替换、删除和变换 BI 内容项，嵌套 Form 复用调用隔离与来源认证；邻接文字/路径及其他页保持。逻辑删除仍不等于安全擦除。权限或签后限制在提交准备之前拒绝；发生事务回滚后仍须刷新快照。
+
 ## 子集字体与新增字符：当前能力及下一实施边界
 
 反向混合固定验收：Arial水平首源→NotoSC竖排B尾源双层跨调用完成严格重开/共享父子Form隔离、源绝对坐标与十四XML负例、三个Identity-H/W与尾Identity-V/W/W2源度量及八字典负例、四抽取字体（含é/Å复合字形）和三字体负例、三页96dpi逐页目视。日志`/tmp/rzpdf-reverse-span-integrated.log`及`/tmp/rzpdf-reverse-span-dictionary.log`均退出0，`git diff --check`通过。仅固定Tj/字体/状态样本，P3-05完整矩阵仍未完成。

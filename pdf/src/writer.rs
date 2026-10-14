@@ -4013,7 +4013,7 @@ mod tests {
     }
 
     #[test]
-    fn inline_images_are_explicitly_rejected_until_decoder_is_implemented() {
+    fn inline_images_require_explicit_colour_metadata() {
         let doc = PdfDocument::open("../tests/path-test.pdf").unwrap();
         let index = doc.try_page_count().unwrap() as u32;
         doc.add_page(index).unwrap();
@@ -4021,7 +4021,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             doc.get_page(index).unwrap().display_list(),
-            Err(crate::error::PdfError::UnsupportedFeature(_))
+            Err(crate::error::PdfError::ContentParseError(_))
         ));
     }
 

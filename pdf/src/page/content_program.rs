@@ -1323,6 +1323,25 @@ impl ContentProgram {
         matrix: [f32; 6],
         options: ParseOptions,
     ) -> PdfResult<Self> {
+        if let Some(image) = self.operations.get(index).and_then(|o| o.operator.inline_image()) {
+            let mut depth=0usize;
+            for (position,operation) in self.operations.iter().enumerate() {
+                if position==index && depth>=options.limits.max_depth {return Err(PdfError::ResourceLimit("inline transform graphics depth".into()));}
+                match operation.operator.name() {
+                    "q" if operation.operator.num_operands()==0 => {
+                        if depth>=options.limits.max_depth {return Err(PdfError::ResourceLimit("source graphics depth".into()));}
+                        depth+=1;
+                    }
+                    "Q" if operation.operator.num_operands()==0 => depth=depth.checked_sub(1).ok_or_else(||PdfError::ContentParseError("Q without matching q".into()))?,
+                    "q"|"Q"=>return Err(PdfError::ContentParseError("q/Q must have no operands".into())),
+                    _=>{}
+                }
+            }
+            if depth!=0 {return Err(PdfError::ContentParseError("unbalanced q/Q for inline transform".into()));}
+            let mut builder = crate::page::content_builder::ContentBuilder::default();
+            builder.draw_inline_image(image, matrix, options.limits)?;
+            return self.with_replaced_operation_sequence(index, builder.as_bytes(), options, 4);
+        }
         self.with_transformed_xobject_operation(index, matrix, options)
     }
 
@@ -1482,7 +1501,8 @@ impl ContentProgram {
         }
         let verify = |actual: &SourceOperation, expected: &SourceOperation| -> PdfResult<()> {
             if actual.operator.name() != expected.operator.name()
-                || actual.operator.num_operands() != expected.operator.num_operands() {
+                || actual.operator.num_operands() != expected.operator.num_operands()
+                || !actual.operator.same_inline_content(&expected.operator) {
                 return Err(PdfError::ContentParseError("batch changed neighboring operations".into()));
             }
             for operand in 0..expected.operator.num_operands() {
@@ -1645,6 +1665,7 @@ impl ContentProgram {
             };
             if actual.operator.name() != expected.operator.name()
                 || actual.operator.num_operands() != expected.operator.num_operands()
+                || !actual.operator.same_inline_content(&expected.operator)
             {
                 return Err(PdfError::ContentParseError(
                     "replacement changed neighboring operations".into(),
@@ -1807,6 +1828,12 @@ impl ContentProgram {
                 return Err(PdfError::ContentParseError(
                     "content source range is invalid".into(),
                 ));
+            }
+            if operator.inline_image().is_some() {
+                let token = operator.byte_offset().unwrap_or(start as u64) as usize;
+                if !stream_ranges.iter().any(|range| token >= range.start && end <= range.end) {
+                    return Err(PdfError::UnsupportedFeature("inline image spanning separate Contents streams".into()));
+                }
             }
             if let Some(budget) = budget {
                 if operations.len() == operations.capacity() {
