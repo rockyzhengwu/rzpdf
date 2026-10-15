@@ -1092,6 +1092,16 @@ impl SimpleFont {
             .map(|value| value.to_string()))
     }
 
+    pub(crate) fn matches_unicode(&self, ch: &CharCode, expected: &str) -> bool {
+        if ch.length() != 1 || ch.code() > 255 { return false; }
+        if let Some(cmap) = &self.to_unicode { return cmap.unicode(ch) == Some(expected); }
+        let actual = self.encoding.as_ref()
+            .and_then(|encoding| encoding.unicode_mapping(ch.code() as u8))
+            .and_then(char::from_u32);
+        let mut chars = expected.chars();
+        actual.is_some() && actual == chars.next() && chars.next().is_none()
+    }
+
     pub fn unicode(&self, ch: &CharCode) -> PdfResult<String> {
         if ch.code() > 255 {
             return Err(PdfError::FontError(

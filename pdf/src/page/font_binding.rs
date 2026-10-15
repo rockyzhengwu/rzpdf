@@ -10,7 +10,10 @@ use std::{
 #[cfg(test)]
 use std::rc::Rc;
 
-pub(crate) struct BudgetedFont {
+/// Owned inspection snapshot. Tracked font storage stays charged until dropped.
+/// Not a live binding: inspect again after editing page resources. Type3 glyph
+/// program resolution additionally enforces its document/revision guard.
+pub struct BudgetedFont {
     font: Font,
     _lease: crate::budget::MemoryLease,
 }
@@ -211,6 +214,27 @@ impl BudgetedEncodedText {
 }
 
 impl<R: Read + Seek> PdfPage<'_, R> {
+    pub fn inspect_font(&self, name: &str) -> PdfResult<BudgetedFont> {
+        self.inspect_font_with_budget(name, &self.ctx.limits().operation_budget())
+    }
+
+    pub fn inspect_font_with_budget(&self, name: &str, budget: &crate::budget::OperationBudget) -> PdfResult<BudgetedFont> {
+        self.named_font_with_budget(name, budget)
+    }
+
+    pub(crate) fn named_font_with_budget(
+        &self, name: &str, budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<BudgetedFont> {
+        let (scope, _scope_lease) = self.resource_with_budget(budget)?;
+        let object = self.font_scope_resource(&scope, "Font", name, &mut |value| {
+            let (object, lease) = self.ctx.resolve_owned_with_budget(value, budget)?;
+            Ok(ResolvedResource { object, _lease: Some(lease) })
+        })?;
+        let dict = object.as_dict().ok_or_else(|| PdfError::FontError("font resource must be a dictionary".into()))?;
+        let (font, lease) = Font::try_new_with_budget(dict, self.ctx, budget)?;
+        Ok(BudgetedFont { font, _lease: lease })
+    }
+
     /// Inspect a page font without enabling Type 3 text rendering.
     pub fn inspect_type3_font(&self, name: &str) -> PdfResult<Type3Font> {
         self.inspect_type3_font_with_budget(name, &self.ctx.limits().operation_budget())

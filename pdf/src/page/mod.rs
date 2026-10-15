@@ -23,6 +23,7 @@ pub mod diagnostic;
 pub mod display_list;
 pub(crate) mod execution_budget;
 pub(crate) mod font_binding;
+pub use font_binding::BudgetedFont as InspectedFont;
 pub mod general_state;
 pub mod graph_state;
 pub mod graphic_state;

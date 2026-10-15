@@ -494,6 +494,14 @@ impl Font {
         }
     }
 
+    pub(crate) fn matches_unicode(&self, ch: &CharCode, expected: &str) -> bool {
+        match self {
+            Self::Simple(font) => font.matches_unicode(ch, expected),
+            Self::Type0(font) => font.unicode_mapping(ch) == Some(expected),
+            Self::Type3(_) => false,
+        }
+    }
+
     pub fn chars(&self, codes: &[u8]) -> PdfResult<Vec<CharCode>> {
         match self {
             Font::Simple(s) => s.chars(codes),

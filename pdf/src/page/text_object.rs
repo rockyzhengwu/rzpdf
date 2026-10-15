@@ -137,7 +137,11 @@ impl TextObject {
                 "Character outline font size must be positive".into(),
             ));
         }
-        let matrix = Matrix::new(size * self.horizontal_scale, 0., 0., size, 0., 0.).checked_mul(
+        let (ox, oy) = if font.writting_mode() == crate::font::WritingMode::Vertical {
+            (-item.charcode().origin_x() / 1000., -item.charcode().origin_y() / 1000.)
+        } else { (0., 0.) };
+        let matrix = Matrix::new(1., 0., 0., 1., ox, oy)
+            .checked_mul(&Matrix::new(size * self.horizontal_scale, 0., 0., size, 0., 0.))?.checked_mul(
             &Matrix::new(
                 self.matrix.a(),
                 self.matrix.b(),

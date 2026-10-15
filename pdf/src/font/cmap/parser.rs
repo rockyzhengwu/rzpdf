@@ -357,7 +357,7 @@ impl<'a> CmapParser<'a> {
         Ok(())
     }
 
-    fn add_unicode(&mut self, cmap: &mut Cmap, code: u32, bytes: &[u8]) -> PdfResult<()> {
+    fn add_unicode(&mut self, cmap: &mut Cmap, code: (u8, u32), bytes: &[u8]) -> PdfResult<()> {
         let text = if let Some(pool) = &self.budget {
             let (text, lease) = decode_utf16be_with_budget(bytes, pool)?;
             self.retain_unicode_lease(lease)?;
@@ -371,18 +371,18 @@ impl<'a> CmapParser<'a> {
                     .reserve_with_budget(1, pool, &mut self.unicode_table)?;
             }
         }
-        cmap.add_unicode(code, text);
+        cmap.cid_to_unicode.insert(code, text);
         Ok(())
     }
 
-    fn add_cid(&mut self, cmap: &mut Cmap, code: u32, cid: u32) -> PdfResult<()> {
+    fn add_cid(&mut self, cmap: &mut Cmap, code: (u8, u32), cid: u32) -> PdfResult<()> {
         if let Some(pool) = &self.budget {
             if cmap.code_to_cids.get(&code).is_none() {
                 cmap.code_to_cids
                     .reserve_with_budget(1, pool, &mut self.cid_table)?;
             }
         }
-        cmap.add_code_to_cid(code, cid);
+        cmap.code_to_cids.insert(code, cid);
         Ok(())
     }
 
@@ -638,6 +638,10 @@ impl<'a> CmapParser<'a> {
             let val = self.required_word()?;
             let l = self.get_code(start.as_slice())?;
             let h = self.get_code(end.as_slice())?;
+            let length = self.source_length(&start)?;
+            if length != self.source_length(&end)? {
+                return Err(PdfError::FontError("CMap range source lengths differ".into()));
+            }
             let gid = self.get_code(&val)?;
             let count = self.range_length(l, h)?;
             if u64::from(gid) + count - 1 > u64::from(u32::MAX) {
@@ -645,7 +649,7 @@ impl<'a> CmapParser<'a> {
             }
             self.reserve_entries(count)?;
             for code in l..=h {
-                self.add_cid(cmap, code, gid + (code - l))?;
+                self.add_cid(cmap, (length, code), gid + (code - l))?;
             }
         }
         Ok(())
@@ -658,7 +662,7 @@ impl<'a> CmapParser<'a> {
             let cid = self.get_code(&key)?;
             let gid = self.get_code(&val)?;
             self.reserve_entries(1)?;
-            self.add_cid(cmap, cid, gid)?;
+            self.add_cid(cmap, (self.source_length(&key)?, cid), gid)?;
         }
         Ok(())
     }
@@ -669,6 +673,10 @@ impl<'a> CmapParser<'a> {
             let high = self.required_word()?;
             let l = self.get_code(&low)?;
             let h = self.get_code(&high)?;
+            let length = self.source_length(&low)?;
+            if length != self.source_length(&high)? {
+                return Err(PdfError::FontError("CMap range source lengths differ".into()));
+            }
             let val = self.required_word()?;
             let count = self.range_length(l, h)?;
             self.reserve_entries(count)?;
@@ -688,7 +696,7 @@ impl<'a> CmapParser<'a> {
                 for code in l..=h {
                     let word = destinations.required_word()?;
                     let bytes = self.hex_to_bytes(&word)?;
-                    self.add_unicode(cmap, code, &bytes)?;
+                    self.add_unicode(cmap, (length, code), &bytes)?;
                 }
                 if destinations.get_next_word().is_some() {
                     return Err(PdfError::FontError(
@@ -703,7 +711,7 @@ impl<'a> CmapParser<'a> {
                     ));
                 }
                 for code in l..=h {
-                    self.add_unicode(cmap, code, &unicode)?;
+                    self.add_unicode(cmap, (length, code), &unicode)?;
                     if code != h {
                         let mut carry = true;
                         for byte in unicode.iter_mut().rev() {
@@ -776,9 +784,17 @@ impl<'a> CmapParser<'a> {
             let unicode_bytes = self.hex_to_bytes(&c)?;
 
             self.reserve_entries(1)?;
-            self.add_unicode(cmap, code_value, &unicode_bytes)?;
+            self.add_unicode(cmap, (self.source_length(&code)?, code_value), &unicode_bytes)?;
         }
         Ok(())
+    }
+
+    fn source_length(&self, token: &[u8]) -> PdfResult<u8> {
+        let bytes = self.hex_to_bytes(token)?;
+        if !(1..=4).contains(&bytes.len()) {
+            return Err(PdfError::FontError("CMap source must contain 1..4 bytes".into()));
+        }
+        Ok(bytes.len() as u8)
     }
 
     pub fn parse(&mut self) -> PdfResult<Cmap> {
@@ -1025,13 +1041,13 @@ mod tests {
             let (cmap, lease) = run(&source, named, &probe).unwrap();
             for (code, text) in [(1, "C"), (2, "B"), (3, "AB"), (4, "😀"), (5, "D"), (6, "E")] {
                 assert_eq!(
-                    cmap.cid_to_unicode.get(&code).map(String::as_str),
+                    cmap.cid_to_unicode.get(&(1, code)).map(String::as_str),
                     Some(text)
                 );
             }
             assert_eq!(
                 lease.bytes(),
-                expected_retained + 10 * std::mem::size_of::<(u32, String)>()
+                expected_retained + 10 * std::mem::size_of::<((u8, u32), String)>()
             );
             assert_eq!(probe.live_bytes(), lease.bytes());
             let peak = probe.peak_bytes();
@@ -1120,7 +1136,7 @@ mod tests {
         let mut parser = super::CmapParser::new(b"1 beginbfchar <41> <0041> endbfchar".to_vec());
         parser.set_budget(&pool);
         let cmap = parser.parse().unwrap();
-        assert_eq!(cmap.cid_to_unicode.get(&65).map(String::as_str), Some("A"));
+        assert_eq!(cmap.unicode(&crate::font::CharCode::new(65, 1, 0.)), Some("A"));
         let lease = parser.take_retained_lease().unwrap();
         assert_eq!(pool.live_bytes(), lease.bytes());
         assert!(lease.bytes() > 0);
@@ -1221,7 +1237,7 @@ mod tests {
         let cmap = CmapParser::new(b"/Identity-H usecmap /Identity-H usecmap".to_vec())
             .parse()
             .unwrap();
-        assert_eq!(cmap.code_to_cids.get(&1), Some(&1));
+        assert_eq!(cmap.cid_for_char(&crate::font::CharCode::new(1, 2, 0.)), 1);
     }
 
     #[test]
@@ -1245,16 +1261,16 @@ mod tests {
         }
         let data = b"1 begincidchar <0001> 42 endcidchar /Identity-H usecmap /WMode 1 def".to_vec();
         let cmap = CmapParser::new(data.clone()).parse().unwrap();
-        assert_eq!(cmap.code_to_cids.get(&1), Some(&42));
-        assert_eq!(cmap.code_to_cids.get(&2), Some(&2));
+        assert_eq!(cmap.cid_for_char(&crate::font::CharCode::new(1, 2, 0.)), 42);
+        assert_eq!(cmap.cid_for_char(&crate::font::CharCode::new(2, 2, 0.)), 2);
         assert_eq!(cmap.wmode(), Some(1));
         assert_eq!(cmap.chars_limited(&[0, 1], 1).unwrap().len(), 1);
         let after =
             CmapParser::new(b"/Identity-H usecmap 1 begincidchar <0001> 42 endcidchar".to_vec())
                 .parse()
                 .unwrap();
-        assert_eq!(after.code_to_cids.get(&1), Some(&42));
-        assert_eq!(after.code_to_cids.get(&2), Some(&2));
+        assert_eq!(after.cid_for_char(&crate::font::CharCode::new(1, 2, 0.)), 42);
+        assert_eq!(after.cid_for_char(&crate::font::CharCode::new(2, 2, 0.)), 2);
         let limits = crate::parser::options::Limits {
             max_depth: 0,
             ..Default::default()
@@ -1278,14 +1294,14 @@ mod tests {
         )
         .parse()
         .unwrap();
-        assert_eq!(cmap.code_to_cids.get(&1), Some(&10));
-        assert_eq!(cmap.code_to_cids.get(&2), Some(&11));
-        assert_eq!(cmap.cid_to_unicode.get(&1).map(String::as_str), Some("😀"));
-        assert_eq!(cmap.cid_to_unicode.get(&2).map(String::as_str), Some("😁"));
+        assert_eq!(cmap.cid_for_char(&crate::font::CharCode::new(1, 1, 0.)), 10);
+        assert_eq!(cmap.cid_for_char(&crate::font::CharCode::new(2, 1, 0.)), 11);
+        assert_eq!(cmap.unicode(&crate::font::CharCode::new(1, 1, 0.)), Some("😀"));
+        assert_eq!(cmap.unicode(&crate::font::CharCode::new(2, 1, 0.)), Some("😁"));
         let cmap = CmapParser::new(b"1 beginbfrange <01> <02> [<0041><00420043>]".to_vec())
             .parse()
             .unwrap();
-        assert_eq!(cmap.cid_to_unicode.get(&2).map(String::as_str), Some("BC"));
+        assert_eq!(cmap.unicode(&crate::font::CharCode::new(2, 1, 0.)), Some("BC"));
     }
 
     #[test]

@@ -432,9 +432,15 @@ impl<R: Read + Seek> PdfDocument<R> {
     /// Append validated overlay in default page user space, independent of the
     /// original CTM/clip/colors. Not secure redaction and not a resource registrar.
     pub fn overlay_page_content(&self, page_index: u32, overlay: &ContentBuilder) -> PdfResult<()> {
-        let original = self.get_page(page_index)?.content_bytes()?;
         let limits = self.ctx.limits();
         let overlay = overlay.try_build_with_limits(limits)?;
+        self.overlay_page_bytes(page_index, &overlay)
+    }
+
+    pub(crate) fn overlay_page_bytes(&self, page_index: u32, overlay: &[u8]) -> PdfResult<()> {
+        self.ctx.require_content_edit_permission()?;
+        let original = self.get_page(page_index)?.content_bytes()?;
+        let limits = self.ctx.limits();
         let mut validation = Vec::new();
         validation
             .try_reserve_exact(original.len())

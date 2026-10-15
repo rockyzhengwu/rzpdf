@@ -46,7 +46,7 @@ mod tests {
             "ToUnicode".into(),
             PdfObject::PdfStream(PdfStream::new(
                 PdfDict::default(),
-                b"1 beginbfchar <0041> <0041> endbfchar".to_vec(),
+                b"2 beginbfchar <41> <0041> <0041> <0041> endbfchar".to_vec(),
             )),
         );
         for (encoding, bytes) in [
@@ -173,6 +173,23 @@ mod tests {
                 Err(PdfError::ResourceLimit(_))
             ));
         }
+    }
+
+    #[test]
+    fn reverse_encoding_preserves_colliding_numeric_codes_with_distinct_lengths() {
+        let font = Type0 {
+            encoding: Some(Cmap::try_new(b"2 begincodespacerange <40> <7F> <0000> <00FF> endcodespacerange 2 begincidchar <41> 7 <0041> 19 endcidchar".to_vec()).unwrap()),
+            to_unicode: Some(Cmap::try_new(b"2 beginbfchar <41> <0041> <0041> <0042> endbfchar".to_vec()).unwrap()),
+            ..Default::default()
+        };
+        let budget = crate::budget::OperationBudget::new(65536);
+        let encoded = font.encode_text_with_budget("AB", Default::default(), &budget).unwrap();
+        assert_eq!(encoded.as_slice(), &[0x41, 0, 0x41]);
+        let chars = font.chars(encoded.as_slice()).unwrap();
+        assert_eq!(font.unicode_mapping(&chars[0]), Some("A"));
+        assert_eq!(font.unicode_mapping(&chars[1]), Some("B"));
+        drop(encoded);
+        assert_eq!(budget.live_bytes(), 0);
     }
 
     #[test]
@@ -411,16 +428,18 @@ impl Type0 {
         let mut _mappings_lease = operation_budget.map(|pool| pool.reserve(0)).transpose()?;
         let mut mappings = Vec::new();
         let mut entries = 0usize;
-        for (code, value) in unicode.unicode_entries() {
+        for (code, source_length, value) in unicode.unicode_entries() {
             entries += 1;
             if entries > limits.max_objects {
                 return Err(PdfError::ResourceLimit("composite Unicode entries".into()));
             }
-            if value.is_empty() || encoding.cid(code) == 0 {
+            if value.is_empty() {
                 continue;
             }
             let bytes = code.to_be_bytes();
             for length in 1..=4u8 {
+                if source_length != 0 && source_length != length { continue; }
+                if encoding.cid_for_char(&CharCode::new(code, length, 0.0)) == 0 { continue; }
                 if length < 4 && code >= (1u32 << (length as u32 * 8)) {
                     continue;
                 }
@@ -701,7 +720,7 @@ impl Type0 {
     fn cid(&self, char: &CharCode) -> u32 {
         self.encoding
             .as_ref()
-            .map_or(0, |cmap| cmap.cid(char.code()))
+            .map_or(0, |cmap| cmap.cid_for_char(char))
     }
 
     pub fn unicode(&self, ch: &CharCode) -> PdfResult<String> {

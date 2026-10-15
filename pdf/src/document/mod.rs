@@ -30,6 +30,7 @@ mod content_edit;
 pub mod cross_ref_table;
 pub mod destinations;
 pub mod embedded_font;
+pub mod glyph_run;
 pub mod identity;
 pub mod links;
 pub mod metadata;

@@ -9,12 +9,12 @@ use crate::error::PdfResult;
 mod parser;
 
 #[derive(Debug, Clone)]
-pub(super) struct MappingTable<T> {
-    hash: HashMap<u32, T>,
-    sorted: Option<Vec<(u32, T)>>,
+pub(super) struct MappingTable<T, K = u32> {
+    hash: HashMap<K, T>,
+    sorted: Option<Vec<(K, T)>>,
 }
 
-impl<T> Default for MappingTable<T> {
+impl<T, K> Default for MappingTable<T, K> {
     fn default() -> Self {
         Self {
             hash: HashMap::new(),
@@ -23,13 +23,13 @@ impl<T> Default for MappingTable<T> {
     }
 }
 
-impl<T> From<HashMap<u32, T>> for MappingTable<T> {
-    fn from(hash: HashMap<u32, T>) -> Self {
+impl<T, K> From<HashMap<K, T>> for MappingTable<T, K> {
+    fn from(hash: HashMap<K, T>) -> Self {
         Self { hash, sorted: None }
     }
 }
 
-impl<T> MappingTable<T> {
+impl<T, K: Copy + Ord + std::hash::Hash> MappingTable<T, K> {
     pub(super) fn new_budgeted() -> Self {
         Self {
             hash: HashMap::new(),
@@ -44,7 +44,7 @@ impl<T> MappingTable<T> {
     pub(super) fn len(&self) -> usize {
         self.sorted.as_ref().map_or(self.hash.len(), Vec::len)
     }
-    pub(super) fn get(&self, code: &u32) -> Option<&T> {
+    pub(super) fn get(&self, code: &K) -> Option<&T> {
         if let Some(entries) = &self.sorted {
             entries
                 .binary_search_by_key(code, |(key, _)| *key)
@@ -54,7 +54,7 @@ impl<T> MappingTable<T> {
             self.hash.get(code)
         }
     }
-    pub(super) fn insert(&mut self, code: u32, value: T) {
+    pub(super) fn insert(&mut self, code: K, value: T) {
         if let Some(entries) = &mut self.sorted {
             match entries.binary_search_by_key(&code, |(key, _)| *key) {
                 Ok(index) => entries[index].1 = value,
@@ -64,14 +64,14 @@ impl<T> MappingTable<T> {
             self.hash.insert(code, value);
         }
     }
-    fn iter(&self) -> impl Iterator<Item = (&u32, &T)> {
+    fn iter(&self) -> impl Iterator<Item = (&K, &T)> {
         self.hash.iter().chain(
             self.sorted
                 .iter()
                 .flat_map(|entries| entries.iter().map(|(key, value)| (key, value))),
         )
     }
-    fn into_entries(self) -> impl Iterator<Item = (u32, T)> {
+    fn into_entries(self) -> impl Iterator<Item = (K, T)> {
         self.hash
             .into_iter()
             .chain(self.sorted.into_iter().flatten())
@@ -110,7 +110,7 @@ impl<T> MappingTable<T> {
             .checked_mul(2)
             .unwrap_or(needed)
             .max(needed);
-        let slots = std::mem::size_of::<(u32, T)>();
+        let slots = std::mem::size_of::<(K, T)>();
         let mut lease = pool.reserve(
             capacity
                 .checked_mul(slots)
@@ -131,7 +131,7 @@ impl<T> MappingTable<T> {
     }
 }
 
-impl<T: PartialEq> PartialEq for MappingTable<T> {
+impl<T: PartialEq, K: Copy + Ord + std::hash::Hash> PartialEq for MappingTable<T, K> {
     fn eq(&self, other: &Self) -> bool {
         self.len() == other.len()
             && self
@@ -175,8 +175,8 @@ pub struct Cmap {
     wmode: Option<u8>,
     cmap_type: Option<u8>,
     code_space_range: Vec<CodeSpaceRange>,
-    cid_to_unicode: MappingTable<String>,
-    code_to_cids: MappingTable<u32>,
+    cid_to_unicode: MappingTable<String, (u8, u32)>,
+    code_to_cids: MappingTable<u32, (u8, u32)>,
 }
 
 impl Cmap {
@@ -376,26 +376,48 @@ impl Cmap {
     }
 
     pub fn add_unicode(&mut self, src_code: u32, unicode: String) {
-        self.cid_to_unicode.insert(src_code, unicode);
+        // Legacy programmatic mappings have no encoded length. Parsed maps
+        // always store the exact source length instead.
+        self.cid_to_unicode.insert((0, src_code), unicode);
     }
 
     pub fn unicode(&self, char: &CharCode) -> Option<&str> {
-        return self.cid_to_unicode.get(&char.code).map(|v| v.as_str());
+        if !self.admits_unicode_code(char.code, char.length) {
+            return None;
+        }
+        self.cid_to_unicode.get(&(char.length, char.code))
+            .or_else(|| self.cid_to_unicode.get(&(0, char.code)))
+            .map(String::as_str)
     }
 
     pub fn add_code_to_cid(&mut self, code: u32, cid: u32) {
-        self.code_to_cids.insert(code, cid);
+        self.code_to_cids.insert((0, code), cid);
     }
 
     /// Resolve an encoding character code to a CID; unmapped codes select .notdef.
     pub fn cid(&self, code: u32) -> u32 {
-        self.code_to_cids.get(&code).copied().unwrap_or(0)
+        // Preserve the lengthless inspection API only for unambiguous values.
+        let mut result = None;
+        for length in 0..=4 {
+            if let Some(value) = self.code_to_cids.get(&(length, code)) {
+                if result.is_some_and(|previous| previous != *value) { return 0; }
+                result = Some(*value);
+            }
+        }
+        result.unwrap_or(0)
     }
 
-    pub(crate) fn unicode_entries(&self) -> impl Iterator<Item = (u32, &str)> {
+    /// Encoding lookup preserves source byte length; an unmapped code is .notdef.
+    pub fn cid_for_char(&self, ch: &CharCode) -> u32 {
+        self.code_to_cids.get(&(ch.length, ch.code))
+            .or_else(|| self.code_to_cids.get(&(0, ch.code)))
+            .copied().unwrap_or(0)
+    }
+
+    pub(crate) fn unicode_entries(&self) -> impl Iterator<Item = (u32, u8, &str)> {
         self.cid_to_unicode
             .iter()
-            .map(|(code, text)| (*code, text.as_str()))
+            .map(|((length, code), text)| (*code, *length, text.as_str()))
     }
 
     pub(crate) fn admits_unicode_code(&self, code: u32, length: u8) -> bool {
@@ -1061,9 +1083,9 @@ mod licensed_cmap_regressions {
                         && cmap
                             .code_space_range
                             .iter()
-                            .any(|s| s.is_contain_code(**code))
+                            .any(|s| s.size == code.0 && s.is_contain_code(code.1))
                 })
-                .map(|(code, cid)| (*code, *cid))
+                .map(|(code, cid)| (code.1, *cid))
                 .collect();
             entries.sort_unstable();
             assert_eq!(entries.len(), count, "{name}");

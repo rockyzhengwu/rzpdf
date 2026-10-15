@@ -1,0 +1,265 @@
+{
+  "generator": {
+    "fonttools": "4.39.4",
+    "pikepdf": "9.11.0"
+  },
+  "cases": [
+    {
+      "kind": "cff",
+      "codes": [
+        "41",
+        "42"
+      ],
+      "unicode": [
+        "fi",
+        "😀"
+      ],
+      "gids": [
+        1,
+        2
+      ],
+      "widths": [
+        600,
+        700
+      ],
+      "origins": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ]
+      ],
+      "rotation": 0
+    },
+    {
+      "kind": "opentype-cff",
+      "codes": [
+        "41",
+        "42"
+      ],
+      "unicode": [
+        "fi",
+        "😀"
+      ],
+      "gids": [
+        1,
+        2
+      ],
+      "widths": [
+        600,
+        700
+      ],
+      "origins": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ]
+      ],
+      "rotation": 0
+    },
+    {
+      "kind": "simple-truetype",
+      "codes": [
+        "41",
+        "42"
+      ],
+      "unicode": [
+        "fi",
+        "😀"
+      ],
+      "gids": [
+        1,
+        2
+      ],
+      "widths": [
+        600,
+        700
+      ],
+      "origins": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ]
+      ],
+      "rotation": 90
+    },
+    {
+      "kind": "cid-h",
+      "codes": [
+        "41",
+        "8001"
+      ],
+      "unicode": [
+        "fi",
+        "😀"
+      ],
+      "gids": [
+        1,
+        2
+      ],
+      "widths": [
+        600,
+        700
+      ],
+      "origins": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ]
+      ],
+      "rotation": 0
+    },
+    {
+      "kind": "cid-v",
+      "codes": [
+        "41",
+        "8001"
+      ],
+      "unicode": [
+        "fi",
+        "😀"
+      ],
+      "gids": [
+        1,
+        2
+      ],
+      "widths": [
+        -900,
+        -1100
+      ],
+      "origins": [
+        [
+          300,
+          800
+        ],
+        [
+          350,
+          850
+        ]
+      ],
+      "rotation": 0
+    },
+    {
+      "kind": "cid-lengths",
+      "codes": [
+        "41",
+        "8001",
+        "810001",
+        "82000001"
+      ],
+      "unicode": [
+        "fi",
+        "😀",
+        "中",
+        "AB"
+      ],
+      "gids": [
+        1,
+        2,
+        1,
+        2
+      ],
+      "widths": [
+        600,
+        700,
+        600,
+        700
+      ],
+      "origins": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ]
+      ],
+      "rotation": 0
+    },
+    {
+      "kind": "embedded-type1",
+      "codes": [
+        "41",
+        "42"
+      ],
+      "unicode": [
+        "A",
+        "B"
+      ],
+      "gids": null,
+      "widths": [
+        600,
+        600
+      ],
+      "origins": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ]
+      ],
+      "rotation": 0
+    },
+    {
+      "kind": "differences",
+      "codes": [
+        "41",
+        "42"
+      ],
+      "unicode": [
+        "A",
+        "B"
+      ],
+      "gids": null,
+      "widths": [
+        600,
+        600
+      ],
+      "origins": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ]
+      ],
+      "rotation": 0
+    }
+  ],
+  "sha256": {
+    "fonts.pdf": "98bd91fa2e1aae28d07676e6eea5558340592e629ee6e8658fd25668efb09414",
+    "geometry.ttf": "2ca6c6eda2bb47acb67c8de1ac30a38e20d351bfa7f5740ea4d6c13b3229e0de",
+    "geometry.otf": "e24c6bcfc2a9b7b41e73e573c773c2d399ef871ed9ded699486d2db0e9d90c06",
+    "geometry.cff": "85a3edb82e94ce4d36ae3a221d06196041b06e36213928765191c18dcfa022a4"
+  },
+  "pfb_source_sha256": "325edab0bcd1050f2c9f51391f9ee87c6d376e69b9f9a2d42cb8ae0a8276d634"
+}

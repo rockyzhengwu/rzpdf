@@ -6,7 +6,7 @@ use crate::{
 use std::io::{Read, Seek};
 
 /// An interpreted character in paint order, not inferred reading order.
-/// Position is the character baseline origin in rotated/cropped page display
+/// Position is the advancing text origin in rotated/cropped page display
 /// coordinates (top-left origin, y downward), not unrotated PDF user space.
 /// Matrix is text-rise translation * initial text-matrix * CTM * page transform;
 /// its translation is the run origin, not each advancing character origin.
@@ -31,27 +31,47 @@ pub struct ExtractedCharacter {
     pub writing_mode: Option<crate::font::WritingMode>,
     pub unicode: Option<String>,
     pub position: Point,
+    /// W2 vector from horizontal glyph origin to vertical text origin, in
+    /// thousandths of text space; [0, 0] for horizontal fonts. Not yet applied
+    /// to `position`. Use `glyph_origin_display()` for the horizontal outline.
+    pub vertical_origin: [f32; 2],
     pub matrix: Matrix,
 }
 
 impl ExtractedCharacter {
+    /// Horizontal outline origin, including the vertical font's W2 offset.
+    /// The text origin remains available independently in `position`.
+    pub fn glyph_origin_display(&self) -> PdfResult<Point> {
+        let x = -f64::from(self.vertical_origin[0]) * f64::from(self.font_size)
+            * f64::from(self.horizontal_scale) / 1000.;
+        let y = -f64::from(self.vertical_origin[1]) * f64::from(self.font_size) / 1000.;
+        let x_display = f64::from(self.position.x()) + x * f64::from(self.matrix.a()) + y * f64::from(self.matrix.c());
+        let y_display = f64::from(self.position.y()) + x * f64::from(self.matrix.b()) + y * f64::from(self.matrix.d());
+        let point = Point::new(x_display as f32, y_display as f32);
+        if !point.x().is_finite() || !point.y().is_finite() {
+            return Err(PdfError::ObjectError("character glyph origin overflows".into()));
+        }
+        Ok(point)
+    }
+
     /// Map local em coordinates anchored at this character's baseline origin
     /// into display space, including Tf, Tz, text/page matrices and UserUnit.
     /// Not a glyph outline/bounding box or visibility test. Vertical origins are
-    /// already reflected in `position`; this does not infer vertical glyph metrics.
+    /// applied by `glyph_origin_display()`, separately from the text origin.
     pub fn em_to_display_matrix(&self) -> PdfResult<Matrix> {
         if !self.font_size.is_finite() || self.font_size <= 0. {
             return Err(PdfError::ObjectError(
                 "character font size must be finite and positive".into(),
             ));
         }
+        let origin = self.glyph_origin_display()?;
         let linear = Matrix::new(
             self.matrix.a(),
             self.matrix.b(),
             self.matrix.c(),
             self.matrix.d(),
-            self.position.x(),
-            self.position.y(),
+            origin.x(),
+            origin.y(),
         );
         Matrix::new(
             self.font_size * self.horizontal_scale,
@@ -349,6 +369,10 @@ impl<R: Read + Seek> PdfPage<'_, R> {
                         .map(|font| font.writting_mode()),
                     unicode,
                     position: item.pos().clone(),
+                    vertical_origin: if text.state.text_state.font.as_ref()
+                        .is_some_and(|font| font.writting_mode() == crate::font::WritingMode::Vertical) {
+                        [item.charcode().origin_x(), item.charcode().origin_y()]
+                    } else { [0., 0.] },
                     matrix: text.matrix.clone(),
                 });
             }
