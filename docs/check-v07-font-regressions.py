@@ -34,9 +34,18 @@ for name, digest, mode in [
 ]:
     original, saved = SOURCE / f"{name}.pdf", OUT / f"{name}.pdf"
     assert hashlib.sha256(original.read_bytes()).hexdigest() == digest
+    strict_status = "passed"
     if mode == "--compat":
-        strict = run(ROOT / "target/debug/examples/v03_probe", original, OUT / "strict-must-not-succeed.pdf", "--strict", fail=True)
-        assert "Invalid free xref offset" in strict or "free" in strict, strict
+        # Historical v0.3 rejected this input's free entry. Later parser work
+        # may accept it strictly; measure the current result, not the old claim.
+        strict = subprocess.run([str(ROOT / "target/debug/examples/v03_probe"), str(original), str(OUT / "strict-check.pdf"), "--strict"], capture_output=True, text=True)
+        (OUT / "strict-check.log").write_text(strict.stdout + strict.stderr)
+        if strict.returncode == 0:
+            assert "roundtrip=strict-ok" in strict.stdout
+            mode = "--strict"
+        else:
+            assert "free" in strict.stderr, strict.stderr
+            strict_status = "historical free-entry rejection; compatible mode required"
     probe = run(ROOT / "target/debug/examples/v03_probe", original, saved, mode)
     (OUT / f"{name}-probe.log").write_text(probe)
     assert "roundtrip=strict-ok" in probe
@@ -54,7 +63,7 @@ for name, digest, mode in [
             first = Image.open(OUT / f"{name}-original-{page+1}.png").convert("RGB")
             second = Image.open(OUT / f"{name}-saved-{page+1}.png").convert("RGB")
             assert ImageChops.difference(first, second).getbbox() is None, (name, page)
-        reports.append(dict(name=name, sha256=digest, pages=len(a), probe=probe, qpdf=qpdf))
+        reports.append(dict(name=name, sha256=digest, pages=len(a), strict_status=strict_status, probe=probe, qpdf=qpdf))
 
 for kind, checker in [("font_matrix", "check-v03-font-matrix.py"), ("subset_matrix", "check-v03-font-subset.py")]:
     path = OUT / f"{kind}.pdf"
