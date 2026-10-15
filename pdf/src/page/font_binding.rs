@@ -1,7 +1,7 @@
 use super::{content_program::ContentProgram, PdfPage};
 use crate::{
     error::{PdfError, PdfResult},
-    font::pdf_font::Font,
+    font::{pdf_font::Font, type3::{Type3Font, Type3GlyphProgram}},
     objects::PdfObject,
 };
 use std::{
@@ -211,6 +211,30 @@ impl BudgetedEncodedText {
 }
 
 impl<R: Read + Seek> PdfPage<'_, R> {
+    /// Inspect a page font without enabling Type 3 text rendering.
+    pub fn inspect_type3_font(&self, name: &str) -> PdfResult<Type3Font> {
+        self.inspect_type3_font_with_budget(name, &self.ctx.limits().operation_budget())
+    }
+
+    pub fn inspect_type3_font_with_budget(
+        &self,
+        name: &str,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<Type3Font> {
+        let (scope, _scope_lease) = self.resource_with_budget(budget)?;
+        let object = self.font_scope_resource(&scope, "Font", name, &mut |value| {
+            let (object, lease) = self.ctx.resolve_owned_with_budget(value, budget)?;
+            Ok(ResolvedResource { object, _lease: Some(lease) })
+        })?;
+        let dict = object.as_dict().ok_or_else(|| PdfError::FontError("Type3 font must be a dictionary".into()))?;
+        Type3Font::try_new_with_budget(dict, self.ctx, budget)
+    }
+
+    /// Read a glyph through the current page's document/revision guard.
+    pub fn inspect_type3_glyph(&self, font: &Type3Font, code: u8) -> PdfResult<Type3GlyphProgram> {
+        font.glyph_program(code, self.ctx)
+    }
+
     /// Track only font selection in the top-level content program, not layout.
     /// Unknown prefix operators are rejected rather than assuming no state effect.
     pub(crate) fn encode_text_for_operation(

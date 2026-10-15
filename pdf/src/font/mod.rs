@@ -18,6 +18,7 @@ pub mod truetype;
 pub mod type0;
 pub mod type1_program;
 pub mod type1c;
+pub mod type3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WritingMode {
