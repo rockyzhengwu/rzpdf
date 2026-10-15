@@ -60,6 +60,7 @@ pub struct TextDrawSource {
 
 #[derive(Debug, Clone)]
 pub struct TextObject {
+    type3_metadata: bool,
     source: Option<TextDrawSource>,
     nested_source: Option<super::source_provenance::NestedDrawSource>,
     pub state: GraphicState,
@@ -72,6 +73,16 @@ pub struct TextObject {
 }
 
 impl TextObject {
+    /// Type3 glyph graphics were emitted separately. Keep this event for
+    /// extraction/provenance only; painting it again would duplicate the glyph.
+    pub fn is_type3_metadata(&self) -> bool {
+        self.type3_metadata
+    }
+
+    pub(crate) fn with_type3_metadata(mut self) -> Self {
+        self.type3_metadata = true;
+        self
+    }
     /// Nonzero-winding location in an unhinted simple character outline.
     /// Geometry only: text rendering mode, clipping and visibility are ignored.
     pub fn character_outline_location_display(
@@ -173,6 +184,7 @@ impl TextObject {
 
     pub fn new(state: GraphicState) -> Self {
         TextObject {
+            type3_metadata: false,
             source: None,
             nested_source: None,
             state,

@@ -1489,6 +1489,7 @@ mod tests {
             let encoded = match font {
                 Font::Simple(font) => font.encode_text_with_limits("é€", doc.ctx().limits()),
                 Font::Type0(font) => font.encode_text_with_limits("é€", doc.ctx().limits()),
+                Font::Type3(_) => unreachable!("standard font test"),
             }
             .unwrap();
             assert_eq!(encoded, [0xe9, 0x80]);

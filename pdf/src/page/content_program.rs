@@ -103,6 +103,7 @@ impl<R: Read + Seek> super::PdfPage<'_, R> {
         match crate::font::pdf_font::Font::try_new(dict, self.ctx)? {
             crate::font::pdf_font::Font::Simple(font) => font.encode_text_with_limits(text, limits),
             crate::font::pdf_font::Font::Type0(font) => font.encode_text_with_limits(text, limits),
+            crate::font::pdf_font::Font::Type3(_) => Err(PdfError::UnsupportedFeature("Type3 Unicode encoding/editing".into())),
         }
     }
 

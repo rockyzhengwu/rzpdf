@@ -2,6 +2,8 @@
 
 内联 BI/ID/EI 和 JPX/JBIG2 基础入口见 [图像编解码指南](image-codecs.md)，具体输入范围见 [v0.6 矩阵](releases/v0.6-matrix.md)。`extract_inline_image_source(program, operation)` 返回经过页/修订认证的原载荷；内联来源没有命名资源，绘制事件通过 `image.is_inline()` 区分，解码结果仍走 paint-order API。
 
+受限 [Type3 字形执行](type3-fonts.md)产生的图像也进入 paint-order 结果，但没有页面根/普通 Form 的编辑来源。它们的资源名属于字形作用域，不能直接用于页面资源替换；字形内部编辑尚不支持。
+
 页面目前提供以下入口，语义不同，不应混用：
 
 | 入口 | 返回内容 | 顺序与范围 |

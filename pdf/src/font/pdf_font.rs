@@ -13,6 +13,7 @@ use super::{GlyphDesc, WritingMode};
 pub enum Font {
     Simple(SimpleFont),
     Type0(Type0),
+    Type3(std::rc::Rc<super::type3::Type3Font>),
 }
 
 /// How a font program was selected for drawing; extraction may still be possible
@@ -289,6 +290,36 @@ mod encoding_input_tests {
 }
 
 impl Font {
+    pub(crate) fn text_advance(
+        &self,
+        ch: &CharCode,
+        size: f32,
+        char_space: f32,
+        word_space: f32,
+        horizontal: f32,
+    ) -> PdfResult<[f32; 2]> {
+        let is_space = ch.code() == 32 && ch.length() == 1;
+        let mut ordinary = (ch.width() / 1000.0) * size + char_space;
+        if is_space {
+            ordinary += word_space;
+        }
+        let value = match self {
+            Self::Type3(font) => {
+                let advance = font.text_space_advance(type3_code(ch)?)?;
+                let mut x = advance[0] * size + char_space;
+                if is_space {
+                    x += word_space;
+                }
+                [x * horizontal, advance[1] * size]
+            }
+            _ if self.writting_mode() == WritingMode::Vertical => [0., ordinary],
+            _ => [ordinary * horizontal, 0.],
+        };
+        if value.iter().any(|v| !v.is_finite()) {
+            return Err(PdfError::FontError("non-finite text advance".into()));
+        }
+        Ok(value)
+    }
     /// Shared ownership path: output capacity is reserved before encoding.
     pub(crate) fn encode_text_with_budget(
         &self,
@@ -299,6 +330,9 @@ impl Font {
         match self {
             Self::Simple(font) => font.encode_text_with_budget(text, limits, budget),
             Self::Type0(font) => font.encode_text_with_budget(text, limits, budget),
+            Self::Type3(_) => Err(PdfError::UnsupportedFeature(
+                "Type3 Unicode encoding/editing".into(),
+            )),
         }
     }
 
@@ -372,7 +406,9 @@ impl Font {
                 return Ok(Font::Simple(truetype));
             }
             "Type3" => {
-                return Err(PdfError::UnsupportedFeature("Type3 fonts".into()));
+                return Ok(Self::Type3(std::rc::Rc::new(
+                    super::type3::Type3Font::try_new(dict, ctx)?,
+                )));
             }
             _ => Err(PdfError::FontError(format!(
                 "unsupported font subtype: {}",
@@ -409,7 +445,12 @@ impl Font {
                 let (font, lease) = Type0::try_new_with_budget(dict, ctx, budget)?;
                 Ok((Self::Type0(font), lease))
             }
-            "Type3" => Err(PdfError::UnsupportedFeature("Type3 fonts".into())),
+            "Type3" => Ok((
+                Self::Type3(std::rc::Rc::new(
+                    super::type3::Type3Font::try_new_with_budget(dict, ctx, budget)?,
+                )),
+                budget.reserve(0)?,
+            )),
             name => Err(PdfError::FontError(format!(
                 "unsupported font subtype: {name}"
             ))),
@@ -420,6 +461,9 @@ impl Font {
         match self {
             Font::Simple(t) => t.text_widths(chars),
             Font::Type0(t) => t.text_widths(chars),
+            Font::Type3(_) => Err(PdfError::UnsupportedFeature(
+                "Type3 editing width aggregation".into(),
+            )),
         }
     }
 
@@ -427,6 +471,9 @@ impl Font {
         match self {
             Font::Simple(t) => t.unicode(char),
             Font::Type0(t) => t.unicode(char),
+            Font::Type3(t) => Ok(t
+                .unicode_mapping(type3_code(char)?)
+                .unwrap_or_else(|| "\u{fffd}".into())),
         }
     }
 
@@ -434,6 +481,7 @@ impl Font {
         match self {
             Font::Simple(_) => WritingMode::Horizontal,
             Font::Type0(tf) => tf.writting_mode(),
+            Font::Type3(_) => WritingMode::Horizontal,
         }
     }
 
@@ -442,6 +490,7 @@ impl Font {
         match self {
             Font::Simple(font) => font.unicode_mapping(ch),
             Font::Type0(font) => Ok(font.unicode_mapping(ch).map(str::to_owned)),
+            Font::Type3(font) => Ok(font.unicode_mapping(type3_code(ch)?)),
         }
     }
 
@@ -449,12 +498,14 @@ impl Font {
         match self {
             Font::Simple(s) => s.chars(codes),
             Font::Type0(ft) => ft.chars(codes),
+            Font::Type3(ft) => ft.chars_limited(codes, usize::MAX),
         }
     }
     pub fn chars_limited(&self, codes: &[u8], limit: usize) -> PdfResult<Vec<CharCode>> {
         match self {
             Font::Simple(font) => font.chars_limited(codes, limit),
             Font::Type0(font) => font.chars_limited(codes, limit),
+            Font::Type3(font) => font.chars_limited(codes, limit),
         }
     }
     /// Validate and visit codes without allocating a retained character vector.
@@ -467,6 +518,7 @@ impl Font {
         match self {
             Font::Simple(font) => font.visit_chars_limited(codes, limit, visitor),
             Font::Type0(font) => font.visit_chars_limited(codes, limit, visitor),
+            Font::Type3(font) => font.visit_chars_limited(codes, limit, visitor),
         }
     }
 
@@ -474,6 +526,7 @@ impl Font {
         match self {
             Font::Simple(f) => f.base_font(),
             Font::Type0(t) => t.base_font(),
+            Font::Type3(_) => "Type3",
         }
     }
 
@@ -481,6 +534,10 @@ impl Font {
         match self {
             Font::Simple(s) => s.get_glyph(char),
             Font::Type0(t0) => t0.get_glyph(char),
+            Font::Type3(font) => type3_code(char)
+                .ok()
+                .and_then(|code| font.glyph_name(code))
+                .map(|name| GlyphDesc::Name(name.into())),
         }
     }
 
@@ -488,23 +545,30 @@ impl Font {
         match self {
             Font::Simple(s) => s.fontfile(),
             Font::Type0(t) => t.fontfile(),
+            Font::Type3(_) => None,
         }
     }
 
     pub fn font_program_source(&self) -> FontProgramSource {
         match self {
             Font::Simple(font) if font.has_embedded_program() => FontProgramSource::Embedded,
-            Font::Simple(font) => {
-                match super::builtin_font::find_builtin_font(font.base_font()) {
-                    Some(name) if name == font.base_font() => FontProgramSource::BundledBase14,
-                    Some(name) => FontProgramSource::DeclaredSubstitute {
-                        base14_name: name.to_owned(),
-                    },
-                    None => FontProgramSource::Missing,
-                }
-            }
+            Font::Simple(font) => match super::builtin_font::find_builtin_font(font.base_font()) {
+                Some(name) if name == font.base_font() => FontProgramSource::BundledBase14,
+                Some(name) => FontProgramSource::DeclaredSubstitute {
+                    base14_name: name.to_owned(),
+                },
+                None => FontProgramSource::Missing,
+            },
             Font::Type0(font) if font.fontfile().is_some() => FontProgramSource::Embedded,
             Font::Type0(_) => FontProgramSource::Missing,
+            Font::Type3(_) => FontProgramSource::Embedded,
         }
     }
+}
+
+fn type3_code(ch: &CharCode) -> PdfResult<u8> {
+    if ch.length() != 1 {
+        return Err(PdfError::FontError("Type3 code must be one byte".into()));
+    }
+    u8::try_from(ch.code()).map_err(|_| PdfError::FontError("Type3 code outside 0..255".into()))
 }

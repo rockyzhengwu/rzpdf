@@ -4,7 +4,9 @@
 
 ## Unreleased — v0.7 实现切片
 
-新增实验性 Type3 字体/字形检查模型和页面查询入口，覆盖 FontMatrix、宽度/编码、CharProcs、d0/d1、资源声明、文档修订认证及保留预算；新增命令行示例、10 项专项和独立 pikepdf/MuPDF 保存检查。页面 Type3 执行/提取、字符映射扩展与字形运行写入仍未完成，不表示整版通过。范围见 [计划](docs/releases/v0.7.md)，接口及限制见 [Type3 指南](docs/type3-fonts.md)。
+新增 Type3 字体检查及受限不透明图形字形执行，接通 d0/d1、FontMatrix、资源、文字提取/ToUnicode 和来源隔离。修复带旋转 FontMatrix 的文字推进：只用水平分量，字形形状仍完整变换。字形内绘图与文字元数据分开，避免重复绘制；资源、循环、累计工作量、R6、共享页编辑和保留预算有回归。非默认 Tr、透明度和字形内文字仍明确拒绝；一般字符映射/字体兼容扩展与字形运行写入未完成，不表示整版通过。
+
+`Font` 增加 `Type3(Rc<Type3Font>)` 变体；自定义设备直接消费显示列表时应跳过 `TextObject::is_type3_metadata()` 文字元数据。当前专项和独立像素检查已通过，完整固定源码回归待终态；范围见 [计划](docs/releases/v0.7.md)，接口及限制见 [Type3 指南](docs/type3-fonts.md)。
 
 ## Unreleased — v0.6 内容流与图像基础（限定范围已验收）
 

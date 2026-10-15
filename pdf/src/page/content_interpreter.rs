@@ -53,6 +53,9 @@ pub struct Interpreter<'a, R: Seek + Read> {
     form_depth: usize,
     active_forms: Vec<crate::objects::object_id::ObjectId>,
     invocation_path: Vec<super::source_provenance::FormInvocation>,
+    type3_depth: usize,
+    type3_uncoloured: bool,
+    type3_budget: crate::budget::OperationBudget,
 }
 
 #[cfg(test)]
@@ -735,6 +738,9 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
     pub fn new(page: &'a PdfPage<'a, R>, ctx: &'a PDFContext<R>, parser: ContentParser) -> Self {
         Interpreter {
             invocation_path: Vec::new(),
+            type3_depth: 0,
+            type3_uncoloured: false,
+            type3_budget: ctx.limits().operation_budget(),
             form_depth: 0,
             active_forms: Vec::new(),
             execution_budget: super::execution_budget::ExecutionBudget::new(),
@@ -858,6 +864,65 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
     }
 
     fn invoke_oeration(&mut self, op: Operator, device: &mut dyn Device) -> PdfResult<()> {
+        if self.type3_depth != 0 {
+            if !matches!(
+                op.name(),
+                "q" | "Q"
+                    | "cm"
+                    | "w"
+                    | "J"
+                    | "j"
+                    | "M"
+                    | "d"
+                    | "i"
+                    | "m"
+                    | "l"
+                    | "c"
+                    | "v"
+                    | "y"
+                    | "h"
+                    | "re"
+                    | "S"
+                    | "s"
+                    | "f"
+                    | "F"
+                    | "f*"
+                    | "B"
+                    | "B*"
+                    | "b"
+                    | "b*"
+                    | "n"
+                    | "W"
+                    | "W*"
+                    | "Do"
+                    | "BI"
+                    | "rg"
+                    | "RG"
+                    | "g"
+                    | "G"
+                    | "k"
+                    | "K"
+                    | "cs"
+                    | "CS"
+                    | "sc"
+                    | "SC"
+                    | "scn"
+                    | "SCN"
+            ) {
+                return Err(PdfError::UnsupportedFeature(format!(
+                    "Type3 glyph operator {} outside graphics baseline",
+                    op.name()
+                )));
+            }
+            if self.type3_uncoloured
+                && matches!(
+                    op.name(),
+                    "rg" | "RG" | "g" | "G" | "k" | "K" | "cs" | "CS" | "sc" | "SC" | "scn" | "SCN"
+                )
+            {
+                return Err(PdfError::FontError("d1 glyph cannot change colour".into()));
+            }
+        }
         if let Some(expected) = crate::page::opcode::operand_count(op.name()) {
             if op.num_operands() != expected {
                 return Err(PdfError::PageOperatorError(format!(
@@ -1002,7 +1067,9 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             // ActualText and optional-content visibility remain diagnostic.
             "BMC" => {
                 op.get_as_name(0)?;
-                self.marked_content_depth = self.marked_content_depth.checked_add(1)
+                self.marked_content_depth = self
+                    .marked_content_depth
+                    .checked_add(1)
                     .filter(|depth| *depth <= self.ctx.limits().max_content_operations)
                     .ok_or_else(|| PdfError::ResourceLimit("marked content depth".into()))?;
             }
@@ -1015,13 +1082,17 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                 if !mcid_only {
                     self.unsupported_operator(&op)?;
                 }
-                self.marked_content_depth = self.marked_content_depth.checked_add(1)
+                self.marked_content_depth = self
+                    .marked_content_depth
+                    .checked_add(1)
                     .filter(|depth| *depth <= self.ctx.limits().max_content_operations)
                     .ok_or_else(|| PdfError::ResourceLimit("marked content depth".into()))?;
             }
             "EMC" => {
-                self.marked_content_depth = self.marked_content_depth.checked_sub(1)
-                    .ok_or_else(|| PdfError::PageOperatorError("EMC without matching BMC".into()))?;
+                self.marked_content_depth =
+                    self.marked_content_depth.checked_sub(1).ok_or_else(|| {
+                        PdfError::PageOperatorError("EMC without matching BMC".into())
+                    })?;
             }
 
             _ => {
@@ -1183,32 +1254,12 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                                     .with_decoded_code_range(code_offset..code_end);
                             code_offset = code_end;
                             textobj.add_item(charitem);
-                            let mut displacement = (char.width() / 1000.0) * font_size + char_space;
-                            if char.code() == 32 && char.length() == 1 {
-                                displacement += word_space;
-                            }
-                            match font.writting_mode() {
-                                WritingMode::Horizontal => {
-                                    let translation = Matrix::new(
-                                        1.0,
-                                        0.0,
-                                        0.0,
-                                        1.0,
-                                        displacement * horz_scale,
-                                        0.0,
-                                    );
-                                    let m =
-                                        translation.checked_mul(&self.current_state.text_matrix)?;
-                                    self.current_state.text_matrix = m;
-                                }
-                                WritingMode::Vertical => {
-                                    let translation =
-                                        Matrix::new(1.0, 0.0, 0.0, 1.0, 0.0, displacement);
-                                    let m =
-                                        translation.checked_mul(&self.current_state.text_matrix)?;
-                                    self.current_state.text_matrix = m;
-                                }
-                            }
+                            let advance = font.text_advance(
+                                char, font_size, char_space, word_space, horz_scale,
+                            )?;
+                            self.current_state.text_matrix =
+                                Matrix::new(1., 0., 0., 1., advance[0], advance[1])
+                                    .checked_mul(&self.current_state.text_matrix)?;
                         }
                     }
                     PdfObject::PdfNumber(n) => {
@@ -1237,12 +1288,12 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                     }
                 }
             }
-            let textobj = if self.form_depth == 0 {
+            let textobj = if self.form_depth == 0 && self.type3_depth == 0 {
                 textobj.with_source(self.text_draw_source())
             } else {
                 textobj.with_nested_source(self.nested_draw_source()?)
             };
-            device.show_text(textobj)?;
+            self.emit_text_object(textobj, device)?;
         }
 
         Ok(())
@@ -1327,30 +1378,18 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                     .with_decoded_code_range(code_offset..code_end);
                 code_offset = code_end;
                 textobj.add_item(charitem);
-                let mut displacement = (char.width() / 1000.0) * font_size + char_space;
-                if char.code() == 32 && char.length() == 1 {
-                    displacement += word_space;
-                }
-                match font.writting_mode() {
-                    WritingMode::Horizontal => {
-                        let translation =
-                            Matrix::new(1.0, 0.0, 0.0, 1.0, displacement * horz_scale, 0.0);
-                        let m = translation.checked_mul(&self.current_state.text_matrix)?;
-                        self.current_state.text_matrix = m;
-                    }
-                    WritingMode::Vertical => {
-                        let translation = Matrix::new(1.0, 0.0, 0.0, 1.0, 0.0, displacement);
-                        let m = translation.checked_mul(&self.current_state.text_matrix)?;
-                        self.current_state.text_matrix = m;
-                    }
-                }
+                let advance =
+                    font.text_advance(char, font_size, char_space, word_space, horz_scale)?;
+                self.current_state.text_matrix =
+                    Matrix::new(1., 0., 0., 1., advance[0], advance[1])
+                        .checked_mul(&self.current_state.text_matrix)?;
             }
-            let textobj = if self.form_depth == 0 {
+            let textobj = if self.form_depth == 0 && self.type3_depth == 0 {
                 textobj.with_source(self.text_draw_source())
             } else {
                 textobj.with_nested_source(self.nested_draw_source()?)
             };
-            device.show_text(textobj)?;
+            self.emit_text_object(textobj, device)?;
         } else {
             return Err(PdfError::PageOperatorError(
                 "Text display requires a selected font".into(),
@@ -1364,6 +1403,112 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             operation_index: self.operation_index,
             operator_byte_offset: self.operation_byte_offset,
         }
+    }
+
+    fn emit_text_object(&mut self, text: TextObject, device: &mut dyn Device) -> PdfResult<()> {
+        if let Some(Font::Type3(font)) = &text.state.text_state.font {
+            if text.state.text_state.text_rendering_mode
+                != super::text_state::TextRenderingMode::Fill
+            {
+                return Err(PdfError::UnsupportedFeature(
+                    "Type3 non-default text rendering mode outside baseline".into(),
+                ));
+            }
+            let general = &text.state.general_state;
+            if general.fill_alpha != 1.0
+                || general.stroke_alpha != 1.0
+                || general.blend_mode != super::general_state::BlendMode::Normal
+            {
+                return Err(PdfError::UnsupportedFeature(
+                    "Type3 transparency outside opaque graphics baseline".into(),
+                ));
+            }
+            let limits = self.ctx.limits();
+            for item in &text.items {
+                let code = u8::try_from(item.charcode().code())
+                    .map_err(|_| PdfError::FontError("Type3 code range".into()))?;
+                let work = self.execution_budget.child(&limits)?;
+                let depth = self.type3_depth + self.form_depth + 1;
+                if depth > 128 {
+                    return Err(PdfError::ResourceLimit(
+                        "Type3 implementation depth (128)".into(),
+                    ));
+                }
+                work.operation(&limits)?; // d0/d1, checked by the model below.
+                let program = font.glyph_program_with_decode_check(code, self.ctx, |bytes| {
+                    work.decoded(bytes, &limits)
+                })?;
+                if program.metrics().width[0] != font.width(code)? {
+                    return Err(PdfError::FontError(
+                        "Type3 CharProc width disagrees with Widths".into(),
+                    ));
+                }
+                let mut child = Interpreter::new(
+                    self.page,
+                    self.ctx,
+                    ContentParser::new(crate::parser::syntax::SyntaxParser::with_options(
+                        crate::io::stream_reader::StreamReader::try_new(std::io::Cursor::new(
+                            Vec::new(),
+                        ))?,
+                        self.ctx.options(),
+                    )),
+                );
+                child.type3_depth = self.type3_depth + 1;
+                child.form_depth = self.form_depth;
+                child.type3_uncoloured = program.metrics().bbox.is_some();
+                child.type3_budget = self.type3_budget.clone();
+                child.execution_budget = work;
+                // Type3 Resources omitted: use the page resource dictionary
+                // (PDF 1.7 Table 5.9). An explicit empty scope stays empty.
+                child.resource_scope = Some(match font.resources() {
+                    Some(scope) => scope.clone(),
+                    None => self.page.resource()?,
+                });
+                child.active_forms = self.active_forms.clone();
+                child.current_state.graphic_state = text.state.clone();
+                child.current_state.graphic_state.text_state.font = None;
+                let matrix = font.font_matrix();
+                let glyph = Matrix::new(
+                    matrix[0], matrix[1], matrix[2], matrix[3], matrix[4], matrix[5],
+                );
+                let size = text.state.text_state.font_size;
+                let baseline = Matrix::new(
+                    text.matrix.a(),
+                    text.matrix.b(),
+                    text.matrix.c(),
+                    text.matrix.d(),
+                    item.pos().x(),
+                    item.pos().y(),
+                );
+                child.current_state.ctm = glyph
+                    .checked_mul(&Matrix::new(
+                        size * text.horizontal_scale,
+                        0.,
+                        0.,
+                        size,
+                        0.,
+                        0.,
+                    ))?
+                    .checked_mul(&baseline)?
+                    .checked_mul(&self.page.page_matrix.checked_inverse()?)?;
+                for (index, operation) in program.program().operations().iter().enumerate().skip(1)
+                {
+                    child.execution_budget.operation(&limits)?;
+                    child.operation_index = index;
+                    child.operation_byte_offset = operation.operator.byte_offset();
+                    child.invoke_oeration(operation.operator.clone(), device)?;
+                }
+                // Empty parser: applies the normal balanced q/Q/BT/marked-content checks.
+                child.run_content(device)?;
+                if !child.diagnostics.is_empty() {
+                    return Err(PdfError::UnsupportedFeature(
+                        "Type3 glyph diagnostics".into(),
+                    ));
+                }
+            }
+            return device.show_text(text.with_type3_metadata());
+        }
+        device.show_text(text)
     }
 
     fn handle_show_text(&mut self, op: Operator, device: &mut dyn Device) -> PdfResult<()> {
@@ -1438,14 +1583,32 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
         self.current_state.graphic_state.text_state.font_size = font_size;
         let font_name = op.get_as_name(0)?;
         let font_resource = self.named_resource("Font", font_name.name())?;
-        let font = Font::try_new(
-            font_resource.as_dict().ok_or_else(|| {
-                PdfError::PageResourceError("Font resource must be a dictionary".into())
-            })?,
-            self.ctx,
-        )?;
+        let font = self.load_font(font_resource.as_dict().ok_or_else(|| {
+            PdfError::PageResourceError("Font resource must be a dictionary".into())
+        })?)?;
         self.current_state.graphic_state.text_state.font = Some(font);
         Ok(())
+    }
+    fn load_font(&self, dict: &crate::objects::pdf_dict::PdfDict) -> PdfResult<Font> {
+        let subtype = dict
+            .get("Subtype")
+            .map(|value| self.ctx.resolve(value))
+            .transpose()?;
+        if subtype
+            .as_ref()
+            .and_then(PdfObject::as_name)
+            .is_some_and(|name| name.name() == "Type3")
+        {
+            Ok(Font::Type3(std::rc::Rc::new(
+                crate::font::type3::Type3Font::try_new_with_budget(
+                    dict,
+                    self.ctx,
+                    &self.type3_budget,
+                )?,
+            )))
+        } else {
+            Font::try_new(dict, self.ctx)
+        }
     }
     fn handle_set_text_leading(&mut self, op: Operator) -> PdfResult<()> {
         let leading = op.get_as_f32(0)?;
@@ -1811,7 +1974,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             let dict = font
                 .as_dict()
                 .ok_or_else(|| PdfError::FontError("ExtGState font must be a dictionary".into()))?;
-            let font = Font::try_new(dict, self.ctx)?;
+            let font = self.load_font(dict)?;
             self.current_state.graphic_state.text_state.font = Some(font);
             self.current_state.graphic_state.text_state.font_size = size;
         }
@@ -1944,7 +2107,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             filletype,
             true,
         );
-        let pathobj = if self.form_depth == 0 {
+        let pathobj = if self.form_depth == 0 && self.type3_depth == 0 {
             pathobj.with_source(self.path_draw_source()?)
         } else {
             pathobj.with_nested_source(self.nested_path_source()?)
@@ -1969,7 +2132,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             filletype,
             false,
         );
-        let pathobj = if self.form_depth == 0 {
+        let pathobj = if self.form_depth == 0 && self.type3_depth == 0 {
             pathobj.with_source(self.path_draw_source()?)
         } else {
             pathobj.with_nested_source(self.nested_path_source()?)
@@ -2004,7 +2167,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             FillType::NoFill,
             true,
         );
-        let path_obj = if self.form_depth == 0 {
+        let path_obj = if self.form_depth == 0 && self.type3_depth == 0 {
             path_obj.with_source(self.path_draw_source()?)
         } else {
             path_obj.with_nested_source(self.nested_path_source()?)
@@ -2028,6 +2191,9 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
     }
 
     fn nested_draw_source(&self) -> PdfResult<Option<super::source_provenance::NestedDrawSource>> {
+        if self.type3_depth != 0 {
+            return Ok(None);
+        }
         if self.invocation_path.is_empty() {
             return Ok(None);
         }
@@ -2340,29 +2506,59 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             shading,
             self.current_state.graphic_state.clone(),
         )
-        .with_source(op.byte_offset().filter(|_| self.form_depth == 0).map(
-            |operator_byte_offset| crate::page::shading_object::ShadingDrawSource {
-                operation_index: self.operation_index,
-                operator_byte_offset,
-            },
-        ))
+        .with_source(
+            op.byte_offset()
+                .filter(|_| self.form_depth == 0 && self.type3_depth == 0)
+                .map(
+                    |operator_byte_offset| crate::page::shading_object::ShadingDrawSource {
+                        operation_index: self.operation_index,
+                        operator_byte_offset,
+                    },
+                ),
+        )
         .with_nested_source(self.nested_draw_source()?);
         device.do_shading(object)
     }
 
     fn handle_inline_image(&mut self, op: Operator, device: &mut dyn Device) -> PdfResult<()> {
-        if self.in_text_object { return Err(PdfError::PageOperatorError("inline image inside BT/ET".into())); }
-        let image = op.inline_image().ok_or_else(|| PdfError::PageOperatorError("BI requires a typed inline payload".into()))?;
+        if self.in_text_object {
+            return Err(PdfError::PageOperatorError(
+                "inline image inside BT/ET".into(),
+            ));
+        }
+        let image = op.inline_image().ok_or_else(|| {
+            PdfError::PageOperatorError("BI requires a typed inline payload".into())
+        })?;
         device.preflight_draw(&self.current_state.graphic_state, None)?;
         let mut dict = image.normalized_dict();
         if let Some(name) = dict.get("ColorSpace").and_then(PdfObject::as_name) {
-            let default_key=match name.name() {"DeviceGray"=>Some("DefaultGray"),"DeviceRGB"=>Some("DefaultRGB"),"DeviceCMYK"=>Some("DefaultCMYK"),_=>None};
-            if let Some(key)=default_key {
-                let resources=self.resource_scope.clone().map(Ok).unwrap_or_else(||self.page.resource())?;
-                if let Some(colors)=resources.get("ColorSpace") {
-                    let colors=self.ctx.resolve(colors)?;
-                    let colors=colors.as_dict().ok_or_else(||PdfError::PageResourceError("ColorSpace resources must be a dictionary".into()))?;
-                    if colors.get(key).is_some_and(|v|!matches!(v,PdfObject::PdfNull)) {return Err(PdfError::UnsupportedFeature("inline default colour override outside v0.6 baseline".into()));}
+            let default_key = match name.name() {
+                "DeviceGray" => Some("DefaultGray"),
+                "DeviceRGB" => Some("DefaultRGB"),
+                "DeviceCMYK" => Some("DefaultCMYK"),
+                _ => None,
+            };
+            if let Some(key) = default_key {
+                let resources = self
+                    .resource_scope
+                    .clone()
+                    .map(Ok)
+                    .unwrap_or_else(|| self.page.resource())?;
+                if let Some(colors) = resources.get("ColorSpace") {
+                    let colors = self.ctx.resolve(colors)?;
+                    let colors = colors.as_dict().ok_or_else(|| {
+                        PdfError::PageResourceError(
+                            "ColorSpace resources must be a dictionary".into(),
+                        )
+                    })?;
+                    if colors
+                        .get(key)
+                        .is_some_and(|v| !matches!(v, PdfObject::PdfNull))
+                    {
+                        return Err(PdfError::UnsupportedFeature(
+                            "inline default colour override outside v0.6 baseline".into(),
+                        ));
+                    }
                 }
             }
             if !matches!(name.name(), "DeviceGray" | "DeviceRGB" | "DeviceCMYK") {
@@ -2370,11 +2566,28 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                 dict.insert("ColorSpace".into(), color);
             }
         }
-        let stream = PdfObject::PdfStream(crate::objects::pdf_stream::PdfStream::new(dict, image.encoded_data().to_vec()));
+        let stream = PdfObject::PdfStream(crate::objects::pdf_stream::PdfStream::new(
+            dict,
+            image.encoded_data().to_vec(),
+        ));
         let decoded = PdfImage::try_new(String::new(), &stream, self.ctx)?.mark_inline();
-        let matrix = Matrix::new(1.,0.,0.,-1.,0.,1.).checked_mul(&self.current_state.ctm())?.checked_mul(&self.page.page_matrix)?;
+        if self.type3_uncoloured && !decoded.is_mask() {
+            return Err(PdfError::FontError(
+                "d1 glyph image must be a stencil".into(),
+            ));
+        }
+        let matrix = Matrix::new(1., 0., 0., -1., 0., 1.)
+            .checked_mul(&self.current_state.ctm())?
+            .checked_mul(&self.page.page_matrix)?;
         let drawing = ImageObject::new(matrix, decoded, self.current_state.graphic_state.clone())
-            .with_source(op.byte_offset().filter(|_| self.form_depth == 0).map(|operator_byte_offset| ImageDrawSource { operation_index:self.operation_index, operator_byte_offset }))
+            .with_source(
+                op.byte_offset()
+                    .filter(|_| self.form_depth == 0 && self.type3_depth == 0)
+                    .map(|operator_byte_offset| ImageDrawSource {
+                        operation_index: self.operation_index,
+                        operator_byte_offset,
+                    }),
+            )
             .with_nested_source(self.nested_draw_source()?);
         device.do_image(drawing)
     }
@@ -2401,6 +2614,11 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             "Image" => {
                 device.preflight_draw(&self.current_state.graphic_state, None)?;
                 let pdfimage = PdfImage::try_new(name.to_string(), &xobject, self.ctx)?;
+                if self.type3_uncoloured && !pdfimage.is_mask() {
+                    return Err(PdfError::FontError(
+                        "d1 glyph image must be a stencil".into(),
+                    ));
+                }
                 let matrix = self.current_state.ctm();
                 let image_to_user = Matrix::new(1.0, 0.0, 0.0, -1.0, 0.0, 1.0);
                 let matrix = image_to_user.checked_mul(&matrix)?;
@@ -2412,7 +2630,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                 )
                 .with_source(
                     op.byte_offset()
-                        .filter(|_| self.form_depth == 0)
+                        .filter(|_| self.form_depth == 0 && self.type3_depth == 0)
                         .map(|operator_byte_offset| ImageDrawSource {
                             operation_index: self.operation_index,
                             operator_byte_offset,
@@ -2431,7 +2649,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                 let budget = self.execution_budget.child(&limits)?;
                 let depth = self.form_depth + 1;
                 // Native recursion is bounded until an iterative invocation engine replaces it.
-                if depth > 128 {
+                if depth + self.type3_depth > 128 {
                     return Err(PdfError::ResourceLimit(
                         "Form implementation depth (128)".into(),
                     ));
@@ -2455,6 +2673,9 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                     Interpreter::new(self.page, self.ctx, parser).with_resource_scope(scope);
                 child.execution_budget = budget;
                 child.form_depth = depth;
+                child.type3_depth = self.type3_depth;
+                child.type3_uncoloured = self.type3_uncoloured;
+                child.type3_budget = self.type3_budget.clone();
                 child
                     .invocation_path
                     .try_reserve_exact(self.invocation_path.len() + 1)

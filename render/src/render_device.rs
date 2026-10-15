@@ -17,8 +17,8 @@ use pdf::{
 use std::{fs::File, io::Write};
 
 use skia_safe::{
-    paint::Cap, surfaces, Color, EncodedImageFormat, FontMgr, Paint, PaintStyle, PathBuilder,
-    PathEffect, PathFillType, Surface, RGB,
+    Color, EncodedImageFormat, FontMgr, Paint, PaintStyle, PathBuilder, PathEffect, PathFillType,
+    RGB, Surface, paint::Cap, surfaces,
 };
 
 pub struct SkiaRender {
@@ -395,6 +395,19 @@ impl Device for SkiaRender {
     }
 
     fn show_text(&mut self, textobject: TextObject) -> PdfResult<()> {
+        // Type3 shapes were executed as ordinary graphics by the interpreter.
+        // Keep its text event for extraction, never ask Skia for a font file.
+        if textobject.is_type3_metadata() {
+            return Ok(());
+        }
+        if matches!(
+            textobject.state.text_state.font.as_ref(),
+            Some(pdf::font::pdf_font::Font::Type3(_))
+        ) {
+            return Err(PdfError::UnsupportedFeature(
+                "Type3 raw text requires interpreted glyph graphics".into(),
+            ));
+        }
         self.paint.reset();
         self.paint.set_blend_mode(Self::skia_blend_mode(
             textobject.state.general_state.blend_mode,
@@ -469,12 +482,12 @@ impl Device for SkiaRender {
             }
 
             let fontmgr = FontMgr::new();
-            let data = font
-                .fontfile()
-                .ok_or_else(|| PdfError::FontError(format!(
+            let data = font.fontfile().ok_or_else(|| {
+                PdfError::FontError(format!(
                     "font '{}' has no embedded or declared substitute program",
                     font.name()
-                )))?;
+                ))
+            })?;
             let typeface = fontmgr
                 .new_from_data(data, 0)
                 .ok_or_else(|| PdfError::FontError("Skia rejected font program".into()))?;
@@ -513,13 +526,15 @@ impl Device for SkiaRender {
                     Some(GlyphDesc::Name(name)) => {
                         return Err(PdfError::UnsupportedFeature(format!(
                             "font '{}' uses unresolved glyph name '{}'",
-                            font.name(), name
+                            font.name(),
+                            name
                         )));
                     }
                     _ => {
                         return Err(PdfError::FontError(format!(
                             "font '{}' has no drawable glyph for character code {}",
-                            font.name(), char_item.charcode().code()
+                            font.name(),
+                            char_item.charcode().code()
                         )));
                     }
                 }
@@ -626,7 +641,12 @@ impl Device for SkiaRender {
                 let uy = (-b * px + a * py) / determinant;
                 if let Some(color) = object.shading.color_at_point(ux, uy)? {
                     let offset = (y as usize * self.page_width as usize + x as usize) * 4;
-                    rgba[offset..offset + 4].copy_from_slice(&[color.r(), color.g(), color.b(), 255]);
+                    rgba[offset..offset + 4].copy_from_slice(&[
+                        color.r(),
+                        color.g(),
+                        color.b(),
+                        255,
+                    ]);
                 }
             }
         }
@@ -740,57 +760,122 @@ mod tests {
     use super::*;
     #[test]
     fn nonuniform_coons_boundary_pixels_survive_function_and_strict_save() {
-        use pdf::{document::{PdfDocument, resource_manager::ResourceKind,
-                save_options::{SaveOptions, StreamCompression}},
-            io::stream_reader::StreamReader, objects::{PdfObject, pdf_stream::PdfStream},
-            page::page_builder::PageBuilder, parser::syntax::{SyntaxParser, ParseMode}};
+        use pdf::{
+            document::{
+                PdfDocument,
+                resource_manager::ResourceKind,
+                save_options::{SaveOptions, StreamCompression},
+            },
+            io::stream_reader::StreamReader,
+            objects::{PdfObject, pdf_stream::PdfStream},
+            page::page_builder::PageBuilder,
+            parser::syntax::{ParseMode, SyntaxParser},
+        };
         for nonlinear in [false, true] {
             let doc = PdfDocument::new().unwrap();
-            doc.add_page_with_builder(0, PageBuilder::new().size(50.0, 50.0)).unwrap();
-            let function = if nonlinear { "/Function << /FunctionType 2 /Domain [0 1] /N 2 >>" } else { "" };
-            let source = format!("<< /ShadingType 6 /ColorSpace /DeviceGray /BitsPerFlag 8 /BitsPerCoordinate 16 /BitsPerComponent 8 /Decode [0 65535 0 65535 0 1] {function} >>");
-            let dict = SyntaxParser::new(StreamReader::try_new(std::io::Cursor::new(source.into_bytes())).unwrap())
-                .get_object().unwrap().into_dict().unwrap();
+            doc.add_page_with_builder(0, PageBuilder::new().size(50.0, 50.0))
+                .unwrap();
+            let function = if nonlinear {
+                "/Function << /FunctionType 2 /Domain [0 1] /N 2 >>"
+            } else {
+                ""
+            };
+            let source = format!(
+                "<< /ShadingType 6 /ColorSpace /DeviceGray /BitsPerFlag 8 /BitsPerCoordinate 16 /BitsPerComponent 8 /Decode [0 65535 0 65535 0 1] {function} >>"
+            );
+            let dict = SyntaxParser::new(
+                StreamReader::try_new(std::io::Cursor::new(source.into_bytes())).unwrap(),
+            )
+            .get_object()
+            .unwrap()
+            .into_dict()
+            .unwrap();
             let mut data = vec![0];
-            for point in [[0_u16, 0], [0, 512], [0, 1024], [0, 1536],
-                [576, 1536], [1088, 1536], [1536, 1536], [1536, 1024],
-                [1536, 512], [1536, 0], [1088, 0], [576, 0]] {
-                for coordinate in point { data.extend_from_slice(&coordinate.to_be_bytes()); }
+            for point in [
+                [0_u16, 0],
+                [0, 512],
+                [0, 1024],
+                [0, 1536],
+                [576, 1536],
+                [1088, 1536],
+                [1536, 1536],
+                [1536, 1024],
+                [1536, 512],
+                [1536, 0],
+                [1088, 0],
+                [576, 0],
+            ] {
+                for coordinate in point {
+                    data.extend_from_slice(&coordinate.to_be_bytes());
+                }
             }
             data.extend([0, 0, 255, 255]);
-            let id = doc.try_insert_object(PdfObject::PdfStream(PdfStream::new(dict, data))).unwrap();
-            let name = doc.resources().register_existing(0, ResourceKind::Shading, id).unwrap();
+            let id = doc
+                .try_insert_object(PdfObject::PdfStream(PdfStream::new(dict, data)))
+                .unwrap();
+            let name = doc
+                .resources()
+                .register_existing(0, ResourceKind::Shading, id)
+                .unwrap();
             // Exact dyadic transform places x(1/4)=420 at pixel x=13,
             // and both y boundaries at pixel centers (display y=.5/48.5).
-            doc.replace_page_contents(0, format!("q 0.03125 0 0 0.03125 0.375 0.5 cm /{name} sh Q").into_bytes()).unwrap();
+            doc.replace_page_contents(
+                0,
+                format!("q 0.03125 0 0 0.03125 0.375 0.5 cm /{name} sh Q").into_bytes(),
+            )
+            .unwrap();
             let render = |target: &PdfDocument<std::io::Cursor<Vec<u8>>>| {
                 let list = target.get_page(0).unwrap().display_list().unwrap();
-                let [pdf::page::page_object::PageObject::Shading(object)] = list.objects()
-                    else { panic!("expected Coons shading") };
+                let [pdf::page::page_object::PageObject::Shading(object)] = list.objects() else {
+                    panic!("expected Coons shading")
+                };
                 for y in 0..50 {
                     for x in 0..50 {
                         let ux = (f64::from(x) + 0.125) * 32.0;
                         let uy = f64::from(49 - y) * 32.0;
-                        object.shading.color_at_point(ux, uy).unwrap_or_else(|error|
-                            panic!("pixel ({x},{y}), shading ({ux},{uy}): {error:?}"));
+                        object
+                            .shading
+                            .color_at_point(ux, uy)
+                            .unwrap_or_else(|error| {
+                                panic!("pixel ({x},{y}), shading ({ux},{uy}): {error:?}")
+                            });
                     }
                 }
                 let mut renderer = SkiaRender::new(72.0, 72.0).unwrap();
                 target.get_page(0).unwrap().display(&mut renderer).unwrap();
-                let info = skia_safe::ImageInfo::new((50, 50), skia_safe::ColorType::RGBA8888,
-                    skia_safe::AlphaType::Unpremul, None);
+                let info = skia_safe::ImageInfo::new(
+                    (50, 50),
+                    skia_safe::ColorType::RGBA8888,
+                    skia_safe::AlphaType::Unpremul,
+                    None,
+                );
                 let mut pixels = vec![0; 10000];
-                assert!(renderer.surface.read_pixels(&info, &mut pixels, 200, (0, 0)));
+                assert!(
+                    renderer
+                        .surface
+                        .read_pixels(&info, &mut pixels, 200, (0, 0))
+                );
                 let expected = if nonlinear { 16 } else { 64 };
                 for y in [1_usize, 49] {
                     let offset = (y * 50 + 13) * 4;
-                    assert_eq!(&pixels[offset..offset + 4], &[expected, expected, expected, 255]);
+                    assert_eq!(
+                        &pixels[offset..offset + 4],
+                        &[expected, expected, expected, 255]
+                    );
                 }
                 pixels
             };
             let original = render(&doc);
-            for compression in [StreamCompression::Preserve, StreamCompression::FlateUnencoded] {
-                let saved = doc.save_to_bytes_with_options(SaveOptions { compression, ..Default::default() }).unwrap();
+            for compression in [
+                StreamCompression::Preserve,
+                StreamCompression::FlateUnencoded,
+            ] {
+                let saved = doc
+                    .save_to_bytes_with_options(SaveOptions {
+                        compression,
+                        ..Default::default()
+                    })
+                    .unwrap();
                 let reopened = PdfDocument::from_bytes_with_mode(saved, ParseMode::Strict).unwrap();
                 assert_eq!(render(&reopened), original);
             }
@@ -798,55 +883,141 @@ mod tests {
     }
     #[test]
     fn triangle_and_coons_mesh_pixels_follow_parameter_interpolation() {
-        use pdf::{document::{PdfDocument, resource_manager::ResourceKind,
-                save_options::{SaveOptions, StreamCompression}},
-            io::stream_reader::StreamReader, objects::{PdfObject, pdf_stream::PdfStream},
-            page::page_builder::PageBuilder, parser::syntax::SyntaxParser};
-        for (nonlinear, mirrored, kind) in [(false, false, 4), (true, false, 4),
-            (false, true, 4), (true, true, 4), (false, false, 5),
-            (true, false, 5), (false, true, 5), (true, true, 5),
-            (false, false, 6), (true, false, 6), (false, true, 6), (true, true, 6)] {
+        use pdf::{
+            document::{
+                PdfDocument,
+                resource_manager::ResourceKind,
+                save_options::{SaveOptions, StreamCompression},
+            },
+            io::stream_reader::StreamReader,
+            objects::{PdfObject, pdf_stream::PdfStream},
+            page::page_builder::PageBuilder,
+            parser::syntax::SyntaxParser,
+        };
+        for (nonlinear, mirrored, kind) in [
+            (false, false, 4),
+            (true, false, 4),
+            (false, true, 4),
+            (true, true, 4),
+            (false, false, 5),
+            (true, false, 5),
+            (false, true, 5),
+            (true, true, 5),
+            (false, false, 6),
+            (true, false, 6),
+            (false, true, 6),
+            (true, true, 6),
+        ] {
             let doc = PdfDocument::new().unwrap();
-            doc.add_page_with_builder(0, PageBuilder::new().size(40.0, 20.0)).unwrap();
-            let function = if nonlinear { "/Function << /FunctionType 2 /Domain [0 1] /N 2 >>" } else { "" };
-            let geometry = match kind { 5 => "/ShadingType 5 /VerticesPerRow 2",
-                6 => "/ShadingType 6 /BitsPerFlag 8", _ => "/ShadingType 4 /BitsPerFlag 8" };
-            let source = format!("<< {geometry} /ColorSpace /DeviceGray /BitsPerCoordinate 8 /BitsPerComponent 8 /Decode [0 40 0 20 0 1] /BBox [4 4 36 16] {function} >>");
-            let dict = SyntaxParser::new(StreamReader::try_new(std::io::Cursor::new(source.into_bytes())).unwrap())
-                .get_object().unwrap().into_dict().unwrap();
+            doc.add_page_with_builder(0, PageBuilder::new().size(40.0, 20.0))
+                .unwrap();
+            let function = if nonlinear {
+                "/Function << /FunctionType 2 /Domain [0 1] /N 2 >>"
+            } else {
+                ""
+            };
+            let geometry = match kind {
+                5 => "/ShadingType 5 /VerticesPerRow 2",
+                6 => "/ShadingType 6 /BitsPerFlag 8",
+                _ => "/ShadingType 4 /BitsPerFlag 8",
+            };
+            let source = format!(
+                "<< {geometry} /ColorSpace /DeviceGray /BitsPerCoordinate 8 /BitsPerComponent 8 /Decode [0 40 0 20 0 1] /BBox [4 4 36 16] {function} >>"
+            );
+            let dict = SyntaxParser::new(
+                StreamReader::try_new(std::io::Cursor::new(source.into_bytes())).unwrap(),
+            )
+            .get_object()
+            .unwrap()
+            .into_dict()
+            .unwrap();
             let data = if kind == 6 {
                 let mut bytes = vec![0];
-                for point in [[0, 0], [0, 85], [0, 170], [0, 255], [85, 255], [170, 255],
-                    [255, 255], [255, 170], [255, 85], [255, 0], [170, 0], [85, 0]] {
+                for point in [
+                    [0, 0],
+                    [0, 85],
+                    [0, 170],
+                    [0, 255],
+                    [85, 255],
+                    [170, 255],
+                    [255, 255],
+                    [255, 170],
+                    [255, 85],
+                    [255, 0],
+                    [170, 0],
+                    [85, 0],
+                ] {
                     bytes.extend(point);
                 }
                 bytes.extend([0, 0, 255, 255]);
                 bytes
-            } else if kind == 5 { vec![0, 0, 0, 255, 0, 255, 0, 255, 0, 255, 255, 255] }
-                else { vec![0, 0, 0, 0, 0, 255, 0, 255, 0, 0, 255, 0, 1, 255, 255, 255] };
-            let id = doc.try_insert_object(PdfObject::PdfStream(PdfStream::new(dict, data))).unwrap();
-            let name = doc.resources().register_existing(0, ResourceKind::Shading, id).unwrap();
+            } else if kind == 5 {
+                vec![0, 0, 0, 255, 0, 255, 0, 255, 0, 255, 255, 255]
+            } else {
+                vec![0, 0, 0, 0, 0, 255, 0, 255, 0, 0, 255, 0, 1, 255, 255, 255]
+            };
+            let id = doc
+                .try_insert_object(PdfObject::PdfStream(PdfStream::new(dict, data)))
+                .unwrap();
+            let name = doc
+                .resources()
+                .register_existing(0, ResourceKind::Shading, id)
+                .unwrap();
             let transform = if mirrored { "-1 0 0 1 40 0 cm " } else { "" };
-            doc.replace_page_contents(0, format!("q {transform}/{name} sh Q").into_bytes()).unwrap();
+            doc.replace_page_contents(0, format!("q {transform}/{name} sh Q").into_bytes())
+                .unwrap();
             let mut renderer = SkiaRender::new(72.0, 72.0).unwrap();
             doc.get_page(0).unwrap().display(&mut renderer).unwrap();
-            let info = skia_safe::ImageInfo::new((40, 20), skia_safe::ColorType::RGBA8888, skia_safe::AlphaType::Unpremul, None);
+            let info = skia_safe::ImageInfo::new(
+                (40, 20),
+                skia_safe::ColorType::RGBA8888,
+                skia_safe::AlphaType::Unpremul,
+                None,
+            );
             let mut bytes = vec![0; 3200];
             assert!(renderer.surface.read_pixels(&info, &mut bytes, 160, (0, 0)));
             for (x, y) in [(10usize, 5usize), (30, 15), (20, 10)] {
                 let coordinate = (x as f64 + 0.5) / 40.0;
-                let t = if mirrored { 1.0 - coordinate } else { coordinate };
+                let t = if mirrored {
+                    1.0 - coordinate
+                } else {
+                    coordinate
+                };
                 let expected = (255.0 * if nonlinear { t * t } else { t }).round() as u8;
-                assert_eq!(&bytes[(y * 40 + x) * 4..(y * 40 + x) * 4 + 4], &[expected, expected, expected, 255]);
+                assert_eq!(
+                    &bytes[(y * 40 + x) * 4..(y * 40 + x) * 4 + 4],
+                    &[expected, expected, expected, 255]
+                );
             }
             assert_eq!(&bytes[(10 * 40 + 2) * 4..(10 * 40 + 2) * 4 + 4], &[255; 4]);
-            for compression in [StreamCompression::Preserve, StreamCompression::FlateUnencoded] {
-                let saved = doc.save_to_bytes_with_options(SaveOptions { compression, ..Default::default() }).unwrap();
-                let reopened = PdfDocument::from_bytes_with_mode(saved, pdf::parser::syntax::ParseMode::Strict).unwrap();
+            for compression in [
+                StreamCompression::Preserve,
+                StreamCompression::FlateUnencoded,
+            ] {
+                let saved = doc
+                    .save_to_bytes_with_options(SaveOptions {
+                        compression,
+                        ..Default::default()
+                    })
+                    .unwrap();
+                let reopened = PdfDocument::from_bytes_with_mode(
+                    saved,
+                    pdf::parser::syntax::ParseMode::Strict,
+                )
+                .unwrap();
                 let mut readback_renderer = SkiaRender::new(72.0, 72.0).unwrap();
-                reopened.get_page(0).unwrap().display(&mut readback_renderer).unwrap();
+                reopened
+                    .get_page(0)
+                    .unwrap()
+                    .display(&mut readback_renderer)
+                    .unwrap();
                 let mut readback_pixels = vec![0; 3200];
-                assert!(readback_renderer.surface.read_pixels(&info, &mut readback_pixels, 160, (0, 0)));
+                assert!(readback_renderer.surface.read_pixels(
+                    &info,
+                    &mut readback_pixels,
+                    160,
+                    (0, 0)
+                ));
                 assert_eq!(readback_pixels, bytes);
             }
         }
@@ -1032,10 +1203,11 @@ mod tests {
         doc.add_page_with_builder(0, PageBuilder::new().size(40.0, 20.0))
             .unwrap();
         let source = b"<< /ShadingType 2 /ColorSpace /DeviceGray /Coords [0 0 40 0] /Extend [true true] /BBox [0 0 30 20] /Function << /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [0] /N 1 >> >>";
-        let object =
-            SyntaxParser::new(StreamReader::try_new(std::io::Cursor::new(source.to_vec())).unwrap())
-                .get_object()
-                .unwrap();
+        let object = SyntaxParser::new(
+            StreamReader::try_new(std::io::Cursor::new(source.to_vec())).unwrap(),
+        )
+        .get_object()
+        .unwrap();
         let id = doc.try_insert_object(object).unwrap();
         let name = doc
             .resources()
@@ -1104,7 +1276,7 @@ mod tests {
             document::{owned::Document, resource_manager::ResourceKind},
             geom::rectangle::Rectangle,
             io::stream_reader::StreamReader,
-            objects::{pdf_stream::PdfStream, PdfObject},
+            objects::{PdfObject, pdf_stream::PdfStream},
             page::page_object::PageObject,
             parser::syntax::{ParseMode, SyntaxParser},
         };
@@ -1132,9 +1304,11 @@ mod tests {
                 None,
             );
             let mut pixels = vec![0; 40 * 40 * 4];
-            assert!(renderer
-                .surface
-                .read_pixels(&info, &mut pixels, 40 * 4, (0, 0)));
+            assert!(
+                renderer
+                    .surface
+                    .read_pixels(&info, &mut pixels, 40 * 4, (0, 0))
+            );
             pixels
         }
         // Expected quadrants are bottom-left, bottom-right, top-left, top-right.
@@ -1162,11 +1336,27 @@ mod tests {
             doc.add_page(0).unwrap();
             doc.set_page_crop_box(0, Some(Rectangle::new(0., 0., 40., 40.)))
                 .unwrap();
-            let image = insert(&doc,
+            let image = insert(
+                &doc,
                 "<< /Subtype /Image /Width 2 /Height 2 /BitsPerComponent 8 /ColorSpace /DeviceRGB /Interpolate false >>",
-                &[255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0]);
-            let leaf = insert(&doc, &format!("<< /Subtype /Form /BBox [0 0 8 8] /Resources << /XObject << /Tile {} 0 R >> >> >>", image.obj_num()), b"q 8 0 0 8 0 0 cm /Tile Do Q");
-            let outer = insert(&doc, &format!("<< /Subtype /Form /BBox [0 0 40 40] /Resources << /XObject << /Child {} 0 R >> >> >>", leaf.obj_num()), b"q 1 0 0 1 5 5 cm /Child Do Q q 1 0 0 1 20 5 cm /Child Do Q");
+                &[255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0],
+            );
+            let leaf = insert(
+                &doc,
+                &format!(
+                    "<< /Subtype /Form /BBox [0 0 8 8] /Resources << /XObject << /Tile {} 0 R >> >> >>",
+                    image.obj_num()
+                ),
+                b"q 8 0 0 8 0 0 cm /Tile Do Q",
+            );
+            let outer = insert(
+                &doc,
+                &format!(
+                    "<< /Subtype /Form /BBox [0 0 40 40] /Resources << /XObject << /Child {} 0 R >> >> >>",
+                    leaf.obj_num()
+                ),
+                b"q 1 0 0 1 5 5 cm /Child Do Q q 1 0 0 1 20 5 cm /Child Do Q",
+            );
             let name = doc
                 .resources()
                 .register_existing(0, ResourceKind::Form, outer)
@@ -1206,9 +1396,11 @@ mod tests {
             assert_eq!(raster(&reopened, 1), original);
             // Replace the transformed first call with a different four-color tile.
             // The reference uses rectangles, not another image draw or Form.
-            let replacement = insert(&doc,
+            let replacement = insert(
+                &doc,
                 "<< /Subtype /Image /Width 2 /Height 2 /BitsPerComponent 8 /ColorSpace /DeviceRGB /Interpolate false >>",
-                &[0, 255, 255, 255, 0, 255, 0, 0, 0, 255, 255, 255]);
+                &[0, 255, 255, 255, 0, 255, 0, 0, 0, 255, 255, 255],
+            );
             let root = doc.get_page(0).unwrap().content_program().unwrap();
             let list = doc.get_page(0).unwrap().display_list().unwrap();
             let PageObject::Image(image) = &list.objects()[0] else {
@@ -1261,7 +1453,7 @@ mod tests {
             document::{owned::Document, resource_manager::ResourceKind},
             geom::rectangle::Rectangle,
             io::stream_reader::StreamReader,
-            objects::{pdf_stream::PdfStream, PdfObject},
+            objects::{PdfObject, pdf_stream::PdfStream},
             page::page_object::PageObject,
             parser::syntax::{ParseMode, SyntaxParser},
         };
@@ -1293,9 +1485,11 @@ mod tests {
                 None,
             );
             let mut pixels = vec![0; 40 * 40 * 4];
-            assert!(renderer
-                .surface
-                .read_pixels(&info, &mut pixels, 40 * 4, (0, 0)));
+            assert!(
+                renderer
+                    .surface
+                    .read_pixels(&info, &mut pixels, 40 * 4, (0, 0))
+            );
             pixels
         }
         for (transform, first_image) in [
@@ -1316,26 +1510,29 @@ mod tests {
             doc.set_page_crop_box(0, Some(Rectangle::new(0., 0., 40., 40.)))
                 .unwrap();
             let image = insert(
-            &doc,
-            "<< /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceRGB >>",
-            &[255, 0, 0],
-        );
-            let replacement = insert(&doc,
+                &doc,
                 "<< /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceRGB >>",
-                &[0, 255, 255]);
+                &[255, 0, 0],
+            );
+            let replacement = insert(
+                &doc,
+                "<< /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceRGB >>",
+                &[0, 255, 255],
+            );
             let leaf = insert(
                 &doc,
                 &format!(
-                "<< /Subtype /Form /BBox [0 0 6 8] /Resources << /XObject << /Red {} 0 R >> >> >>",
-                image.obj_num()
-            ),
+                    "<< /Subtype /Form /BBox [0 0 6 8] /Resources << /XObject << /Red {} 0 R >> >> >>",
+                    image.obj_num()
+                ),
                 b"q 8 0 0 8 0 0 cm /Red Do Q 0 0 1 rg 4 0 8 8 re f",
             );
             let outer = insert(
                 &doc,
                 &format!(
-            "<< /Subtype /Form /BBox [0 0 40 40] /Resources << /XObject << /Child {} 0 R >> >> >>",
-            leaf.obj_num()),
+                    "<< /Subtype /Form /BBox [0 0 40 40] /Resources << /XObject << /Child {} 0 R >> >> >>",
+                    leaf.obj_num()
+                ),
                 b"q 1 0 0 1 5 5 cm /Child Do Q q 1 0 0 1 20 5 cm /Child Do Q",
             );
             let name = doc
@@ -1435,7 +1632,7 @@ mod tests {
             document::{owned::Document, resource_manager::ResourceKind},
             geom::rectangle::Rectangle,
             io::stream_reader::StreamReader,
-            objects::{pdf_stream::PdfStream, PdfObject},
+            objects::{PdfObject, pdf_stream::PdfStream},
             page::page_object::PageObject,
             parser::syntax::{ParseMode, SyntaxParser},
         };
@@ -1467,9 +1664,11 @@ mod tests {
                 None,
             );
             let mut pixels = vec![0; 40 * 40 * 4];
-            assert!(renderer
-                .surface
-                .read_pixels(&info, &mut pixels, 40 * 4, (0, 0)));
+            assert!(
+                renderer
+                    .surface
+                    .read_pixels(&info, &mut pixels, 40 * 4, (0, 0))
+            );
             pixels
         }
         for edit_geometry in [false, true] {
@@ -1483,7 +1682,14 @@ mod tests {
                 "<< /Subtype /Form /BBox [0 0 20 20] /Resources << >> >>",
                 body.as_bytes(),
             );
-            let outer = insert(&doc,&format!("<< /Subtype /Form /BBox [0 0 40 40] /Resources << /XObject << /Child {} 0 R >> >> >>",leaf.obj_num()),b"q 1 0 0 1 5 5 cm /Child Do Q q 1 0 0 1 20 5 cm /Child Do Q");
+            let outer = insert(
+                &doc,
+                &format!(
+                    "<< /Subtype /Form /BBox [0 0 40 40] /Resources << /XObject << /Child {} 0 R >> >> >>",
+                    leaf.obj_num()
+                ),
+                b"q 1 0 0 1 5 5 cm /Child Do Q q 1 0 0 1 20 5 cm /Child Do Q",
+            );
             let name = doc
                 .resources()
                 .register_existing(0, ResourceKind::Form, outer)
@@ -1565,7 +1771,7 @@ mod tests {
             document::{owned::Document, resource_manager::ResourceKind},
             geom::rectangle::Rectangle,
             io::stream_reader::StreamReader,
-            objects::{pdf_stream::PdfStream, PdfObject},
+            objects::{PdfObject, pdf_stream::PdfStream},
             parser::syntax::{ParseMode, SyntaxParser},
         };
         use std::io::Cursor;
@@ -1579,9 +1785,11 @@ mod tests {
                 None,
             );
             let mut pixels = vec![0; 40 * 40 * 4];
-            assert!(renderer
-                .surface
-                .read_pixels(&info, &mut pixels, 40 * 4, (0, 0)));
+            assert!(
+                renderer
+                    .surface
+                    .read_pixels(&info, &mut pixels, 40 * 4, (0, 0))
+            );
             pixels
         }
         let doc = Document::new().unwrap();
@@ -1653,7 +1861,7 @@ mod tests {
             document::{owned::Document, resource_manager::ResourceKind},
             geom::rectangle::Rectangle,
             io::stream_reader::StreamReader,
-            objects::{pdf_stream::PdfStream, PdfObject},
+            objects::{PdfObject, pdf_stream::PdfStream},
             parser::syntax::{ParseMode, SyntaxParser},
         };
         use std::io::Cursor;
@@ -1667,9 +1875,11 @@ mod tests {
                 None,
             );
             let mut pixels = vec![0; 60 * 60 * 4];
-            assert!(renderer
-                .surface
-                .read_pixels(&info, &mut pixels, 60 * 4, (0, 0)));
+            assert!(
+                renderer
+                    .surface
+                    .read_pixels(&info, &mut pixels, 60 * 4, (0, 0))
+            );
             pixels
         }
         for matrix in [
@@ -1722,12 +1932,16 @@ mod tests {
             doc.replace_page_contents(2, neighbor.as_bytes().to_vec())
                 .unwrap();
             let removed = raster(&doc, 2);
-            assert!(removed
-                .chunks_exact(4)
-                .any(|pixel| pixel == [0, 255, 0, 255]));
-            assert!(!removed
-                .chunks_exact(4)
-                .any(|pixel| pixel == [255, 0, 0, 255] || pixel == [0, 0, 255, 255]));
+            assert!(
+                removed
+                    .chunks_exact(4)
+                    .any(|pixel| pixel == [0, 255, 0, 255])
+            );
+            assert!(
+                !removed
+                    .chunks_exact(4)
+                    .any(|pixel| pixel == [255, 0, 0, 255] || pixel == [0, 0, 255, 255])
+            );
             let reopened =
                 Document::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict)
                     .unwrap();
@@ -1747,7 +1961,7 @@ mod tests {
             },
             geom::rectangle::Rectangle,
             io::stream_reader::StreamReader,
-            objects::{pdf_stream::PdfStream, PdfObject},
+            objects::{PdfObject, pdf_stream::PdfStream},
             parser::syntax::{ParseMode, SyntaxParser},
         };
         use std::io::Cursor;
@@ -1762,9 +1976,11 @@ mod tests {
                 None,
             );
             let mut pixels = vec![0; 60 * 60 * 4];
-            assert!(renderer
-                .surface
-                .read_pixels(&info, &mut pixels, 60 * 4, (0, 0)));
+            assert!(
+                renderer
+                    .surface
+                    .read_pixels(&info, &mut pixels, 60 * 4, (0, 0))
+            );
             pixels
         }
         for (show, leading) in [
@@ -1901,9 +2117,11 @@ mod tests {
             .unwrap();
             let expected = raster(&doc, 1);
             assert_ne!(expected, actual);
-            assert!(expected
-                .chunks_exact(4)
-                .any(|pixel| pixel == [0, 0, 0, 255]));
+            assert!(
+                expected
+                    .chunks_exact(4)
+                    .any(|pixel| pixel == [0, 0, 0, 255])
+            );
             let reopened =
                 Document::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict)
                     .unwrap();
@@ -1998,9 +2216,11 @@ mod tests {
         ).into_bytes()).unwrap();
                 let replacement_pixels = raster(&doc, 1);
                 assert_ne!(replacement_pixels, actual);
-                assert!(replacement_pixels
-                    .chunks_exact(4)
-                    .any(|pixel| pixel == [0, 0, 0, 255]));
+                assert!(
+                    replacement_pixels
+                        .chunks_exact(4)
+                        .any(|pixel| pixel == [0, 0, 0, 255])
+                );
                 let reopened =
                     Document::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict)
                         .unwrap();
@@ -2043,7 +2263,7 @@ mod tests {
             document::{owned::Document, resource_manager::ResourceKind, save_options::PdfVersion},
             geom::rectangle::Rectangle,
             io::stream_reader::StreamReader,
-            objects::{pdf_stream::PdfStream, PdfObject},
+            objects::{PdfObject, pdf_stream::PdfStream},
             parser::syntax::{ParseMode, SyntaxParser},
         };
         use std::io::Cursor;
@@ -2058,9 +2278,11 @@ mod tests {
                 None,
             );
             let mut pixels = vec![0; w as usize * h as usize * 4];
-            assert!(renderer
-                .surface
-                .read_pixels(&info, &mut pixels, w as usize * 4, (0, 0)));
+            assert!(
+                renderer
+                    .surface
+                    .read_pixels(&info, &mut pixels, w as usize * 4, (0, 0))
+            );
             (w, h, pixels)
         }
         let doc = Document::new_with_version(PdfVersion::V1_6).unwrap();
@@ -2159,9 +2381,11 @@ mod tests {
             assert_eq!(renderer.surface.canvas().save_count(), count);
             assert_eq!(renderer.surface.canvas().local_to_device(), matrix);
         }
-        assert!(renderer
-            .draw_path(PathObject::default(), PaintStyle::Fill)
-            .is_ok());
+        assert!(
+            renderer
+                .draw_path(PathObject::default(), PaintStyle::Fill)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2189,9 +2413,11 @@ mod tests {
         assert!(renderer.draw_path(path, PaintStyle::Fill).is_err());
         assert_eq!(renderer.surface.canvas().save_count(), count);
         assert_eq!(renderer.surface.canvas().local_to_device(), matrix);
-        assert!(renderer
-            .draw_path(PathObject::default(), PaintStyle::Fill)
-            .is_ok());
+        assert!(
+            renderer
+                .draw_path(PathObject::default(), PaintStyle::Fill)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2239,7 +2465,7 @@ mod tests {
         use pdf::{
             document::cross_ref_table::CrossRefTable,
             io::stream_reader::StreamReader,
-            objects::{pdf_dict::PdfDict, pdf_stream::PdfStream, PdfObject},
+            objects::{PdfObject, pdf_dict::PdfDict, pdf_stream::PdfStream},
             page::pdf_image::PdfImage,
             parser::{parser::PdfParser, syntax::SyntaxParser},
             pdf_context::PDFContext,
@@ -2275,13 +2501,15 @@ mod tests {
         renderer.start_page(4.0, 4.0).unwrap();
         let before_count = renderer.surface.canvas().save_count();
         let before_matrix = renderer.surface.canvas().local_to_device();
-        assert!(renderer
-            .do_image(ImageObject::new(
-                Matrix::new(2.0, 0.0, 0.0, 2.0, 1.0, 1.0),
-                make_image(vec![1, 2]),
-                GraphicState::default()
-            ))
-            .is_err());
+        assert!(
+            renderer
+                .do_image(ImageObject::new(
+                    Matrix::new(2.0, 0.0, 0.0, 2.0, 1.0, 1.0),
+                    make_image(vec![1, 2]),
+                    GraphicState::default()
+                ))
+                .is_err()
+        );
         assert_eq!(renderer.surface.canvas().save_count(), before_count);
         assert_eq!(renderer.surface.canvas().local_to_device(), before_matrix);
         renderer
@@ -2336,9 +2564,11 @@ mod tests {
                 None,
             );
             let mut pixels = vec![0; 30 * 10 * 4];
-            assert!(renderer
-                .surface
-                .read_pixels(&info, &mut pixels, 30 * 4, (0, 0)));
+            assert!(
+                renderer
+                    .surface
+                    .read_pixels(&info, &mut pixels, 30 * 4, (0, 0))
+            );
             for (x, expected) in [
                 (5usize, [255u8, 255, 255, 255]),
                 (15, [227, 147, 137, 255]),
@@ -2373,9 +2603,11 @@ mod tests {
                 None,
             );
             let mut pixels = vec![0; width * height * 4];
-            assert!(renderer
-                .surface
-                .read_pixels(&info, &mut pixels, width * 4, (0, 0)));
+            assert!(
+                renderer
+                    .surface
+                    .read_pixels(&info, &mut pixels, width * 4, (0, 0))
+            );
             pixels
         }
         let source = PdfDocument::new().unwrap();
@@ -2471,9 +2703,11 @@ mod tests {
                 None,
             );
             let mut pixels = vec![0; 160 * 80 * 4];
-            assert!(renderer
-                .surface
-                .read_pixels(&info, &mut pixels, 160 * 4, (0, 0)));
+            assert!(
+                renderer
+                    .surface
+                    .read_pixels(&info, &mut pixels, 160 * 4, (0, 0))
+            );
             pixels
         }
         for (target, baseline) in [
@@ -2554,9 +2788,11 @@ mod tests {
                 None,
             );
             let mut pixels = vec![0; width as usize * height as usize * 4];
-            assert!(renderer
-                .surface
-                .read_pixels(&info, &mut pixels, width as usize * 4, (0, 0)));
+            assert!(
+                renderer
+                    .surface
+                    .read_pixels(&info, &mut pixels, width as usize * 4, (0, 0))
+            );
             (width, height, pixels)
         }
         for rotation in [0, 90, 180, 270] {
@@ -2628,9 +2864,11 @@ mod tests {
                 None,
             );
             let mut pixels = vec![0; width * height * 4];
-            assert!(renderer
-                .surface
-                .read_pixels(&info, &mut pixels, width * 4, (0, 0)));
+            assert!(
+                renderer
+                    .surface
+                    .read_pixels(&info, &mut pixels, width * 4, (0, 0))
+            );
             pixels
         }
         for rotation in [0, 90, 180, 270] {
@@ -2700,9 +2938,11 @@ mod tests {
                 None,
             );
             let mut pixels = vec![0; width * height * 4];
-            assert!(renderer
-                .surface
-                .read_pixels(&info, &mut pixels, width * 4, (0, 0)));
+            assert!(
+                renderer
+                    .surface
+                    .read_pixels(&info, &mut pixels, width * 4, (0, 0))
+            );
             pixels
         }
         for rotation in [0, 90, 180, 270] {
@@ -2797,9 +3037,11 @@ mod tests {
                 None,
             );
             let mut pixels = vec![0; 30 * 10 * 4];
-            assert!(renderer
-                .surface
-                .read_pixels(&info, &mut pixels, 30 * 4, (0, 0)));
+            assert!(
+                renderer
+                    .surface
+                    .read_pixels(&info, &mut pixels, 30 * 4, (0, 0))
+            );
             for (x, expected) in [
                 (5usize, [255u8, 255, 255, 255]),
                 (15, [0, 0, 255, 255]),
@@ -2858,9 +3100,11 @@ mod tests {
                 None,
             );
             let mut pixels = vec![0; 40 * 40 * 4];
-            assert!(renderer
-                .surface
-                .read_pixels(&info, &mut pixels, 40 * 4, (0, 0)));
+            assert!(
+                renderer
+                    .surface
+                    .read_pixels(&info, &mut pixels, 40 * 4, (0, 0))
+            );
             for (x, y, expected) in [
                 (5usize, 5usize, [255u8, 0, 0, 255]),
                 (5, 15, [0, 255, 0, 255]),
@@ -2918,9 +3162,11 @@ mod tests {
                 None,
             );
             let mut pixels = vec![0; 30 * 10 * 4];
-            assert!(renderer
-                .surface
-                .read_pixels(&info, &mut pixels, 30 * 4, (0, 0)));
+            assert!(
+                renderer
+                    .surface
+                    .read_pixels(&info, &mut pixels, 30 * 4, (0, 0))
+            );
             for (x, expected) in [
                 (5usize, [255u8, 255, 255, 255]),
                 (15, [255, 0, 0, 255]),
@@ -2964,9 +3210,11 @@ mod tests {
                 None,
             );
             let mut pixels = vec![0; 30 * 10 * 4];
-            assert!(renderer
-                .surface
-                .read_pixels(&info, &mut pixels, 30 * 4, (0, 0)));
+            assert!(
+                renderer
+                    .surface
+                    .read_pixels(&info, &mut pixels, 30 * 4, (0, 0))
+            );
             for (x, expected) in [
                 (5usize, [255u8, 255, 255, 255]),
                 (15, [255, 0, 0, 255]),
@@ -3012,21 +3260,23 @@ mod tests {
         .unwrap();
         assert!(renderer.start_page(2.0, 2.0).is_err());
         renderer.start_page(1.0, 2.0).unwrap();
-        assert!(SkiaRender::with_limits(
-            72.0,
-            72.0,
-            Limits {
-                max_render_bytes: 3,
-                ..Default::default()
-            }
-        )
-        .is_err());
+        assert!(
+            SkiaRender::with_limits(
+                72.0,
+                72.0,
+                Limits {
+                    max_render_bytes: 3,
+                    ..Default::default()
+                }
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn text_prefix_pixels_do_not_change_when_a_character_is_appended() {
         use pdf::{
-            document::{resource_manager::StandardFont, PdfDocument},
+            document::{PdfDocument, resource_manager::StandardFont},
             page::{content_builder::ContentBuilder, page_builder::PageBuilder},
         };
         let render = |text: &str, scale: u32, matrix: [f32; 6], size: f32| {
@@ -3057,9 +3307,11 @@ mod tests {
                 None,
             );
             let mut pixels = vec![0; 160 * 60 * 4];
-            assert!(renderer
-                .surface
-                .read_pixels(&info, &mut pixels, 160 * 4, (0, 0)));
+            assert!(
+                renderer
+                    .surface
+                    .read_pixels(&info, &mut pixels, 160 * 4, (0, 0))
+            );
             pixels
         };
         let matrix = [1.0, 0.0, 0.0, 1.0, 10.25, 15.25];
@@ -3116,8 +3368,8 @@ mod tests {
         use pdf::{
             document::{owned::Document, resource_manager::StandardFont},
             objects::{
-                pdf_array::PdfArray, pdf_dict::PdfDict, pdf_number::PdfNumber,
-                pdf_reference::PdfReference, PdfObject,
+                PdfObject, pdf_array::PdfArray, pdf_dict::PdfDict, pdf_number::PdfNumber,
+                pdf_reference::PdfReference,
             },
             page::page_builder::PageBuilder,
             parser::syntax::ParseMode,
@@ -3194,12 +3446,16 @@ mod tests {
                     None,
                 );
                 let mut pixels = vec![0; 160 * 60 * 4];
-                assert!(renderer
-                    .surface
-                    .read_pixels(&info, &mut pixels, 160 * 4, (0, 0)));
-                assert!(pixels
-                    .chunks_exact(4)
-                    .any(|pixel| pixel[..3] != [255, 255, 255]));
+                assert!(
+                    renderer
+                        .surface
+                        .read_pixels(&info, &mut pixels, 160 * 4, (0, 0))
+                );
+                assert!(
+                    pixels
+                        .chunks_exact(4)
+                        .any(|pixel| pixel[..3] != [255, 255, 255])
+                );
                 pages.push(pixels);
             }
             assert_eq!(pages[0], pages[1]);
@@ -3210,7 +3466,7 @@ mod tests {
     fn alpha_constants_composite_paths_images_and_transparent_text() {
         use pdf::{
             document::{owned::Document, resource_manager::StandardFont},
-            objects::{pdf_dict::PdfDict, pdf_number::PdfNumber, PdfObject},
+            objects::{PdfObject, pdf_dict::PdfDict, pdf_number::PdfNumber},
             page::page_builder::PageBuilder,
             parser::syntax::ParseMode,
         };
@@ -3237,9 +3493,11 @@ mod tests {
                 None,
             );
             let mut output = vec![0; 40 * 40 * 4];
-            assert!(renderer
-                .surface
-                .read_pixels(&info, &mut output, 40 * 4, (0, 0)));
+            assert!(
+                renderer
+                    .surface
+                    .read_pixels(&info, &mut output, 40 * 4, (0, 0))
+            );
             output
         };
         let check = |data: &[u8], x: usize, y: usize, expected: [u8; 3]| {
@@ -3317,9 +3575,11 @@ mod tests {
                         .collect::<String>(),
                     "ABC"
                 );
-                assert!(pixels(&doc)
-                    .chunks_exact(4)
-                    .all(|pixel| pixel == [255, 255, 255, 255]));
+                assert!(
+                    pixels(&doc)
+                        .chunks_exact(4)
+                        .all(|pixel| pixel == [255, 255, 255, 255])
+                );
             }
         }
     }
@@ -3328,7 +3588,7 @@ mod tests {
     fn standard_blend_modes_match_rgb_compositing_and_restore_normal() {
         use pdf::{
             document::owned::Document,
-            objects::{pdf_dict::PdfDict, pdf_name::PdfName, pdf_number::PdfNumber, PdfObject},
+            objects::{PdfObject, pdf_dict::PdfDict, pdf_name::PdfName, pdf_number::PdfNumber},
             page::page_builder::PageBuilder,
             parser::syntax::ParseMode,
         };
@@ -3366,9 +3626,11 @@ mod tests {
                         None,
                     );
                     let mut pixels = vec![0; 40 * 20 * 4];
-                    assert!(renderer
-                        .surface
-                        .read_pixels(&info, &mut pixels, 40 * 4, (0, 0)));
+                    assert!(
+                        renderer
+                            .surface
+                            .read_pixels(&info, &mut pixels, 40 * 4, (0, 0))
+                    );
                     for (channel, (backdrop, source)) in
                         [(0.25f32, 0.75f32), (0.5, 0.25), (0.75, 0.5)]
                             .iter()
@@ -3420,7 +3682,7 @@ mod tests {
     fn multiply_blending_applies_to_images_and_text_not_only_paths() {
         use pdf::{
             document::{owned::Document, resource_manager::StandardFont},
-            objects::{pdf_dict::PdfDict, pdf_name::PdfName, pdf_number::PdfNumber, PdfObject},
+            objects::{PdfObject, pdf_dict::PdfDict, pdf_name::PdfName, pdf_number::PdfNumber},
             page::page_builder::PageBuilder,
             parser::syntax::ParseMode,
         };
@@ -3467,9 +3729,11 @@ mod tests {
                     None,
                 );
                 let mut pixels = vec![0; 40 * 20 * 4];
-                assert!(renderer
-                    .surface
-                    .read_pixels(&info, &mut pixels, 40 * 4, (0, 0)));
+                assert!(
+                    renderer
+                        .surface
+                        .read_pixels(&info, &mut pixels, 40 * 4, (0, 0))
+                );
                 assert!(
                     pixels.chunks_exact(4).all(|pixel| pixel[0] <= 1),
                     "Multiply cannot introduce red over cyan"
@@ -3817,8 +4081,11 @@ mod tests {
                     .resources()
                     .register_existing(0, ResourceKind::Image, id)
                     .unwrap();
-                doc.replace_page_contents(0, format!("q 40 0 0 20 0 0 cm /{name} Do Q").into_bytes())
-                    .unwrap();
+                doc.replace_page_contents(
+                    0,
+                    format!("q 40 0 0 20 0 0 cm /{name} Do Q").into_bytes(),
+                )
+                .unwrap();
                 let render = |doc: &PdfDocument<std::io::Cursor<Vec<u8>>>| {
                     assert_eq!(
                         doc.get_page(0)
@@ -3864,7 +4131,8 @@ mod tests {
                             ..Default::default()
                         })
                         .unwrap();
-                    let reopened = PdfDocument::from_bytes_with_mode(bytes, ParseMode::Strict).unwrap();
+                    let reopened =
+                        PdfDocument::from_bytes_with_mode(bytes, ParseMode::Strict).unwrap();
                     assert_eq!(render(&reopened), expected);
                 }
             }
@@ -3874,7 +4142,7 @@ mod tests {
     #[test]
     fn invisible_text_is_extractable_but_does_not_paint() {
         use pdf::{
-            document::{resource_manager::StandardFont, PdfDocument},
+            document::{PdfDocument, resource_manager::StandardFont},
             page::{content_builder::ContentBuilder, page_builder::PageBuilder},
         };
         let doc = PdfDocument::new().unwrap();
@@ -3914,9 +4182,11 @@ mod tests {
             None,
         );
         let mut pixels = vec![0; 100 * 60 * 4];
-        assert!(renderer
-            .surface
-            .read_pixels(&info, &mut pixels, 100 * 4, (0, 0)));
+        assert!(
+            renderer
+                .surface
+                .read_pixels(&info, &mut pixels, 100 * 4, (0, 0))
+        );
         assert!(pixels.iter().all(|byte| *byte == 255));
         for mode in [
             TextRenderingMode::FillClip,
@@ -3945,8 +4215,10 @@ mod tests {
             Err(PdfError::ResourceLimit(_))
         ));
         renderer.start_page(16.0, 16.0).unwrap();
-        assert!(renderer
-            .save(std::env::temp_dir().to_str().unwrap())
-            .is_err());
+        assert!(
+            renderer
+                .save(std::env::temp_dir().to_str().unwrap())
+                .is_err()
+        );
     }
 }

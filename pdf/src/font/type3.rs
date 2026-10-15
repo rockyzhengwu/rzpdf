@@ -1,6 +1,4 @@
-//! Bounded inspection of Type 3 fonts and glyph programs.
-//!
-//! This model does not execute CharProcs or enable Type 3 page rendering.
+//! Bounded Type 3 fonts and glyph programs, shared by inspection and execution.
 use std::io::{Read, Seek};
 
 use crate::{
@@ -28,6 +26,7 @@ pub struct Type3Font {
     last: u8,
     widths: [f32; 256],
     encoding: Encoding,
+    to_unicode: Option<super::cmap::Cmap>,
     char_procs: PdfObject,
     resources: Option<PdfObject>,
     document: DocumentIdentity,
@@ -162,6 +161,18 @@ impl Type3Font {
                 _ => return Err(invalid("Encoding must be a name or dictionary")),
             }
         };
+        let to_unicode = if let Some(value) = dict.get("ToUnicode") {
+            let (value, _temporary) = ctx.resolve_owned_with_budget(value, budget)?;
+            let stream = value
+                .as_stream()
+                .ok_or_else(|| invalid("ToUnicode must be a stream"))?;
+            let (cmap, mut retained) =
+                super::cmap::Cmap::from_stream_with_budget(stream, ctx, budget)?;
+            lease.absorb(&mut retained)?;
+            Some(cmap)
+        } else {
+            None
+        };
         let (char_procs, mut retained) = field("CharProcs")?;
         let procs = char_procs
             .as_dict()
@@ -190,6 +201,7 @@ impl Type3Font {
             last,
             widths,
             encoding,
+            to_unicode,
             char_procs,
             resources,
             document: ctx.identity(),
@@ -211,6 +223,49 @@ impl Type3Font {
     pub fn glyph_name(&self, code: u8) -> Option<&str> {
         self.encoding.get_glyph_name(code)
     }
+    pub fn unicode_mapping(&self, code: u8) -> Option<String> {
+        if let Some(cmap) = &self.to_unicode {
+            return cmap
+                .unicode(&super::CharCode::new(u32::from(code), 1, 0.))
+                .map(str::to_owned);
+        }
+        self.encoding
+            .unicode_mapping(code)
+            .and_then(char::from_u32)
+            .map(|c| c.to_string())
+    }
+    pub(crate) fn chars_limited(
+        &self,
+        bytes: &[u8],
+        limit: usize,
+    ) -> PdfResult<Vec<super::CharCode>> {
+        if bytes.len() > limit {
+            return Err(PdfError::ResourceLimit("Type3 character count".into()));
+        }
+        let mut result = Vec::new();
+        result
+            .try_reserve_exact(bytes.len())
+            .map_err(|_| invalid("character allocation"))?;
+        self.visit_chars_limited(bytes, limit, |ch| {
+            result.push(ch);
+            Ok(())
+        })?;
+        Ok(result)
+    }
+    pub(crate) fn visit_chars_limited(
+        &self,
+        bytes: &[u8],
+        limit: usize,
+        mut visitor: impl FnMut(super::CharCode) -> PdfResult<()>,
+    ) -> PdfResult<usize> {
+        if bytes.len() > limit {
+            return Err(PdfError::ResourceLimit("Type3 character count".into()));
+        }
+        for &code in bytes {
+            visitor(super::CharCode::new(u32::from(code), 1, self.width(code)?))?;
+        }
+        Ok(bytes.len())
+    }
     pub fn resources(&self) -> Option<&PdfDict> {
         self.resources.as_ref().and_then(PdfObject::as_dict)
     }
@@ -223,10 +278,11 @@ impl Type3Font {
         Ok(self.widths[usize::from(code)])
     }
 
-    /// Transform the horizontal width vector without applying matrix translation.
+    /// Horizontal text displacement: use only the transformed width's x
+    /// component, even when FontMatrix rotates or shears the glyph shape.
     pub fn text_space_advance(&self, code: u8) -> PdfResult<[f32; 2]> {
         let width = self.width(code)?;
-        let advance = [width * self.matrix[0], width * self.matrix[1]];
+        let advance = [width * self.matrix[0], 0.0];
         if advance.iter().any(|v| !v.is_finite()) {
             return Err(invalid("non-finite transformed width"));
         }
@@ -237,6 +293,15 @@ impl Type3Font {
         &self,
         code: u8,
         ctx: &PDFContext<R>,
+    ) -> PdfResult<Type3GlyphProgram> {
+        self.glyph_program_with_decode_check(code, ctx, |_| Ok(()))
+    }
+
+    pub(crate) fn glyph_program_with_decode_check<R: Read + Seek>(
+        &self,
+        code: u8,
+        ctx: &PDFContext<R>,
+        check_decoded: impl FnOnce(usize) -> PdfResult<()>,
     ) -> PdfResult<Type3GlyphProgram> {
         if self.document != ctx.identity() || self.revision != ctx.revision() {
             return Err(invalid(
@@ -258,6 +323,7 @@ impl Type3Font {
             .as_stream()
             .ok_or_else(|| invalid("CharProc must be a stream"))?;
         let decoded = stream.decode_data_with_budget(ctx, &self.budget)?;
+        check_decoded(decoded.as_slice().len())?;
         let program =
             ContentProgram::from_decoded_bytes_with_budget(decoded, ctx.options(), &self.budget)?;
         let operations = program.program().operations();

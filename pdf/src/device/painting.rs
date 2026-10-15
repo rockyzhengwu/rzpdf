@@ -80,6 +80,9 @@ impl Device for PaintingDevice<'_> {
         }
     }
     fn show_text(&mut self, mut text: TextObject) -> PdfResult<()> {
+        if text.is_type3_metadata() {
+            return Ok(());
+        }
         use TextRenderingMode::*;
         let mode = &text.state.text_state.text_rendering_mode;
         let fill = matches!(mode, Fill | FillStroke | FillClip | FillStrokeClip)
