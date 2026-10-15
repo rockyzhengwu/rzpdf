@@ -4,6 +4,17 @@ use crate::error::PdfResult;
 use crate::page::{image_object::ImageObject, path_object::PathObject, text_object::TextObject};
 
 pub trait Device {
+    fn begin_group(&mut self, _group: crate::page::transparency::GroupPaint) -> PdfResult<()> {
+        Err(crate::error::PdfError::UnsupportedFeature(
+            "device transparency group".into(),
+        ))
+    }
+    /// `commit=false` discards this group's paints after a child failure.
+    fn end_group(&mut self, _commit: bool) -> PdfResult<()> {
+        Err(crate::error::PdfError::UnsupportedFeature(
+            "device transparency group".into(),
+        ))
+    }
     /// Backends must opt in; silently dropping a shading would corrupt display.
     fn do_shading(
         &mut self,

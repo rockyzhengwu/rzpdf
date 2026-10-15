@@ -445,7 +445,13 @@ fn indexed_lab_and_icc_ranges_survive_resource_registration_and_save() {
                 .into_dict()
                 .unwrap();
             let id = doc
-                .try_insert_object(PdfObject::PdfStream(PdfStream::new(dict, vec![])))
+                .try_insert_object(PdfObject::PdfStream(PdfStream::new(
+                    dict,
+                    pdf::color::icc_profile::ICCProfile::gray_srgb()
+                        .unwrap()
+                        .to_bytes()
+                        .unwrap(),
+                )))
                 .unwrap();
             format!("[/ICCBased {} {} R]", id.obj_num(), id.gen_num())
         } else {
@@ -709,7 +715,7 @@ fn parse_object(source: &str) -> pdf::objects::PdfObject {
 #[test]
 fn none_dispatch_preserves_objects_text_clipping_and_visible_sides_of_combined_paths() {
     use pdf::{
-        document::resource_manager::{ResourceKind, StandardFont},
+        document::resource_manager::ResourceKind,
         objects::{PdfObject, pdf_stream::PdfStream},
         page::text_state::TextRenderingMode::*,
     };
@@ -724,9 +730,31 @@ fn none_dispatch_preserves_objects_text_clipping_and_visible_sides_of_combined_p
             ),
         )
         .unwrap();
+    // ET clipping now requires real outlines; keep the dispatch assertions but
+    // use the project-authored TrueType geometry fixture, not a Type1 alias.
+    let source = PdfDocument::from_bytes_with_mode(
+        include_bytes!("fixtures/v07/fonts.pdf").to_vec(),
+        ParseMode::Strict,
+    )
+    .unwrap();
+    let resources = source.get_page(2).unwrap().resource().unwrap();
+    let id = resources
+        .get("Font")
+        .unwrap()
+        .get_attr("F0")
+        .unwrap()
+        .as_object_id()
+        .unwrap();
+    let handle = doc
+        .import_resource_from(
+            &source,
+            &source.object_handle(id).unwrap(),
+            ResourceKind::Font,
+        )
+        .unwrap();
     let font = doc
         .resources()
-        .register_standard_font(0, StandardFont::Helvetica)
+        .register_handle(0, ResourceKind::Font, &handle)
         .unwrap();
     let image_dict = parse_object("<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 >>").into_dict().unwrap();
     let mask = doc
@@ -753,7 +781,8 @@ fn none_dispatch_preserves_objects_text_clipping_and_visible_sides_of_combined_p
             .iter()
             .filter_map(|ch| ch.unicode.as_deref())
             .collect::<String>(),
-        "AAAAAAAA"
+        // This fixture deliberately maps code A to the two-scalar string fi.
+        "fifififififififi"
     );
     let mut device = ColorDevice::default();
     list.replay(&mut device).unwrap();

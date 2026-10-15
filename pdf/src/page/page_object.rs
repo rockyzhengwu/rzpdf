@@ -6,5 +6,7 @@ pub enum PageObject {
     Text(TextObject),
     Path(PathObject),
     Form,
+    GroupBegin(super::transparency::GroupPaint),
+    GroupEnd,
     Shading(super::shading_object::ShadingObject),
 }

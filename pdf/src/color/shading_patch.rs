@@ -1,4 +1,7 @@
-//! Parameter-space geometry for PDF Type6 patches. Not yet wired into Shading.
+//! Certified parameter-space geometry for PDF Coons and tensor-product patches.
+#[cfg(test)]
+#[path = "shading_tensor_tests.rs"]
+mod tensor_tests;
 
 #[derive(Debug, Clone)]
 pub(crate) struct CoonsPatch {
@@ -7,6 +10,9 @@ pub(crate) struct CoonsPatch {
     // Exact-real decoded coordinates may differ from their rounded values.
     point_enclosures: Option<[[Interval; 2]; 12]>,
     encoded: Option<EncodedGeometry>,
+    // Type7 supplies these controls independently of its boundary. PDF order
+    // is (u,v)=(1/3,1/3),(1/3,2/3),(2/3,2/3),(2/3,1/3).
+    tensor_interior: Option<([[f64; 2]; 4], [[Interval; 2]; 4])>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -219,14 +225,25 @@ pub(crate) fn decode_patch_stream(
     max_patches: usize,
     max_bytes: usize,
 ) -> Result<PatchMesh, PatchStreamError> {
+    decode_patch_stream_kind(bytes, encoding, max_patches, max_bytes, false)
+}
+
+pub(crate) fn decode_patch_stream_kind(
+    bytes: &[u8],
+    encoding: &PatchEncoding<'_>,
+    max_patches: usize,
+    max_bytes: usize,
+    tensor: bool,
+) -> Result<PatchMesh, PatchStreamError> {
     let components = encoding.components.len();
-    let plan = scan_patch_stream(
+    let plan = scan_patch_stream_kind(
         bytes,
         encoding.flag_bits,
         encoding.coordinate_bits,
         encoding.component_bits,
         components,
         max_patches,
+        tensor,
     )?;
     if !encoding.coordinates.iter().all(|v| v.is_finite())
         || encoding.components.iter().flatten().any(|v| !v.is_finite())
@@ -293,12 +310,13 @@ pub(crate) fn decode_patch_stream(
         let offset = if flag == 0 { 0 } else { components * 2 };
         let count = values - offset;
         let (_, geometry) = stream
-            .decoded_record(
+            .decoded_record_kind(
                 encoding,
                 patches.last().map(|p| &p.geometry),
                 &mut scratch[..count],
                 &mut values_buffer[offset..],
                 &mut bounds_buffer[offset..],
+                tensor,
             )
             .ok_or(PatchStreamError::InvalidDecode)?;
         if flag != 0 {
@@ -366,8 +384,35 @@ pub(crate) fn scan_patch_stream(
     components: usize,
     max_patches: usize,
 ) -> Result<PatchStreamPlan, PatchStreamError> {
-    patch_record_layout(0, flag_bits, coordinate_bits, component_bits, components)
-        .ok_or(PatchStreamError::InvalidEncoding)?;
+    scan_patch_stream_kind(
+        bytes,
+        flag_bits,
+        coordinate_bits,
+        component_bits,
+        components,
+        max_patches,
+        false,
+    )
+}
+
+pub(crate) fn scan_patch_stream_kind(
+    bytes: &[u8],
+    flag_bits: u8,
+    coordinate_bits: u8,
+    component_bits: u8,
+    components: usize,
+    max_patches: usize,
+    tensor: bool,
+) -> Result<PatchStreamPlan, PatchStreamError> {
+    patch_record_layout_kind(
+        0,
+        flag_bits,
+        coordinate_bits,
+        component_bits,
+        components,
+        tensor,
+    )
+    .ok_or(PatchStreamError::InvalidEncoding)?;
     let mut cursor = PatchBits::new(bytes);
     let mut patches = 0_usize;
     let mut tail_bits = 0;
@@ -387,9 +432,15 @@ pub(crate) fn scan_patch_stream(
         if patches == 0 && flag != 0 {
             return Err(PatchStreamError::MissingPreviousPatch);
         }
-        let layout =
-            patch_record_layout(flag, flag_bits, coordinate_bits, component_bits, components)
-                .ok_or(PatchStreamError::InvalidEncoding)?;
+        let layout = patch_record_layout_kind(
+            flag,
+            flag_bits,
+            coordinate_bits,
+            component_bits,
+            components,
+            tensor,
+        )
+        .ok_or(PatchStreamError::InvalidEncoding)?;
         if remaining < layout.bits {
             return Err(PatchStreamError::Truncated);
         }
@@ -513,13 +564,26 @@ impl<'a> PatchBits<'a> {
         values: &mut [f32],
         bounds: &mut [Interval],
     ) -> Option<(u8, CoonsPatch)> {
+        self.decoded_record_kind(encoding, previous, scratch, values, bounds, false)
+    }
+
+    fn decoded_record_kind(
+        &mut self,
+        encoding: &PatchEncoding<'_>,
+        previous: Option<&CoonsPatch>,
+        scratch: &mut [u32],
+        values: &mut [f32],
+        bounds: &mut [Interval],
+        tensor: bool,
+    ) -> Option<(u8, CoonsPatch)> {
         let flag = self.peek_flag(encoding.flag_bits)?;
-        let layout = patch_record_layout(
+        let layout = patch_record_layout_kind(
             flag,
             encoding.flag_bits,
             encoding.coordinate_bits,
             encoding.component_bits,
             encoding.components.len(),
+            tensor,
         )?;
         if flag != 0 && previous.is_none() {
             return None;
@@ -528,18 +592,27 @@ impl<'a> PatchBits<'a> {
             return None;
         }
         let mut cursor = *self;
-        let mut raw_points = [[0; 2]; 12];
-        cursor.record(
+        let mut raw_points = [[0; 2]; 16];
+        cursor.record_kind(
             encoding.flag_bits,
             encoding.coordinate_bits,
             encoding.component_bits,
             encoding.components.len(),
             &mut raw_points[..layout.points],
             scratch,
+            tensor,
         )?;
-        let patch = if flag == 0 {
+        let patch = if tensor {
+            CoonsPatch::from_tensor_record(
+                flag,
+                &raw_points[..layout.points],
+                previous,
+                encoding.coordinate_bits,
+                encoding.coordinates,
+            )?
+        } else if flag == 0 {
             CoonsPatch::from_decoded_points(
-                raw_points,
+                std::array::from_fn(|i| raw_points[i]),
                 encoding.coordinate_bits,
                 encoding.coordinates,
             )?
@@ -608,10 +681,37 @@ impl<'a> PatchBits<'a> {
         points: &mut [[u32; 2]],
         colors: &mut [u32],
     ) -> Option<u8> {
+        self.record_kind(
+            flag_bits,
+            coordinate_bits,
+            component_bits,
+            components,
+            points,
+            colors,
+            false,
+        )
+    }
+
+    fn record_kind(
+        &mut self,
+        flag_bits: u8,
+        coordinate_bits: u8,
+        component_bits: u8,
+        components: usize,
+        points: &mut [[u32; 2]],
+        colors: &mut [u32],
+        tensor: bool,
+    ) -> Option<u8> {
         let mut cursor = *self;
         let flag = cursor.flag(flag_bits)?;
-        let layout =
-            patch_record_layout(flag, flag_bits, coordinate_bits, component_bits, components)?;
+        let layout = patch_record_layout_kind(
+            flag,
+            flag_bits,
+            coordinate_bits,
+            component_bits,
+            components,
+            tensor,
+        )?;
         if points.len() != layout.points
             || colors.len() != layout.corners.checked_mul(components)?
             || self.remaining()? < layout.bits
@@ -646,6 +746,24 @@ pub(crate) fn patch_record_layout(
     component_bits: u8,
     components: usize,
 ) -> Option<PatchRecordLayout> {
+    patch_record_layout_kind(
+        flag,
+        flag_bits,
+        coordinate_bits,
+        component_bits,
+        components,
+        false,
+    )
+}
+
+pub(crate) fn patch_record_layout_kind(
+    flag: u8,
+    flag_bits: u8,
+    coordinate_bits: u8,
+    component_bits: u8,
+    components: usize,
+    tensor: bool,
+) -> Option<PatchRecordLayout> {
     if flag > 3
         || ![2, 4, 8].contains(&flag_bits)
         || ![1, 2, 4, 8, 12, 16, 24, 32].contains(&coordinate_bits)
@@ -654,7 +772,11 @@ pub(crate) fn patch_record_layout(
     {
         return None;
     }
-    let points: usize = if flag == 0 { 12 } else { 8 };
+    let points: usize = if flag == 0 {
+        if tensor { 16 } else { 12 }
+    } else {
+        if tensor { 12 } else { 8 }
+    };
     let corners: usize = if flag == 0 { 4 } else { 2 };
     let coordinates = points
         .checked_mul(2)?
@@ -1875,6 +1997,48 @@ pub(crate) fn interpolate_corners(
 }
 
 impl CoonsPatch {
+    fn from_tensor_record(
+        flag: u8,
+        new: &[[u32; 2]],
+        previous: Option<&Self>,
+        width: u8,
+        decode: [f64; 4],
+    ) -> Option<Self> {
+        if flag > 3 || new.len() != if flag == 0 { 16 } else { 12 } {
+            return None;
+        }
+        let mut raw = [[0; 2]; 16];
+        let start = if flag == 0 {
+            0
+        } else {
+            let old = previous?.encoded?;
+            if old.width != width || old.decode != decode {
+                return None;
+            }
+            for i in 0..4 {
+                raw[i] = old.raw[(usize::from(flag) * 3 + i) % 12];
+            }
+            4
+        };
+        raw[start..].copy_from_slice(new);
+        let mut patch = Self::from_decoded_points(std::array::from_fn(|i| raw[i]), width, decode)?;
+        let mut points = [[0.; 2]; 4];
+        let mut bounds = [[Interval::exact(0.); 2]; 4];
+        for i in 0..4 {
+            for axis in 0..2 {
+                let (value, interval) = decode_patch_scalar(
+                    raw[12 + i][axis],
+                    width,
+                    [decode[2 * axis], decode[2 * axis + 1]],
+                )?;
+                points[i][axis] = value;
+                bounds[i][axis] = interval;
+            }
+        }
+        patch.tensor_interior = Some((points, bounds));
+        Some(patch)
+    }
+
     pub(crate) fn continue_decoded(
         &self,
         flag: u8,
@@ -1945,6 +2109,7 @@ impl CoonsPatch {
             points,
             point_enclosures: Some(enclosures),
             encoded: Some(EncodedGeometry { raw, width, decode }),
+            tensor_interior: None,
         })
     }
 
@@ -1983,6 +2148,10 @@ impl CoonsPatch {
             .point_enclosures
             .is_some_and(|points| points.iter().flatten().any(|v| v.lower != v.upper))
             || self.points.iter().any(|point| *point != self.points[0])
+            || self.tensor_interior.is_some_and(|(points, bounds)| {
+                points.iter().any(|p| *p != self.points[0])
+                    || bounds.iter().flatten().any(|v| v.lower != v.upper)
+            })
         {
             return Ok(ConstantCoverage::NotConstant);
         }
@@ -1996,6 +2165,22 @@ impl CoonsPatch {
     /// Exact control identities prove one coordinate is a strictly monotone
     /// cubic of v alone. Roots of the same device point therefore share v.
     fn proves_common_v(&self) -> bool {
+        // A tensor patch needs an identity over its entire control net, not
+        // merely the boundary. An exact, strictly monotone coordinate that
+        // depends only on v proves that all roots have a common v.
+        if self.tensor_interior.is_some() {
+            let controls = self.tensor_control_enclosures();
+            return (0..2).any(|axis| {
+                let values = std::array::from_fn::<_, 4, _>(|j| controls[j][0][axis].lower);
+                (0..4).all(|j| {
+                    (0..4).all(|i| {
+                        controls[j][i][axis].lower == values[j]
+                            && controls[j][i][axis].upper == values[j]
+                    })
+                }) && (values.windows(2).all(|w| w[0] < w[1])
+                    || values.windows(2).all(|w| w[0] > w[1]))
+            });
+        }
         if let Some(encoded) = self.encoded {
             let p = encoded.raw;
             return (0..2).any(|axis| {
@@ -2044,6 +2229,14 @@ impl CoonsPatch {
         let p = self
             .point_enclosures
             .unwrap_or_else(|| self.points.map(|point| point.map(Interval::exact)));
+        if let Some((_, q)) = self.tensor_interior {
+            return [
+                [p[0], p[11], p[10], p[9]],
+                [p[1], q[0], q[3], p[8]],
+                [p[2], q[1], q[2], p[7]],
+                [p[3], p[4], p[5], p[6]],
+            ];
+        }
         let bottom = [p[0], p[11], p[10], p[9]];
         let top = [p[3], p[4], p[5], p[6]];
         let left = [p[0], p[1], p[2], p[3]];
@@ -2163,6 +2356,14 @@ impl CoonsPatch {
     /// Unlike corner bounds, its convex hull contains folded interiors too.
     pub(crate) fn tensor_controls(&self) -> Option<[[[f64; 2]; 4]; 4]> {
         let p = &self.points;
+        if let Some((q, _)) = self.tensor_interior {
+            return Some([
+                [p[0], p[11], p[10], p[9]],
+                [p[1], q[0], q[3], p[8]],
+                [p[2], q[1], q[2], p[7]],
+                [p[3], p[4], p[5], p[6]],
+            ]);
+        }
         let bottom = [p[0], p[11], p[10], p[9]];
         let top = [p[3], p[4], p[5], p[6]];
         let left = [p[0], p[1], p[2], p[3]];
@@ -2232,11 +2433,17 @@ impl CoonsPatch {
                 points,
                 point_enclosures: None,
                 encoded: None,
+                tensor_interior: None,
             })
     }
 
     pub(crate) fn point(&self, u: f64, v: f64) -> Option<[f64; 2]> {
         let weights = corner_weights(u, v)?;
+        if self.tensor_interior.is_some() {
+            let rows = self.tensor_controls()?.map(|row| cubic(row, u));
+            let result = cubic(rows, v);
+            return result.iter().all(|x| x.is_finite()).then_some(result);
+        }
         let p = &self.points;
         let bottom = cubic([p[0], p[11], p[10], p[9]], u);
         let top = cubic([p[3], p[4], p[5], p[6]], u);
@@ -2255,6 +2462,22 @@ impl CoonsPatch {
     pub(crate) fn derivatives(&self, u: f64, v: f64) -> Option<[[f64; 2]; 2]> {
         if !unit(u) || !unit(v) {
             return None;
+        }
+        if self.tensor_interior.is_some() {
+            let controls = self.tensor_controls()?;
+            let du = cubic(controls.map(|row| cubic_derivative(row, u)), v);
+            let dv = cubic(
+                std::array::from_fn(|i| {
+                    cubic_derivative(std::array::from_fn(|j| controls[j][i]), v)
+                }),
+                u,
+            );
+            let result = [du, dv];
+            return result
+                .iter()
+                .flatten()
+                .all(|x| x.is_finite())
+                .then_some(result);
         }
         let p = &self.points;
         let c1 = [p[0], p[11], p[10], p[9]];

@@ -98,6 +98,8 @@ The [advanced saving APIs](docs/advanced-saving.md) provide bounded incremental 
 
 [Image workflows](docs/image-codecs.md) include typed inline images, source-aware edits, and in-process JPEG 2000 and JBIG2 decoding. The [image input matrix](docs/releases/v0.6-matrix.md) defines the bounded baseline: JPX alpha/ICC and symbol-coded JBIG2 scans are not supported. Original encoded images and shared JBIG2 Globals can be preserved without re-encoding.
 
+Graphics include [patterns](docs/patterns.md), tensor-patch shading, [RGB transparency groups and soft masks](docs/transparency.md), TrueType text clipping, and [explicit ICC colour conversion](docs/color-management.md). The [graphics support matrix](docs/releases/v0.8-support.md) distinguishes tested display workflows from unsupported print-production and font combinations.
+
 Text extraction does not reconstruct general reading order or paragraphs. Chinese support does not include complete font shaping, and rendering does not cover every PDF feature. Full annotation/form support, secure redaction and OCR remain outside the scope. Incremental saves retain historical bytes; covering text or removing a drawing operation is not secure erasure.
 
 For input limits, supported fonts and images, and verified platforms, see the [v0.1 support matrix](docs/releases/v0.1-support.md), [v0.2 editing support matrix](docs/releases/v0.2-support.md), and [v0.7 font matrix](docs/releases/v0.7-font-matrix.md). Unknown unembedded fonts are explicit missing-font cases; declared aliases are substitutes, not exact reproduction. Font checks cover fixed Type1, CFF, OpenType/CFF, TrueType and bounded Type3 combinations, not arbitrary fonts or complex shaping.

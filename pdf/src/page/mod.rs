@@ -42,6 +42,7 @@ pub mod source_provenance;
 pub mod text_extraction;
 pub mod text_object;
 pub mod text_state;
+pub mod transparency;
 
 /// Effective page geometry, independent of content decoding or interpretation.
 #[derive(Debug, Clone)]

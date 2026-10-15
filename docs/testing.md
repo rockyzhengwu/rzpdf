@@ -1,5 +1,13 @@
 # 解析回归与异常输入验证
 
+## v0.8 最终门禁
+
+2026-10-15，限定范围完整工作区 68 组、1,251 passed、0 failed/ignored/filtered，八组独立检查和 91 张主样本视觉复核通过。源码指纹、失败迁移记录、阅读器差异及最终证据见 [验收记录](releases/v0.8-acceptance.md)，边界见 [支持矩阵](releases/v0.8-support.md)。
+
+完整入口：`PYTHONPATH=tmp/pdfs/v05-verifiers-py311 sh docs/check-v08.sh`。它先执行不带过滤的完整回归并重建示例，再运行 Pattern、Type6/7、组、蒙版、ICC/Lab/专色、文字裁剪、组合/16BM 和 Type1～5 复验。Python 需预先有 Pillow/LittleCMS、pikepdf，另需 qpdf 和 MuPDF；不安装工具，不使用 Poppler 或 fuzz。每次产生新的 PDF/PNG/报告目录，自动通过后仍应复核图片。
+
+正向样本保留严格保存、注册/导入、局部资源和共享隔离；负向与邻值预算测试保留错误恢复。颜色容差、字形 AA、低分辨率 shading 端点和原始阅读器差异分别记录，不统一放宽阈值。全局 OperationBudget/RSS、任意 ICC/印刷组空间及所有字体裁剪仍不能从本版矩阵推导。
+
 ## v0.7 最终门禁
 
 最终候选 `8a901e0` 的完整工作区 64 组、1,208 项通过，0 失败/忽略；八页字体/字形运行矩阵、两份公开文件 12 页、静态 H/V/子集与 Type3 独立门禁及视觉复核通过。具体命令、时间、工具版本和证据见 [v0.7 验收记录](releases/v0.7-acceptance.md)。新入口与预算边界见 [字形运行指南](glyph-runs.md)。不使用 Poppler，不运行 fuzz，不将明确拒绝组合计为通过。

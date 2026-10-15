@@ -17,6 +17,7 @@ pub struct ShadingObject {
     pub resource_name: String,
     source: Option<ShadingDrawSource>,
     nested_source: Option<super::source_provenance::NestedDrawSource>,
+    pattern_background: bool,
 }
 
 impl ShadingObject {
@@ -33,10 +34,18 @@ impl ShadingObject {
             graphic_state,
             source: None,
             nested_source: None,
+            pattern_background: false,
         }
     }
     pub fn source(&self) -> Option<ShadingDrawSource> {
         self.source
+    }
+    pub fn uses_pattern_background(&self) -> bool {
+        self.pattern_background
+    }
+    pub(crate) fn with_pattern_background(mut self) -> Self {
+        self.pattern_background = true;
+        self
     }
     pub fn nested_source(&self) -> Option<&super::source_provenance::NestedDrawSource> {
         self.nested_source.as_ref()

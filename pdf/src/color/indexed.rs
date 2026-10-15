@@ -18,6 +18,9 @@ pub struct Indexed {
 }
 
 impl Indexed {
+    pub(crate) fn retained_profile_bytes(&self) -> PdfResult<usize> {
+        self.base.retained_profile_bytes()
+    }
     pub fn default_value(&self) -> ColorValue {
         ColorValue::new(vec![0.0])
     }
@@ -87,6 +90,13 @@ impl Indexed {
         })
     }
     pub fn rgb(&self, value: &ColorValue) -> PdfResult<ColorRgb> {
+        self.rgb_with_context(value, &super::conversion::ColorConversionContext::default())
+    }
+    pub fn rgb_with_context(
+        &self,
+        value: &ColorValue,
+        context: &super::conversion::ColorConversionContext,
+    ) -> PdfResult<ColorRgb> {
         if value.value_size() != 1 {
             return Err(PdfError::ColorError("Indexed requires one index".into()));
         }
@@ -137,7 +147,7 @@ impl Indexed {
             );
         }
         let value = ColorValue::new(cvs);
-        self.base.rgb(&value)
+        self.base.rgb_with_context(&value, context)
     }
 
     pub fn number_of_components(&self) -> usize {
@@ -154,7 +164,7 @@ mod tests {
     use crate::color::device_rgb::DeviceRgb;
 
     #[test]
-    fn icc_palette_bytes_use_declared_ranges_before_alternate_conversion() {
+    fn icc_palette_bytes_use_declared_ranges_before_profile_conversion() {
         use crate::{
             color::icc_based::IccBased,
             io::stream_reader::StreamReader,
@@ -175,7 +185,9 @@ mod tests {
             (
                 "<< /N 3 /Range [0 0.5 0 1 0 0.25] >>",
                 vec![0, 0, 0, 255, 128, 255],
-                [[0, 0, 0], [128, 128, 64]],
+                // The encoded sRGB matrix/TRC, unlike the old Alternate
+                // shortcut, puts red just below the 127.5 byte rounding tie.
+                [[0, 0, 0], [127, 128, 64]],
             ),
         ] {
             let dict = SyntaxParser::new(
@@ -185,8 +197,16 @@ mod tests {
             .unwrap()
             .into_dict()
             .unwrap();
-            let icc = IccBased::try_new(&PdfObject::PdfStream(PdfStream::new(dict, vec![])), &ctx)
-                .unwrap();
+            let profile = if dict.get("N").and_then(PdfObject::as_u32) == Some(1) {
+                crate::color::icc_profile::ICCProfile::gray_srgb().unwrap()
+            } else {
+                crate::color::icc_profile::ICCProfile::srgb()
+            };
+            let icc = IccBased::try_new(
+                &PdfObject::PdfStream(PdfStream::new(dict, profile.to_bytes().unwrap())),
+                &ctx,
+            )
+            .unwrap();
             let indexed = Indexed {
                 base: Box::new(ColorSpace::IccBased(icc)),
                 hival: 1,

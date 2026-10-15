@@ -12,6 +12,7 @@ pub enum ResourceKind {
     Form,
     ColorSpace,
     Shading,
+    Pattern,
 }
 
 /// Unembedded standard Latin fonts. Unicode text still needs font-specific encoding.
@@ -607,14 +608,17 @@ impl<R: Read + Seek> ResourceManager<'_, R> {
     /// page's resource scope. References inside the value must belong to this
     /// document; use import_resource_from for foreign object graphs.
     pub fn register_color_space(&self, page_index: u32, object: PdfObject) -> PdfResult<String> {
+        // Invalid input must not even enter a rollback transaction (which
+        // deliberately invalidates revisions/caches on failure).
+        self.document.page_location(page_index)?;
+        let object = if object.as_reference().is_some() {
+            self.document.ctx.resolve_owned(&object)?
+        } else {
+            object
+        };
+        crate::color::colorspace::ColorSpace::try_new(&object, &self.document.ctx)?;
         self.document.edit_transaction(|doc| {
             let location = doc.page_location(page_index)?;
-            let object = if object.as_reference().is_some() {
-                doc.ctx.resolve_owned(&object)?
-            } else {
-                object
-            };
-            crate::color::colorspace::ColorSpace::try_new(&object, &doc.ctx)?;
             if let Some(resources) = super::page_tree::PageTree::inherited_attribute(
                 &doc.ctx,
                 &PdfObject::PdfReference(PdfReference::from_id(location.page_id)),
@@ -672,10 +676,15 @@ impl<R: Read + Seek> ResourceManager<'_, R> {
             let object = doc.resolve_object(id)?;
             crate::color::shading::Shading::try_new(&object, &doc.ctx)?;
         }
+        if matches!(kind, ResourceKind::Pattern) {
+            let object = doc.resolve_object(id)?;
+            crate::color::pattern::Pattern::try_new(&object, &doc.ctx)?;
+        }
         doc.edit_transaction(|doc| {
             let object = doc.resolve_object(id)?;
             let (category, prefix) = match kind {
                 ResourceKind::Shading => ("Shading", "Sh"),
+                ResourceKind::Pattern => ("Pattern", "P"),
                 ResourceKind::ColorSpace => {
                     crate::color::colorspace::ColorSpace::try_new(&object, &doc.ctx)?;
                     ("ColorSpace", "CS")

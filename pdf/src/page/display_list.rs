@@ -377,22 +377,61 @@ impl DisplayList {
     }
 
     pub fn replay(&self, device: &mut dyn Device) -> PdfResult<()> {
-        let mut device = crate::device::painting::PaintingDevice(device);
         device.start_page(self.page_width, self.page_height)?;
-        for object in &self.objects {
-            match object {
-                PageObject::Image(image) => device.do_image(image.clone())?,
-                PageObject::Text(text) => device.show_text(text.clone())?,
-                PageObject::Path(path) => match (path.stroke(), path.fill_type()) {
-                    (true, FillType::NoFill) => device.stroke_path(path.clone())?,
-                    (false, _) => device.fill_path(path.clone())?,
-                    _ => device.fill_and_stroke_path(path.clone())?,
-                },
-                PageObject::Shading(shading) => device.do_shading(shading.clone())?,
-                PageObject::Form => {}
+        self.replay_contents(device)?;
+        device.end_page()
+    }
+
+    /// Replay into an already started page (e.g. a caller-owned transparency
+    /// group). Only groups opened by this list are unwound on failure.
+    pub fn replay_contents(&self, device: &mut dyn Device) -> PdfResult<()> {
+        let mut device = crate::device::painting::PaintingDevice(device);
+        let mut groups = 0usize;
+        let result = (|| -> PdfResult<()> {
+            for object in &self.objects {
+                match object {
+                    PageObject::Image(image) => device.do_image(image.clone())?,
+                    PageObject::Text(text) => device.show_text(text.clone())?,
+                    PageObject::Path(path) => match (path.stroke(), path.fill_type()) {
+                        (true, FillType::NoFill) => device.stroke_path(path.clone())?,
+                        (false, _) => device.fill_path(path.clone())?,
+                        _ => device.fill_and_stroke_path(path.clone())?,
+                    },
+                    PageObject::Shading(shading) => device.do_shading(shading.clone())?,
+                    PageObject::Form => {}
+                    PageObject::GroupBegin(group) => {
+                        let next = groups.checked_add(1).ok_or_else(|| {
+                            crate::error::PdfError::ResourceLimit("display group depth".into())
+                        })?;
+                        device.begin_group(group.clone())?;
+                        groups = next;
+                    }
+                    PageObject::GroupEnd => {
+                        if groups == 0 {
+                            return Err(crate::error::PdfError::PageOperatorError(
+                                "unmatched display group end".into(),
+                            ));
+                        }
+                        // The backend consumes its boundary even if compositing fails.
+                        groups -= 1;
+                        device.end_group(true)?;
+                    }
+                }
+            }
+            if groups != 0 {
+                return Err(crate::error::PdfError::PageOperatorError(
+                    "unclosed display group".into(),
+                ));
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            while groups > 0 {
+                let _ = device.end_group(false);
+                groups -= 1;
             }
         }
-        device.end_page()?;
+        result?;
         Ok(())
     }
 }

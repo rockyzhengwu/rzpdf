@@ -2,6 +2,16 @@
 
 本文件只记录交付变化，不替代长期任务池或原始测试日志。版本范围见 [ROADMAP](ROADMAP.md)。
 
+## Unreleased — v0.8 图形颜色与透明度（限定范围已验收）
+
+新增实验性平铺及 Shading Pattern 解释、资源注册/导入和显示快照；Skia 路径、文字和 stencil 绘制可使用图案来源。图案保留局部资源和默认坐标系，支持正负步距、单元裁剪及非着色基空间色值；Pattern Background 与直接 sh 的规则分开。加入累计工作/显示载荷和离屏表面限制、模型/像素测试及独立互操作脚本。
+
+新增 Type7 张量积补片，保留实际内部控制点，复用认证区间求根与累计工作上限；接通解析、函数颜色、显示、注册、导入与严格保存。透明度新增显式 DisplayList/Device 组边界，RGB 隔离/非隔离/挖空、独立 shape/opacity、嵌套背景校正、图形 Alpha/Luminosity SMask 及 TrueType Tr4～7 的 ET 轮廓裁剪。透明填充加描边按隐式挖空组处理，失败先丢弃再恢复。
+
+颜色新增固定版本纯 Rust moxcms ICC 后端、真实 Gray/RGB/CMYK 配置转换、四种 rendering intent、显式 RGB 数值输出、有限共享缓存及显式 Alternate 回退。非法/空 ICC 不再静默使用 Alternate；依赖及许可见 [清单](docs/releases/v0.8-dependencies.md)。
+
+接口变化：`ResourceKind` 新增 Pattern；`Pattern::Shading` 携带实际模型；`TilingPattern` 不再提供零步距 Default；`PageObject` 新增 GroupBegin/GroupEnd，`ShadingGeometry` 新增 TensorMesh；GeneralState 新增软蒙版/意图。自定义 Device 须处理组边界，不能静默展开。详见 [Pattern](docs/patterns.md)、[透明度](docs/transparency.md)、[颜色管理](docs/color-management.md)及 [支持矩阵](docs/releases/v0.8-support.md)。2026-10-15，最终未提交候选完整工作区门禁退出 0：68 组、1,251 passed、0 failed/ignored/filtered；八组独立门禁及 91 张主样本视觉复核通过。V08-00～17 在限定范围内关闭，源码及证据见 [验收记录](docs/releases/v0.8-acceptance.md)。未提交、推送、标签或发布，未修改包版本；fuzz 暂缓。
+
 ## Unreleased — v0.7 字体与文字解释（限定范围已验收）
 
 新增 Type3 字体检查及受限不透明图形字形执行，接通 d0/d1、FontMatrix、资源、文字提取/ToUnicode 和来源隔离。修复带旋转 FontMatrix 的文字推进：只用水平分量，字形形状仍完整变换。字形内绘图与文字元数据分开，避免重复绘制；资源、循环、累计工作量、R6、共享页编辑和保留预算有回归。非默认 Tr、透明度和字形内文字仍明确拒绝。

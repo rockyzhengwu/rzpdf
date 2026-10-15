@@ -1,4 +1,5 @@
 pub mod colorspace;
+pub mod conversion;
 pub mod pdf_color;
 
 pub mod cal_gray;

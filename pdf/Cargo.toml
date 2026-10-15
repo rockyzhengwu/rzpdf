@@ -15,6 +15,7 @@ fax = "0.2.7"
 flate2 = "1.1.9"
 hayro-jpeg2000 = { version = "=0.4.1", default-features = false, features = ["std"] }
 hayro-jbig2 = { version = "=0.3.1", default-features = false, features = ["std"] }
+moxcms = { version = "=0.9.1", default-features = false, features = ["lut"] }
 freetype-rs = "0.38.0"
 lazy_static = "1.5.0"
 md-5 = "0.10.6"

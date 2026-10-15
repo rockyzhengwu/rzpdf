@@ -1,7 +1,7 @@
-//! Type6 stream resource adapter with explicit retained-storage accounting.
+//! Type6/7 stream resource adapter with explicit retained-storage accounting.
 use std::io::{Read, Seek};
 
-use super::shading_patch::{PatchEncoding, PatchMesh, PatchStreamError, decode_patch_stream};
+use super::shading_patch::{PatchEncoding, PatchMesh, PatchStreamError, decode_patch_stream_kind};
 use crate::{
     error::{PdfError, PdfResult},
     objects::pdf_stream::PdfStream,
@@ -31,18 +31,20 @@ pub(crate) fn from_stream<R: Read + Seek>(
             .ok_or_else(|| invalid("expected integer"))?;
         u8::try_from(number.as_u64_checked()?).map_err(|_| invalid("integer outside byte range"))
     };
-    if integer("ShadingType")? != 6 {
-        return Err(invalid("requires ShadingType 6"));
+    let kind = integer("ShadingType")?;
+    if ![6, 7].contains(&kind) {
+        return Err(invalid("requires ShadingType 6 or 7"));
     }
     let flag_bits = integer("BitsPerFlag")?;
     let coordinate_bits = integer("BitsPerCoordinate")?;
     let component_bits = integer("BitsPerComponent")?;
-    super::shading_patch::patch_record_layout(
+    super::shading_patch::patch_record_layout_kind(
         0,
         flag_bits,
         coordinate_bits,
         component_bits,
         components,
+        kind == 7,
     )
     .ok_or_else(|| invalid("invalid bit widths or component count"))?;
     let count = components
@@ -92,7 +94,7 @@ pub(crate) fn from_stream<R: Read + Seek>(
     allowance = allowance
         .checked_sub(data.capacity() - data.len())
         .ok_or_else(|| PdfError::ResourceLimit("patch decoded input capacity".into()))?;
-    let mesh = decode_patch_stream(
+    let mesh = decode_patch_stream_kind(
         &data,
         &PatchEncoding {
             flag_bits,
@@ -103,6 +105,7 @@ pub(crate) fn from_stream<R: Read + Seek>(
         },
         limits.max_objects,
         allowance,
+        kind == 7,
     )
     .map_err(|error| match error {
         PatchStreamError::PatchLimit

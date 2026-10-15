@@ -21,6 +21,7 @@ pub struct PdfImage {
     soft_mask: Option<Vec<u8>>,
     // Non-device samples retain packed precision until color conversion.
     color_sample_decode: Option<(usize, Vec<f64>)>,
+    rendering_intent: Option<crate::color::conversion::RenderingIntent>,
 }
 
 #[cfg(test)]
@@ -591,6 +592,7 @@ mod tests {
             max_rgba_bytes: 4,
             soft_mask: None,
             color_sample_decode: None,
+            rendering_intent: None,
         };
         assert_eq!(image.rgba_buffer().unwrap(), vec![10, 20, 30, 255]);
         image.soft_mask = Some(vec![128]);
@@ -1099,6 +1101,18 @@ impl PdfImage {
             }
         };
 
+        let rendering_intent = image
+            .get_attr("Intent")
+            .map(|value| {
+                let value = ctx.resolve(value)?;
+                let name = value
+                    .as_name()
+                    .ok_or_else(|| PdfError::ObjectError("image Intent must be a name".into()))?
+                    .name();
+                crate::color::conversion::RenderingIntent::from_pdf_name(name)
+                    .ok_or_else(|| PdfError::UnsupportedFeature("image rendering Intent".into()))
+            })
+            .transpose()?;
         Ok(Self {
             name,
             height,
@@ -1111,6 +1125,7 @@ impl PdfImage {
             max_rgba_bytes: ctx.limits().max_decoded_bytes,
             soft_mask,
             color_sample_decode,
+            rendering_intent,
         })
     }
     pub fn name(&self) -> &str {
@@ -1130,7 +1145,8 @@ impl PdfImage {
     }
 
     pub(crate) fn retained_sample_bytes(&self) -> PdfResult<usize> {
-        self.data
+        let bytes = self
+            .data
             .len()
             .checked_add(self.soft_mask.as_ref().map_or(0, Vec::len))
             .and_then(|n| {
@@ -1143,7 +1159,10 @@ impl PdfImage {
                             .and_then(|bytes| n.checked_add(bytes))
                     })
             })
-            .ok_or_else(|| PdfError::ResourceLimit("image retained samples".into()))
+            .ok_or_else(|| PdfError::ResourceLimit("image retained samples".into()))?;
+        bytes
+            .checked_add(self.colorspace.retained_profile_bytes()?)
+            .ok_or_else(|| PdfError::ResourceLimit("image retained profile".into()))
     }
 
     pub fn colorspace(&self) -> &ColorSpace {
@@ -1157,7 +1176,20 @@ impl PdfImage {
         self.is_inline
     }
     pub fn rgba_buffer(&self) -> PdfResult<Vec<u8>> {
-        self.rgba_buffer_inner(None)
+        let mut context = crate::color::conversion::ColorConversionContext::default();
+        if let Some(intent) = self.rendering_intent {
+            context.rendering_intent = intent;
+        }
+        self.rgba_buffer_inner(None, &context)
+    }
+    pub fn rendering_intent(&self) -> Option<crate::color::conversion::RenderingIntent> {
+        self.rendering_intent
+    }
+    pub fn rgba_buffer_with_context(
+        &self,
+        context: &crate::color::conversion::ColorConversionContext,
+    ) -> PdfResult<Vec<u8>> {
+        self.rgba_buffer_inner(None, context)
     }
 
     /// Apply the current nonstroking color to a stencil's transparent coverage.
@@ -1174,12 +1206,16 @@ impl PdfImage {
                 "stencil color requires a stencil and finite RGB components in [0,1]".into(),
             ));
         }
-        self.rgba_buffer_inner(Some(color))
+        self.rgba_buffer_inner(
+            Some(color),
+            &crate::color::conversion::ColorConversionContext::default(),
+        )
     }
 
     fn rgba_buffer_inner(
         &self,
         stencil_color: Option<&crate::color::value::ColorRgb>,
+        context: &crate::color::conversion::ColorConversionContext,
     ) -> PdfResult<Vec<u8>> {
         if self.is_mask && stencil_color.is_none() {
             return Err(PdfError::ColorError(
@@ -1257,7 +1293,7 @@ impl PdfImage {
                                 * (endpoints[component * 2 + 1] - endpoints[component * 2]))
                             as f32;
                     }
-                    let rgb = self.colorspace.rgb(&color)?;
+                    let rgb = self.colorspace.rgb_with_context(&color, context)?;
                     rgba.extend_from_slice(&[rgb.r(), rgb.g(), rgb.b(), 255]);
                 }
             }
@@ -1300,10 +1336,10 @@ impl PdfImage {
                         let pixel = match palette[index as usize] {
                             Some(pixel) => pixel,
                             None => {
-                                let rgb =
-                                    space.rgb(&crate::color::value::ColorValue::new(vec![
-                                        index as f32,
-                                    ]))?;
+                                let rgb = space.rgb_with_context(
+                                    &crate::color::value::ColorValue::new(vec![index as f32]),
+                                    context,
+                                )?;
                                 let pixel = [rgb.r(), rgb.g(), rgb.b(), 255];
                                 palette[index as usize] = Some(pixel);
                                 pixel
@@ -1313,6 +1349,25 @@ impl PdfImage {
                     }
                 }
                 _ => {}
+            }
+        }
+        if self.color_sample_decode.is_none()
+            && stencil_color.is_none()
+            && !context.output_profile().is_builtin_srgb()
+            && matches!(
+                self.colorspace,
+                ColorSpace::DeviceGray(_) | ColorSpace::DeviceRgb(_) | ColorSpace::DeviceCmyk(_)
+            )
+        {
+            for pixel in rgba.chunks_exact_mut(4) {
+                let color = context.from_srgb(crate::color::value::ColorRgb::new(
+                    f32::from(pixel[0]) / 255.,
+                    f32::from(pixel[1]) / 255.,
+                    f32::from(pixel[2]) / 255.,
+                ))?;
+                pixel[0] = color.r();
+                pixel[1] = color.g();
+                pixel[2] = color.b();
             }
         }
         if let Some(alpha) = &self.soft_mask {

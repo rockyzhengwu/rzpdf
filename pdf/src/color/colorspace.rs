@@ -30,31 +30,58 @@ pub enum ColorSpace {
 }
 
 impl ColorSpace {
+    pub(crate) fn retained_profile_bytes(&self) -> PdfResult<usize> {
+        match self {
+            Self::IccBased(space) => space.retained_profile_bytes(),
+            Self::Indexed(space) => space.retained_profile_bytes(),
+            Self::Separation(space) => space.retained_profile_bytes(),
+            Self::DeviceN(space) => space.retained_profile_bytes(),
+            Self::Pattern(space) => space
+                .base
+                .as_ref()
+                .map(|base| base.retained_profile_bytes())
+                .transpose()
+                .map(|v| v.unwrap_or(0)),
+            _ => Ok(0),
+        }
+    }
     /// Whether this colorant suppresses paint without suppressing clipping.
     pub fn is_nonpainting(&self) -> bool {
         match self {
             Self::Separation(space) => space.is_nonpainting(),
             Self::DeviceN(space) => space.is_nonpainting(),
             Self::Indexed(space) => space.is_nonpainting(),
+            Self::Pattern(space) => space
+                .base
+                .as_ref()
+                .is_some_and(|base| base.is_nonpainting()),
             _ => false,
         }
     }
     pub fn rgb(&self, value: &ColorValue) -> PdfResult<ColorRgb> {
-        match self {
+        self.rgb_with_context(value, &super::conversion::ColorConversionContext::default())
+    }
+    pub fn rgb_with_context(
+        &self,
+        value: &ColorValue,
+        context: &super::conversion::ColorConversionContext,
+    ) -> PdfResult<ColorRgb> {
+        let color = match self {
             ColorSpace::DeviceGray(gray) => gray.rgb(value),
             ColorSpace::DeviceRgb(rgb) => rgb.rgb(value),
             ColorSpace::DeviceCmyk(cmyk) => cmyk.rgb(value),
             ColorSpace::Lab(lab) => lab.rgb(value),
-            ColorSpace::IccBased(icc) => icc.rgb(value),
+            ColorSpace::IccBased(icc) => return icc.rgb_with_context(value, context),
             ColorSpace::CalGray(cg) => cg.rgb(value),
             ColorSpace::CalRgb(cr) => cr.rgb(value),
-            ColorSpace::Indexed(indexed) => indexed.rgb(value),
-            ColorSpace::Separation(sep) => sep.rgb(value),
-            ColorSpace::DeviceN(space) => space.rgb(value),
+            ColorSpace::Indexed(indexed) => return indexed.rgb_with_context(value, context),
+            ColorSpace::Separation(sep) => return sep.rgb_with_context(value, context),
+            ColorSpace::DeviceN(space) => return space.rgb_with_context(value, context),
             _ => Err(PdfError::UnsupportedFeature(format!(
                 "RGB conversion for {self}"
             ))),
-        }
+        }?;
+        context.from_srgb(color)
     }
     pub fn default_value(&self) -> PdfResult<ColorValue> {
         Ok(match self {
@@ -126,7 +153,9 @@ impl ColorSpace {
                     "DeviceCMYK" => Ok(ColorSpace::DeviceCmyk(DeviceCmyk::new())),
                     "CalGray" => Ok(ColorSpace::CalGray(CalGray::try_new(&obj, ctx)?)),
                     "CalRGB" => Ok(ColorSpace::CalRgb(CalRgb::try_new(&obj, ctx)?)),
-                    "Pattern" => Ok(ColorSpace::Pattern(PatternColorSpace::default())),
+                    "Pattern" => Ok(ColorSpace::Pattern(
+                        PatternColorSpace::try_new_with_context(&obj, ctx)?,
+                    )),
                     "Indexed" => Ok(ColorSpace::Indexed(Indexed::try_new(array, ctx)?)),
                     "Separation" => Ok(ColorSpace::Separation(Separation::try_new(array, ctx)?)),
                     "DeviceN" => Ok(ColorSpace::DeviceN(DeviceN::try_new(array, ctx)?)),

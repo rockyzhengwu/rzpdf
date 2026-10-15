@@ -21,6 +21,7 @@ pub enum ShadingGeometry {
     FreeformMesh,
     LatticeMesh,
     CoonsMesh,
+    TensorMesh,
 }
 
 /// Function-based, axial, radial, triangle-mesh and partial Coons-patch shading,
@@ -114,6 +115,8 @@ impl Shading {
             5 => return Err(invalid("Type5 requires a stream")),
             6 if object.as_stream().is_some() => ShadingGeometry::CoonsMesh,
             6 => return Err(invalid("Type6 requires a stream")),
+            7 if object.as_stream().is_some() => ShadingGeometry::TensorMesh,
+            7 => return Err(invalid("Type7 requires a stream")),
             _ => return Err(PdfError::UnsupportedFeature(format!("ShadingType {kind}"))),
         };
         let color_object = ctx.resolve(required("ColorSpace")?)?;
@@ -130,7 +133,7 @@ impl Shading {
         let colorspace = ColorSpace::try_new(&color_object, ctx)?;
         if matches!(colorspace, ColorSpace::Pattern(_))
             || matches!(colorspace, ColorSpace::Indexed(_))
-                && (!matches!(kind, 4 | 5 | 6) || dict.get("Function").is_some())
+                && (!matches!(kind, 4 | 5 | 6 | 7) || dict.get("Function").is_some())
         {
             return Err(invalid(
                 "axial/radial ColorSpace must not be Pattern or Indexed",
@@ -178,7 +181,7 @@ impl Shading {
                 .ok_or_else(|| invalid("AntiAlias must be boolean"))?
                 .value(),
         };
-        let function = if matches!(kind, 4 | 5 | 6) && dict.get("Function").is_none() {
+        let function = if matches!(kind, 4 | 5 | 6 | 7) && dict.get("Function").is_none() {
             None
         } else {
             Some(ctx.resolve(required("Function")?)?)
@@ -269,6 +272,12 @@ impl Shading {
         let mut retained_payload_bytes = functions
             .capacity()
             .checked_mul(std::mem::size_of::<Function>())
+            .and_then(|bytes| {
+                colorspace
+                    .retained_profile_bytes()
+                    .ok()
+                    .and_then(|profile| bytes.checked_add(profile))
+            })
             .ok_or_else(|| PdfError::ResourceLimit("shading retained payload overflow".into()))?;
         for function in &functions {
             retained_payload_bytes = retained_payload_bytes
@@ -314,7 +323,7 @@ impl Shading {
         } else {
             None
         };
-        let patch_mesh = if kind == 6 {
+        let patch_mesh = if matches!(kind, 6 | 7) {
             if !functions.is_empty() {
                 let decode: [f32; 6] = numbers(required("Decode")?, ctx)?;
                 let low = decode[4].min(decode[5]);
@@ -331,7 +340,7 @@ impl Shading {
             let mesh = super::shading_patch_resource::from_stream(
                 object
                     .as_stream()
-                    .ok_or_else(|| invalid("Type6 requires a stream"))?,
+                    .ok_or_else(|| invalid("patch requires a stream"))?,
                 if functions.is_empty() { components } else { 1 },
                 ctx,
                 retained_payload_bytes,
@@ -395,6 +404,18 @@ impl Shading {
     /// Background is intentionally not used: PDF applies it to shading patterns,
     /// not to the sh operator. The caller applies graphics-state clipping/alpha.
     pub fn color_at_point(&self, x: f64, y: f64) -> PdfResult<Option<ColorRgb>> {
+        self.color_at_point_with_context(
+            x,
+            y,
+            &super::conversion::ColorConversionContext::default(),
+        )
+    }
+    pub fn color_at_point_with_context(
+        &self,
+        x: f64,
+        y: f64,
+        context: &super::conversion::ColorConversionContext,
+    ) -> PdfResult<Option<ColorRgb>> {
         if !x.is_finite() || !y.is_finite() {
             return Err(invalid("sample coordinates must be finite"));
         }
@@ -412,7 +433,7 @@ impl Shading {
                 && (fraction <= 1.0 || self.extend[1])
         };
         let fraction = match self.geometry {
-            ShadingGeometry::CoonsMesh => {
+            ShadingGeometry::CoonsMesh | ShadingGeometry::TensorMesh => {
                 let mesh = self
                     .patch_mesh
                     .as_ref()
@@ -470,15 +491,17 @@ impl Shading {
                         }
                         SearchError::InvalidInput => invalid("invalid patch sample"),
                         SearchError::Unresolved => PdfError::UnsupportedFeature(
-                            "unresolved Type6 patch geometry or coverage ordering".into(),
+                            "unresolved patch geometry or coverage ordering".into(),
                         ),
                     })?;
                 return if !hit {
                     Ok(None)
                 } else if self.functions.is_empty() {
-                    self.colorspace.rgb(&ColorValue::new(values)).map(Some)
+                    self.colorspace
+                        .rgb_with_context(&ColorValue::new(values), context)
+                        .map(Some)
                 } else {
-                    self.evaluate_color(&values).map(Some)
+                    self.evaluate_color(&values, context).map(Some)
                 };
             }
             ShadingGeometry::FreeformMesh | ShadingGeometry::LatticeMesh => {
@@ -498,9 +521,11 @@ impl Shading {
                 for index in (0..mesh.triangle_count()).rev() {
                     if mesh.sample_triangle(index, [x, y], &mut values)? {
                         return if self.functions.is_empty() {
-                            self.colorspace.rgb(&ColorValue::new(values)).map(Some)
+                            self.colorspace
+                                .rgb_with_context(&ColorValue::new(values), context)
+                                .map(Some)
                         } else {
-                            self.evaluate_color(&values).map(Some)
+                            self.evaluate_color(&values, context).map(Some)
                         };
                     }
                 }
@@ -526,7 +551,9 @@ impl Shading {
                 {
                     return Ok(None);
                 }
-                return self.evaluate_color(&[u as f32, v as f32]).map(Some);
+                return self
+                    .evaluate_color(&[u as f32, v as f32], context)
+                    .map(Some);
             }
             ShadingGeometry::Axial(coords) => {
                 let [x0, y0, x1, y1] = coords.map(f64::from);
@@ -581,19 +608,30 @@ impl Shading {
             }
         };
         fraction
-            .map(|fraction| self.color_at(fraction.clamp(0.0, 1.0)))
+            .map(|fraction| self.color_at_with_context(fraction.clamp(0.0, 1.0), context))
             .transpose()
     }
 
     /// Evaluate a normalized location within the shading's domain.
     /// Geometry/Extend/BBox and background application belong to the painter.
     pub fn color_at(&self, fraction: f64) -> PdfResult<ColorRgb> {
+        self.color_at_with_context(
+            fraction,
+            &super::conversion::ColorConversionContext::default(),
+        )
+    }
+    pub fn color_at_with_context(
+        &self,
+        fraction: f64,
+        context: &super::conversion::ColorConversionContext,
+    ) -> PdfResult<ColorRgb> {
         if matches!(
             self.geometry,
             ShadingGeometry::FunctionBased { .. }
                 | ShadingGeometry::FreeformMesh
                 | ShadingGeometry::LatticeMesh
                 | ShadingGeometry::CoonsMesh
+                | ShadingGeometry::TensorMesh
         ) {
             return Err(invalid("this shading requires point sampling"));
         }
@@ -603,12 +641,16 @@ impl Shading {
         let parameter = (f64::from(self.domain[0])
             + fraction * (f64::from(self.domain[1]) - f64::from(self.domain[0])))
             as f32;
-        self.evaluate_color(&[parameter])
+        self.evaluate_color(&[parameter], context)
     }
 
     // Shared by one-dimensional blends and future two-dimensional Type1
     // sampling; coordinates arrive in the function's own domain.
-    fn evaluate_color(&self, parameters: &[f32]) -> PdfResult<ColorRgb> {
+    fn evaluate_color(
+        &self,
+        parameters: &[f32],
+        context: &super::conversion::ColorConversionContext,
+    ) -> PdfResult<ColorRgb> {
         let values = if self.functions.len() == 1 {
             self.functions[0].eval(parameters)?
         } else {
@@ -625,7 +667,8 @@ impl Shading {
             }
             values
         };
-        self.colorspace.rgb(&ColorValue::new(values))
+        self.colorspace
+            .rgb_with_context(&ColorValue::new(values), context)
     }
 }
 

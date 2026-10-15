@@ -1,4 +1,7 @@
 use std::io::{Read, Seek};
+mod pattern;
+mod soft_mask;
+mod text_clip;
 
 use crate::{
     color::{
@@ -49,6 +52,10 @@ pub struct Interpreter<'a, R: Seek + Read> {
     operation_byte_offset: Option<u64>,
     path_source_indices: Vec<usize>,
     resource_scope: Option<crate::objects::pdf_dict::PdfDict>,
+    initial_ctm: Matrix,
+    pattern_depth: usize,
+    pattern_uncoloured: bool,
+    pending_text_clip: Option<PdfPath>,
     execution_budget: super::execution_budget::ExecutionBudget,
     form_depth: usize,
     active_forms: Vec<crate::objects::object_id::ObjectId>,
@@ -745,6 +752,10 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             active_forms: Vec::new(),
             execution_budget: super::execution_budget::ExecutionBudget::new(),
             resource_scope: None,
+            initial_ctm: Matrix::identity(),
+            pattern_depth: 0,
+            pattern_uncoloured: false,
+            pending_text_clip: None,
             page,
             ctx,
             parser,
@@ -864,6 +875,27 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
     }
 
     fn invoke_oeration(&mut self, op: Operator, device: &mut dyn Device) -> PdfResult<()> {
+        if self.pattern_uncoloured
+            && matches!(
+                op.name(),
+                "rg" | "RG"
+                    | "g"
+                    | "G"
+                    | "k"
+                    | "K"
+                    | "cs"
+                    | "CS"
+                    | "sc"
+                    | "SC"
+                    | "scn"
+                    | "SCN"
+                    | "sh"
+            )
+        {
+            return Err(PdfError::ColorError(
+                "uncoloured pattern cannot specify colour".into(),
+            ));
+        }
         if self.type3_depth != 0 {
             if !matches!(
                 op.name(),
@@ -1016,7 +1048,18 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                 self.handle_fill_and_stroke_path(device, FillType::EvenOdd)?;
             }
             "d" => self.handle_set_dash(op)?,
-            "ri" => self.unsupported_operator(&op)?,
+            "ri" => {
+                let name = op.get_as_name(0)?.name();
+                if let Some(intent) = crate::color::conversion::RenderingIntent::from_pdf_name(name)
+                {
+                    self.current_state
+                        .graphic_state
+                        .general_state
+                        .rendering_intent = intent;
+                } else {
+                    self.unsupported_operator(&op)?;
+                }
+            }
             "i" => self.handle_set_flat(op)?,
             "gs" => self.handle_set_extend_gs(op)?,
 
@@ -1059,6 +1102,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                 if !self.in_text_object {
                     return Err(PdfError::PageOperatorError("ET without matching BT".into()));
                 }
+                self.finish_text_clip()?;
                 self.in_text_object = false;
             }
 
@@ -1405,7 +1449,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
         }
     }
 
-    fn emit_text_object(&mut self, text: TextObject, device: &mut dyn Device) -> PdfResult<()> {
+    fn emit_text_object(&mut self, mut text: TextObject, device: &mut dyn Device) -> PdfResult<()> {
         if let Some(Font::Type3(font)) = &text.state.text_state.font {
             if text.state.text_state.text_rendering_mode
                 != super::text_state::TextRenderingMode::Fill
@@ -1456,6 +1500,8 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                 child.type3_depth = self.type3_depth + 1;
                 child.form_depth = self.form_depth;
                 child.type3_uncoloured = program.metrics().bbox.is_some();
+                child.pattern_depth = self.pattern_depth;
+                child.pattern_uncoloured = self.pattern_uncoloured;
                 child.type3_budget = self.type3_budget.clone();
                 child.execution_budget = work;
                 // Type3 Resources omitted: use the page resource dictionary
@@ -1508,6 +1554,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             }
             return device.show_text(text.with_type3_metadata());
         }
+        self.accumulate_text_clip(&mut text)?;
         device.show_text(text)
     }
 
@@ -1635,6 +1682,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
     }
 
     fn handle_begin_text(&mut self) -> PdfResult<()> {
+        self.pending_text_clip = None;
         self.current_state.set_text_matrix(Matrix::identity());
         self.current_state.text_line_matrix = Matrix::identity();
         Ok(())
@@ -1736,7 +1784,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                 .stroke_color_space,
             ColorSpace::Pattern(_)
         ) {
-            self.unsupported_operator(&op)
+            self.select_pattern(&op, true)
         } else {
             self.handle_set_colorvalue_stroke(op)
         }
@@ -1749,7 +1797,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                 .fill_color_space,
             ColorSpace::Pattern(_)
         ) {
-            self.unsupported_operator(&op)
+            self.select_pattern(&op, false)
         } else {
             self.handle_set_colorvalue_fill(op)
         }
@@ -1809,7 +1857,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             PdfObject::PdfName(name) => {
                 if matches!(
                     name.name(),
-                    "DeviceRGB" | "DeviceGray" | "DeviceCMYK" | "RGB" | "CMYK" | "G"
+                    "DeviceRGB" | "DeviceGray" | "DeviceCMYK" | "RGB" | "CMYK" | "G" | "Pattern"
                 ) {
                     return ColorSpace::try_new(obj, self.ctx);
                 } else {
@@ -1869,6 +1917,24 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
         if !crate::page::all_state::supported_ext_gs_keys(extgs) {
             return self.unsupported_operator(&op);
         }
+        let mask = extgs
+            .get("SMask")
+            .map(|value| self.compile_soft_mask(value))
+            .transpose()?;
+        let intent = if let Some(value) = extgs.get("RI") {
+            let value = self.ctx.resolve(value)?;
+            let name = value
+                .as_name()
+                .ok_or_else(|| PdfError::PageResourceError("ExtGState RI must be a name".into()))?
+                .name();
+            let Some(intent) = crate::color::conversion::RenderingIntent::from_pdf_name(name)
+            else {
+                return self.unsupported_operator(&op);
+            };
+            Some(intent)
+        } else {
+            None
+        };
         if let Some(value) = extgs.get("BM") {
             let Some(mode) = crate::page::general_state::resolve_blend_mode(value, self.ctx)?
             else {
@@ -1977,6 +2043,15 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             let font = self.load_font(dict)?;
             self.current_state.graphic_state.text_state.font = Some(font);
             self.current_state.graphic_state.text_state.font_size = size;
+        }
+        if let Some(mask) = mask {
+            self.current_state.graphic_state.general_state.soft_mask = mask;
+        }
+        if let Some(intent) = intent {
+            self.current_state
+                .graphic_state
+                .general_state
+                .rendering_intent = intent;
         }
         Ok(())
     }
@@ -2571,7 +2646,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             image.encoded_data().to_vec(),
         ));
         let decoded = PdfImage::try_new(String::new(), &stream, self.ctx)?.mark_inline();
-        if self.type3_uncoloured && !decoded.is_mask() {
+        if (self.type3_uncoloured || self.pattern_uncoloured) && !decoded.is_mask() {
             return Err(PdfError::FontError(
                 "d1 glyph image must be a stencil".into(),
             ));
@@ -2614,7 +2689,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             "Image" => {
                 device.preflight_draw(&self.current_state.graphic_state, None)?;
                 let pdfimage = PdfImage::try_new(name.to_string(), &xobject, self.ctx)?;
-                if self.type3_uncoloured && !pdfimage.is_mask() {
+                if (self.type3_uncoloured || self.pattern_uncoloured) && !pdfimage.is_mask() {
                     return Err(PdfError::FontError(
                         "d1 glyph image must be a stencil".into(),
                     ));
@@ -2659,8 +2734,42 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                     return Err(PdfError::PageResourceError("Cyclic Form invocation".into()));
                 }
                 let form = crate::page::pdf_form::PdfForm::try_new(&xobject, self.ctx)?;
-                let state =
-                    form.invocation_state(&self.current_state, &self.page.page_matrix, &limits)?;
+                let group = form
+                    .group
+                    .as_ref()
+                    .map(|group| super::transparency::GroupParameters::parse(group, self.ctx))
+                    .transpose()?;
+                if group.is_some() && self.type3_depth > 0 {
+                    return Err(PdfError::UnsupportedFeature(
+                        "Type3 transparency group".into(),
+                    ));
+                }
+                let mut state = if group.is_some() {
+                    form.group_invocation_state(
+                        &self.current_state,
+                        &self.page.page_matrix,
+                        &limits,
+                    )?
+                } else {
+                    form.invocation_state(&self.current_state, &self.page.page_matrix, &limits)?
+                };
+                let group = group.map(|group| {
+                    let general = &self.current_state.graphic_state.general_state;
+                    let paint = super::transparency::GroupPaint {
+                        isolated: group.isolated,
+                        knockout: group.knockout,
+                        alpha: general.fill_alpha,
+                        blend_mode: general.blend_mode,
+                        clip: state.graphic_state.clip_path.clone(),
+                        soft_mask: general.soft_mask.clone(),
+                    };
+                    state.graphic_state.general_state.fill_alpha = 1.;
+                    state.graphic_state.general_state.stroke_alpha = 1.;
+                    state.graphic_state.general_state.blend_mode =
+                        super::general_state::BlendMode::Normal;
+                    state.graphic_state.general_state.soft_mask = None;
+                    paint
+                });
                 let page_resources = self.page.resource()?;
                 let scope = form.resource_scope(&page_resources).clone();
                 let data = xobject.as_stream().unwrap().decode_data(self.ctx)?;
@@ -2701,12 +2810,29 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                     child.active_forms.push(id);
                 }
                 child.current_state = state;
-                child.run_content(device)?;
-                if !child.diagnostics.is_empty() {
-                    return Err(PdfError::UnsupportedFeature(
-                        "Form diagnostics require nested source paths".into(),
-                    ));
+                child.initial_ctm = child.current_state.ctm.clone();
+                child.pattern_depth = self.pattern_depth;
+                child.pattern_uncoloured = self.pattern_uncoloured;
+                let grouped = group.is_some();
+                if let Some(group) = group {
+                    device.begin_group(group)?;
                 }
+                let result = child.run_content(device).and_then(|()| {
+                    if child.diagnostics.is_empty() {
+                        Ok(())
+                    } else {
+                        Err(PdfError::UnsupportedFeature(
+                            "Form diagnostics require nested source paths".into(),
+                        ))
+                    }
+                });
+                let cleanup = if grouped {
+                    device.end_group(result.is_ok())
+                } else {
+                    Ok(())
+                };
+                result?;
+                cleanup?;
             }
             _ => {
                 return Err(PdfError::UnsupportedFeature(format!(

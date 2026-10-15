@@ -99,11 +99,35 @@ mod collection_tests {
 }
 
 impl Device for TraceDevice {
+    fn begin_group(&mut self, group: crate::page::transparency::GroupPaint) -> PdfResult<()> {
+        self.reserve_object()?;
+        let mut state = crate::page::graphic_state::GraphicState {
+            clip_path: group.clip.clone(),
+            ..Default::default()
+        };
+        state.general_state.soft_mask = group.soft_mask.clone();
+        let payload = self.next_draw_bytes(None, &state)?;
+        let segments = self.next_retained_segments(None, &state)?;
+        self.retained_path_segments = segments;
+        self.retained_payload_bytes = payload;
+        self.objects.push(PageObject::GroupBegin(group));
+        Ok(())
+    }
+    fn end_group(&mut self, commit: bool) -> PdfResult<()> {
+        if !commit {
+            return Err(PdfError::PageOperatorError(
+                "aborted group display list".into(),
+            ));
+        }
+        self.reserve_object()?;
+        self.objects.push(PageObject::GroupEnd);
+        Ok(())
+    }
     fn do_shading(&mut self, shading: crate::page::shading_object::ShadingObject) -> PdfResult<()> {
         self.reserve_object()?;
         let segments = self.next_retained_segments(None, &shading.graphic_state)?;
         let total = self
-            .next_nested_source_bytes(shading.nested_source())?
+            .next_draw_bytes(shading.nested_source(), &shading.graphic_state)?
             .checked_add(shading.retained_payload_bytes()?)
             .ok_or_else(|| PdfError::ResourceLimit("display retained payload overflow".into()))?;
         if self
@@ -142,7 +166,7 @@ impl Device for TraceDevice {
         self.reserve_object()?;
         let segments = self.next_retained_segments(None, &imageobject.graphic_state)?;
         let total = self
-            .next_nested_source_bytes(imageobject.nested_source())?
+            .next_draw_bytes(imageobject.nested_source(), &imageobject.graphic_state)?
             .checked_add(imageobject.image.retained_sample_bytes()?)
             .ok_or_else(|| PdfError::ResourceLimit("display retained payload overflow".into()))?;
         if self
@@ -161,7 +185,8 @@ impl Device for TraceDevice {
     }
 
     fn stroke_path(&mut self, pathobject: PathObject) -> PdfResult<()> {
-        let payload = self.next_nested_source_bytes(pathobject.nested_source())?;
+        let payload =
+            self.next_draw_bytes(pathobject.nested_source(), pathobject.graphic_state())?;
         self.reserve_object()?;
         let segments =
             self.next_retained_segments(Some(pathobject.pdf_path()), pathobject.graphic_state())?;
@@ -174,7 +199,8 @@ impl Device for TraceDevice {
     }
 
     fn fill_path(&mut self, pathobject: PathObject) -> PdfResult<()> {
-        let payload = self.next_nested_source_bytes(pathobject.nested_source())?;
+        let payload =
+            self.next_draw_bytes(pathobject.nested_source(), pathobject.graphic_state())?;
         self.reserve_object()?;
         let segments =
             self.next_retained_segments(Some(pathobject.pdf_path()), pathobject.graphic_state())?;
@@ -187,7 +213,8 @@ impl Device for TraceDevice {
     }
 
     fn fill_and_stroke_path(&mut self, pathobject: PathObject) -> PdfResult<()> {
-        let payload = self.next_nested_source_bytes(pathobject.nested_source())?;
+        let payload =
+            self.next_draw_bytes(pathobject.nested_source(), pathobject.graphic_state())?;
         self.reserve_object()?;
         let segments =
             self.next_retained_segments(Some(pathobject.pdf_path()), pathobject.graphic_state())?;
@@ -226,7 +253,7 @@ impl Device for TraceDevice {
     fn show_text(&mut self, textobject: TextObject) -> PdfResult<()> {
         self.reserve_object()?;
         let segments = self.next_retained_segments(None, &textobject.state)?;
-        let mut total = self.next_nested_source_bytes(textobject.nested_source())?;
+        let mut total = self.next_draw_bytes(textobject.nested_source(), &textobject.state)?;
         for item in &textobject.items {
             total = total
                 .checked_add(item.unicode().map_or(0, |text| text.len()))
@@ -249,6 +276,63 @@ impl Device for TraceDevice {
 }
 
 impl TraceDevice {
+    pub(crate) fn pattern_storage(&self) -> PdfResult<(usize, usize)> {
+        let bytes = self
+            .objects
+            .capacity()
+            .checked_mul(std::mem::size_of::<PageObject>())
+            .and_then(|v| {
+                self.retained_path_segments
+                    .checked_mul(std::mem::size_of::<Segment>())
+                    .and_then(|s| v.checked_add(s))
+            })
+            .and_then(|v| v.checked_add(self.retained_payload_bytes))
+            .ok_or_else(|| PdfError::ResourceLimit("pattern retained storage overflow".into()))?;
+        if self
+            .limits
+            .is_some_and(|limits| bytes > limits.max_decoded_bytes)
+        {
+            return Err(PdfError::ResourceLimit("pattern retained storage".into()));
+        }
+        Ok((bytes, self.retained_path_segments))
+    }
+
+    fn next_draw_bytes(
+        &self,
+        source: Option<&crate::page::source_provenance::NestedDrawSource>,
+        state: &crate::page::graphic_state::GraphicState,
+    ) -> PdfResult<usize> {
+        let mut total = self.next_nested_source_bytes(source)?;
+        if let Some(mask) = &state.general_state.soft_mask {
+            total = total
+                .checked_add(mask.retained_bytes)
+                .ok_or_else(|| PdfError::ResourceLimit("soft mask draw payload overflow".into()))?;
+        }
+        for space in [
+            &state.color_state.fill_color_space,
+            &state.color_state.stroke_color_space,
+        ] {
+            total = total
+                .checked_add(space.retained_profile_bytes()?)
+                .ok_or_else(|| {
+                    PdfError::ResourceLimit("colour profile draw payload overflow".into())
+                })?;
+            if let crate::color::colorspace::ColorSpace::Pattern(space) = space {
+                if let Some(paint) = space.paint() {
+                    total = total.checked_add(paint.retained_bytes).ok_or_else(|| {
+                        PdfError::ResourceLimit("pattern draw payload overflow".into())
+                    })?;
+                }
+            }
+        }
+        if self
+            .limits
+            .is_some_and(|limits| total > limits.max_decoded_bytes)
+        {
+            return Err(PdfError::ResourceLimit("pattern draw payload bytes".into()));
+        }
+        Ok(total)
+    }
     fn next_nested_source_bytes(
         &self,
         source: Option<&crate::page::source_provenance::NestedDrawSource>,
@@ -296,6 +380,23 @@ impl TraceDevice {
         state: &crate::page::graphic_state::GraphicState,
     ) -> PdfResult<usize> {
         let mut total = self.retained_path_segments;
+        if let Some(mask) = &state.general_state.soft_mask {
+            total = total.checked_add(mask.retained_segments).ok_or_else(|| {
+                PdfError::ResourceLimit("soft mask draw segments overflow".into())
+            })?;
+        }
+        for space in [
+            &state.color_state.fill_color_space,
+            &state.color_state.stroke_color_space,
+        ] {
+            if let crate::color::colorspace::ColorSpace::Pattern(space) = space {
+                if let Some(paint) = space.paint() {
+                    total = total.checked_add(paint.retained_segments).ok_or_else(|| {
+                        PdfError::ResourceLimit("pattern draw segments overflow".into())
+                    })?;
+                }
+            }
+        }
         for path in path
             .into_iter()
             .chain(state.clip_path.elements().iter().map(|clip| &clip.path))

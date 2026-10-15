@@ -53,9 +53,7 @@ pub(crate) fn resolve_blend_mode<R: std::io::Read + std::io::Seek>(
 pub(crate) fn resolve_blend_mode_using<O: std::borrow::Borrow<crate::objects::PdfObject>>(
     value: &crate::objects::PdfObject,
     limits: crate::parser::options::Limits,
-    resolve: &mut impl FnMut(
-        &crate::objects::PdfObject,
-    ) -> crate::error::PdfResult<O>,
+    resolve: &mut impl FnMut(&crate::objects::PdfObject) -> crate::error::PdfResult<O>,
 ) -> crate::error::PdfResult<Option<BlendMode>> {
     use crate::{error::PdfError, objects::PdfObject};
     let name_mode = |value: &PdfObject| {
@@ -97,6 +95,8 @@ pub struct GeneralState {
     pub stroke_alpha: f32,
     pub fill_alpha: f32,
     pub flat_ness: f32,
+    pub soft_mask: Option<std::sync::Arc<super::transparency::SoftMaskPaint>>,
+    pub rendering_intent: crate::color::conversion::RenderingIntent,
 }
 
 #[cfg(test)]
@@ -105,7 +105,7 @@ mod budget_tests {
     use crate::{
         budget::OperationBudget,
         error::PdfResult,
-        objects::{pdf_array::PdfArray, pdf_name::PdfName, PdfObject},
+        objects::{PdfObject, pdf_array::PdfArray, pdf_name::PdfName},
         parser::options::Limits,
     };
 
@@ -167,6 +167,8 @@ impl Default for GeneralState {
             stroke_alpha: 1.0,
             fill_alpha: 1.0,
             flat_ness: 0.0,
+            soft_mask: None,
+            rendering_intent: Default::default(),
         }
     }
 }

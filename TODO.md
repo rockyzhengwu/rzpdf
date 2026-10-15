@@ -4,6 +4,8 @@
 
 ## 当前版本管理规则
 
+2026-10-15 v0.8 的 A1/A2/B/C 限定范围已完成本地工程验收：完整工作区 68 组、1,251 passed、0 failed/ignored/filtered；八组独立门禁及 91 张主样本视觉复核通过。Pattern、Type7、RGB 透明组/挖空/软蒙版、TrueType 裁剪与实际 ICC 转换已收口；V08-00～17 关闭，允许进入 v0.9 盘点，不自动关闭长期 P0～P5 父项。任务见 [版本计划](docs/releases/v0.8.md)，边界见 [支持矩阵](docs/releases/v0.8-support.md)，源码指纹和证据见 [验收记录](docs/releases/v0.8-acceptance.md)。本轮修改尚未提交；未推送、标签或发布，fuzz 继续暂缓。
+
 2026-10-15 v0.7 的 A/B/C 冻结范围已完成本地工程验收：最终候选 `8a901e0` 的完整工作区 64 组、1,208 项通过，0 失败/忽略；字体映射/原生读绘、显式字形运行、公开文件/子集及 Type3 独立门禁和视觉复核通过。V07-00～09 关闭，允许进入 v0.8 范围盘点；不自动关闭 P0～P5 长期父项。任务见 [计划](docs/releases/v0.7.md)，边界见 [矩阵](docs/releases/v0.7-font-matrix.md)，证据与未解决输入见 [验收记录](docs/releases/v0.7-acceptance.md)。未推送、打标签或发布；fuzz 继续暂缓。
 
 2026-10-14 v0.5：最终源码 `5e9bc93` 的 A/B/C 限定范围已完成本地工程验收。完整工作区门禁退出 0：59 组、1,139 项通过、0 失败/忽略；三组独立互操作门禁及最终视觉复核通过。最终范围和证据见 [v0.5 计划](docs/releases/v0.5.md)、[支持矩阵](docs/releases/v0.5-support.md)和 [验收记录](docs/releases/v0.5-acceptance.md)。本段取代下方旧版本的“当前阶段”快照；fuzz 继续暂缓，未推送、打标签或发布，不自动勾选完整 P0～P5 父任务。

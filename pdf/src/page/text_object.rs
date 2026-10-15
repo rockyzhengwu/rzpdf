@@ -60,6 +60,7 @@ pub struct TextDrawSource {
 
 #[derive(Debug, Clone)]
 pub struct TextObject {
+    clipping_interpreted: bool,
     type3_metadata: bool,
     source: Option<TextDrawSource>,
     nested_source: Option<super::source_provenance::NestedDrawSource>,
@@ -132,25 +133,36 @@ impl TextObject {
             .as_ref()
             .ok_or_else(|| PdfError::FontError("Character outline requires a font".into()))?;
         let size = self.state.text_state.font_size;
-        if !size.is_finite() || size <= 0. {
+        if !size.is_finite() {
             return Err(PdfError::ObjectError(
-                "Character outline font size must be positive".into(),
+                "Character outline font size must be finite".into(),
             ));
         }
         let (ox, oy) = if font.writting_mode() == crate::font::WritingMode::Vertical {
-            (-item.charcode().origin_x() / 1000., -item.charcode().origin_y() / 1000.)
-        } else { (0., 0.) };
+            (
+                -item.charcode().origin_x() / 1000.,
+                -item.charcode().origin_y() / 1000.,
+            )
+        } else {
+            (0., 0.)
+        };
         let matrix = Matrix::new(1., 0., 0., 1., ox, oy)
-            .checked_mul(&Matrix::new(size * self.horizontal_scale, 0., 0., size, 0., 0.))?.checked_mul(
-            &Matrix::new(
+            .checked_mul(&Matrix::new(
+                size * self.horizontal_scale,
+                0.,
+                0.,
+                size,
+                0.,
+                0.,
+            ))?
+            .checked_mul(&Matrix::new(
                 self.matrix.a(),
                 self.matrix.b(),
                 self.matrix.c(),
                 self.matrix.d(),
                 item.pos.x(),
                 item.pos.y(),
-            ),
-        )?;
+            ))?;
         let mut commands = font.glyph_outline(item.charcode(), limits)?;
         let transform = |point: &mut [f64; 2]| -> crate::error::PdfResult<()> {
             let x = point[0] * f64::from(matrix.a())
@@ -188,6 +200,7 @@ impl TextObject {
 
     pub fn new(state: GraphicState) -> Self {
         TextObject {
+            clipping_interpreted: false,
             type3_metadata: false,
             source: None,
             nested_source: None,
@@ -201,6 +214,12 @@ impl TextObject {
     }
     pub fn add_item(&mut self, item: CharItem) {
         self.items.push(item)
+    }
+    pub fn has_interpreted_clipping(&self) -> bool {
+        self.clipping_interpreted
+    }
+    pub(crate) fn mark_clipping_interpreted(&mut self) {
+        self.clipping_interpreted = true;
     }
     pub fn source(&self) -> Option<TextDrawSource> {
         self.source

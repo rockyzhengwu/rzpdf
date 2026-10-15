@@ -75,7 +75,7 @@ fn extgstate_line_parameters_apply_and_restore_through_q() {
 
 #[test]
 fn unsupported_extgstate_is_diagnosed_without_partial_application() {
-    let doc = document("<< /LW 99 /ca 0.5 /SMask /None >>", b"/G gs 0 0 10 10 re S");
+    let doc = document("<< /LW 99 /ca 0.5 /AIS true >>", b"/G gs 0 0 10 10 re S");
     let list = doc.get_page(0).unwrap().display_list().unwrap();
     assert_eq!(list.diagnostics().len(), 1);
     assert_eq!(list.diagnostics()[0].operator, "gs");

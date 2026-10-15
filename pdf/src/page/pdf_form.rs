@@ -2,7 +2,7 @@
 use crate::{
     error::{PdfError, PdfResult},
     geom::{matrix::Matrix, rectangle::Rectangle},
-    objects::{pdf_dict::PdfDict, PdfObject},
+    objects::{PdfObject, pdf_dict::PdfDict},
     pdf_context::PDFContext,
 };
 use std::io::{Read, Seek};
@@ -60,6 +60,16 @@ impl PdfForm {
         if self.group.is_some() {
             return Err(PdfError::UnsupportedFeature("Form group execution".into()));
         }
+        self.group_invocation_state(parent, page_matrix, limits)
+    }
+
+    /// Caller must validate and emit the group's compositing boundaries.
+    pub(crate) fn group_invocation_state(
+        &self,
+        parent: &crate::page::all_state::AllState,
+        page_matrix: &Matrix,
+        limits: &crate::parser::options::Limits,
+    ) -> PdfResult<crate::page::all_state::AllState> {
         let ctm = self.invocation_matrix(parent.ctm())?;
         let operand = self.bbox_clip_element(parent.ctm(), page_matrix, limits)?;
         let mut state = parent.clone();
@@ -485,8 +495,8 @@ mod tests {
             .invocation_state(&child, &Matrix::identity(), &limits)
             .unwrap();
         assert_eq!(nested.graphic_state.clip_path.elements.len(), 2);
-        assert!(form
-            .invocation_state(
+        assert!(
+            form.invocation_state(
                 &child,
                 &Matrix::identity(),
                 &crate::parser::options::Limits {
@@ -494,7 +504,8 @@ mod tests {
                     ..limits
                 }
             )
-            .is_err());
+            .is_err()
+        );
         assert_eq!(child.graphic_state.clip_path.elements.len(), 1);
         form.group = Some(PdfDict::default());
         assert!(matches!(
@@ -548,8 +559,8 @@ mod tests {
             assert!(isolated.try_add_element(operand.clone(), &bounded).is_err());
             assert_eq!(isolated.elements.len(), 2);
         }
-        assert!(form
-            .bbox_clip_element(
+        assert!(
+            form.bbox_clip_element(
                 &parent,
                 &page,
                 &crate::parser::options::Limits {
@@ -557,22 +568,24 @@ mod tests {
                     ..limits
                 }
             )
-            .is_err());
+            .is_err()
+        );
         assert_eq!((parent.e(), parent.f()), (10., 20.));
         form.matrix = Matrix::new(0., 0., 0., 0., 3., 4.);
         let points = form.bbox_display_corners(&parent, &page).unwrap();
         assert!(points.iter().all(|p| p.x() == 6. && p.y() == 77.));
         form.matrix = Matrix::new(f32::MAX, 0., 0., 1., 0., 0.);
-        assert!(form
-            .bbox_display_corners(&Matrix::identity(), &Matrix::identity())
-            .is_err());
+        assert!(
+            form.bbox_display_corners(&Matrix::identity(), &Matrix::identity())
+                .is_err()
+        );
         form.matrix = Matrix::new(f32::NAN, 0., 0., 1., 0., 0.);
         assert!(form.invocation_matrix(&parent).is_err());
     }
     #[test]
     fn indirect_resources_and_geometry_survive_strict_save_reopen() {
         use crate::{
-            document::{resource_manager::ResourceKind, PdfDocument},
+            document::{PdfDocument, resource_manager::ResourceKind},
             io::stream_reader::StreamReader,
             objects::{pdf_reference::PdfReference, pdf_stream::PdfStream},
             parser::syntax::{ParseMode, SyntaxParser},
@@ -614,10 +627,11 @@ mod tests {
                 PdfStream::from_decoded_data(form_dict, b"q Q".to_vec()).unwrap(),
             ))
             .unwrap();
-        assert!(doc
-            .resources()
-            .register_existing(0, ResourceKind::Form, value)
-            .is_err());
+        assert!(
+            doc.resources()
+                .register_existing(0, ResourceKind::Form, value)
+                .is_err()
+        );
         let name = doc
             .resources()
             .register_existing(0, ResourceKind::Form, form_id)
@@ -626,10 +640,12 @@ mod tests {
         let target = PdfDocument::new().unwrap();
         target.add_page(0).unwrap();
         let source_handle = doc.object_handle(form_id).unwrap();
-        assert!(target
-            .resources()
-            .register_handle(0, ResourceKind::Form, &source_handle)
-            .is_err());
+        assert!(
+            target
+                .resources()
+                .register_handle(0, ResourceKind::Form, &source_handle)
+                .is_err()
+        );
         let imported = target
             .import_resource_from(&doc, &source_handle, ResourceKind::Form)
             .unwrap();
@@ -642,13 +658,15 @@ mod tests {
                 .unwrap();
         let reference = PdfObject::PdfReference(PdfReference::from_id(form_id));
         for document in [&doc, &reopened] {
-            assert!(document
-                .get_page(0)
-                .unwrap()
-                .get_xobject(&name)
-                .unwrap()
-                .as_stream()
-                .is_some());
+            assert!(
+                document
+                    .get_page(0)
+                    .unwrap()
+                    .get_xobject(&name)
+                    .unwrap()
+                    .as_stream()
+                    .is_some()
+            );
             let form = PdfForm::try_new(&reference, document.ctx()).unwrap();
             assert_eq!((form.matrix.e(), form.matrix.f()), (3., 4.));
             let parent = parse("<< /XObject << /Shared << /Marker /Parent >> /OnlyParent 1 >> >>")
@@ -666,9 +684,10 @@ mod tests {
                     .name(),
                 "Local"
             );
-            assert!(form
-                .named_resource(&parent, "XObject", "OnlyParent", document.ctx())
-                .is_err());
+            assert!(
+                form.named_resource(&parent, "XObject", "OnlyParent", document.ctx())
+                    .is_err()
+            );
         }
         drop(reopened);
         drop(doc);
@@ -751,31 +770,38 @@ mod tests {
                 .as_f32(),
             Some(22.)
         );
-        assert!(own
-            .named_resource(page_resources, "XObject", "ParentOnly", &ctx)
-            .is_err());
-        assert!(own
-            .named_resource(page_resources, "XObject", "Null", &ctx)
-            .is_err());
-        assert!(own
-            .named_resource(page_resources, "Font", "Shared", &ctx)
-            .is_err());
+        assert!(
+            own.named_resource(page_resources, "XObject", "ParentOnly", &ctx)
+                .is_err()
+        );
+        assert!(
+            own.named_resource(page_resources, "XObject", "Null", &ctx)
+                .is_err()
+        );
+        assert!(
+            own.named_resource(page_resources, "Font", "Shared", &ctx)
+                .is_err()
+        );
         let empty = PdfForm::try_new(
             &parse("<< /Subtype /Form /BBox [0 0 1 1] /Resources << >> >>"),
             &ctx,
         )
         .unwrap();
-        assert!(empty
-            .named_resource(page_resources, "XObject", "Shared", &ctx)
-            .is_err());
+        assert!(
+            empty
+                .named_resource(page_resources, "XObject", "Shared", &ctx)
+                .is_err()
+        );
         let malformed = PdfForm::try_new(
             &parse("<< /Subtype /Form /BBox [0 0 1 1] /Resources << /XObject 3 >> >>"),
             &ctx,
         )
         .unwrap();
-        assert!(malformed
-            .named_resource(page_resources, "XObject", "Shared", &ctx)
-            .is_err());
+        assert!(
+            malformed
+                .named_resource(page_resources, "XObject", "Shared", &ctx)
+                .is_err()
+        );
         let explicit = PdfForm::try_new(&parse("<< /Subtype /Form /FormType 1 /BBox [0 0 10 20] /Matrix [1 0 0 1 3 4] /Resources << >> /Group << /S /Transparency >> >>"),&ctx).unwrap();
         assert!(explicit.resources.is_some());
         assert!(explicit.group.is_some());

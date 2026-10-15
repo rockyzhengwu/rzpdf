@@ -15,6 +15,22 @@ use pdf::{
     path::pdf_path::Segment,
 };
 use std::{fs::File, io::Write};
+#[cfg(test)]
+#[path = "group_tests.rs"]
+mod group_tests;
+#[path = "knockout.rs"]
+mod knockout;
+#[cfg(test)]
+#[path = "pattern_tests.rs"]
+mod pattern_tests;
+#[path = "soft_mask.rs"]
+mod soft_mask;
+#[cfg(test)]
+#[path = "soft_mask_tests.rs"]
+mod soft_mask_tests;
+#[cfg(test)]
+#[path = "text_clip_tests.rs"]
+mod text_clip_tests;
 
 use skia_safe::{
     Color, EncodedImageFormat, FontMgr, Paint, PaintStyle, PathBuilder, PathEffect, PathFillType,
@@ -31,9 +47,95 @@ pub struct SkiaRender {
     page_width: i32,
     page_height: i32,
     limits: Limits,
+    clear_color: Color,
+    held_pattern_surfaces: u64,
+    group_stack: Vec<RenderGroup>,
+    active_intent: pdf::color::conversion::RenderingIntent,
+    shape_mode: bool,
+    object_dispatch: bool,
+    initial_override: Option<skia_safe::Image>,
+}
+
+struct RenderGroup {
+    parent: Surface,
+    limits: Limits,
+    paint: pdf::page::transparency::GroupPaint,
+    coverage: Option<Surface>,
+    shape: Option<Surface>,
+    initial: Option<skia_safe::Image>,
 }
 
 impl SkiaRender {
+    fn capture_group_alpha(
+        &mut self,
+        paint: impl FnOnce(&mut Self) -> PdfResult<()>,
+    ) -> PdfResult<()> {
+        if self.shape_mode {
+            return Ok(());
+        }
+        let Some(coverage) = self
+            .group_stack
+            .last_mut()
+            .and_then(|group| group.coverage.take())
+        else {
+            return Ok(());
+        };
+        let color = std::mem::replace(&mut self.surface, coverage);
+        // Taking the coverage surface is also a reentrancy guard: recursive
+        // primitive dispatch sees no collector and does not capture itself.
+        let result = paint(self);
+        let coverage = std::mem::replace(&mut self.surface, color);
+        self.group_stack
+            .last_mut()
+            .ok_or_else(|| {
+                PdfError::PageOperatorError("group alpha stack changed during primitive".into())
+            })?
+            .coverage = Some(coverage);
+        result
+    }
+
+    fn composite_group_image(
+        &mut self,
+        image: &skia_safe::Image,
+        group: &pdf::page::transparency::GroupPaint,
+    ) -> PdfResult<()> {
+        let mut paint = Paint::default();
+        paint.set_alpha_f(if self.shape_mode { 1. } else { group.alpha });
+        paint.set_blend_mode(self.effective_blend_mode(group.blend_mode));
+        if let Some(mask) = group.soft_mask.as_deref().filter(|_| !self.shape_mode) {
+            self.paint = paint;
+            let image_shader = image
+                .to_shader(
+                    (skia_safe::TileMode::Decal, skia_safe::TileMode::Decal),
+                    skia_safe::SamplingOptions::default(),
+                    None,
+                )
+                .ok_or_else(|| PdfError::ResourceLimit("group image shader".into()))?;
+            self.paint.set_shader(image_shader);
+            self.apply_soft_mask(Some(mask), &Matrix::identity())?;
+            paint = self.paint.clone();
+            self.paint.set_shader(None);
+        }
+        let save = self.surface.canvas().save_count();
+        self.surface.canvas().save();
+        let result = (|| -> PdfResult<()> {
+            self.set_clip(&group.clip)?;
+            self.surface.canvas().reset_matrix();
+            if group.soft_mask.is_some() && !self.shape_mode {
+                self.surface.canvas().draw_rect(
+                    skia_safe::Rect::from_wh(self.page_width as f32, self.page_height as f32),
+                    &paint,
+                );
+            } else {
+                self.surface
+                    .canvas()
+                    .draw_image(image, (0., 0.), Some(&paint));
+            }
+            Ok(())
+        })();
+        self.surface.canvas().restore_to_count(save);
+        result
+    }
     fn vertical_glyph_offset(
         code: &pdf::font::CharCode,
         font_size: f32,
@@ -84,10 +186,194 @@ impl SkiaRender {
             page_width: 0,
             page_height: 0,
             limits,
+            clear_color: Color::WHITE,
+            held_pattern_surfaces: 0,
+            group_stack: Vec::new(),
+            active_intent: Default::default(),
+            shape_mode: false,
+            object_dispatch: false,
+            initial_override: None,
         })
     }
 }
 impl SkiaRender {
+    fn set_color_source(
+        &mut self,
+        space: &pdf::color::colorspace::ColorSpace,
+        value: &pdf::color::value::ColorValue,
+        ctm: &Matrix,
+    ) -> PdfResult<()> {
+        // Release the preceding shader before charging the next offscreen surface.
+        self.paint.set_shader(None);
+        if let pdf::color::colorspace::ColorSpace::Pattern(pattern) = space {
+            let pattern = pattern.paint().ok_or_else(|| {
+                PdfError::ColorError("Pattern colour has no selected pattern".into())
+            })?;
+            let pixels = u64::from(self.page_width as u32) * u64::from(self.page_height as u32);
+            let bytes = usize::try_from(pixels)
+                .ok()
+                .and_then(|v| v.checked_mul(4))
+                .ok_or_else(|| PdfError::ResourceLimit("pattern render bytes overflow".into()))?;
+            let mut limits = self.limits;
+            let factor = if pattern.is_tiling()
+                && (self.scale_x.fract() != 0. || self.scale_y.fract() != 0.)
+            {
+                3usize
+            } else {
+                1
+            };
+            let needs_backdrop = pattern.list.objects().iter().any(|object| {
+                use pdf::page::page_object::PageObject;
+                let mode = match object {
+                    PageObject::Path(p) => p.graphic_state().general_state.blend_mode,
+                    PageObject::Text(t) => t.state.general_state.blend_mode,
+                    PageObject::Image(i) => i.graphic_state.general_state.blend_mode,
+                    PageObject::Shading(s) => s.graphic_state.general_state.blend_mode,
+                    PageObject::GroupBegin(g) => {
+                        return !g.isolated
+                            || g.blend_mode != pdf::page::general_state::BlendMode::Normal;
+                    }
+                    _ => return false,
+                };
+                mode != pdf::page::general_state::BlendMode::Normal
+            });
+            // Parent, sibling shader, and both downsampling byte buffers.
+            let surfaces = self
+                .held_pattern_surfaces
+                .checked_add(
+                    if factor == 1 { 1 } else { 3 }
+                        + if needs_backdrop && factor > 1 {
+                            (factor * factor) as u64
+                        } else {
+                            0
+                        },
+                )
+                .ok_or_else(|| PdfError::ResourceLimit("pattern surface count".into()))?;
+            let reserved = bytes
+                .checked_mul(surfaces as usize)
+                .ok_or_else(|| PdfError::ResourceLimit("pattern aggregate render bytes".into()))?;
+            limits.max_render_bytes = limits
+                .max_render_bytes
+                .checked_sub(reserved)
+                .ok_or_else(|| PdfError::ResourceLimit("pattern aggregate render bytes".into()))?;
+            limits.max_render_pixels = limits
+                .max_render_pixels
+                .checked_sub(pixels.checked_mul(surfaces).ok_or_else(|| {
+                    PdfError::ResourceLimit("pattern aggregate render pixels".into())
+                })?)
+                .ok_or_else(|| PdfError::ResourceLimit("pattern aggregate render pixels".into()))?;
+            // Oversampling reduces seams from independent antialiased cell edges.
+            // All additional pixels are charged before allocating the surface.
+            let mut renderer = Self::with_limits(
+                self.scale_x * 72. * factor as f32,
+                self.scale_y * 72. * factor as f32,
+                limits,
+            )?;
+            renderer.clear_color = Color::TRANSPARENT;
+            renderer.shape_mode = self.shape_mode;
+            if needs_backdrop && !self.shape_mode {
+                renderer.start_page(pattern.list.page_width(), pattern.list.page_height())?;
+                let image = self.surface.image_snapshot();
+                let backdrop = if factor == 1 {
+                    image
+                } else {
+                    let mut scaled =
+                        surfaces::raster_n32_premul((renderer.page_width, renderer.page_height))
+                            .ok_or_else(|| {
+                                PdfError::ResourceLimit("pattern backdrop surface".into())
+                            })?;
+                    scaled.canvas().scale((factor as f32, factor as f32));
+                    scaled.canvas().draw_image(&image, (0., 0.), None);
+                    scaled.image_snapshot()
+                };
+                renderer.initial_override = Some(backdrop);
+                renderer.begin_group(pdf::page::transparency::GroupPaint {
+                    isolated: false,
+                    knockout: !pattern.is_tiling(),
+                    alpha: 1.,
+                    blend_mode: pdf::page::general_state::BlendMode::Normal,
+                    clip: Default::default(),
+                    soft_mask: None,
+                })?;
+                let result = pattern.list.replay_contents(&mut renderer);
+                let end = renderer.end_group(result.is_ok());
+                result.and(end)?;
+            } else {
+                pattern.list.replay(&mut renderer)?;
+            }
+            let image = if factor == 1 {
+                renderer.surface.image_snapshot()
+            } else {
+                // Average premultiplied native channels, not unpremultiplied
+                // colours. Bilinear minification is not an area average and
+                // introduces seams at abutting, independently painted cells.
+                let source = renderer
+                    .surface
+                    .peek_pixels()
+                    .ok_or_else(|| PdfError::ResourceLimit("pattern raster access".into()))?;
+                let stride = source.row_bytes();
+                let input = source
+                    .bytes()
+                    .ok_or_else(|| PdfError::ResourceLimit("pattern raster bytes".into()))?;
+                let mut reduced = Vec::new();
+                reduced
+                    .try_reserve_exact(bytes)
+                    .map_err(|_| PdfError::ResourceLimit("pattern reduction buffer".into()))?;
+                reduced.resize(bytes, 0u8);
+                for y in 0..self.page_height as usize {
+                    for x in 0..self.page_width as usize {
+                        for channel in 0..4 {
+                            let mut sum = 0u32;
+                            for sy in y * factor..(y + 1) * factor {
+                                for sx in x * factor..(x + 1) * factor {
+                                    if sx < renderer.page_width as usize
+                                        && sy < renderer.page_height as usize
+                                    {
+                                        sum += u32::from(input[sy * stride + sx * 4 + channel]);
+                                    }
+                                }
+                            }
+                            reduced[(y * self.page_width as usize + x) * 4 + channel] =
+                                ((sum + 4) / 9) as u8;
+                        }
+                    }
+                }
+                skia_safe::images::raster_from_data(
+                    &self.surface.image_info(),
+                    skia_safe::Data::new_copy(&reduced),
+                    self.page_width as usize * 4,
+                )
+                .ok_or_else(|| PdfError::ResourceLimit("pattern reduced surface".into()))?
+            };
+            let inverse = ctm.checked_inverse()?;
+            let matrix = skia_safe::Matrix::new_all(
+                inverse.a(),
+                inverse.c(),
+                inverse.e(),
+                inverse.b(),
+                inverse.d(),
+                inverse.f(),
+                0.,
+                0.,
+                1.,
+            );
+            let shader = image
+                .to_shader(
+                    (skia_safe::TileMode::Decal, skia_safe::TileMode::Decal),
+                    skia_safe::SamplingOptions::default(),
+                    &matrix,
+                )
+                .ok_or_else(|| PdfError::ResourceLimit("pattern image shader".into()))?;
+            self.paint.set_color(Color::WHITE);
+            self.paint.set_shader(shader);
+        } else {
+            let context = pdf::color::conversion::ColorConversionContext::default()
+                .with_intent(self.active_intent);
+            let rgb = space.rgb_with_context(value, &context)?;
+            self.paint.set_color(RGB::from((rgb.r(), rgb.g(), rgb.b())));
+        }
+        Ok(())
+    }
     fn validate_path_coordinates(
         path: &pdf::path::pdf_path::PdfPath,
         matrix: &Matrix,
@@ -221,7 +507,8 @@ impl SkiaRender {
                 "paint alpha must be finite and in [0,1]".into(),
             ));
         }
-        self.paint.set_alpha_f(alpha);
+        self.paint
+            .set_alpha_f(if self.shape_mode { 1. } else { alpha });
         Ok(())
     }
 
@@ -261,16 +548,15 @@ impl SkiaRender {
             LineJoin::Bevel => self.paint.set_stroke_join(skia_safe::PaintJoin::Bevel),
         };
     }
-    fn stroke_path(&mut self, graphic_state: &GraphicState) -> PdfResult<()> {
-        let rgb = graphic_state
-            .color_state
-            .stroke_color_space
-            .rgb(&graphic_state.color_state.stroke_color_value)?;
-        self.paint.set_color(RGB::from((rgb.r(), rgb.g(), rgb.b())));
+    fn stroke_path(&mut self, graphic_state: &GraphicState, ctm: &Matrix) -> PdfResult<()> {
+        self.set_color_source(
+            &graphic_state.color_state.stroke_color_space,
+            &graphic_state.color_state.stroke_color_value,
+            ctm,
+        )?;
         self.set_paint_alpha(graphic_state.general_state.stroke_alpha)?;
-        self.paint.set_blend_mode(Self::skia_blend_mode(
-            graphic_state.general_state.blend_mode,
-        ));
+        self.paint
+            .set_blend_mode(self.effective_blend_mode(graphic_state.general_state.blend_mode));
         self.paint
             .set_stroke_width(graphic_state.graph_state.line_width);
         let dash_phrase = graphic_state.graph_state.dash_phrase;
@@ -280,25 +566,20 @@ impl SkiaRender {
         self.paint
             .set_path_effect(PathEffect::dash(dash_array, dash_phrase));
         self.paint.set_style(PaintStyle::Stroke);
-        self.surface
-            .canvas()
-            .draw_path(&self.pathbuilder.snapshot(), &self.paint);
+        self.apply_soft_mask(graphic_state.general_state.soft_mask.as_deref(), ctm)?;
         Ok(())
     }
-    fn fill_path(&mut self, graphic_state: &GraphicState) -> PdfResult<()> {
-        let rgb = graphic_state
-            .color_state
-            .fill_color_space
-            .rgb(&graphic_state.color_state.fill_color_value)?;
-        self.paint.set_color(RGB::from((rgb.r(), rgb.g(), rgb.b())));
+    fn fill_path(&mut self, graphic_state: &GraphicState, ctm: &Matrix) -> PdfResult<()> {
+        self.set_color_source(
+            &graphic_state.color_state.fill_color_space,
+            &graphic_state.color_state.fill_color_value,
+            ctm,
+        )?;
         self.set_paint_alpha(graphic_state.general_state.fill_alpha)?;
-        self.paint.set_blend_mode(Self::skia_blend_mode(
-            graphic_state.general_state.blend_mode,
-        ));
+        self.paint
+            .set_blend_mode(self.effective_blend_mode(graphic_state.general_state.blend_mode));
         self.paint.set_style(PaintStyle::Fill);
-        self.surface
-            .canvas()
-            .draw_path(&self.pathbuilder.snapshot(), &self.paint);
+        self.apply_soft_mask(graphic_state.general_state.soft_mask.as_deref(), ctm)?;
         Ok(())
     }
 
@@ -317,6 +598,7 @@ impl SkiaRender {
     }
 
     fn draw_path(&mut self, pathobject: PathObject, paintstyle: PaintStyle) -> PdfResult<()> {
+        self.active_intent = pathobject.graphic_state().general_state.rendering_intent;
         let ctm = pathobject.matrix().checked_mul(&self.matrix)?;
         Self::validate_path_coordinates(pathobject.pdf_path(), &ctm)?;
         self.surface.canvas().save();
@@ -333,14 +615,35 @@ impl SkiaRender {
             self.build_path(&pathobject);
             match paintstyle {
                 PaintStyle::Fill => {
-                    self.fill_path(graphic_state)?;
+                    self.fill_path(graphic_state, &ctm)?;
+                    self.surface
+                        .canvas()
+                        .draw_path(&self.pathbuilder.snapshot(), &self.paint);
                 }
                 PaintStyle::Stroke => {
-                    self.stroke_path(graphic_state)?;
+                    self.stroke_path(graphic_state, &ctm)?;
+                    self.surface
+                        .canvas()
+                        .draw_path(&self.pathbuilder.snapshot(), &self.paint);
                 }
                 PaintStyle::StrokeAndFill => {
-                    self.fill_path(graphic_state)?;
-                    self.stroke_path(graphic_state)?;
+                    self.fill_path(graphic_state, &ctm)?;
+                    let fill = self.paint.clone();
+                    self.held_pattern_surfaces =
+                        u64::from(matches!(
+                            graphic_state.color_state.fill_color_space,
+                            pdf::color::colorspace::ColorSpace::Pattern(_)
+                        )) + u64::from(graphic_state.general_state.soft_mask.is_some());
+                    let stroke_result = self.stroke_path(graphic_state, &ctm);
+                    self.held_pattern_surfaces = 0;
+                    stroke_result?;
+                    // Neither side paints until both colour sources are prepared.
+                    self.surface
+                        .canvas()
+                        .draw_path(&self.pathbuilder.snapshot(), &fill);
+                    self.surface
+                        .canvas()
+                        .draw_path(&self.pathbuilder.snapshot(), &self.paint);
                 }
             }
             Ok(())
@@ -352,7 +655,192 @@ impl SkiaRender {
 }
 
 impl Device for SkiaRender {
+    fn begin_group(&mut self, group: pdf::page::transparency::GroupPaint) -> PdfResult<()> {
+        self.paint.set_shader(None);
+        if !group.alpha.is_finite() || !(0.0..=1.).contains(&group.alpha) {
+            return Err(PdfError::PageOperatorError("invalid group alpha".into()));
+        }
+        if self.group_stack.len() >= self.limits.max_depth || self.group_stack.len() >= 128 {
+            return Err(PdfError::ResourceLimit("render group depth".into()));
+        }
+        let pixels = self.page_width as u64 * self.page_height as u64;
+        let bytes = usize::try_from(pixels)
+            .ok()
+            .and_then(|v| v.checked_mul(4))
+            .ok_or_else(|| PdfError::ResourceLimit("render group bytes".into()))?;
+        let mut limits = self.limits;
+        let needs_shape =
+            group.knockout || self.group_stack.last().is_some_and(|g| g.shape.is_some());
+        // A retained initial backdrop may trigger copy-on-write when nested
+        // inside an isolated knockout group, so reserve that page as well.
+        let count = (if group.isolated { 1 } else { 3 }) + usize::from(needs_shape);
+        let reserved = bytes
+            .checked_mul(count)
+            .ok_or_else(|| PdfError::ResourceLimit("aggregate group surface bytes".into()))?;
+        limits.max_render_bytes = limits
+            .max_render_bytes
+            .checked_sub(reserved)
+            .filter(|v| *v >= bytes)
+            .ok_or_else(|| PdfError::ResourceLimit("aggregate group surface bytes".into()))?;
+        limits.max_render_pixels = limits
+            .max_render_pixels
+            .checked_sub(pixels * count as u64)
+            .filter(|v| *v >= pixels)
+            .ok_or_else(|| PdfError::ResourceLimit("aggregate group surface pixels".into()))?;
+        self.group_stack
+            .try_reserve(1)
+            .map_err(|_| PdfError::ResourceLimit("render group stack".into()))?;
+        let mut surface = surfaces::raster_n32_premul((self.page_width, self.page_height))
+            .ok_or_else(|| PdfError::ResourceLimit("group offscreen surface".into()))?;
+        surface.canvas().clear(Color::TRANSPARENT);
+        let initial = if group.isolated {
+            None
+        } else {
+            let image = if let Some(image) = self.initial_override.take() {
+                image
+            } else if let Some(parent) = self.group_stack.last_mut().filter(|g| g.paint.knockout) {
+                if parent.paint.isolated {
+                    surface.image_snapshot()
+                } else {
+                    parent.initial.as_ref().unwrap().clone()
+                }
+            } else {
+                self.surface.image_snapshot()
+            };
+            surface.canvas().draw_image(&image, (0., 0.), None);
+            Some(image)
+        };
+        let coverage = if group.isolated {
+            None
+        } else {
+            let mut coverage = surfaces::raster_n32_premul((self.page_width, self.page_height))
+                .ok_or_else(|| PdfError::ResourceLimit("group alpha surface".into()))?;
+            coverage.canvas().clear(Color::TRANSPARENT);
+            Some(coverage)
+        };
+        let shape = if needs_shape {
+            Some(self.empty_object_surface()?)
+        } else {
+            None
+        };
+        let parent = std::mem::replace(&mut self.surface, surface);
+        self.group_stack.push(RenderGroup {
+            parent,
+            limits: self.limits,
+            paint: group,
+            coverage,
+            shape,
+            initial,
+        });
+        self.limits = limits;
+        Ok(())
+    }
+
+    fn end_group(&mut self, commit: bool) -> PdfResult<()> {
+        self.paint.set_shader(None);
+        let mut group = self
+            .group_stack
+            .pop()
+            .ok_or_else(|| PdfError::PageOperatorError("unmatched render group end".into()))?;
+        let mut surface = std::mem::replace(&mut self.surface, group.parent);
+        self.limits = group.limits;
+        if !commit {
+            return Ok(());
+        }
+        let image = if let Some(mut coverage) = group.coverage.take() {
+            let bytes = (self.page_width as usize)
+                .checked_mul(self.page_height as usize)
+                .and_then(|v| v.checked_mul(4))
+                .ok_or_else(|| PdfError::ResourceLimit("group uncompositing bytes".into()))?;
+            // Parent, initial backdrop, colour, opacity, optional shape, plus
+            // output Vec/native copy. Initial may alias but is counted in full.
+            let peak = 6 + usize::from(group.shape.is_some());
+            if bytes
+                .checked_mul(peak)
+                .is_none_or(|v| v > self.limits.max_render_bytes)
+                || (self.page_width as u64 * self.page_height as u64)
+                    .checked_mul(peak as u64)
+                    .is_none_or(|v| v > self.limits.max_render_pixels)
+            {
+                return Err(PdfError::ResourceLimit("group uncompositing peak".into()));
+            }
+            let source = surface
+                .peek_pixels()
+                .ok_or_else(|| PdfError::ResourceLimit("group colour pixels".into()))?;
+            let backdrop = group
+                .initial
+                .as_ref()
+                .and_then(|image| image.peek_pixels())
+                .ok_or_else(|| PdfError::ResourceLimit("group backdrop pixels".into()))?;
+            let alpha = coverage
+                .peek_pixels()
+                .ok_or_else(|| PdfError::ResourceLimit("group alpha pixels".into()))?;
+            let (src, bg, mask) = (
+                source
+                    .bytes()
+                    .ok_or_else(|| PdfError::ResourceLimit("group colour bytes".into()))?,
+                backdrop
+                    .bytes()
+                    .ok_or_else(|| PdfError::ResourceLimit("group backdrop bytes".into()))?,
+                alpha
+                    .bytes()
+                    .ok_or_else(|| PdfError::ResourceLimit("group alpha bytes".into()))?,
+            );
+            let mut output = Vec::new();
+            output
+                .try_reserve_exact(bytes)
+                .map_err(|_| PdfError::ResourceLimit("group uncompositing buffer".into()))?;
+            output.resize(bytes, 0u8);
+            // Native N32 on the supported little-endian backends stores alpha
+            // last; RGB byte order is immaterial because all three agree.
+            if cfg!(target_endian = "big") {
+                return Err(PdfError::UnsupportedFeature(
+                    "nonisolated group native big-endian pixels".into(),
+                ));
+            }
+            for y in 0..self.page_height as usize {
+                for x in 0..self.page_width as usize {
+                    let a = mask[y * alpha.row_bytes() + x * 4 + 3];
+                    let inverse = 1. - f64::from(a) / 255.;
+                    for channel in 0..3 {
+                        let v = f64::from(src[y * source.row_bytes() + x * 4 + channel])
+                            - inverse * f64::from(bg[y * backdrop.row_bytes() + x * 4 + channel]);
+                        output[(y * self.page_width as usize + x) * 4 + channel] =
+                            v.round().clamp(0., f64::from(a)) as u8;
+                    }
+                    output[(y * self.page_width as usize + x) * 4 + 3] = a;
+                }
+            }
+            skia_safe::images::raster_from_data(
+                &self.surface.image_info(),
+                skia_safe::Data::new_copy(&output),
+                self.page_width as usize * 4,
+            )
+            .ok_or_else(|| PdfError::ResourceLimit("group corrected image".into()))?
+        } else {
+            surface.image_snapshot()
+        };
+        let shape = group.shape.as_mut().map(Surface::image_snapshot);
+        if self.dispatch_group_object(|device| {
+            let source = if device.shape_mode {
+                shape.as_ref().unwrap_or(&image)
+            } else {
+                &image
+            };
+            device
+                .capture_group_alpha(|device| device.composite_group_image(source, &group.paint))?;
+            device.composite_group_image(source, &group.paint)
+        })? {
+            return Ok(());
+        }
+        self.capture_group_alpha(|device| device.composite_group_image(&image, &group.paint))?;
+        self.composite_group_image(&image, &group.paint)
+    }
+
     fn start_page(&mut self, page_width: f32, page_height: f32) -> PdfResult<()> {
+        while !self.group_stack.is_empty() {
+            self.end_group(false)?;
+        }
         let pixel_width = (f64::from(self.scale_x) * f64::from(page_width)).round();
         let pixel_height = (f64::from(self.scale_y) * f64::from(page_height)).round();
         if !page_width.is_finite()
@@ -390,11 +878,45 @@ impl Device for SkiaRender {
         self.surface = surface;
         self.page_width = width;
         self.page_height = height;
-        self.surface.canvas().clear(Color::WHITE);
+        self.surface.canvas().clear(self.clear_color);
         Ok(())
     }
 
     fn show_text(&mut self, textobject: TextObject) -> PdfResult<()> {
+        // Default PDF text knockout (TK=true) treats each glyph as a member,
+        // not a whole Tj run. TK=false is rejected by ExtGState validation.
+        if !self.object_dispatch
+            && !self.shape_mode
+            && self.group_stack.last().is_some_and(|g| g.paint.knockout)
+            && textobject.items.len() > 1
+        {
+            for item in &textobject.items {
+                let mut glyph = textobject.clone();
+                glyph.items = vec![item.clone()];
+                self.show_text(glyph)?;
+            }
+            return Ok(());
+        }
+        if self.dispatch_group_object(|device| device.show_text(textobject.clone()))? {
+            return Ok(());
+        }
+        if matches!(
+            textobject.state.text_state.text_rendering_mode,
+            TextRenderingMode::FillStroke | TextRenderingMode::FillStrokeClip
+        ) && self.needs_combined_group(&textobject.state)
+        {
+            let state = textobject.state.clone();
+            return self.combined_group(&state, |device| {
+                let mut fill = textobject.clone();
+                fill.state.text_state.text_rendering_mode = TextRenderingMode::Fill;
+                device.show_text(fill)?;
+                let mut stroke = textobject;
+                stroke.state.text_state.text_rendering_mode = TextRenderingMode::Stroke;
+                device.show_text(stroke)
+            });
+        }
+        self.active_intent = textobject.state.general_state.rendering_intent;
+        self.capture_group_alpha(|device| device.show_text(textobject.clone()))?;
         // Type3 shapes were executed as ordinary graphics by the interpreter.
         // Keep its text event for extraction, never ask Skia for a font file.
         if textobject.is_type3_metadata() {
@@ -409,31 +931,56 @@ impl Device for SkiaRender {
             ));
         }
         self.paint.reset();
-        self.paint.set_blend_mode(Self::skia_blend_mode(
-            textobject.state.general_state.blend_mode,
-        ));
-        let fill_stroke = matches!(
-            textobject.state.text_state.text_rendering_mode,
-            TextRenderingMode::FillStroke
+        self.paint
+            .set_blend_mode(self.effective_blend_mode(textobject.state.general_state.blend_mode));
+        let text_matrix = textobject.matrix.checked_mul(&self.matrix)?;
+        let text_sign = if textobject.state.text_state.font_size < 0. {
+            -1.
+        } else {
+            1.
+        };
+        let text_paint_ctm = Matrix::new(
+            text_matrix.a() * text_sign,
+            text_matrix.b() * text_sign,
+            -text_matrix.c() * text_sign,
+            -text_matrix.d() * text_sign,
+            text_matrix.e(),
+            text_matrix.f(),
         );
-        match textobject.state.text_state.text_rendering_mode {
+        let mode = match textobject.state.text_state.text_rendering_mode {
+            TextRenderingMode::FillClip
+            | TextRenderingMode::StrokeClip
+            | TextRenderingMode::FillStrokeClip
+            | TextRenderingMode::Clip
+                if !textobject.has_interpreted_clipping() =>
+            {
+                return Err(PdfError::UnsupportedFeature(
+                    "raw text clipping requires interpreted ET geometry".into(),
+                ));
+            }
+            TextRenderingMode::FillClip => TextRenderingMode::Fill,
+            TextRenderingMode::StrokeClip => TextRenderingMode::Stroke,
+            TextRenderingMode::FillStrokeClip => TextRenderingMode::FillStroke,
+            TextRenderingMode::Clip => return Ok(()),
+            ref mode => mode.clone(),
+        };
+        let fill_stroke = matches!(mode, TextRenderingMode::FillStroke);
+        match mode {
             TextRenderingMode::Fill => {
-                let rgb = textobject
-                    .state
-                    .color_state
-                    .fill_color_space
-                    .rgb(&textobject.state.color_state.fill_color_value)?;
-                self.paint.set_color(RGB::from((rgb.r(), rgb.g(), rgb.b())));
+                self.set_color_source(
+                    &textobject.state.color_state.fill_color_space,
+                    &textobject.state.color_state.fill_color_value,
+                    &text_paint_ctm,
+                )?;
                 self.set_paint_alpha(textobject.state.general_state.fill_alpha)?;
                 self.paint.set_style(PaintStyle::Fill);
             }
             TextRenderingMode::Stroke => {
-                let rgb = textobject
-                    .state
-                    .color_state
-                    .stroke_color_space
-                    .rgb(&textobject.state.color_state.stroke_color_value)?;
-                self.paint.set_color(RGB::from((rgb.r(), rgb.g(), rgb.b())));
+                self.set_color_source(
+                    &textobject.state.color_state.stroke_color_space,
+                    &textobject.state.color_state.stroke_color_value,
+                    &text_paint_ctm,
+                )?;
                 self.set_paint_alpha(textobject.state.general_state.stroke_alpha)?;
                 self.set_path_paint_state(&textobject.state);
                 self.paint
@@ -443,12 +990,11 @@ impl Device for SkiaRender {
                 self.paint.set_style(PaintStyle::Stroke);
             }
             TextRenderingMode::FillStroke => {
-                let rgb = textobject
-                    .state
-                    .color_state
-                    .fill_color_space
-                    .rgb(&textobject.state.color_state.fill_color_value)?;
-                self.paint.set_color(RGB::from((rgb.r(), rgb.g(), rgb.b())));
+                self.set_color_source(
+                    &textobject.state.color_state.fill_color_space,
+                    &textobject.state.color_state.fill_color_value,
+                    &text_paint_ctm,
+                )?;
                 self.set_paint_alpha(textobject.state.general_state.fill_alpha)?;
                 self.paint.set_style(PaintStyle::Fill);
             }
@@ -462,6 +1008,43 @@ impl Device for SkiaRender {
                 ));
             }
         }
+        self.apply_soft_mask(
+            textobject.state.general_state.soft_mask.as_deref(),
+            &text_paint_ctm,
+        )?;
+        // Prepare both paints before touching the canvas. Keep sibling shaders
+        // charged while a stroke Pattern or soft mask allocates offscreen data.
+        let fill_paint = self.paint.clone();
+        let stroke_paint = if fill_stroke {
+            self.held_pattern_surfaces =
+                u64::from(matches!(
+                    textobject.state.color_state.fill_color_space,
+                    pdf::color::colorspace::ColorSpace::Pattern(_)
+                )) + u64::from(textobject.state.general_state.soft_mask.is_some());
+            let result = (|| -> PdfResult<Paint> {
+                self.set_color_source(
+                    &textobject.state.color_state.stroke_color_space,
+                    &textobject.state.color_state.stroke_color_value,
+                    &text_paint_ctm,
+                )?;
+                self.set_paint_alpha(textobject.state.general_state.stroke_alpha)?;
+                self.set_path_paint_state(&textobject.state);
+                self.paint
+                    .set_stroke_width(textobject.state.graph_state.line_width);
+                self.paint
+                    .set_stroke_miter(textobject.state.graph_state.miter_limit);
+                self.paint.set_style(PaintStyle::Stroke);
+                self.apply_soft_mask(
+                    textobject.state.general_state.soft_mask.as_deref(),
+                    &text_paint_ctm,
+                )?;
+                Ok(self.paint.clone())
+            })();
+            self.held_pattern_surfaces = 0;
+            Some(result?)
+        } else {
+            None
+        };
         if let Some(font) = &textobject.state.text_state.font {
             let objmatrix = textobject.matrix.checked_mul(&self.matrix)?;
             // Skia glyph outlines use downward y; PDF text outlines use upward y.
@@ -551,37 +1134,16 @@ impl Device for SkiaRender {
                 positions.as_slice(),
                 (0, 0),
                 &skia_font,
-                &self.paint,
+                &fill_paint,
             );
-            if fill_stroke {
-                let rgb = textobject
-                    .state
-                    .color_state
-                    .stroke_color_space
-                    .rgb(&textobject.state.color_state.stroke_color_value);
-                // Restore the canvas even if color conversion or alpha validation fails.
-                let result = rgb.and_then(|rgb| {
-                    self.paint.set_color(RGB::from((rgb.r(), rgb.g(), rgb.b())));
-                    self.set_paint_alpha(textobject.state.general_state.stroke_alpha)?;
-                    self.set_path_paint_state(&textobject.state);
-                    self.paint
-                        .set_stroke_width(textobject.state.graph_state.line_width);
-                    self.paint
-                        .set_stroke_miter(textobject.state.graph_state.miter_limit);
-                    self.paint.set_style(PaintStyle::Stroke);
-                    self.surface.canvas().draw_glyphs_at(
-                        &glyphs,
-                        positions.as_slice(),
-                        (0, 0),
-                        &skia_font,
-                        &self.paint,
-                    );
-                    Ok(())
-                });
-                if let Err(error) = result {
-                    self.surface.canvas().restore();
-                    return Err(error);
-                }
+            if let Some(stroke) = stroke_paint.as_ref() {
+                self.surface.canvas().draw_glyphs_at(
+                    &glyphs,
+                    positions.as_slice(),
+                    (0, 0),
+                    &skia_font,
+                    stroke,
+                );
             }
             self.surface.canvas().restore();
         }
@@ -589,10 +1151,17 @@ impl Device for SkiaRender {
     }
 
     fn do_shading(&mut self, object: pdf::page::shading_object::ShadingObject) -> PdfResult<()> {
+        if self.dispatch_group_object(|device| device.do_shading(object.clone()))? {
+            return Ok(());
+        }
+        self.active_intent = object.graphic_state.general_state.rendering_intent;
+        self.capture_group_alpha(|device| device.do_shading(object.clone()))?;
         if object.shading.colorspace().is_nonpainting() {
             return Ok(());
         }
         let alpha = object.graphic_state.general_state.fill_alpha;
+        let color_context = pdf::color::conversion::ColorConversionContext::default()
+            .with_intent(self.active_intent);
         if !alpha.is_finite() || !(0.0..=1.0).contains(&alpha) {
             return Err(PdfError::PageOperatorError("invalid shading alpha".into()));
         }
@@ -639,7 +1208,31 @@ impl Device for SkiaRender {
                 let py = f64::from(y) + 0.5 - f;
                 let ux = (d * px - c * py) / determinant;
                 let uy = (-b * px + a * py) / determinant;
-                if let Some(color) = object.shading.color_at_point(ux, uy)? {
+                let color = object
+                    .shading
+                    .color_at_point_with_context(ux, uy, &color_context)?;
+                let color = if color.is_none()
+                    && object.uses_pattern_background()
+                    && object.shading.bbox().is_none_or(|b| {
+                        ux >= f64::from(b[0])
+                            && uy >= f64::from(b[1])
+                            && ux <= f64::from(b[2])
+                            && uy <= f64::from(b[3])
+                    }) {
+                    object
+                        .shading
+                        .background()
+                        .map(|value| {
+                            object
+                                .shading
+                                .colorspace()
+                                .rgb_with_context(value, &color_context)
+                        })
+                        .transpose()?
+                } else {
+                    color
+                };
+                if let Some(color) = color {
                     let offset = (y as usize * self.page_width as usize + x as usize) * 4;
                     rgba[offset..offset + 4].copy_from_slice(&[
                         color.r(),
@@ -664,33 +1257,88 @@ impl Device for SkiaRender {
         .ok_or_else(|| PdfError::ResourceLimit("Skia rejected shading raster".into()))?;
         drop(rgba);
         let mut paint = Paint::default();
-        paint.set_alpha_f(alpha);
-        paint.set_blend_mode(Self::skia_blend_mode(
-            object.graphic_state.general_state.blend_mode,
-        ));
+        paint.set_alpha_f(if self.shape_mode { 1. } else { alpha });
+        paint.set_blend_mode(
+            self.effective_blend_mode(object.graphic_state.general_state.blend_mode),
+        );
+        let masked = object.graphic_state.general_state.soft_mask.is_some();
+        if masked {
+            self.paint = paint;
+            self.paint.set_shader(
+                image
+                    .to_shader(
+                        (skia_safe::TileMode::Decal, skia_safe::TileMode::Decal),
+                        skia_safe::SamplingOptions::default(),
+                        None,
+                    )
+                    .ok_or_else(|| PdfError::ResourceLimit("masked shading shader".into()))?,
+            );
+            self.apply_soft_mask(
+                object.graphic_state.general_state.soft_mask.as_deref(),
+                &Matrix::identity(),
+            )?;
+            paint = self.paint.clone();
+            self.paint.set_shader(None);
+        }
         self.surface.canvas().save();
         let result = self.set_clip(&object.graphic_state.clip_path);
         if result.is_ok() {
             self.surface.canvas().reset_matrix();
-            self.surface
-                .canvas()
-                .draw_image(&image, (0.0, 0.0), Some(&paint));
+            if masked {
+                self.surface.canvas().draw_rect(
+                    skia_safe::Rect::from_wh(self.page_width as f32, self.page_height as f32),
+                    &paint,
+                );
+            } else {
+                self.surface
+                    .canvas()
+                    .draw_image(&image, (0.0, 0.0), Some(&paint));
+            }
         }
         self.surface.canvas().restore();
         result
     }
 
     fn do_image(&mut self, imageobject: ImageObject) -> PdfResult<()> {
+        if self.dispatch_group_object(|device| device.do_image(imageobject.clone()))? {
+            return Ok(());
+        }
+        self.active_intent = imageobject
+            .image
+            .rendering_intent()
+            .unwrap_or(imageobject.graphic_state.general_state.rendering_intent);
+        self.capture_group_alpha(|device| device.do_image(imageobject.clone()))?;
         let matrix = &imageobject.matrix;
         let ctm = matrix.checked_mul(&self.matrix)?;
         let m44 = self.pdf_to_skia_m44(ctm.a(), ctm.b(), ctm.c(), ctm.d(), ctm.e(), ctm.f());
-        let rgba = if imageobject.image.is_mask() {
+        let pattern_stencil = imageobject.image.is_mask()
+            && matches!(
+                imageobject.graphic_state.color_state.fill_color_space,
+                pdf::color::colorspace::ColorSpace::Pattern(_)
+            );
+        let mut rgba = if imageobject.image.is_mask() {
             let state = &imageobject.graphic_state.color_state;
-            let color = state.fill_color_space.rgb(&state.fill_color_value)?;
+            let color = if pattern_stencil {
+                pdf::color::value::ColorRgb::new(1., 1., 1.)
+            } else {
+                state.fill_color_space.rgb_with_context(
+                    &state.fill_color_value,
+                    &pdf::color::conversion::ColorConversionContext::default()
+                        .with_intent(self.active_intent),
+                )?
+            };
             imageobject.image.rgba_buffer_with_stencil_color(&color)?
         } else {
-            imageobject.image.rgba_buffer()?
+            imageobject.image.rgba_buffer_with_context(
+                &pdf::color::conversion::ColorConversionContext::default()
+                    .with_intent(self.active_intent),
+            )?
         };
+        if self.shape_mode && !imageobject.image.is_mask() {
+            for pixel in rgba.chunks_exact_mut(4) {
+                pixel[3] = 255;
+            }
+        }
         let (width, height) = imageobject.image.pixel_dimensions();
         let width = i32::try_from(width)
             .map_err(|_| PdfError::ResourceLimit("image width exceeds backend range".into()))?;
@@ -713,10 +1361,57 @@ impl Device for SkiaRender {
             ));
         }
         let mut image_paint = skia_safe::paint::Paint::default();
-        image_paint.set_alpha_f(alpha);
-        image_paint.set_blend_mode(Self::skia_blend_mode(
-            imageobject.graphic_state.general_state.blend_mode,
-        ));
+        image_paint.set_alpha_f(if self.shape_mode { 1. } else { alpha });
+        image_paint.set_blend_mode(
+            self.effective_blend_mode(imageobject.graphic_state.general_state.blend_mode),
+        );
+        if pattern_stencil {
+            let color = &imageobject.graphic_state.color_state;
+            self.set_color_source(&color.fill_color_space, &color.fill_color_value, &ctm)?;
+            let shader = self
+                .paint
+                .shader()
+                .ok_or_else(|| PdfError::ColorError("missing pattern stencil shader".into()))?;
+            let matrix = skia_safe::Matrix::scale((1. / width as f32, 1. / height as f32));
+            let mask = image
+                .to_shader(
+                    (skia_safe::TileMode::Decal, skia_safe::TileMode::Decal),
+                    skia_safe::SamplingOptions::default(),
+                    &matrix,
+                )
+                .ok_or_else(|| PdfError::ResourceLimit("pattern stencil mask shader".into()))?;
+            image_paint.set_shader(skia_safe::shaders::blend(
+                skia_safe::BlendMode::DstIn,
+                shader,
+                mask,
+            ));
+            // image_paint now owns the shader; do not retain an extra copy.
+            self.paint.set_shader(None);
+        }
+        let masked =
+            imageobject.graphic_state.general_state.soft_mask.is_some() && !self.shape_mode;
+        if masked {
+            self.paint = image_paint;
+            if self.paint.shader().is_none() {
+                let image_matrix =
+                    skia_safe::Matrix::scale((1. / width as f32, 1. / height as f32));
+                self.paint.set_shader(
+                    image
+                        .to_shader(
+                            (skia_safe::TileMode::Decal, skia_safe::TileMode::Decal),
+                            skia_safe::SamplingOptions::default(),
+                            &image_matrix,
+                        )
+                        .ok_or_else(|| PdfError::ResourceLimit("masked image shader".into()))?,
+                );
+            }
+            self.apply_soft_mask(
+                imageobject.graphic_state.general_state.soft_mask.as_deref(),
+                &ctm,
+            )?;
+            image_paint = self.paint.clone();
+            self.paint.set_shader(None);
+        }
         self.surface.canvas().save();
         if let Err(error) = self.set_clip(&imageobject.graphic_state.clip_path) {
             self.surface.canvas().restore();
@@ -724,24 +1419,51 @@ impl Device for SkiaRender {
         }
         self.surface.canvas().set_matrix(&m44);
         let dest_rect = skia_safe::Rect::from_wh(1.0, 1.0);
-        self.surface
-            .canvas()
-            .draw_image_rect(&image, None, dest_rect, &image_paint);
+        if pattern_stencil || masked {
+            self.surface.canvas().draw_rect(dest_rect, &image_paint);
+        } else {
+            self.surface
+                .canvas()
+                .draw_image_rect(&image, None, dest_rect, &image_paint);
+        }
         self.surface.canvas().restore();
         Ok(())
     }
 
     fn stroke_path(&mut self, pathobject: PathObject) -> PdfResult<()> {
+        if self.dispatch_group_object(|device| Device::stroke_path(device, pathobject.clone()))? {
+            return Ok(());
+        }
+        self.capture_group_alpha(|device| {
+            device.draw_path(pathobject.clone(), PaintStyle::Stroke)
+        })?;
         self.draw_path(pathobject, PaintStyle::Stroke)?;
         Ok(())
     }
 
     fn fill_and_stroke_path(&mut self, pathobject: PathObject) -> PdfResult<()> {
+        if self.dispatch_group_object(|device| device.fill_and_stroke_path(pathobject.clone()))? {
+            return Ok(());
+        }
+        if self.needs_combined_group(pathobject.graphic_state()) {
+            let state = pathobject.graphic_state().clone();
+            return self.combined_group(&state, |device| {
+                Device::fill_path(device, pathobject.clone())?;
+                Device::stroke_path(device, pathobject)
+            });
+        }
+        self.capture_group_alpha(|device| {
+            device.draw_path(pathobject.clone(), PaintStyle::StrokeAndFill)
+        })?;
         self.draw_path(pathobject, PaintStyle::StrokeAndFill)?;
         Ok(())
     }
 
     fn fill_path(&mut self, pathobject: PathObject) -> PdfResult<()> {
+        if self.dispatch_group_object(|device| Device::fill_path(device, pathobject.clone()))? {
+            return Ok(());
+        }
+        self.capture_group_alpha(|device| device.draw_path(pathobject.clone(), PaintStyle::Fill))?;
         self.draw_path(pathobject, PaintStyle::Fill)?;
         Ok(())
     }
@@ -3982,7 +4704,13 @@ mod tests {
                         .into_dict()
                         .unwrap();
                     let id = doc
-                        .try_insert_object(PdfObject::PdfStream(PdfStream::new(dict, vec![])))
+                        .try_insert_object(PdfObject::PdfStream(PdfStream::new(
+                            dict,
+                            pdf::color::icc_profile::ICCProfile::gray_srgb()
+                                .unwrap()
+                                .to_bytes()
+                                .unwrap(),
+                        )))
                         .unwrap();
                     (
                         format!("[/ICCBased {} {} R]", id.obj_num(), id.gen_num()),

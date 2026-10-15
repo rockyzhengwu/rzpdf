@@ -60,7 +60,19 @@ mod tests {
             .unwrap()
             .into_dict()
             .unwrap();
-            IccBased::try_new(&PdfObject::PdfStream(PdfStream::new(dict, vec![])), &ctx)
+            let n = dict
+                .get("N")
+                .map(|v| ctx.resolve(v).unwrap())
+                .and_then(|v| v.as_u32());
+            let profile = if n == Some(1) {
+                ICCProfile::gray_srgb().unwrap()
+            } else {
+                ICCProfile::srgb()
+            };
+            IccBased::try_new(
+                &PdfObject::PdfStream(PdfStream::new(dict, profile.to_bytes().unwrap())),
+                &ctx,
+            )
         };
         let color = parse("<< /N 3 /Range [0 1 0 1 0 1] >>").unwrap();
         assert!(color.rgb(&color.default_value().unwrap()).is_ok());
@@ -86,6 +98,16 @@ mod tests {
 }
 
 impl IccBased {
+    pub(crate) fn retained_profile_bytes(&self) -> PdfResult<usize> {
+        self.alternate
+            .retained_profile_bytes()?
+            .checked_add(
+                self.profile
+                    .as_ref()
+                    .map_or(0, ICCProfile::retained_source_bytes),
+            )
+            .ok_or_else(|| PdfError::ResourceLimit("ICC retained profile bytes".into()))
+    }
     pub fn try_new<R: Seek + Read>(obj: &PdfObject, ctx: &PDFContext<R>) -> PdfResult<Self> {
         let resolved = ctx.resolve(obj)?;
         let color_stream =
@@ -203,11 +225,19 @@ impl IccBased {
                 "ICCBased Range pairs must be ordered".into(),
             ));
         }
+        let data = color_stream.decode_data(ctx)?;
+        let profile = ICCProfile::try_new_with_limits(&data, ctx.limits())?;
+        if profile.number_of_components() != usize::from(color.n) {
+            return Err(PdfError::ColorError(
+                "ICCBased N disagrees with embedded ICC profile".into(),
+            ));
+        }
+        color.profile = Some(profile);
         Ok(color)
     }
 
     pub fn default_value(&self) -> PdfResult<ColorValue> {
-        Ok(match self.n {
+        let default = match self.n {
             1 => ColorValue::new(vec![0.0]),
             3 => ColorValue::new(vec![0.0, 0.0, 0.0]),
             4 => ColorValue::new(vec![0.0, 0.0, 0.0, 0.0]),
@@ -216,9 +246,27 @@ impl IccBased {
                     "ICCBased N must be 1, 3, or 4".to_string(),
                 ));
             }
-        })
+        };
+        Ok(ColorValue::new(
+            default
+                .values()
+                .iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    let range = self.range.get(i * 2..i * 2 + 2).unwrap_or(&[0., 1.]);
+                    v.clamp(range[0], range[1])
+                })
+                .collect(),
+        ))
     }
     pub fn rgb(&self, value: &ColorValue) -> PdfResult<ColorRgb> {
+        self.rgb_with_context(value, &super::conversion::ColorConversionContext::default())
+    }
+    pub fn rgb_with_context(
+        &self,
+        value: &ColorValue,
+        context: &super::conversion::ColorConversionContext,
+    ) -> PdfResult<ColorRgb> {
         if value.value_size() != usize::from(self.n)
             || value.values().iter().any(|v| !v.is_finite())
         {
@@ -226,7 +274,32 @@ impl IccBased {
                 "ICCBased requires finite components matching N".into(),
             ));
         }
-        self.alternate.rgb(value)
+        let mut clipped = [0f32; 4];
+        for (i, v) in value.values().iter().enumerate() {
+            let range = self.range.get(i * 2..i * 2 + 2).unwrap_or(&[0., 1.]);
+            clipped[i] = v.clamp(range[0], range[1]);
+        }
+        if let Some(profile) = &self.profile {
+            match profile.convert(&clipped[..usize::from(self.n)], context) {
+                Ok(color) => return Ok(color),
+                Err(PdfError::UnsupportedFeature(_))
+                    if context.icc_fallback == super::conversion::IccFallback::Alternate => {}
+                Err(error) => return Err(error),
+            }
+        } else if context.icc_fallback == super::conversion::IccFallback::Reject {
+            return Err(PdfError::ColorError(
+                "ICCBased has no usable profile; Alternate requires explicit fallback policy"
+                    .into(),
+            ));
+        }
+        self.alternate.rgb_with_context(
+            &ColorValue::new(clipped[..usize::from(self.n)].to_vec()),
+            context,
+        )
+    }
+
+    pub fn profile(&self) -> Option<&ICCProfile> {
+        self.profile.as_ref()
     }
 
     pub fn number_of_components(&self) -> usize {

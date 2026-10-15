@@ -3767,19 +3767,19 @@ mod tests {
         let index = doc.try_page_count().unwrap() as u32;
         let mut state = PdfDict::default();
         state.insert(
-            "SMask".into(),
-            PdfObject::PdfName(crate::objects::pdf_name::PdfName::new("None".into())),
+            "AIS".into(),
+            PdfObject::PdfBool(crate::objects::pdf_bool::PdfBool::new(b"true")),
         );
         let mut states = PdfDict::default();
         states.insert("G".into(), PdfObject::PdfDict(state));
         let mut resources = PdfDict::default();
         resources.insert("ExtGState".into(), PdfObject::PdfDict(states));
-        // sh is now implemented for types 2/3; keep this diagnostic fixture
+        // sh is now implemented for types 1..7; keep this diagnostic fixture
         // genuinely unsupported rather than referencing a missing resource.
         let mut shading = PdfDict::default();
         shading.insert(
             "ShadingType".into(),
-            PdfObject::PdfNumber(crate::objects::pdf_number::PdfNumber::new(7.0)),
+            PdfObject::PdfNumber(crate::objects::pdf_number::PdfNumber::new(8.0)),
         );
         let mut shadings = PdfDict::default();
         shadings.insert("S".into(), PdfObject::PdfDict(shading));
@@ -3791,7 +3791,7 @@ mod tests {
         .unwrap();
         doc.replace_page_contents(
             index,
-            b"customOp /S sh /RelativeColorimetric ri /G gs 0 0 10 10 re f".to_vec(),
+            b"customOp /S sh /UnsupportedIntent ri /G gs 0 0 10 10 re f".to_vec(),
         )
         .unwrap();
         let list = doc.get_page(index).unwrap().display_list().unwrap();

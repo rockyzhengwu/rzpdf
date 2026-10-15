@@ -122,6 +122,9 @@ mod tests {
 }
 
 impl Separation {
+    pub(crate) fn retained_profile_bytes(&self) -> PdfResult<usize> {
+        self.alternate_space.retained_profile_bytes()
+    }
     pub fn is_nonpainting(&self) -> bool {
         self.name == "None"
     }
@@ -189,6 +192,13 @@ impl Separation {
     }
 
     pub fn rgb(&self, value: &ColorValue) -> PdfResult<ColorRgb> {
+        self.rgb_with_context(value, &super::conversion::ColorConversionContext::default())
+    }
+    pub fn rgb_with_context(
+        &self,
+        value: &ColorValue,
+        context: &super::conversion::ColorConversionContext,
+    ) -> PdfResult<ColorRgb> {
         if value.value_size() != 1 || !value.values()[0].is_finite() {
             return Err(PdfError::ColorError(
                 "Separation requires one finite tint".into(),
@@ -198,7 +208,7 @@ impl Separation {
         match self.name.as_str() {
             "All" => {
                 let gray = 1.0 - tint;
-                return Ok(ColorRgb::new(gray, gray, gray));
+                return context.from_srgb(ColorRgb::new(gray, gray, gray));
             }
             "None" => {
                 return Err(PdfError::UnsupportedFeature(
@@ -208,7 +218,8 @@ impl Separation {
             _ => {}
         }
         let values = self.tint_transform.eval(&[tint])?;
-        self.alternate_space.rgb(&ColorValue::new(values))
+        self.alternate_space
+            .rgb_with_context(&ColorValue::new(values), context)
     }
 
     pub fn number_of_components(&self) -> usize {

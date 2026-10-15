@@ -24,6 +24,10 @@ copyright notices, license texts, exceptions, and redistribution requirements
 remain applicable. See [font-data/NOTICE.md](../font-data/NOTICE.md),
 `docs/licenses/`, and the fixture provenance records.
 
+The v0.8 in-process colour backend and its new transitive dependencies are
+recorded in [the dependency inventory](releases/v0.8-dependencies.md), with
+selected BSD-3-Clause and MIT redistribution notices under `docs/licenses/`.
+
 Cargo's package license fields describe project-owned code; they do not replace
 the notices for the bundled data. Distributors must review and include all
 applicable third-party notices, not just the root LICENSE.

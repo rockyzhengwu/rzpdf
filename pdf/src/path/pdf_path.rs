@@ -130,6 +130,9 @@ pub struct PdfPath {
     subpaths: Vec<SubPath>,
 }
 impl PdfPath {
+    pub(crate) fn into_subpaths(self) -> Vec<SubPath> {
+        self.subpaths
+    }
     pub fn try_add_subpath(&mut self, subpath: SubPath) -> crate::error::PdfResult<()> {
         self.subpaths
             .try_reserve(1)

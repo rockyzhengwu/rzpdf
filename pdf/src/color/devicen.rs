@@ -230,6 +230,9 @@ mod tests {
 }
 
 impl DeviceN {
+    pub(crate) fn retained_profile_bytes(&self) -> PdfResult<usize> {
+        self.alternate.retained_profile_bytes()
+    }
     pub fn is_nonpainting(&self) -> bool {
         self.all_none
     }
@@ -375,6 +378,13 @@ impl DeviceN {
     }
 
     pub fn rgb(&self, value: &ColorValue) -> PdfResult<ColorRgb> {
+        self.rgb_with_context(value, &super::conversion::ColorConversionContext::default())
+    }
+    pub fn rgb_with_context(
+        &self,
+        value: &ColorValue,
+        context: &super::conversion::ColorConversionContext,
+    ) -> PdfResult<ColorRgb> {
         if value.value_size() != self.components || value.values().iter().any(|v| !v.is_finite()) {
             return Err(PdfError::ColorError(
                 "DeviceN requires one finite tint per component".into(),
@@ -398,6 +408,7 @@ impl DeviceN {
                 "invalid DeviceN transform output".into(),
             ));
         }
-        self.alternate.rgb(&ColorValue::new(values))
+        self.alternate
+            .rgb_with_context(&ColorValue::new(values), context)
     }
 }

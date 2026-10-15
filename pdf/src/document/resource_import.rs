@@ -365,6 +365,10 @@ impl<T: Read + Seek> PdfDocument<T> {
             )),
         };
         let valid = match kind {
+            ResourceKind::Pattern => {
+                crate::color::pattern::Pattern::try_new(&object, &source.ctx)?;
+                true
+            }
             ResourceKind::Shading => {
                 crate::color::shading::Shading::try_new(&object, source.ctx())?;
                 true

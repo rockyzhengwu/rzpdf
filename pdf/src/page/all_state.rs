@@ -9,7 +9,19 @@ pub(crate) fn supported_ext_gs_keys(state: &PdfDict) -> bool {
     state.into_iter().all(|(key, _)| {
         matches!(
             key.as_str(),
-            "Type" | "Font" | "LW" | "LC" | "LJ" | "ML" | "D" | "FL" | "CA" | "ca" | "BM"
+            "Type"
+                | "Font"
+                | "LW"
+                | "LC"
+                | "LJ"
+                | "ML"
+                | "D"
+                | "FL"
+                | "CA"
+                | "ca"
+                | "BM"
+                | "SMask"
+                | "RI"
         )
     })
 }

@@ -12,6 +12,12 @@ use crate::{
 pub(crate) struct PaintingDevice<'a>(pub &'a mut dyn Device);
 
 impl Device for PaintingDevice<'_> {
+    fn begin_group(&mut self, group: crate::page::transparency::GroupPaint) -> PdfResult<()> {
+        self.0.begin_group(group)
+    }
+    fn end_group(&mut self, commit: bool) -> PdfResult<()> {
+        self.0.end_group(commit)
+    }
     fn do_shading(&mut self, shading: crate::page::shading_object::ShadingObject) -> PdfResult<()> {
         if shading.shading.colorspace().is_nonpainting() {
             Ok(())
