@@ -636,6 +636,61 @@ fn ascii_wrapped_inline_ccitt_uses_existing_decode_parameters() {
 }
 
 #[test]
+fn ccitt_image_adapter_handles_row_padding_polarity_and_stencils() {
+    for width in [1, 7, 8, 9, 17] {
+        let mut encoder = fax::encoder::Encoder::new(fax::VecWriter::new());
+        for row in 0..3 {
+            encoder
+                .encode_line(
+                    (0..width).map(|x| {
+                        if (x + row) % 2 == 0 {
+                            fax::Color::Black
+                        } else {
+                            fax::Color::White
+                        }
+                    }),
+                    width,
+                )
+                .unwrap();
+        }
+        let bytes = encoder.finish().unwrap().finish();
+        let hex: String = bytes.iter().map(|b| format!("{b:02X}")).collect();
+        for black_is_1 in [false, true] {
+            for stencil in [false, true] {
+                for reverse in [false, true] {
+                    let color = if stencil { "/IM true" } else { "/BPC 1 /CS /G" };
+                    let decode = if reverse { "/D [1 0]" } else { "/D [0 1]" };
+                    let doc = doc(format!("BI /W {width} /H 3 {color} {decode} /F [/AHx /CCF] /DP [null << /K -1 /Columns {width} /Rows 3 /BlackIs1 {black_is_1} >>] ID {hex}> EI").into_bytes());
+                    let images = doc
+                        .get_page(0)
+                        .unwrap()
+                        .extract_images_paint_order()
+                        .unwrap();
+                    let image = &images[0].image;
+                    assert_eq!(image.is_mask(), stencil);
+                    let expected: Vec<u8> = (0..3)
+                        .flat_map(|row| {
+                            (0..width).map(move |x| {
+                                if ((x + row) % 2 == 0) ^ black_is_1 ^ reverse {
+                                    0
+                                } else {
+                                    255
+                                }
+                            })
+                        })
+                        .collect();
+                    assert_eq!(
+                        image.data(),
+                        expected,
+                        "width={width}, black_is_1={black_is_1}, stencil={stencil}, reverse={reverse}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn inline_edit_preserves_neighbor_text_codes_positions_and_unmodified_bytes() {
     use pdf::document::resource_manager::StandardFont;
     let doc = doc(Vec::new());

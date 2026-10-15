@@ -612,7 +612,10 @@ mod tests {
 }
 
 impl PdfImage {
-    pub(crate) fn mark_inline(mut self) -> Self { self.is_inline = true; self }
+    pub(crate) fn mark_inline(mut self) -> Self {
+        self.is_inline = true;
+        self
+    }
     pub fn try_new<R: Seek + Read>(
         name: String,
         image: &PdfObject,
@@ -623,25 +626,74 @@ impl PdfImage {
         let stream = image
             .as_stream()
             .ok_or_else(|| PdfError::ObjectError("image must be a stream".into()))?;
-        let filter=stream.dict().get("Filter").map(|f|crate::objects::pdf_stream::resolve_filter_setting(f,ctx,false)).transpose()?;
-        let is_jpx=match filter.as_ref() {
-            Some(PdfObject::PdfName(name))=>name.name()=="JPXDecode",
-            Some(PdfObject::PdfArray(array)) if array.len()==1=>array.get(0).and_then(PdfObject::as_name).is_some_and(|n|n.name()=="JPXDecode"),
-            Some(PdfObject::PdfArray(array)) if array.into_iter().any(|f|f.as_name().is_some_and(|n|n.name()=="JPXDecode"))=>return Err(PdfError::UnsupportedFeature("JPX image filter chain outside single-stage baseline".into())),
-            _=>false
+        let filter = stream
+            .dict()
+            .get("Filter")
+            .map(|f| crate::objects::pdf_stream::resolve_filter_setting(f, ctx, false))
+            .transpose()?;
+        let is_jpx = match filter.as_ref() {
+            Some(PdfObject::PdfName(name)) => name.name() == "JPXDecode",
+            Some(PdfObject::PdfArray(array)) if array.len() == 1 => array
+                .get(0)
+                .and_then(PdfObject::as_name)
+                .is_some_and(|n| n.name() == "JPXDecode"),
+            Some(PdfObject::PdfArray(array))
+                if array
+                    .into_iter()
+                    .any(|f| f.as_name().is_some_and(|n| n.name() == "JPXDecode")) =>
+            {
+                return Err(PdfError::UnsupportedFeature(
+                    "JPX image filter chain outside single-stage baseline".into(),
+                ));
+            }
+            _ => false,
         };
-        let is_jbig2=filter.as_ref().is_some_and(|filter|match filter {
-            PdfObject::PdfName(name)=>name.name()=="JBIG2Decode",
-            PdfObject::PdfArray(array)=>array.into_iter().any(|f|f.as_name().is_some_and(|n|n.name()=="JBIG2Decode")),
-            _=>false
+        let is_jbig2 = filter.as_ref().is_some_and(|filter| match filter {
+            PdfObject::PdfName(name) => name.name() == "JBIG2Decode",
+            PdfObject::PdfArray(array) => array
+                .into_iter()
+                .any(|f| f.as_name().is_some_and(|n| n.name() == "JBIG2Decode")),
+            _ => false,
+        });
+        let is_ccitt = filter.as_ref().is_some_and(|filter| match filter {
+            PdfObject::PdfName(name) => matches!(name.name(), "CCF" | "CCITTFaxDecode"),
+            PdfObject::PdfArray(array) => array
+                .into_iter()
+                .last()
+                .and_then(PdfObject::as_name)
+                .is_some_and(|name| matches!(name.name(), "CCF" | "CCITTFaxDecode")),
+            _ => false,
         });
         let jpx = if is_jpx {
-            Some(crate::filter::jpx::inspect(stream.raw_data(), crate::filter::FilterContext { max_decoded_bytes:ctx.limits().max_decoded_bytes, max_image_pixels:ctx.limits().max_image_pixels, ..Default::default() })?)
-        } else { None };
+            Some(crate::filter::jpx::inspect(
+                stream.raw_data(),
+                crate::filter::FilterContext {
+                    max_decoded_bytes: ctx.limits().max_decoded_bytes,
+                    max_image_pixels: ctx.limits().max_image_pixels,
+                    ..Default::default()
+                },
+            )?)
+        } else {
+            None
+        };
         if let Some(info) = jpx {
-            let number=|key|image.get_attr(key).map(|v|ctx.resolve_owned(v)).transpose().map(|v|v.and_then(|v|v.as_u32()));
-            if image.get_attr("SMaskInData").is_some() && number("SMaskInData")?!=Some(0) {return Err(PdfError::UnsupportedFeature("JPX image SMaskInData/alpha".into()));}
-            if number("Width")?!=Some(info.width) || number("Height")?!=Some(info.height) {return Err(PdfError::ObjectError("JPX dimensions disagree with image dictionary".into()));}
+            let number = |key| {
+                image
+                    .get_attr(key)
+                    .map(|v| ctx.resolve_owned(v))
+                    .transpose()
+                    .map(|v| v.and_then(|v| v.as_u32()))
+            };
+            if image.get_attr("SMaskInData").is_some() && number("SMaskInData")? != Some(0) {
+                return Err(PdfError::UnsupportedFeature(
+                    "JPX image SMaskInData/alpha".into(),
+                ));
+            }
+            if number("Width")? != Some(info.width) || number("Height")? != Some(info.height) {
+                return Err(PdfError::ObjectError(
+                    "JPX dimensions disagree with image dictionary".into(),
+                ));
+            }
         }
         if let Some(subtype) = image.get_attr("Subtype") {
             let subtype = ctx.resolve(subtype)?;
@@ -659,10 +711,21 @@ impl PdfImage {
         } else {
             false
         };
-        if is_mask && jpx.is_some() {return Err(PdfError::UnsupportedFeature("JPX stencil image outside baseline".into()));}
+        if is_mask && jpx.is_some() {
+            return Err(PdfError::UnsupportedFeature(
+                "JPX stencil image outside baseline".into(),
+            ));
+        }
         if is_jbig2 && (!is_mask || image.get_attr("BitsPerComponent").is_some()) {
-            let bits=image.get_attr("BitsPerComponent").map(|v|ctx.resolve_owned(v)).transpose()?;
-            if bits.as_ref().and_then(PdfObject::as_u32)!=Some(1) {return Err(PdfError::ObjectError("JBIG2 images require 1-bit samples".into()));}
+            let bits = image
+                .get_attr("BitsPerComponent")
+                .map(|v| ctx.resolve_owned(v))
+                .transpose()?;
+            if bits.as_ref().and_then(PdfObject::as_u32) != Some(1) {
+                return Err(PdfError::ObjectError(
+                    "JBIG2 images require 1-bit samples".into(),
+                ));
+            }
         }
         if is_mask {
             for key in ["ColorSpace", "SMask"] {
@@ -711,7 +774,9 @@ impl PdfImage {
             .checked_mul(4)
             .filter(|bytes| *bytes <= ctx.limits().max_decoded_bytes)
             .ok_or_else(|| PdfError::ResourceLimit("image RGBA byte budget".into()))?;
-        let bits = if jpx.is_some() { 8 } else if let Some(bits) = image.get_attr("BitsPerComponent") {
+        let bits = if jpx.is_some() {
+            8
+        } else if let Some(bits) = image.get_attr("BitsPerComponent") {
             let bits = ctx.resolve(bits)?;
             let bits = bits
                 .as_u32()
@@ -748,18 +813,41 @@ impl PdfImage {
             if let Some(colorspace_obj) = image.get_attr("ColorSpace") {
                 let color = ColorSpace::try_new(colorspace_obj, ctx)?;
                 if let Some(info) = jpx {
-                    if !matches!((&color, info.color_space),(ColorSpace::DeviceGray(_),crate::filter::jpx::JpxColorSpace::Gray)|(ColorSpace::DeviceRgb(_),crate::filter::jpx::JpxColorSpace::Rgb)) { return Err(PdfError::UnsupportedFeature("JPX dictionary colour override outside baseline".into())); }
+                    if !matches!(
+                        (&color, info.color_space),
+                        (
+                            ColorSpace::DeviceGray(_),
+                            crate::filter::jpx::JpxColorSpace::Gray
+                        ) | (
+                            ColorSpace::DeviceRgb(_),
+                            crate::filter::jpx::JpxColorSpace::Rgb
+                        )
+                    ) {
+                        return Err(PdfError::UnsupportedFeature(
+                            "JPX dictionary colour override outside baseline".into(),
+                        ));
+                    }
                 }
                 color
             } else if let Some(info) = jpx {
                 match info.color_space {
-                    crate::filter::jpx::JpxColorSpace::Gray => ColorSpace::DeviceGray(crate::color::device_gray::DeviceGray::new()),
-                    crate::filter::jpx::JpxColorSpace::Rgb => ColorSpace::DeviceRgb(crate::color::device_rgb::DeviceRgb::new()),
+                    crate::filter::jpx::JpxColorSpace::Gray => {
+                        ColorSpace::DeviceGray(crate::color::device_gray::DeviceGray::new())
+                    }
+                    crate::filter::jpx::JpxColorSpace::Rgb => {
+                        ColorSpace::DeviceRgb(crate::color::device_rgb::DeviceRgb::new())
+                    }
                 }
-            } else {return Err(PdfError::ColorError("image ColorSpace is missing".into()));}
+            } else {
+                return Err(PdfError::ColorError("image ColorSpace is missing".into()));
+            }
         };
         let indexed = matches!(colorspace, ColorSpace::Indexed(_));
-        if is_jbig2 && !matches!(colorspace,ColorSpace::DeviceGray(_)) {return Err(PdfError::UnsupportedFeature("JBIG2 colour space outside Gray/stencil baseline".into()));}
+        if is_jbig2 && !matches!(colorspace, ColorSpace::DeviceGray(_)) {
+            return Err(PdfError::UnsupportedFeature(
+                "JBIG2 colour space outside Gray/stencil baseline".into(),
+            ));
+        }
         let indexed_decode = if indexed {
             image_decode_endpoints(Some(1), image.get_attr("Decode"), ctx)?
         } else {
@@ -833,6 +921,35 @@ impl PdfImage {
             _ => None,
         };
         let mut data = stream.decode_data(ctx)?;
+        if is_ccitt {
+            // The legacy fax filter returns one 0/255 byte per sample. Adapt
+            // that contract to PDF's row-padded 1-bit samples before applying
+            // Decode or stencil semantics; do not unpack the expanded bytes.
+            if bits != 1 || !matches!(colorspace, ColorSpace::DeviceGray(_)) {
+                return Err(PdfError::ObjectError(
+                    "CCITT images require Gray/stencil 1-bit samples".into(),
+                ));
+            }
+            if data.len() != pixel_count || data.iter().any(|value| !matches!(*value, 0 | 255)) {
+                return Err(PdfError::ObjectError(
+                    "CCITT decoded sample length/value mismatch".into(),
+                ));
+            }
+            let row_bytes = (width as usize).div_ceil(8);
+            for row in 0..height as usize {
+                for byte in 0..row_bytes {
+                    let mut packed = 0;
+                    for bit in 0..8 {
+                        let x = byte * 8 + bit;
+                        if x < width as usize && data[row * width as usize + x] != 0 {
+                            packed |= 1 << (7 - bit);
+                        }
+                    }
+                    data[row * row_bytes + byte] = packed;
+                }
+            }
+            data.truncate(row_bytes * height as usize);
+        }
         let components = match &colorspace {
             ColorSpace::DeviceGray(_) => Some(1),
             ColorSpace::DeviceRgb(_) => Some(3),
@@ -865,7 +982,9 @@ impl PdfImage {
             )?;
         } else if bits == 8 {
             // Decode is ignored for non-stencil JPX images (ISO image dictionary).
-            if jpx.is_none() { apply_image_decode(&mut data, components, image.get_attr("Decode"), ctx)?; }
+            if jpx.is_none() {
+                apply_image_decode(&mut data, components, image.get_attr("Decode"), ctx)?;
+            }
         } else {
             let components = components.ok_or_else(|| {
                 PdfError::UnsupportedFeature("packed image samples for this color space".into())
