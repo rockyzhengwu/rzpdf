@@ -6,7 +6,7 @@
 
 新增 Type3 字体检查及受限不透明图形字形执行，接通 d0/d1、FontMatrix、资源、文字提取/ToUnicode 和来源隔离。修复带旋转 FontMatrix 的文字推进：只用水平分量，字形形状仍完整变换。字形内绘图与文字元数据分开，避免重复绘制；资源、循环、累计工作量、R6、共享页编辑和保留预算有回归。非默认 Tr、透明度和字形内文字仍明确拒绝；一般字符映射/字体兼容扩展与字形运行写入未完成，不表示整版通过。
 
-`Font` 增加 `Type3(Rc<Type3Font>)` 变体；自定义设备直接消费显示列表时应跳过 `TextObject::is_type3_metadata()` 文字元数据。当前专项和独立像素检查已通过，完整固定源码回归待终态；范围见 [计划](docs/releases/v0.7.md)，接口及限制见 [Type3 指南](docs/type3-fonts.md)。
+`Font` 增加 `Type3(Rc<Type3Font>)` 变体；自定义设备直接消费显示列表时应跳过 `TextObject::is_type3_metadata()` 文字元数据。2026-10-15，源码 `47e2383` 的 23 项专项、独立 12 页检查与完整工作区 1,188 项回归通过，0 失败/忽略；仅关闭 A 阶段限定范围，B/C 未完成。范围及阶段证据见 [计划](docs/releases/v0.7.md)，接口及限制见 [Type3 指南](docs/type3-fonts.md)。
 
 ## Unreleased — v0.6 内容流与图像基础（限定范围已验收）
 
