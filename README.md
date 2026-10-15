@@ -29,7 +29,7 @@ Chinese text creation supports embedded static TrueType fonts. Standard Western 
 
 ## Quick start
 
-For now, start by running the examples from source. You need a toolchain that supports Rust 2024 edition. The first build uses native dependencies including FreeType and JPEG; building the renderer also involves Skia and may take some time.
+For now, start by running the examples from source. Rust 1.92 or newer is required. The first build uses native dependencies including FreeType and JPEG; building the renderer also involves Skia and may take some time.
 
 ```bash
 git clone https://github.com/rockyzhengwu/rzpdf.git
@@ -96,16 +96,18 @@ Document interactions cover flat bookmarks and named destinations, page and URI 
 
 The [advanced saving APIs](docs/advanced-saving.md) provide bounded incremental saves, AES-256 R6 protection, and external detached CMS approval signing. These are separate workflows: encrypted incremental saves, encrypted signing and multi-signature updates are unsupported. Signing does not establish certificate trust; see the [v0.5 support matrix](docs/releases/v0.5-support.md).
 
+[Image workflows](docs/image-codecs.md) include typed inline images, source-aware edits, and in-process JPEG 2000 and JBIG2 decoding. The [image input matrix](docs/releases/v0.6-matrix.md) defines the bounded baseline: JPX alpha/ICC and symbol-coded JBIG2 scans are not supported. Original encoded images and shared JBIG2 Globals can be preserved without re-encoding.
+
 Text extraction does not reconstruct general reading order or paragraphs. Chinese support does not include complete font shaping, and rendering does not cover every PDF feature. Full annotation/form support, secure redaction and OCR remain outside the scope. Incremental saves retain historical bytes; covering text or removing a drawing operation is not secure erasure.
 
 For input limits, supported fonts and images, and verified platforms, see the [v0.1 support matrix](docs/releases/v0.1-support.md), [v0.2 editing support matrix](docs/releases/v0.2-support.md), and [v0.3 font/document matrix](docs/releases/v0.3-support.md). In v0.3, an unknown unembedded font is an explicit missing-font case; declared aliases are substitutes, not exact reproduction. One selected public Chinese PDF requires compatible parsing of its original bytes, and the positive static-font tests do not imply support for arbitrary CJK or vertical fonts.
 
 ## Documentation and development
 
-- Guides: [text extraction](docs/text-extraction.md) · [image extraction](docs/image-extraction.md) · [content editing](docs/content-editing.md) · [advanced saving](docs/advanced-saving.md)
+- Guides: [text extraction](docs/text-extraction.md) · [image extraction](docs/image-extraction.md) · [image codecs](docs/image-codecs.md) · [content editing](docs/content-editing.md) · [advanced saving](docs/advanced-saving.md)
 - Design: [architecture](docs/architecture.md) · [cache and lifecycle](docs/cache-lifecycle.md)
 - Releases: [roadmap](ROADMAP.md) · [interaction scope](docs/releases/v0.4.md) · [advanced saving scope](docs/releases/v0.5-support.md) · [changelog](CHANGELOG.md)
-- Development and verification: [tasks and implementation history](TODO.md) · [testing](docs/testing.md) · [v0.1 acceptance](docs/releases/v0.1-acceptance.md) · [v0.2 acceptance](docs/releases/v0.2-acceptance.md) · [v0.3 acceptance](docs/releases/v0.3-acceptance.md) · [v0.4 acceptance](docs/releases/v0.4-acceptance.md) · [v0.5 acceptance](docs/releases/v0.5-acceptance.md)
+- Development and verification: [tasks and implementation history](TODO.md) · [testing](docs/testing.md) · [v0.1 acceptance](docs/releases/v0.1-acceptance.md) · [v0.2 acceptance](docs/releases/v0.2-acceptance.md) · [v0.3 acceptance](docs/releases/v0.3-acceptance.md) · [v0.4 acceptance](docs/releases/v0.4-acceptance.md) · [v0.5 acceptance](docs/releases/v0.5-acceptance.md) · [v0.6 acceptance](docs/releases/v0.6-acceptance.md)
 
 The workspace has three crates: `pdf` provides the core, `render` provides the Skia backend, and `font-data` supplies bundled fonts and mapping data.
 

@@ -50,6 +50,11 @@ retain the source encoding; edits can use normal RGB/RGBA/JPEG output. Shared
 Globals are ordinary object references and are remapped during graph import.
 No runtime system-tool subprocess is used for production decoding.
 
+The legacy CCITT filter exposes expanded 0/255 samples. The common image
+adapter converts these to row-padded one-bit samples before applying Decode
+and stencil semantics. Inline Group 4 with an ASCIIHex wrapper is covered,
+including widths not divisible by eight; direct CCITT inline framing is not.
+
 ## Limits and dependencies
 
 Explicit budget entry points share `OperationBudget` with Globals and retained

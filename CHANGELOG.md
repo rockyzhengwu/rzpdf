@@ -2,6 +2,15 @@
 
 本文件只记录交付变化，不替代长期任务池或原始测试日志。版本范围见 [ROADMAP](ROADMAP.md)。
 
+## Unreleased — v0.6 内容流与图像基础（限定范围已验收）
+
+- 新增类型化内联图像、精确 BI/ID/EI 边界及字典/载荷来源范围；接通构建、解释、提取和限定来源编辑，保留邻接内容、共享页及 Form 调用隔离。
+- 新增进程内 JPX Gray/RGB 基础解码与 JBIG2 Generic/Pattern-Halftone 基础解码；保存/导入保留原编码及真实共享 Globals。无 JPX/JBIG2 编码器；JPX Alpha/ICC、JBIG2 symbol-coded 等组合明确不支持。
+- 补齐同池 Globals/解码结果预算、结构/尺寸预检和失败重试；修复 CCITT 展开样本与图像打包样本契约不一致的问题，覆盖行补齐、极性、Decode 和 stencil。
+- 新增独立生产者样本及许可/hash、图像指南和独立像素/结构/渲染门禁。`Operator` 的内联载荷不再是普通操作数，BI/ID/EI 按一个操作索引；最低 Rust 要求为 1.92，实际验证版本为 1.96。
+
+2026-10-15，最终源码 `0f647af` 的完整工作区回归退出 0：61 组、1,165 项通过、0 失败/忽略；独立九页解码像素差均为 0，保存/导入、R6、共享 Globals 和视觉复核通过。具体范围见 [输入矩阵](docs/releases/v0.6-matrix.md)，迁移入口见 [图像指南](docs/image-codecs.md)，证据及预算限制见 [验收记录](docs/releases/v0.6-acceptance.md)。未推送、打标签或发布，Cargo 包版本未修改，fuzz 继续暂缓。
+
 ## Unreleased — v0.5 高级保存与安全（限定范围已验收）
 
 新增三个独立工作流，默认保存仍是全量重写：
