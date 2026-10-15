@@ -4,13 +4,13 @@
 
 ## 当前目标
 
-**v0.1～v0.6 的限定范围已完成本地工程验收，尚未打标签或发布。** 各版验收记录见 [v0.1](docs/releases/v0.1-acceptance.md)、[v0.2](docs/releases/v0.2-acceptance.md)、[v0.3](docs/releases/v0.3-acceptance.md)、[v0.4](docs/releases/v0.4-acceptance.md)、[v0.5](docs/releases/v0.5-acceptance.md) 与 [v0.6](docs/releases/v0.6-acceptance.md)。验收只承诺各版冻结的支持矩阵，不表示任意 PDF 均受支持。P0～P5 是长期技术分类，不再按整个阶段全部完成后才交付；[TODO.md](TODO.md) 保留技术任务和历史证据。
+**v0.1～v0.7 的限定范围已完成本地工程验收，尚未打标签或发布。** 各版验收记录见 [v0.1](docs/releases/v0.1-acceptance.md)、[v0.2](docs/releases/v0.2-acceptance.md)、[v0.3](docs/releases/v0.3-acceptance.md)、[v0.4](docs/releases/v0.4-acceptance.md)、[v0.5](docs/releases/v0.5-acceptance.md)、[v0.6](docs/releases/v0.6-acceptance.md) 与 [v0.7](docs/releases/v0.7-acceptance.md)。验收只承诺各版冻结的支持矩阵，不表示任意 PDF 均受支持。P0～P5 是长期技术分类，不再按整个阶段全部完成后才交付；[TODO.md](TODO.md) 保留技术任务和历史证据。
 
 v0.2 的范围、开工前盘点和最终结论见 [版本清单](docs/releases/v0.2.md)与 [支持矩阵](docs/releases/v0.2-support.md)。
 
 v0.5 的增量保存、限定 R=6 加解密、外部签名接口均已完成限定范围验收：最终源码 `5e9bc93` 的完整工作区回归退出 0，1,139 项通过，三组独立门禁及视觉复核通过；不承诺加密增量保存、加密签名、多签追加或证书信任服务。范围见 [v0.5 计划](docs/releases/v0.5.md)和 [支持矩阵](docs/releases/v0.5-support.md)，证据见 [验收记录](docs/releases/v0.5-acceptance.md)。
 
-后续不直接进入 v1.0，按 [PDF 标准基础能力规划](docs/pdf-standard-roadmap.md)分期推进。[v0.6 内容流与图像基础](docs/releases/v0.6.md)已在源码 `0f647af` 收口：完整回归 1,165 项及独立门禁通过，范围见 [输入矩阵](docs/releases/v0.6-matrix.md)。[v0.7 字体与文字解释](docs/releases/v0.7.md)的受限 Type3 A 阶段已通过源码 `47e2383` 的 1,188 项完整回归和独立检查；[字体矩阵](docs/releases/v0.7-font-matrix.md)中的 B 字符映射/字体兼容与 C 字形运行写入尚未完成，不表示整版验收。PDF 核心负责规范结构和准确解释，上层负责 OCR、无标记表格/阅读顺序推断、自动排版和业务工作流；读取已有 Tagged PDF 结构仍属于核心。
+后续不直接进入 v1.0，按 [PDF 标准基础能力规划](docs/pdf-standard-roadmap.md)分期推进。[v0.6 内容流与图像基础](docs/releases/v0.6.md)已在源码 `0f647af` 收口，范围见 [输入矩阵](docs/releases/v0.6-matrix.md)。[v0.7 字体与文字解释](docs/releases/v0.7.md)的 A/B/C 冻结范围已在候选 `8a901e0` 通过完整回归 1,208 项、独立检查及视觉复核；接口与限制见 [字体矩阵](docs/releases/v0.7-font-matrix.md)及 [字形运行指南](docs/glyph-runs.md)。下一步为 v0.8 图形/颜色/透明度开工盘点，尚未开始实现。PDF 核心负责规范结构和准确解释，上层负责 OCR、无标记表格/阅读顺序推断、自动排版和业务工作流；读取已有 Tagged PDF 结构仍属于核心。
 
 已确认暂缓 3D/多媒体、脚本与 XFA 执行、专业印刷专项、页面切换/高级组合包/地理空间、线性化输出、时间戳/LTV/完整在线信任服务及全格式字体子集器，不作为近期版本必选门禁；已有结构仍须按支持边界保留或明确拒绝。v0.6 的三个图像阶段保持必选。
 

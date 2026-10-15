@@ -2,11 +2,15 @@
 
 本文件只记录交付变化，不替代长期任务池或原始测试日志。版本范围见 [ROADMAP](ROADMAP.md)。
 
-## Unreleased — v0.7 实现切片
+## Unreleased — v0.7 字体与文字解释（限定范围已验收）
 
-新增 Type3 字体检查及受限不透明图形字形执行，接通 d0/d1、FontMatrix、资源、文字提取/ToUnicode 和来源隔离。修复带旋转 FontMatrix 的文字推进：只用水平分量，字形形状仍完整变换。字形内绘图与文字元数据分开，避免重复绘制；资源、循环、累计工作量、R6、共享页编辑和保留预算有回归。非默认 Tr、透明度和字形内文字仍明确拒绝；一般字符映射/字体兼容扩展与字形运行写入未完成，不表示整版通过。
+新增 Type3 字体检查及受限不透明图形字形执行，接通 d0/d1、FontMatrix、资源、文字提取/ToUnicode 和来源隔离。修复带旋转 FontMatrix 的文字推进：只用水平分量，字形形状仍完整变换。字形内绘图与文字元数据分开，避免重复绘制；资源、循环、累计工作量、R6、共享页编辑和保留预算有回归。非默认 Tr、透明度和字形内文字仍明确拒绝。
 
-`Font` 增加 `Type3(Rc<Type3Font>)` 变体；自定义设备直接消费显示列表时应跳过 `TextObject::is_type3_metadata()` 文字元数据。2026-10-15，源码 `47e2383` 的 23 项专项、独立 12 页检查与完整工作区 1,188 项回归通过，0 失败/忽略；仅关闭 A 阶段限定范围，B/C 未完成。范围及阶段证据见 [计划](docs/releases/v0.7.md)，接口及限制见 [Type3 指南](docs/type3-fonts.md)。
+新增字体检查快照和显式 `GlyphRun`/`PositionedGlyph` 页面写入：PDF 字符码、位置、可选 GID/Unicode 断言，支持冻结的水平/竖排字体组合；事务、共享资源、全量/增量保存及权限保护有回归。CMap 查找和反向编码保留源字节长度，新增 `cid_for_char`；旧无长度 CID 查询遇歧义返回 0。补齐 Type1、CFF、OpenType/CFF、TrueType 固定读绘及独立验证矩阵。
+
+兼容变化：`Font` 增加 `Type3(Rc<Type3Font>)` 变体；自定义设备直接消费显示列表时应跳过 `TextObject::is_type3_metadata()` 文字元数据。`ExtractedCharacter` 新增 `vertical_origin`，下游字面量构造需迁移；竖排 em/轮廓辅助几何正确应用 W2，原 `position` 仍是文字原点。详见 [字形运行指南](docs/glyph-runs.md)与 [Type3 指南](docs/type3-fonts.md)。
+
+2026-10-15，最终候选 `8a901e0` 的完整工作区回归退出 0：64 组、1,208 项通过，0 失败/忽略；字体、公开文件/子集、Type3 独立门禁及视觉复核通过。范围见 [矩阵](docs/releases/v0.7-font-matrix.md)，证据与保留限制见 [验收记录](docs/releases/v0.7-acceptance.md)。未推送、打标签或发布；包版本未修改，fuzz 继续暂缓。
 
 ## Unreleased — v0.6 内容流与图像基础（限定范围已验收）
 

@@ -15,7 +15,7 @@ It is designed for Rust applications that need to generate PDFs, extract content
 - **Protect and sign:** Read and write AES-256 R6 password protection, inspect permissions, or prepare a single invisible approval signature for an external CMS signer. Private keys stay outside the PDF core.
 - **Render and edit:** Use a separate Skia renderer, or edit text, images, and paths within the documented font and source limits, including targeted edits in one-level, non-Group Forms.
 
-Chinese text creation supports embedded static TrueType fonts. Standard Western fonts have explicit text-encoding APIs. Text extraction preserves drawing order and coordinates for downstream processing.
+Chinese text creation supports embedded static TrueType fonts. Standard Western fonts have explicit text-encoding APIs. [Positioned glyph runs](docs/glyph-runs.md) let applications supply precise character placement and check existing glyph and Unicode mappings. Text extraction preserves drawing order and coordinates for downstream processing.
 
 ## Why rzpdf?
 
@@ -100,11 +100,11 @@ The [advanced saving APIs](docs/advanced-saving.md) provide bounded incremental 
 
 Text extraction does not reconstruct general reading order or paragraphs. Chinese support does not include complete font shaping, and rendering does not cover every PDF feature. Full annotation/form support, secure redaction and OCR remain outside the scope. Incremental saves retain historical bytes; covering text or removing a drawing operation is not secure erasure.
 
-For input limits, supported fonts and images, and verified platforms, see the [v0.1 support matrix](docs/releases/v0.1-support.md), [v0.2 editing support matrix](docs/releases/v0.2-support.md), and [v0.3 font/document matrix](docs/releases/v0.3-support.md). In v0.3, an unknown unembedded font is an explicit missing-font case; declared aliases are substitutes, not exact reproduction. One selected public Chinese PDF requires compatible parsing of its original bytes, and the positive static-font tests do not imply support for arbitrary CJK or vertical fonts.
+For input limits, supported fonts and images, and verified platforms, see the [v0.1 support matrix](docs/releases/v0.1-support.md), [v0.2 editing support matrix](docs/releases/v0.2-support.md), and [v0.7 font matrix](docs/releases/v0.7-font-matrix.md). Unknown unembedded fonts are explicit missing-font cases; declared aliases are substitutes, not exact reproduction. Font checks cover fixed Type1, CFF, OpenType/CFF, TrueType and bounded Type3 combinations, not arbitrary fonts or complex shaping.
 
 ## Documentation and development
 
-- Guides: [text extraction](docs/text-extraction.md) · [image extraction](docs/image-extraction.md) · [image codecs](docs/image-codecs.md) · [content editing](docs/content-editing.md) · [advanced saving](docs/advanced-saving.md)
+- Guides: [text extraction](docs/text-extraction.md) · [glyph runs](docs/glyph-runs.md) · [Type3 fonts](docs/type3-fonts.md) · [image extraction](docs/image-extraction.md) · [image codecs](docs/image-codecs.md) · [content editing](docs/content-editing.md) · [advanced saving](docs/advanced-saving.md)
 - Design: [architecture](docs/architecture.md) · [cache and lifecycle](docs/cache-lifecycle.md)
 - Releases: [roadmap](ROADMAP.md) · [interaction scope](docs/releases/v0.4.md) · [advanced saving scope](docs/releases/v0.5-support.md) · [changelog](CHANGELOG.md)
 - Development and verification: [tasks and implementation history](TODO.md) · [testing](docs/testing.md) · [v0.1 acceptance](docs/releases/v0.1-acceptance.md) · [v0.2 acceptance](docs/releases/v0.2-acceptance.md) · [v0.3 acceptance](docs/releases/v0.3-acceptance.md) · [v0.4 acceptance](docs/releases/v0.4-acceptance.md) · [v0.5 acceptance](docs/releases/v0.5-acceptance.md) · [v0.6 acceptance](docs/releases/v0.6-acceptance.md)

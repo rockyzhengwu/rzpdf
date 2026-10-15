@@ -2,9 +2,11 @@
 
 `extract_characters_paint_order_report()` 返回原始解释绘制顺序的字符事件与内容诊断。`extract_text_runs_paint_order_report()` 在同次解释结果上移动字符，返回文本段与诊断，不复制Unicode负载。`extract_characters_paint_order()` 与 `extract_text_runs_paint_order()` 是简便入口，会丢弃诊断；文本段分组的是解释文字对象，不是段落或文本流来源范围。
 
-每个事件保留字符码/码长、可选 Unicode、声明字号、字体名、书写模式、水平缩放、显示空间基线原点与文字段矩阵。一个 PDF 字符码可以映射多个 Unicode 字符，缺映射保留 `None`。BaseFont 名不是资源键或稳定字体身份。
+每个事件保留字符码/码长、可选 Unicode、声明字号、字体名、书写模式、水平缩放、显示空间文字原点与文字段矩阵。一个 PDF 字符码可以映射多个 Unicode 字符，缺映射保留 `None`，不与显式 U+FFFD 混淆。BaseFont 名不是资源键或稳定字体身份。
 
 位置使用旋转/裁剪后的显示空间，左上角原点、y向下。矩阵包含 Ts 抬升，平移是文字段初始原点，不随各字符推进。Tz 单独保留为因子；`writing_axis()` 不是单位向量，也不是带字宽/字距的实际推进。
+
+竖排的 `position` 仍为文字原点，尚未扣除 W2 字形偏移；`vertical_origin` 保存从水平字形原点到竖排文字原点的向量（千分之一文字空间，水平字体为零）。`glyph_origin_display()` 单独给出实际水平轮廓原点，`em_to_display_matrix()`、`display_to_em_point()` 与文字对象轮廓辅助接口使用该原点。不要重复扣除偏移。接口示例和迁移说明见 [字形运行指南](glyph-runs.md)；当前字体组合见 [v0.7 矩阵](releases/v0.7-font-matrix.md)。
 
 阅读顺序与绘制顺序分开：
 
