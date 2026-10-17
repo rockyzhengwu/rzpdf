@@ -11,15 +11,33 @@ use std::{
     io::{Read, Seek},
 };
 
-struct Importer<'a, S: Read + Seek, T: Read + Seek> {
-    source: &'a PdfDocument<S>,
-    target: &'a PdfDocument<T>,
-    mapped: HashMap<ObjectId, ObjectId>,
+pub(super) struct Importer<'a, S: Read + Seek, T: Read + Seek> {
+    pub(super) source: &'a PdfDocument<S>,
+    pub(super) target: &'a PdfDocument<T>,
+    pub(super) mapped: HashMap<ObjectId, ObjectId>,
+    pub(super) prepared: HashMap<ObjectId, PdfObject>,
+    pub(super) blocked: std::collections::HashSet<ObjectId>,
+    pub(super) isolate_structure: bool,
     nodes: usize,
     retained_bytes: usize,
 }
 
 impl<S: Read + Seek, T: Read + Seek> Importer<'_, S, T> {
+    pub(super) fn new<'a>(
+        source: &'a PdfDocument<S>,
+        target: &'a PdfDocument<T>,
+    ) -> Importer<'a, S, T> {
+        Importer {
+            source,
+            target,
+            mapped: HashMap::new(),
+            prepared: HashMap::new(),
+            blocked: Default::default(),
+            isolate_structure: false,
+            nodes: 0,
+            retained_bytes: 0,
+        }
+    }
     fn charge_bytes(&mut self, size: usize, token: bool) -> PdfResult<()> {
         let limits = self.target.ctx.limits();
         if (token && size > limits.max_token_bytes)
@@ -35,14 +53,25 @@ impl<S: Read + Seek, T: Read + Seek> Importer<'_, S, T> {
         self.retained_bytes += size;
         Ok(())
     }
-    fn reference(&mut self, id: ObjectId, depth: usize) -> PdfResult<ObjectId> {
+    pub(super) fn reference(&mut self, id: ObjectId, depth: usize) -> PdfResult<ObjectId> {
         if let Some(&mapped) = self.mapped.get(&id) {
             return Ok(mapped);
+        }
+        if self.blocked.contains(&id) && !self.prepared.contains_key(&id) {
+            return Err(PdfError::UnsupportedFeature(
+                "reference to an unselected page/field/annotation owner".into(),
+            ));
+        }
+        if self.source.identity() == self.target.identity() && !self.prepared.contains_key(&id) && !self.isolate_structure {
+            return Ok(id);
         }
         self.mapped
             .try_reserve(1)
             .map_err(|_| PdfError::ResourceLimit("Imported object map allocation".into()))?;
-        let object = self.source.resolve_object(id)?;
+        let object = match self.prepared.get(&id) {
+            Some(object) => object.clone(),
+            None => self.source.resolve_object(id)?,
+        };
         let mapped = self.target.try_insert_object(PdfObject::PdfNull)?;
         self.mapped.insert(id, mapped);
         let object = self.object(object, depth)?;
@@ -54,6 +83,17 @@ impl<S: Read + Seek, T: Read + Seek> Importer<'_, S, T> {
             .get("Type")
             .map(|value| self.source.ctx.resolve_owned(value))
             .transpose()?;
+        let optional = kind.as_ref().and_then(PdfObject::as_name)
+            .is_some_and(|name| matches!(name.name(), "OCG" | "OCMD"));
+        let scoped_oc = if dict.contains_key("OC") {
+            dict.get("Subtype").map(|v| self.source.ctx.resolve_owned(v)).transpose()?
+                .as_ref().and_then(PdfObject::as_name)
+                .is_some_and(|name| matches!(name.name(), "Form" | "Image"))
+        } else { false };
+        if optional || scoped_oc {
+            return Err(PdfError::UnsupportedFeature(
+                "page/resource import of optional content requires configuration support".into()));
+        }
         if kind
             .as_ref()
             .and_then(PdfObject::as_name)
@@ -70,7 +110,7 @@ impl<S: Read + Seek, T: Read + Seek> Importer<'_, S, T> {
         }
         Ok(output)
     }
-    fn object(&mut self, object: PdfObject, depth: usize) -> PdfResult<PdfObject> {
+    pub(super) fn object(&mut self, object: PdfObject, depth: usize) -> PdfResult<PdfObject> {
         let limits = self.target.ctx.limits();
         if depth > limits.max_depth.min(self.source.ctx.limits().max_depth)
             || self.nodes >= limits.max_objects
@@ -162,20 +202,33 @@ impl<T: Read + Seek> PdfDocument<T> {
 
     /// Import a unique ordered selection in one transaction and shared ID map.
     /// Cross-page references to selected pages are remapped; other pages reject.
-    /// Use copy_page for same-document copying. Annotation/tag restrictions match
-    /// import_page_from; outlines and named destination trees are not imported.
+    /// Use copy_page for same-document copying. Supported annotations/fields and
+    /// explicit labels migrate. Catalog navigation is opt-in with options;
+    /// named page links become explicit destinations even without that opt-in.
     pub fn import_pages_from<S: Read + Seek>(
         &self,
         source: &PdfDocument<S>,
         indices: &[u32],
         insertion_index: u32,
     ) -> PdfResult<Vec<ObjectHandle>> {
+        self.import_pages_from_with_options(source, indices, insertion_index, &Default::default())
+    }
+
+    pub fn import_pages_from_with_options<S: Read + Seek>(
+        &self,
+        source: &PdfDocument<S>,
+        indices: &[u32],
+        insertion_index: u32,
+        options: &super::page_transfer::PageTransferOptions,
+    ) -> PdfResult<Vec<ObjectHandle>> {
+        self.ctx().require_assembly_permission()?;
         if insertion_index as usize > self.try_page_count()? {
             return Err(PdfError::PageNotExist);
         }
         if indices.is_empty() {
             return Ok(Vec::new());
         }
+        self.ctx().require_content_edit_permission()?;
         if self.identity() == source.identity() {
             return Err(PdfError::UnsupportedFeature(
                 "Batch import requires a distinct source document; use copy_page".into(),
@@ -213,22 +266,11 @@ impl<T: Read + Seek> PdfDocument<T> {
                     "Duplicate page in import selection".into(),
                 ));
             }
-            for key in ["StructParents", "B"] {
+            for key in ["B"] {
                 if location.page_dict.contains_key(key) {
                     return Err(PdfError::UnsupportedFeature(format!(
                         "Page import with {key} ownership"
                     )));
-                }
-            }
-            if let Some(value) = location.page_dict.get("Annots") {
-                match source.ctx.resolve_owned(value)? {
-                    PdfObject::PdfNull => {}
-                    PdfObject::PdfArray(array) if array.len() == 0 => {}
-                    _ => {
-                        return Err(PdfError::UnsupportedFeature(
-                            "Page import with annotations".into(),
-                        ));
-                    }
                 }
             }
             let mut page = location.page_dict.clone();
@@ -255,17 +297,28 @@ impl<T: Read + Seek> PdfDocument<T> {
                     };
                 page.try_insert(key.into(), value)?;
             }
-            for key in ["Type", "Parent", "Annots"] {
+            for key in ["Type", "Parent"] {
                 page.remove(key);
             }
             prepared.push((location.page_id, page));
         }
         let insertion = self.page_insertion_point(insertion_index)?;
+        // Invalid source ownership is a preflight failure, not a target edit:
+        // preserve the existing no-revision-change contract for malformed input.
+        source.page_relationship_guard()?;
+        let structure_plan=self.plan_structure_transfer(source,&selected)?;
         self.edit_transaction(|target| {
+            let count = u32::try_from(target.try_page_count()?)
+                .map_err(|_| PdfError::ResourceLimit("page count".into()))?;
+            let labels =
+                target.imported_page_labels(source, indices, insertion_index, count, options)?;
             let mut importer = Importer {
                 source,
                 target,
                 mapped: HashMap::new(),
+                prepared: HashMap::new(),
+                blocked: Default::default(),
+                isolate_structure: false,
                 nodes: 0,
                 retained_bytes: 0,
             };
@@ -282,6 +335,9 @@ impl<T: Read + Seek> PdfDocument<T> {
                 importer.mapped.insert(*source_id, id);
                 handles.push(target.object_handle(id)?);
             }
+            structure_plan.prepare(&mut importer);
+            let (roots, resources) =
+                target.prepare_page_relationships(&mut importer, &selected, options)?;
             for (offset, ((_, page), handle)) in prepared.into_iter().zip(&handles).enumerate() {
                 let mut page = importer
                     .object(PdfObject::PdfDict(page), 0)?
@@ -310,12 +366,21 @@ impl<T: Read + Seek> PdfDocument<T> {
                 )?;
             }
             target.adjust_page_counts(&insertion.ancestor_ids, delta)?;
+            target.attach_page_fields(roots, resources)?;
+            target.transfer_navigation(&mut importer, options)?;
+            target.validate_annotation_ownership()?;
+            target.apply_structure_transfer(&mut importer,structure_plan)?;
+            if let Some(labels) = labels {
+                target.set_page_label_ranges(&labels)?;
+            }
             Ok(handles)
         })
     }
 
-    /// Import one unannotated, untagged page and its content/resource graph.
-    /// The source is unchanged. Does not import outlines, labels or structure trees.
+    /// Import one page and supported annotation/field/content/resource graphs.
+    /// The source is unchanged. Explicit labels migrate; catalog navigation
+    /// requires the batch options API. Supported structure branches migrate;
+    /// article ownership and unsupported structure extensions are refused.
     pub fn import_page_from<S: Read + Seek>(
         &self,
         source: &PdfDocument<S>,
@@ -404,7 +469,10 @@ impl<T: Read + Seek> PdfDocument<T> {
                 source,
                 target,
                 mapped: HashMap::new(),
+                prepared: HashMap::new(),
+                blocked: Default::default(),
                 nodes: 0,
+                isolate_structure: false,
                 retained_bytes: 0,
             };
             let imported = importer.reference(id, 0)?;

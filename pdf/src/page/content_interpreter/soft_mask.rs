@@ -49,6 +49,9 @@ impl<R: Read + Seek> Interpreter<'_, R> {
             return Err(PdfError::PageResourceError("cyclic soft mask group".into()));
         }
         let object = self.ctx.resolve(g)?;
+        if self.optional_content.is_some() && object.as_stream().is_some_and(|s| s.dict().contains_key("OC")) {
+            return Err(PdfError::UnsupportedFeature("optional content on soft-mask G is outside the supported composition subset".into()));
+        }
         let form = crate::page::pdf_form::PdfForm::try_new(&object, self.ctx)?;
         let group = form.group.as_ref().ok_or_else(|| {
             PdfError::PageResourceError("SMask G must have a transparency Group".into())
@@ -122,6 +125,7 @@ impl<R: Read + Seek> Interpreter<'_, R> {
         let mut child = Interpreter::new(self.page, self.ctx, parser)
             .with_resource_scope(form.resource_scope(&page_resources).clone());
         child.form_depth = self.form_depth + 1;
+        child.optional_content = self.optional_content.clone();
         child.pattern_depth = self.pattern_depth;
         child.execution_budget = work;
         child.active_forms = self.active_forms.clone();

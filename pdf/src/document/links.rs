@@ -11,9 +11,11 @@ use crate::{
     },
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum LinkTarget {
     Page(u32),
+    /// Full view; page identity survives page reordering.
+    Destination(super::destination::Destination),
     Named(String),
     Uri(String),
 }
@@ -42,6 +44,243 @@ fn rectangle(rect: [f32; 4]) -> PdfResult<PdfArray> {
 }
 
 impl<R: Read + Seek> PdfDocument<R> {
+    /// Stable identities of the Link entries, in page order. Direct annotations
+    /// remain readable through page_links but cannot be edited by address.
+    pub fn page_link_handles(
+        &self,
+        page_index: u32,
+    ) -> PdfResult<Vec<super::identity::ObjectHandle>> {
+        self.page_links(page_index)?;
+        let page = self.page_location(page_index)?;
+        let Some(annots) = page.page_dict.get("Annots") else {
+            return Ok(Vec::new());
+        };
+        let annots = self
+            .ctx()
+            .resolve(annots)?
+            .into_array()
+            .ok_or_else(|| PdfError::DocumentError("Annots must be an array".into()))?;
+        let mut result = Vec::new();
+        for object in &annots {
+            let dict =
+                self.ctx().resolve(object)?.into_dict().ok_or_else(|| {
+                    PdfError::DocumentError("annotation must be a dictionary".into())
+                })?;
+            if dict
+                .get("Subtype")
+                .and_then(PdfObject::as_name)
+                .map(PdfName::name)
+                == Some("Link")
+            {
+                let id = object.as_reference().map(PdfReference::id).ok_or_else(|| {
+                    PdfError::UnsupportedFeature("direct link has no stable handle".into())
+                })?;
+                result.push(self.object_handle(id)?);
+            }
+        }
+        Ok(result)
+    }
+
+    fn encoded_link_target(&self, target: &LinkTarget) -> PdfResult<(&'static str, PdfObject)> {
+        match target {
+            LinkTarget::Page(page) => Ok((
+                "Dest",
+                self.encode_destination(
+                    &self.destination(*page, super::destination::DestinationView::Fit)?,
+                )?,
+            )),
+            LinkTarget::Destination(dest) => Ok(("Dest", self.encode_destination(dest)?)),
+            LinkTarget::Named(name) => {
+                if !self
+                    .named_destinations()?
+                    .iter()
+                    .any(|(key, _)| key == name)
+                {
+                    return Err(PdfError::DocumentError("named destination missing".into()));
+                }
+                Ok((
+                    "Dest",
+                    PdfObject::PdfString(PdfString::from_text_with_limits(
+                        name,
+                        &self.ctx().limits(),
+                    )?),
+                ))
+            }
+            LinkTarget::Uri(uri) => {
+                if uri.is_empty()
+                    || uri.len() > self.ctx().limits().max_token_bytes
+                    || !uri.is_ascii()
+                    || uri.bytes().any(|b| b < 0x21 || b == 0x7f)
+                    || !(uri.starts_with("https://")
+                        || uri.starts_with("http://")
+                        || uri.starts_with("mailto:"))
+                {
+                    return Err(PdfError::UnsupportedFeature(
+                        "URI must be printable ASCII http(s) or mailto".into(),
+                    ));
+                }
+                let mut action = PdfDict::default();
+                action.try_insert("S".into(), PdfObject::PdfName(PdfName::new("URI".into())))?;
+                action.try_insert(
+                    "URI".into(),
+                    PdfObject::PdfString(PdfString::new(uri.as_bytes().to_vec(), false)),
+                )?;
+                Ok(("A", PdfObject::PdfDict(action)))
+            }
+        }
+    }
+
+    pub fn add_link(
+        &self,
+        page_index: u32,
+        link: &PageLink,
+    ) -> PdfResult<super::identity::ObjectHandle> {
+        self.ctx().require_annotation_permission()?;
+        let rect = rectangle(link.rect)?;
+        self.edit_transaction(|doc| {
+            let (key, target) = doc.encoded_link_target(&link.target)?;
+            doc.add_link_inner(page_index, rect, key, target)?;
+            let page = doc.page_location(page_index)?;
+            let array = doc
+                .ctx()
+                .resolve(page.page_dict.get("Annots").unwrap())?
+                .into_array()
+                .unwrap();
+            let id = array
+                .get(array.len() - 1)
+                .and_then(PdfObject::as_reference)
+                .unwrap()
+                .id();
+            doc.object_handle(id)
+        })
+    }
+
+    /// Replace only rectangle/target. Unknown keys, flags, border and AP survive.
+    pub fn update_page_link(
+        &self,
+        page_index: u32,
+        handle: &super::identity::ObjectHandle,
+        link: &PageLink,
+    ) -> PdfResult<()> {
+        self.ctx().require_annotation_permission()?;
+        let id = self.validate_handle(handle)?;
+        let rect = rectangle(link.rect)?;
+        self.edit_transaction(|doc| {
+            doc.check_link_edit_owner(page_index, id)?;
+            if !doc
+                .page_link_handles(page_index)?
+                .iter()
+                .any(|h| h == handle)
+            {
+                return Err(PdfError::DocumentError(
+                    "link is not owned by this page".into(),
+                ));
+            }
+            let (key, target) = doc.encoded_link_target(&link.target)?;
+            let mut dict = doc
+                .resolve_object(id)?
+                .into_dict()
+                .ok_or_else(|| PdfError::DocumentError("link must be a dictionary".into()))?;
+            dict.remove("A");
+            dict.remove("Dest");
+            dict.try_insert("Rect".into(), PdfObject::PdfArray(rect))?;
+            dict.try_insert(key.into(), target)?;
+            doc.update_object(id, PdfObject::PdfDict(dict))
+        })
+    }
+
+    /// Detach the Link from its page; do not delete an object that another
+    /// object may still reference. This is not secure erasure.
+    pub fn remove_page_link(
+        &self,
+        page_index: u32,
+        handle: &super::identity::ObjectHandle,
+    ) -> PdfResult<()> {
+        self.ctx().require_annotation_permission()?;
+        let id = self.validate_handle(handle)?;
+        self.edit_transaction(|doc| {
+            doc.check_link_edit_owner(page_index, id)?;
+            if !doc
+                .page_link_handles(page_index)?
+                .iter()
+                .any(|h| h == handle)
+            {
+                return Err(PdfError::DocumentError(
+                    "link is not owned by this page".into(),
+                ));
+            }
+            let page = doc.page_location(page_index)?;
+            let old = doc
+                .ctx()
+                .resolve(page.page_dict.get("Annots").unwrap())?
+                .into_array()
+                .unwrap();
+            let mut annots = PdfArray::default();
+            for object in &old {
+                if object.as_reference().map(PdfReference::id) != Some(id) {
+                    annots.try_add_obj(object.clone())?;
+                }
+            }
+            let mut dict = page.page_dict;
+            dict.try_insert("Annots".into(), PdfObject::PdfArray(annots))?;
+            doc.update_object(page.page_id, PdfObject::PdfDict(dict))
+        })
+    }
+
+    pub(super) fn check_link_edit_owner(&self, page_index: u32, id: ObjectId) -> PdfResult<()> {
+        let page = self.page_location(page_index)?;
+        let dict = self
+            .resolve_object(id)?
+            .into_dict()
+            .ok_or_else(|| PdfError::DocumentError("link must be a dictionary".into()))?;
+        if dict
+            .get("P")
+            .is_some_and(|p| p.as_reference().map(PdfReference::id) != Some(page.page_id))
+        {
+            return Err(PdfError::DocumentError("link P does not match page".into()));
+        }
+        let flags = dict
+            .get("F")
+            .map(|f| {
+                self.ctx()
+                    .resolve(f)?
+                    .as_number()
+                    .ok_or_else(|| PdfError::DocumentError("annotation F must be integer".into()))?
+                    .as_u32_checked()
+            })
+            .transpose()?
+            .unwrap_or(0);
+        if flags & (64 | 128 | 512) != 0 {
+            return Err(PdfError::UnsupportedFeature(
+                "read-only or locked link".into(),
+            ));
+        }
+        let mut owners = 0usize;
+        for page in self.collect_page_entries()? {
+            if let Some(annots) = page.page_dict.get("Annots") {
+                let annots = self
+                    .ctx()
+                    .resolve(annots)?
+                    .into_array()
+                    .ok_or_else(|| PdfError::DocumentError("Annots must be an array".into()))?;
+                if annots.len() > self.ctx().limits().max_objects {
+                    return Err(PdfError::ResourceLimit("annotation count".into()));
+                }
+                for value in &annots {
+                    if value.as_reference().map(PdfReference::id) == Some(id) {
+                        owners += 1;
+                    }
+                }
+            }
+        }
+        if owners != 1 {
+            return Err(PdfError::UnsupportedFeature(
+                "link has shared or missing page ownership".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Return supported `/Link` annotations on a page. Other annotation types
     /// are skipped; malformed `/Link` entries are not silently skipped.
     pub fn page_links(&self, page_index: u32) -> PdfResult<Vec<PageLink>> {
@@ -56,7 +295,6 @@ impl<R: Read + Seek> PdfDocument<R> {
         if array.len() > self.ctx().limits().max_objects {
             return Err(PdfError::ResourceLimit("annotation count".into()));
         }
-        let pages = self.collect_page_entries()?;
         let mut links = Vec::new();
         for value in array {
             let object = self.ctx().resolve(value)?;
@@ -113,36 +351,12 @@ impl<R: Read + Seek> PdfDocument<R> {
                     });
                     continue;
                 }
-                let dest = dest.as_array().ok_or_else(|| {
-                    PdfError::UnsupportedFeature("link Dest is not a page array".into())
-                })?;
-                if dest.len() != 2
-                    || self
-                        .ctx()
-                        .resolve(dest.get(1).unwrap())?
-                        .as_name()
-                        .map(PdfName::name)
-                        != Some("Fit")
-                {
-                    return Err(PdfError::UnsupportedFeature(
-                        "only /Fit link destinations are supported".into(),
-                    ));
+                let destination = self.decode_destination(&dest)?;
+                if destination.view == super::destination::DestinationView::Fit {
+                    LinkTarget::Page(self.destination_page_index(&destination)?)
+                } else {
+                    LinkTarget::Destination(destination)
                 }
-                let id = dest
-                    .get(0)
-                    .and_then(PdfObject::as_reference)
-                    .map(PdfReference::id)
-                    .ok_or_else(|| {
-                        PdfError::UnsupportedFeature("link page target must be indirect".into())
-                    })?;
-                let index = pages
-                    .iter()
-                    .position(|page| page.page_id == id)
-                    .ok_or_else(|| PdfError::DocumentError("link target page is missing".into()))?;
-                LinkTarget::Page(
-                    u32::try_from(index)
-                        .map_err(|_| PdfError::ResourceLimit("page index".into()))?,
-                )
             } else {
                 let action = dict.get("A").ok_or_else(|| {
                     PdfError::UnsupportedFeature("link has no supported target".into())
@@ -155,6 +369,33 @@ impl<R: Read + Seek> PdfDocument<R> {
                     .get("S")
                     .and_then(PdfObject::as_name)
                     .map(PdfName::name);
+                if action.get("Next").is_some() {
+                    return Err(PdfError::UnsupportedFeature("chained link actions".into()));
+                }
+                if kind == Some("GoTo") {
+                    let target = action
+                        .get("D")
+                        .ok_or_else(|| PdfError::DocumentError("GoTo D missing".into()))?;
+                    let target = self.ctx().resolve(target)?;
+                    let target = if let Some(s) = target.as_string() {
+                        let name = s.text_content_with_limits(&self.ctx().limits())?;
+                        if !self.named_destinations()?.iter().any(|(n, _)| n == &name) {
+                            return Err(PdfError::DocumentError(
+                                "named GoTo destination missing".into(),
+                            ));
+                        }
+                        LinkTarget::Named(name)
+                    } else {
+                        let dest = self.decode_destination(&target)?;
+                        if dest.view == super::destination::DestinationView::Fit {
+                            LinkTarget::Page(self.destination_page_index(&dest)?)
+                        } else {
+                            LinkTarget::Destination(dest)
+                        }
+                    };
+                    links.push(PageLink { rect, target });
+                    continue;
+                }
                 if kind != Some("URI") {
                     return Err(PdfError::UnsupportedFeature(
                         "only URI link actions are supported".into(),
@@ -296,6 +537,47 @@ impl<R: Read + Seek> PdfDocument<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn locked_and_shared_links_reject_edits_and_named_rename() {
+        let doc = PdfDocument::new().unwrap();
+        doc.add_page(0).unwrap();
+        doc.add_page(1).unwrap();
+        doc.set_named_destination("target", 1).unwrap();
+        let link = PageLink {
+            rect: [10., 20., 30., 40.],
+            target: LinkTarget::Named("target".into()),
+        };
+        let handle = doc.add_link(0, &link).unwrap();
+        let mut dict = doc.resolve_handle(&handle).unwrap().into_dict().unwrap();
+        dict.try_insert("F".into(), PdfObject::PdfNumber(PdfNumber::new(128.)))
+            .unwrap();
+        doc.update_handle(&handle, PdfObject::PdfDict(dict.clone()))
+            .unwrap();
+        let revision = doc.commit_revision();
+        assert!(doc.update_page_link(0, &handle, &link).is_err());
+        assert!(doc.remove_page_link(0, &handle).is_err());
+        assert!(doc.rename_named_destination("target", "renamed").is_err());
+        assert_eq!(doc.commit_revision(), revision);
+        assert_eq!(doc.named_destinations().unwrap()[0].0, "target");
+        dict.remove("F");
+        dict.remove("P");
+        doc.update_handle(&handle, PdfObject::PdfDict(dict))
+            .unwrap();
+        let page = doc.page_location(1).unwrap();
+        let mut dict = page.page_dict;
+        let mut annots = PdfArray::default();
+        annots.try_add_obj(reference(handle.object_id())).unwrap();
+        dict.try_insert("Annots".into(), PdfObject::PdfArray(annots))
+            .unwrap();
+        doc.update_object(page.page_id, PdfObject::PdfDict(dict))
+            .unwrap();
+        let revision = doc.commit_revision();
+        assert!(doc.update_page_link(0, &handle, &link).is_err());
+        assert!(doc.remove_page_link(0, &handle).is_err());
+        assert!(doc.rename_named_destination("target", "renamed").is_err());
+        assert_eq!(doc.commit_revision(), revision);
+    }
 
     #[test]
     fn links_roundtrip_and_invalid_target_rolls_back() {

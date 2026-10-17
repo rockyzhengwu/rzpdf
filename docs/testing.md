@@ -1,5 +1,43 @@
 # 解析回归与异常输入验证
 
+## v0.10 可选内容与整版验证
+
+专项为 `cargo test --locked -j2 -p pdf --test v010_optional_content`。最终联合回归还包括 v010 结构/标记专题、`v03_marked_content`、v09 批注/字段类型/字段关系/导航/页面关系及 `v05_security`，不以专项代替完整工作区。
+
+独立图层入口为 `PYTHONPATH=tmp/pdfs/v05-verifiers-py311 python3.11 docs/check-v010-optional-content.py <new-directory>`。先构建 PDF 的 `inspect_optional_content` 和 render 的 `render_optional_content` 示例，再执行；使用既有 pikepdf、qpdf、MuPDF、Pillow，不安装 Poppler、不运行 fuzz。独立样本检查严格保存重开、源内容保留、四份语义反例、显式逻辑文字，以及默认/替代/打印三组 Skia 与独立 MuPDF 预期的像素对照。几何要求逐像素一致，颜色允许至多一个 RGB 取整级别差；对照图需目视复核。
+
+整版命令 `cargo test --workspace --locked -j2` 已退出 0：80 组、1,453 passed、0 failed/ignored/filtered，日志 `tmp/pdfs/v010-final-workspace-verified.log`。联合回归 14 组、206 项及八个示例构建退出 0；七组独立门禁通过，三配置最新对照图已目视检查。457 个 Rust/Cargo/Python 输入在回归前后指纹及文件列表一致；源码清单、具体命令和退出状态见[验收记录](releases/v0.10-acceptance.md)。首次最终候选因消除重复流复制而中断，不计作全量通过；此前阶段证据均为历史记录。
+
+## v0.10 结构迁移与阶段 B 历史验证
+
+新增 `v010_structure_transfer` 25 项。联合命令为 `cargo test --locked -j2 -p pdf --test v010_structure_transfer --test v010_structure_edit --test v010_structure --test v010_structure_associations --test v010_structure_semantics --test v010_marked_text --test v03_marked_content --test v09_page_relationships --test v09_navigation --test v05_security`，最终退出 0，10 组、148 passed、0 failed/ignored/filtered，日志 `tmp/pdfs/v010-stage-b-regression-verified.log`。
+
+独立入口新增 `docs/check-v010-structure-transfer.py <new-directory>`，先构建 `transfer_structure` 及下方五个已有结构示例。既有 Python 3.11/pikepdf、qpdf、MuPDF 环境即可；六组独立门禁通过，迁移链严格重开/来源保留和四份反例均有结果。两页 144 dpi MuPDF 渲染与独立输入仅 A→Z 的预期逐像素一致，并完成目视核对；不把 ActualText 当作绘制字形。接口及范围见[迁移指南](structure-transfers.md)，证据见[验收记录](releases/v0.10-acceptance.md)。
+
+阶段 B 最终全量 `cargo test --workspace --locked -j2` 已退出 0：79 组、1,426 passed、0 failed/ignored/filtered，日志 `tmp/pdfs/v010-stage-b-workspace-verified.log`。编译 7 分 18 秒，PDF 单元 97.49 秒，render 52.42 秒；419 个 Rust/Cargo/Python 文件前后指纹和列表一致。V10-05 与阶段 B 的限定范围已验收，不表示阶段 C 或整版完成。较早 `v010-stage-b-workspace.log` 因补充图层拒绝保护退出 130；`v010-stage-b-workspace-final.log` 因非法源输入拒绝晚于目标事务而退出 101，旧预检契约已修复并在最终全量通过。不将这两轮计作通过，也不把失败归因于长用例。不安装 Poppler、不运行 fuzz。
+
+## v0.10 显式结构编辑
+
+V10-04 专项为 `v010_structure_edit`，新增 22 项。最终联合命令为 `cargo test --locked -j2 -p pdf --test v010_structure_edit --test v010_structure --test v010_structure_associations --test v010_structure_semantics --test v010_marked_text --test v03_marked_content --test v09_page_relationships --test v09_navigation --test v05_security`，退出 0，9 组共 123 项通过，0 failed/ignored/filtered。日志为 `tmp/pdfs/v010-edit-regression-final.log`；`cargo check --workspace --all-targets --locked -j2` 也退出 0，但不是全量测试。
+
+先构建 `edit_structure` 和下方四个读取示例，再用新的目录执行 `PYTHONPATH=tmp/pdfs/v05-verifiers-py311 python3.11 docs/check-v010-structure-edit.py <new-output-directory>`。独立写入及四组旧门禁复验均通过，覆盖引用/属性、来源保留、严格重开及 MuPDF 标记替代文字观察；不作像素/视觉或 PDF/UA 结论。接口见[编辑指南](structure-editing.md)，源码和证据见[验证记录](releases/v0.10-acceptance.md)。阶段 B 全量留到 V10-05 集成后，不以旧阶段 A 的数字冒充本次全量。
+
+## v0.10 阶段 A 的历史验证
+
+阶段 A 专项包含 `v010_structure`、`v010_structure_associations`、`v010_structure_semantics` 和 `v010_marked_text`，兼容回归保留 `v03_marked_content`、`v09_navigation`、`v09_page_relationships`。逻辑提取新增 26 项，当前专项共 92 项；阶段集成完整命令为 `cargo test --workspace --locked -j2`，需等待进程退出，不能将专项数字当作全量结果。
+
+2026-10-16，阶段 A 最终源码完整工作区已退出 0：77 组、1,379 passed、0 failed/ignored/filtered，日志为 `tmp/pdfs/v010-stage-a-workspace.log`；编译 12 分 36 秒，PDF 单元 130.34 秒，render 单元 62.56 秒。长用例提示超过 60 秒后正常通过，未过滤或跳过；411 个 Rust/Cargo/Python 输入在全量前后指纹及文件列表一致。阶段 A 的限定范围已验收，不表示阶段 B/C 或整版完成。
+
+独立脚本为 `docs/check-v010-structure.py`、`check-v010-associations.py`、`check-v010-semantics.py` 和 `check-v010-marked-text.py`，分别使用新的输出目录。先构建对应 `inspect_structure`、`validate_structure_associations`、`inspect_structure_semantics` 和 `extract_marked_text` 示例；使用既有 Python 3.11/pikepdf、qpdf、MuPDF，不安装依赖、Poppler 或运行 fuzz。最后一个门禁对照声明文本及 K 顺序，检查严格改写/来源保留，并观察 MuPDF 标记 ActualText；不等同于像素或 PDF/UA 验证。当前门禁结果和源码指纹见[v0.10 验证记录](releases/v0.10-acceptance.md)。
+
+## v0.9 最终门禁
+
+2026-10-16，最终源码完整工作区 73 组、1,312 passed、0 failed/ignored/filtered；导航、批注、字段层级、类型/Unicode 外观和页面关系五组独立门禁通过。最终 23 页主样本完成视觉或已目视基线的逐像素复核。源码指纹、原始日志、历史中断及精确限制见[v0.9 验收记录](releases/v0.9-acceptance.md)与[支持矩阵](releases/v0.9-support.md)。
+
+完整回归命令：`cargo test --workspace --locked -j2 -- --test-threads=2`。本次编译 3 分 10 秒，PDF 单元 105.37 秒，render 58.60 秒；字体子集历史长用例超过 60 秒后正常结束，不能仅凭提示判断死锁。最终日志为 `tmp/pdfs/v09-release-workspace.log`，已确认进程退出 0，不以启动或局部测试通过替代整版结论。
+
+独立脚本为 `docs/check-v09-navigation.py`、`check-v09-annotations.py`、`check-v09-forms.py`、`check-v09-form-types.py` 和 `check-v09-page-relationships.py`，参数均为新的输出目录。先构建对应 `v09_*` 示例及 `render_annotations`；使用已有 Python 3.11/pikepdf/Pillow、qpdf、MuPDF，不安装 Poppler、不运行 fuzz。页面关系的专项入口为 `cargo test --locked -j2 -p pdf --test v09_page_relationships`，共 14 项；详见[页面关系指南](page-relationships.md)。当前仅声明本地 macOS x86_64 验证，未提交、推送或发布。
+
 ## v0.8 最终门禁
 
 2026-10-15，限定范围完整工作区 68 组、1,251 passed、0 failed/ignored/filtered，八组独立检查和 91 张主样本视觉复核通过。源码指纹、失败迁移记录、阅读器差异及最终证据见 [验收记录](releases/v0.8-acceptance.md)，边界见 [支持矩阵](releases/v0.8-support.md)。

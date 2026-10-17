@@ -1,8 +1,12 @@
 # 版本路线
 
-更新日期：2026-10-15。
+更新日期：2026-10-17。
 
 ## 当前目标
+
+[v0.10 显式结构与可选内容](docs/releases/v0.10.md)的 V10-01～09 已完成限定范围本地验收，不是 v1.0。结构读取/提取、显式编辑、页面关系维护及可选内容模型/绘制/提取均已收口；完整工作区 80 组、1,453 项、206 项联合回归、七组独立门禁及图层像素/目视复核通过。接口与限制见[可选内容指南](docs/optional-content.md)及[迁移指南](docs/structure-transfers.md)，证据见[验收记录](docs/releases/v0.10-acceptance.md)。可进入 v0.11 范围盘点，不自动开工。
+
+v0.9 的 V09-01～11 已完成限定范围本地验收：当时冻结源码完整工作区 73 组、1,312 项、五组独立门禁和 23 页视觉/像素复核通过，见[v0.9 验收记录](docs/releases/v0.9-acceptance.md)。这些历史结果不自动覆盖 v0.10 的新增源码。v0.10 范围、架构边界和验收清单见[计划](docs/releases/v0.10.md)，初始模型见[结构读取指南](docs/structure.md)。v0.9 与本轮新增均尚未提交；不自动推送、打标签或发布。
 
 **v0.1～v0.8 的限定范围已完成本地工程验收，尚未打标签或发布。** 各版验收记录见 [v0.1](docs/releases/v0.1-acceptance.md)、[v0.2](docs/releases/v0.2-acceptance.md)、[v0.3](docs/releases/v0.3-acceptance.md)、[v0.4](docs/releases/v0.4-acceptance.md)、[v0.5](docs/releases/v0.5-acceptance.md)、[v0.6](docs/releases/v0.6-acceptance.md)、[v0.7](docs/releases/v0.7-acceptance.md) 与 [v0.8](docs/releases/v0.8-acceptance.md)。验收只承诺各版冻结的支持矩阵，不表示任意 PDF 均受支持。P0～P5 是长期技术分类，不再按整个阶段全部完成后才交付；[TODO.md](TODO.md) 保留技术任务和历史证据。
 

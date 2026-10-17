@@ -23,11 +23,13 @@ use crate::{
 
 pub mod acroform;
 pub mod annotations;
+pub(crate) mod appearance;
 pub mod attachments;
 pub mod bookmarks;
 pub mod catalog;
 mod content_edit;
 pub mod cross_ref_table;
+pub mod destination;
 pub mod destinations;
 pub mod embedded_font;
 pub mod glyph_run;
@@ -35,14 +37,19 @@ pub mod identity;
 pub mod links;
 pub mod metadata;
 mod nested_edit;
+pub mod outlines;
+pub mod optional_content;
 pub mod owned;
+pub mod page_labels;
 mod span_tree;
 pub mod subset_text_edit;
 mod text_event_edit;
+mod trees;
 pub use owned::Document;
 mod page_copy;
 mod page_geometry;
 mod page_order;
+pub mod page_transfer;
 pub mod page_overlay;
 pub mod page_tree;
 mod resource_import;
@@ -50,6 +57,7 @@ pub mod resource_manager;
 pub mod save_options;
 pub(crate) mod state;
 pub mod store;
+pub mod structure;
 
 use page_tree::PageTreeEntry;
 
@@ -566,6 +574,13 @@ impl<R: Seek + Read> PdfDocument<R> {
             return Err(PdfError::PageNotExist);
         }
 
+        let labels = self.labels_after_page_mapping(
+            (0..pagenum)
+                .map(Some)
+                .chain(std::iter::once(None))
+                .chain((pagenum..page_count).map(Some)),
+        )?;
+
         let insertion = self.page_insertion_point(pagenum)?;
         let new_page_id = self.create_page(insertion.parent_id, builder)?;
         self.update_pages_kids(
@@ -575,48 +590,25 @@ impl<R: Seek + Read> PdfDocument<R> {
             false,
         )?;
         self.adjust_page_counts(&insertion.ancestor_ids, 1)?;
+        if let Some(labels) = labels {
+            self.set_page_label_ranges(&labels)?;
+        }
         Ok(())
     }
 
     pub fn delete_page(&self, pagenum: u32) -> PdfResult<()> {
-        self.ctx().require_assembly_permission()?;
-        self.edit_transaction(|doc| doc.delete_page_inner(pagenum))
+        self.delete_page_with_policy(pagenum, page_transfer::PageDeletionPolicy::RejectReferenced)
     }
 
     fn delete_page_inner(&self, pagenum: u32) -> PdfResult<()> {
+        self.page_location(pagenum)?;
+        let count = u32::try_from(self.try_page_count()?)
+            .map_err(|_| PdfError::ResourceLimit("page count".into()))?;
+        let labels =
+            self.labels_after_page_mapping((0..count).filter(|i| *i != pagenum).map(Some))?;
         let page_count = self.try_page_count()? as u32;
         if pagenum >= page_count {
             return Err(PdfError::PageNotExist);
-        }
-
-        // Removing a referenced page would leave an outline destination dangling.
-        // Reject until page-deletion destination remapping is implemented.
-        let root = self.ctx.get_root_owned()?;
-        let has_named_targets = if let Some(names) = root.get("Names") {
-            self.ctx
-                .resolve(names)?
-                .as_dict()
-                .is_some_and(|dict| dict.get("Dests").is_some())
-        } else {
-            false
-        };
-        if root.get("Outlines").is_some() || root.get("Dests").is_some() || has_named_targets {
-            return Err(PdfError::UnsupportedFeature(
-                "page deletion with document navigation requires destination remapping".into(),
-            ));
-        }
-        for entry in self.collect_page_entries()? {
-            if let Some(annotations) = entry.page_dict.get("Annots") {
-                let annotations = self.ctx.resolve(annotations)?;
-                let annotations = annotations
-                    .as_array()
-                    .ok_or_else(|| PdfError::DocumentError("Annots must be an array".into()))?;
-                if annotations.len() > 0 {
-                    return Err(PdfError::UnsupportedFeature(
-                        "page deletion with annotations requires relationship cleanup".into(),
-                    ));
-                }
-            }
         }
 
         let location = self.page_location(pagenum)?;
@@ -627,7 +619,19 @@ impl<R: Seek + Read> PdfDocument<R> {
             true,
         )?;
         self.adjust_page_counts(&location.ancestor_ids, -1)?;
-        self.delete_object(location.page_id)?;
+        // Detached annotations and field snapshots may still own /P references.
+        // Keep their former page dictionary as unreachable history, without a
+        // page-tree parent. Page removal is unlinking, not secure erasure.
+        if location.page_dict.contains_key("Annots") {
+            let mut detached = location.page_dict;
+            detached.remove("Parent");
+            self.update_object(location.page_id, PdfObject::PdfDict(detached))?;
+        } else {
+            self.delete_object(location.page_id)?;
+        }
+        if let Some(labels) = labels {
+            self.set_page_label_ranges(&labels)?;
+        }
         // Contents and resources can be shared. Unlinking the page does not
         // authorize deleting those objects; explicit graph cleanup handles them.
         Ok(())

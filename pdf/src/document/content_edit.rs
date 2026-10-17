@@ -1242,6 +1242,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         }
         drop(location);
         drop(_location_lease);
+        let structure_before = self.structure_associations()?;
         let retained_current = budget
             .map(|budget| {
                 self.get_page_with_budget(page, budget)?
@@ -1397,6 +1398,14 @@ impl<R: Read + Seek> PdfDocument<R> {
             };
             dict.replace_existing("Contents", result)?;
             doc.update_object(location.page_id, PdfObject::PdfDict(dict))?;
+            if let Some(before) = &structure_before {
+                let after = doc.structure_associations()?.ok_or_else(||
+                    PdfError::DocumentError("content edit removed structure tree".into()))?;
+                if before.items != after.items {
+                    return Err(PdfError::UnsupportedFeature(
+                        "content edit changes declared MCID/MCR/OBJR ownership".into()));
+                }
+            }
             Ok(())
         };
         if let Some(budget) = budget {

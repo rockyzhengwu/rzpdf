@@ -1,4 +1,4 @@
-//! Document-level embedded files through a flat `/EmbeddedFiles` name tree.
+//! Document-level embedded files through a bounded, balanced name tree.
 
 use std::io::{Read, Seek};
 
@@ -6,7 +6,7 @@ use super::PdfDocument;
 use crate::{
     error::{PdfError, PdfResult},
     objects::{
-        PdfObject, object_id::ObjectId, pdf_array::PdfArray, pdf_dict::PdfDict, pdf_name::PdfName,
+        PdfObject, object_id::ObjectId, pdf_dict::PdfDict, pdf_name::PdfName,
         pdf_reference::PdfReference, pdf_stream::PdfStream, pdf_string::PdfString,
     },
 };
@@ -16,6 +16,17 @@ fn reference(id: ObjectId) -> PdfObject {
 }
 
 impl<R: Read + Seek> PdfDocument<R> {
+    /// Address an existing embedded Filespec for FileAttachment annotations.
+    /// Reading a payload never launches or opens the embedded file.
+    pub fn attachment_filespec(&self,name:&str)->PdfResult<Option<super::identity::ObjectHandle>> {
+        for (key,value) in self.attachment_entries()?.2 {
+            if key.text_content_with_limits(&self.ctx().limits())?==name {
+                let id=value.as_reference().map(PdfReference::id).ok_or_else(||PdfError::UnsupportedFeature("direct attachment Filespec has no stable handle".into()))?;
+                return self.object_handle(id).map(Some);
+            }
+        }
+        Ok(None)
+    }
     fn attachment_entries(&self) -> PdfResult<(PdfDict, PdfDict, Vec<(PdfString, PdfObject)>)> {
         let root = self.ctx().get_root_owned()?;
         let names = match root.get("Names") {
@@ -31,52 +42,24 @@ impl<R: Read + Seek> PdfDocument<R> {
             self.ctx().resolve(tree_value)?.into_dict().ok_or_else(|| {
                 PdfError::DocumentError("EmbeddedFiles must be a dictionary".into())
             })?;
-        if tree.get("Kids").is_some() {
-            return Err(PdfError::UnsupportedFeature(
-                "nested EmbeddedFiles name tree".into(),
-            ));
-        }
-        let Some(array_value) = tree.get("Names") else {
-            return Ok((names, tree, Vec::new()));
-        };
-        let array = self
-            .ctx()
-            .resolve(array_value)?
-            .into_array()
-            .ok_or_else(|| {
-                PdfError::DocumentError("EmbeddedFiles Names must be an array".into())
-            })?;
-        if array.len() % 2 != 0 || array.len() > self.ctx().limits().max_objects {
-            return Err(PdfError::ResourceLimit("EmbeddedFiles name entries".into()));
-        }
         let mut entries = Vec::new();
-        let mut previous: Option<Vec<u8>> = None;
         let mut decoded_names = std::collections::HashSet::new();
-        for index in (0..array.len()).step_by(2) {
-            let key = self
-                .ctx()
-                .resolve(array.get(index).unwrap())?
-                .into_string()
-                .ok_or_else(|| {
-                    PdfError::DocumentError("attachment name key must be a string".into())
-                })?;
-            if previous.as_deref().is_some_and(|prev| prev >= key.bytes()) {
-                return Err(PdfError::DocumentError(
-                    "EmbeddedFiles names must be unique and ordered".into(),
-                ));
-            }
+        for (key, value) in self.read_tree(tree_value, super::trees::TreeKind::Name)? {
+            let super::trees::TreeKey::Name(bytes) = key else {
+                unreachable!()
+            };
+            let key = PdfString::new(bytes, false);
             if !decoded_names.insert(key.text_content_with_limits(&self.ctx().limits())?) {
                 return Err(PdfError::DocumentError(
                     "duplicate decoded attachment name".into(),
                 ));
             }
-            previous = Some(key.bytes().to_vec());
-            entries.push((key, array.get(index + 1).unwrap().clone()));
+            entries.push((key, value));
         }
         Ok((names, tree, entries))
     }
 
-    /// List attachment keys. Only flat name trees are currently supported.
+    /// List attachment keys from flat or nested name trees.
     pub fn attachment_names(&self) -> PdfResult<Vec<String>> {
         let (_, _, entries) = self.attachment_entries()?;
         entries
@@ -114,8 +97,8 @@ impl<R: Read + Seek> PdfDocument<R> {
         Ok(None)
     }
 
-    /// Add an attachment with a unique name. Existing nested name trees are
-    /// rejected without mutation. Removal unlinks data; it is not secure erasure.
+    /// Add an attachment with a unique name. The name tree is balanced on write.
+    /// Removal unlinks data; it is not secure erasure.
     pub fn add_attachment(&self, name: &str, data: Vec<u8>) -> PdfResult<()> {
         if self.effective_version()? < super::save_options::PdfVersion::V1_4 {
             return Err(PdfError::UnsupportedFeature(
@@ -201,13 +184,11 @@ impl<R: Read + Seek> PdfDocument<R> {
             return Err(PdfError::ResourceLimit("EmbeddedFiles name entries".into()));
         }
         entries.sort_by(|a, b| a.0.bytes().cmp(b.0.bytes()));
-        let mut array = PdfArray::default();
-        for (key, value) in entries {
-            array.try_add_obj(PdfObject::PdfString(key))?;
-            array.try_add_obj(value)?;
-        }
-        tree.try_insert("Names".into(), PdfObject::PdfArray(array))?;
-        tree.remove("Limits"); // only valid for an ordered parent-indexed tree
+        let entries: Vec<_> = entries
+            .into_iter()
+            .map(|(key, value)| (super::trees::TreeKey::Name(key.bytes().to_vec()), value))
+            .collect();
+        tree = self.build_tree(super::trees::TreeKind::Name, &entries, tree)?;
         let tree_id = self.try_insert_object(PdfObject::PdfDict(tree))?;
         names.try_insert("EmbeddedFiles".into(), reference(tree_id))?;
         let mut root = self.ctx().get_root_owned()?;
@@ -226,7 +207,10 @@ impl<R: Read + Seek> PdfDocument<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::options::{Limits, ParseOptions};
+    use crate::{
+        objects::pdf_array::PdfArray,
+        parser::options::{Limits, ParseOptions},
+    };
 
     #[test]
     fn attachment_roundtrip_and_remove() {
@@ -251,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_attachment_tree_is_rejected_without_write() {
+    fn malformed_mixed_attachment_tree_is_rejected_without_write() {
         let doc = PdfDocument::new().unwrap();
         doc.add_attachment("one.txt", b"one".to_vec()).unwrap();
         let root = doc.ctx().get_root_owned().unwrap();

@@ -86,6 +86,7 @@ impl<R: Read + Seek> Interpreter<'_, R> {
             let mut child =
                 Interpreter::new(self.page, self.ctx, parser).with_resource_scope(scope);
             child.execution_budget = work;
+            child.optional_content = self.optional_content.clone();
             let mut trace = TraceDevice::for_display_list(limits);
             child.run_content(&mut trace)?;
             if !child.diagnostics.is_empty() {
@@ -199,6 +200,7 @@ impl<R: Read + Seek> Interpreter<'_, R> {
                 let mut child = Interpreter::new(self.page, self.ctx, parser)
                     .with_resource_scope(pattern.resources.clone());
                 child.execution_budget = budget.clone();
+                child.optional_content = self.optional_content.clone();
                 child.pattern_depth = self.pattern_depth + 1;
                 child.form_depth = self.form_depth + 1; // Never expose cell paths as page-edit provenance.
                 child.type3_depth = self.type3_depth;

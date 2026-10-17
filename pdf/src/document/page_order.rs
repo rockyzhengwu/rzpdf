@@ -8,9 +8,11 @@ use std::io::{Read, Seek};
 impl<R: Read + Seek> PdfDocument<R> {
     /// Reorder pages by a complete permutation of their current zero-based indices.
     /// Keeps page IDs, tree slots and Counts; materializes inherited attributes
-    /// when a page moves to a different parent. Does not rewrite outlines/labels.
+    /// when a page moves to a different parent. Destinations stay page-bound;
+    /// explicit page labels move with their original pages.
     pub fn reorder_pages(&self, order: &[u32]) -> PdfResult<()> {
         self.ctx().require_assembly_permission()?;
+        self.page_relationship_guard()?;
         let entries = self.collect_page_entries()?;
         if order.len() != entries.len() {
             return Err(PdfError::DocumentError(
@@ -35,6 +37,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         {
             return Ok(());
         }
+        self.ctx().require_content_edit_permission()?;
         let mut replacements = Vec::new();
         replacements
             .try_reserve_exact(entries.len())
@@ -78,6 +81,7 @@ impl<R: Read + Seek> PdfDocument<R> {
             replacements.push((source.page_id, page));
         }
         self.edit_transaction(|doc| {
+            let labels = doc.labels_after_page_mapping(order.iter().copied().map(Some))?;
             for (slot, (id, page)) in replacements.into_iter().enumerate() {
                 let target = &entries[slot];
                 doc.update_pages_kids(
@@ -94,6 +98,10 @@ impl<R: Read + Seek> PdfDocument<R> {
                 )?;
                 doc.update_object(id, PdfObject::PdfDict(page))?;
             }
+            if let Some(labels) = labels {
+                doc.set_page_label_ranges(&labels)?;
+            }
+            doc.structure_associations()?;
             Ok(())
         })
     }

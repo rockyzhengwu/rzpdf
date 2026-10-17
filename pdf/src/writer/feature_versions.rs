@@ -57,7 +57,7 @@ pub(super) fn validate_feature_versions_with_budget<R: Read + Seek>(
     version: PdfVersion,
     budget: Option<&crate::budget::OperationBudget>,
 ) -> PdfResult<()> {
-    if version >= PdfVersion::V1_6 {
+    if version >= PdfVersion::V1_7 {
         return Ok(());
     }
     let doc = &FeatureDocument { doc, budget };
@@ -83,6 +83,42 @@ pub(super) fn validate_feature_versions_with_budget<R: Read + Seek>(
             _ => None,
         };
         if let Some((dict, stream)) = dict {
+            let optional_group = name(doc,dict,"Type","OCG")?;
+            let optional_membership = name(doc,dict,"Type","OCMD")?;
+            if version < PdfVersion::V1_5 && (optional_group || optional_membership || dict.contains_key("OCProperties")
+                || dict.contains_key("OC") && (stream || name(doc,dict,"Type","Annot")?)) {
+                return Err(PdfError::UnsupportedFeature("optional content requires PDF 1.5 or later; select an explicit version upgrade".into()));
+            }
+            if version < PdfVersion::V1_6 && optional_membership && dict.contains_key("VE") {
+                return Err(PdfError::UnsupportedFeature("optional-content VE requires PDF 1.6 or later; select an explicit version upgrade".into()));
+            }
+            if !stream && name(doc, dict, "Type", "Catalog")? && dict.contains_key("AcroForm") && version < PdfVersion::V1_2 {
+                return Err(PdfError::UnsupportedFeature("AcroForm requires PDF 1.2 or later; select an explicit version upgrade".into()));
+            }
+            if !stream && (dict.contains_key("FT") || dict.contains_key("T") && dict.contains_key("Ff")) {
+                let flags = match dict.get("Ff") {
+                    Some(value) => doc.resolve(value)?.as_number().ok_or_else(|| PdfError::DocumentError("field flags integer".into()))?.as_u32_checked()?,
+                    None => 0,
+                };
+                let minimum = if flags & ((1 << 25) | (1 << 26)) != 0 { PdfVersion::V1_5 }
+                    else if flags & ((1 << 20) | (1 << 21) | (1 << 22) | (1 << 23)) != 0
+                        || name(doc, dict, "FT", "Btn")? && dict.contains_key("Opt")
+                        || name(doc, dict, "FT", "Ch")? && dict.contains_key("I") { PdfVersion::V1_4 }
+                    else if name(doc, dict, "FT", "Sig")? { PdfVersion::V1_3 }
+                    else { PdfVersion::V1_2 };
+                if version < minimum { return Err(PdfError::UnsupportedFeature(format!("form field requires PDF {} or later; select an explicit version upgrade", minimum.as_str()))); }
+            }
+            if !stream && (name(doc,dict,"Type","Annot")? || dict.contains_key("Rect") && dict.contains_key("Subtype")) {
+                let flags=match dict.get("F") {
+                    Some(v)=>doc.resolve(v)?.as_number().ok_or_else(||PdfError::DocumentError("annotation flags must be integer".into()))?.as_u32_checked()?,
+                    None=>0,
+                };
+                let minimum=if flags&512!=0 {PdfVersion::V1_7}
+                    else if dict.contains_key("RT") {PdfVersion::V1_6}
+                    else if flags&256!=0 || dict.contains_key("IRT") || name(doc,dict,"Subtype","Polygon")? || name(doc,dict,"Subtype","PolyLine")? {PdfVersion::V1_5}
+                    else if dict.contains_key("CA") {PdfVersion::V1_4}else{PdfVersion::V1_0};
+                if version<minimum {return Err(PdfError::UnsupportedFeature(format!("annotation requires PDF {} or later; select an explicit version upgrade",minimum.as_str())));}
+            }
             if version < PdfVersion::V1_3 {
                 if let Some(value) = dict.get("ColorSpace") {
                     let value = doc.resolve(value)?;

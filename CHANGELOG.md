@@ -2,6 +2,34 @@
 
 本文件只记录交付变化，不替代长期任务池或原始测试日志。版本范围见 [ROADMAP](ROADMAP.md)。
 
+## Unreleased — v0.10 显式结构与可选内容（限定范围已验收）
+
+新增显式只读 `structure_associations()`：按页面/Form 分离 MCID，扫描真实标记及 Properties、Form 调用，校验 MCR/Stm、批注/Widget 及 XObject OBJR、ParentTree 双向所有权/null 槽/键冲突和 NextKey；累计解码、调用、操作和深度有限额。Form 缺省资源按规范回退到页面，跨页歧义拒绝。
+
+新增只读 `structure_tree()` 层级、文档限定句柄/快照、P/K 检查、RoleMap、页面及标题/Lang/Alt/ActualText 元数据；内容和 ParentTree 仍由显式归属接口校验。扩展 PDF 2.0 NS/Namespaces/RoleMapNS 限定端点解析，以及 ClassMap/A/C、本地 owner/key 优先关系与修订模型；PDF 1.x 重复属性返回歧义，未知流返回 Opaque，不猜测布局继承或扩展语义。`StructureElement/StructureTree` 新增模型字段；`mapped_role` 仅保留无 NS 元素的旧式端点，命名空间身份和环状态使用 `resolved_role`。
+
+新增显式 `extract_marked_text()` 和 `extract_text_structure_order()`：支持 Properties、Span/Artifact ActualText、Unicode/空替代、跨操作及嵌套 Form 来源；过滤 Artifact，按声明 K 顺序提取并应用元素 ActualText。替代保留来源但不伪造字形位置，不猜测无标签阅读顺序；跨所有者原子替代及结构 Form 多实例明确拒绝，未关联单位/未提取 OBJR 显式计数。共享工作限额覆盖跨 Form/跨页及被过滤或覆盖的文本。接口及边界见[逻辑提取指南](docs/marked-text.md)。
+
+新增[结构编辑接口](docs/structure-editing.md)：节点创建/元数据与本地属性更新、混合 K 移动、空节点删除或子项提升；同步 P/Pg/ParentTree，保留已有 Form MCR/OBJR 及 NS/C/ClassMap，属性写入使用当前 R。支持 RoleMap 设置/移除、快照绑定的页面操作标记、自动 MCID/StructParents/NextKey 和可选 ActualText；新内容流隔离共享来源，错误和外层 panic 回滚。要求 PDF 1.4+、修改权限及无签名来源；不直接标记 Form 内部、不递归删除正文子树，未知反向扩展明确拒绝。
+
+新增[结构感知的页面迁移](docs/structure-transfers.md)：复制/导入/合并/选页按 K 分支投影，维护页面/Form 域、MCR/OBJR 和 ParentTree；隔离共享资源，删除裁剪分支，重排保留声明顺序，Form Pg 仅在调用页唯一时重绑。正文快照编辑前后校验所有权，无法维护的结构 Form 修改回滚；显式 ActualText 不由字形自动改写。保留角色映射/类/命名空间定义，冲突及捕获双方未映射角色/未定义类时拒绝；图层配置迁移仍明确拒绝，不因阶段 C 的读取能力而放开。
+
+新增[可选内容](docs/optional-content.md)模型和显式图层接口：默认/替代配置、BaseState/ON/OFF、四种 OCMD 策略、有界 VE、显式 View/Print、支持的 AS 状态类别及临时覆盖。BDC、Form/image、批注可见性接入既有绘制/提取；隐藏仍执行状态并消耗预算，不删除源内容、不改操作地址。显示列表和逻辑报告新增可选的 selection 缓存标识；旧接口不静默筛选。未知规则、循环、无法分层的原子替代及未支持的组合明确拒绝，保留页面迁移安全保护。
+
+2026-10-17，V10-01～09 与阶段 A/B/C 在限定范围内全部验收：27 项新增图层测试、14 组 206 项联合回归、七组独立门禁、三配置图层像素/目视对照，以及最终源码完整工作区 80 组、1,453 项全部通过。457 个 Rust/Cargo/Python 输入在回归前后指纹及列表一致，证据见[验收记录](docs/releases/v0.10-acceptance.md)。可盘点 v0.11，不自动开工；不承诺完整 Tagged PDF/PDF-UA。未修改包版本、提交、推送或发布。
+
+## Unreleased — v0.9 文档交互与对象关系（限定范围已验收）
+
+新增[页面关系操作](docs/page-relationships.md)：复制和跨文档导入维护导航、Popup/IRT、AP/资源、层级字段及多 Widget；源标签默认迁移，目录导航显式启用，命名与 DR 冲突不覆盖。删除可显式重定向目标，并解除离页 Widget、空字段及祖先组关系；未知活跃反向引用和未知标签树扩展拒绝并回滚。2026-10-16，V09-01～11 在限定范围内关闭：最终源码完整工作区 73 组、1,312 项及五组独立门禁通过，23 页视觉/像素基线复核通过。新增 14 项页面关系用例。边界见[支持矩阵](docs/releases/v0.9-support.md)，源码指纹和最终证据见[验收记录](docs/releases/v0.9-acceptance.md)。未修改包版本、提交、推送、标签或发布。
+
+阶段 C 新增统一字段定义与详情接口、自定义 Checkbox 状态/Unicode 导出标签、Radio NoToggleToOff/InUnison/明确 Widget 选择、Choice Combo/List 和导出/显示/I 索引维护、无永久值 PushButton 与 caption。字段文字复用嵌入字体、DA/DR、ToUnicode 与宽度，支持中文显式单/多行和左/中/右对齐，保存重开可继续填值；外观、缺字/溢出、限额、权限及签名保护共用管线。修复真实 Base14 Type1 Differences 缺省基础编码和全局 Q 默认值；保留 Ff 继承并避免浮点丢失标志低位。`FormValue` 新增变体，穷尽匹配需要迁移。该阶段完整工作区 72 组、1,298 项通过，四组独立门禁及视觉复核通过，历史检查点保留在验收记录中。边界见[表单指南](docs/forms.md)。
+
+字段关系里程碑新增层级 AcroForm 树、继承检查和文档限定句柄；支持完整路径新增、部分名称改名、字段子树移除、合并 Widget 拆分、多页呈现增删与同步填值。未知字段可检查，动作/锁定/所有权/碰撞明确拒绝并回滚；旧 `form_fields()` 的页号表示第一个 Widget。该里程碑的 9 项新增测试、四页独立门禁和完整工作区 71 组、1,286 项通过，历史证据保留在阶段记录。
+
+阶段 B 新增 15 类限定批注模型与稳定 CRUD、Popup/回复关系及显式级联移除；Square 和现有 AcroForm 复用自包含 AP 构建。增加可选批注/Widget 渲染、Screen/Print、AS/BBox/Matrix、NoRotate/NoZoom、整体透明度与 Highlight Multiply，正文提取与编辑来源保持隔离。FreeText 外观仅为 ASCII Courier、显式换行/对齐。该阶段完整工作区 70 组、1,277 项、独立批注/导航门禁及六页视觉检查通过。MuPDF 特殊 NoRotate 组合差异单独保留。限制和接口见 [批注指南](docs/annotations.md)，证据见 [阶段记录](docs/releases/v0.9-acceptance.md)。
+
+导航阶段新增共用 Destination/View，保留坐标与 null；层级书签、稳定句柄 CRUD、命名目标改名与引用维护、GoTo/URI 链接、共用平衡 NameTree/NumberTree、嵌套附件树，以及随页面维护的 PageLabels。该阶段定向 122 项文档模块测试、19 项集成测试和 qpdf/pikepdf/MuPDF 门禁通过；整版结论以上方最终记录为准。接口及限制见[导航指南](docs/navigation.md)，全部任务及收口范围见[v0.9 计划](docs/releases/v0.9.md)。`LinkTarget` 新增带浮点视图的 Destination 变体，不再实现 Eq。
+
 ## Unreleased — v0.8 图形颜色与透明度（限定范围已验收）
 
 新增实验性平铺及 Shading Pattern 解释、资源注册/导入和显示快照；Skia 路径、文字和 stencil 绘制可使用图案来源。图案保留局部资源和默认坐标系，支持正负步距、单元裁剪及非着色基空间色值；Pattern Background 与直接 sh 的规则分开。加入累计工作/显示载荷和离屏表面限制、模型/像素测试及独立互操作脚本。

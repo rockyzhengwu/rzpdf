@@ -1,4 +1,5 @@
 use std::io::{Read, Seek};
+mod marked_text;
 mod pattern;
 mod soft_mask;
 mod text_clip;
@@ -46,6 +47,11 @@ pub struct Interpreter<'a, R: Seek + Read> {
     path_start: Point,
     in_text_object: bool,
     marked_content_depth: usize,
+    optional_content: Option<crate::document::optional_content::OptionalContentVisibility>,
+    optional_visible: bool,
+    optional_stack: Vec<bool>,
+    semantic_capture: Option<std::rc::Rc<std::cell::RefCell<super::marked_text::Capture>>>,
+    semantic_mark_context: Vec<(bool, usize)>,
     text_chars: usize,
     path_segments: usize,
     operation_index: usize,
@@ -770,6 +776,11 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             path_start: Point::default(),
             in_text_object: false,
             marked_content_depth: 0,
+            optional_content: None,
+            optional_visible: true,
+            optional_stack: Vec::new(),
+            semantic_capture: None,
+            semantic_mark_context: Vec::new(),
             text_chars: 0,
             path_segments: 0,
             operation_index: 0,
@@ -797,7 +808,8 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                 self.operation_index = operations;
                 self.operation_byte_offset = op.byte_offset();
                 operations += 1;
-                self.invoke_oeration(op, device)?;
+                let visible = self.optional_visible;
+                self.invoke_oeration(op, &mut crate::device::visibility::VisibilityDevice { device, visible })?;
             } else {
                 break;
             }
@@ -825,6 +837,36 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
     pub fn with_resource_scope(mut self, scope: crate::objects::pdf_dict::PdfDict) -> Self {
         self.resource_scope = Some(scope);
         self
+    }
+
+    pub(crate) fn with_execution_budget(mut self, budget:super::execution_budget::ExecutionBudget)->Self {
+        self.execution_budget=budget;
+        self
+    }
+
+    pub fn with_optional_content(mut self, visibility: &crate::document::optional_content::OptionalContentVisibility) -> PdfResult<Self> {
+        visibility.validate(self.ctx)?;
+        self.optional_content = Some(visibility.clone());
+        Ok(self)
+    }
+
+    fn begin_optional_mark(&mut self, op: &Operator) -> PdfResult<()> {
+        if self.optional_content.is_none() { return Ok(()); }
+        if op.num_operands() != if op.name() == "BDC" { 2 } else { 1 } {
+            return Err(PdfError::PageOperatorError("optional content BMC/BDC operands".into()));
+        }
+        if self.optional_stack.len() >= self.ctx.limits().max_depth {
+            return Err(PdfError::ResourceLimit("optional content marked nesting".into()));
+        }
+        let mut visible = true;
+        if op.name() == "BDC" && op.get_as_name(0)?.name() == "OC" {
+            let name = op.get_as_name(1)?.name();
+            let value = self.resource_entry("Properties",name)?;
+            visible = self.optional_content.as_ref().unwrap().visible(self.ctx,&value)?;
+        }
+        self.optional_stack.push(self.optional_visible);
+        self.optional_visible &= visible;
+        Ok(())
     }
 
     fn named_resource(&self, category: &str, name: &str) -> PdfResult<PdfObject> {
@@ -865,6 +907,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
         let mut device = TraceDevice::for_display_list(self.ctx.limits());
         self.run_unfiltered(&mut device)?;
         let mut list = device.into_display_list();
+        if let Some(visibility) = &self.optional_content { list.set_optional_content_selection(visibility.selection().clone()); }
         list.set_provenance(self.page.source_provenance());
         list.set_diagnostics(self.diagnostics.clone());
         Ok(list)
@@ -1012,7 +1055,16 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
         // println!("{:?}", op);
         match op.name() {
             "q" => self.save_sate()?,
-            "Q" => self.restore_state()?,
+            "Q" => {
+                if self.semantic_mark_context.last()
+                    .is_some_and(|(_, depth)| *depth >= self.state_stack.len())
+                {
+                    return Err(PdfError::PageOperatorError(
+                        "Q crosses a marked-content boundary".into(),
+                    ));
+                }
+                self.restore_state()?;
+            }
             "cm" => self.concat_matrix(op)?,
             "w" => self.handle_linewidth(op)?,
             "J" => self.handle_linecap(op)?,
@@ -1099,6 +1151,11 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             "\"" => self.handle_show_text_nextline_space(op, device)?,
             "TJ" => self.handle_show_text_array(op, device)?,
             "ET" => {
+                if self.semantic_mark_context.last().is_some_and(|(inside, _)| *inside) {
+                    return Err(PdfError::PageOperatorError(
+                        "ET crosses a marked-content boundary".into(),
+                    ));
+                }
                 if !self.in_text_object {
                     return Err(PdfError::PageOperatorError("ET without matching BT".into()));
                 }
@@ -1108,8 +1165,13 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
 
             // These delimiters do not alter painting. MCID-only BDC is safe
             // for visual/text interpretation; richer properties such as
-            // ActualText and optional-content visibility remain diagnostic.
+            // ActualText stays diagnostic in the default path. Only explicit
+            // marked-text capture interprets the supported richer properties.
             "BMC" => {
+                self.begin_optional_mark(&op)?;
+                if self.semantic_capture.is_some() {
+                    self.capture_mark(&op)?;
+                }
                 op.get_as_name(0)?;
                 self.marked_content_depth = self
                     .marked_content_depth
@@ -1119,12 +1181,16 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             }
             "BDC" => {
                 op.get_as_name(0)?;
+                self.begin_optional_mark(&op)?;
                 let mcid_only = op.operand(1)?.as_dict().is_some_and(|dict| {
                     dict.into_iter().count() == 1
                         && dict.get("MCID").and_then(PdfObject::as_u32).is_some()
                 });
-                if !mcid_only {
-                    self.unsupported_operator(&op)?;
+                if self.semantic_capture.is_some() {
+                    self.capture_mark(&op)?;
+                } else if !mcid_only {
+                    if self.optional_content.is_some() { self.validate_selected_properties(&op)?; }
+                    else { self.unsupported_operator(&op)?; }
                 }
                 self.marked_content_depth = self
                     .marked_content_depth
@@ -1133,10 +1199,19 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                     .ok_or_else(|| PdfError::ResourceLimit("marked content depth".into()))?;
             }
             "EMC" => {
+                if (self.semantic_capture.is_some() || self.optional_content.is_some()) && op.num_operands() != 0 {
+                    return Err(PdfError::PageOperatorError("EMC operands".into()));
+                }
                 self.marked_content_depth =
                     self.marked_content_depth.checked_sub(1).ok_or_else(|| {
                         PdfError::PageOperatorError("EMC without matching BMC".into())
                     })?;
+                if self.semantic_capture.is_some() {
+                    self.capture_mark(&op)?;
+                }
+                if self.optional_content.is_some() {
+                    self.optional_visible = self.optional_stack.pop().ok_or_else(|| PdfError::PageOperatorError("optional content unmatched EMC".into()))?;
+                }
             }
 
             _ => {
@@ -1450,6 +1525,9 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
     }
 
     fn emit_text_object(&mut self, mut text: TextObject, device: &mut dyn Device) -> PdfResult<()> {
+        if let Some(capture) = self.semantic_capture.clone() {
+            capture.borrow_mut().text(&text, self.semantic_location()?, self.optional_visible)?;
+        }
         if let Some(Font::Type3(font)) = &text.state.text_state.font {
             if text.state.text_state.text_rendering_mode
                 != super::text_state::TextRenderingMode::Fill
@@ -1498,6 +1576,8 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                     )),
                 );
                 child.type3_depth = self.type3_depth + 1;
+                child.optional_content = self.optional_content.clone();
+                child.optional_visible = self.optional_visible;
                 child.form_depth = self.form_depth;
                 child.type3_uncoloured = program.metrics().bbox.is_some();
                 child.pattern_depth = self.pattern_depth;
@@ -1542,7 +1622,8 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                     child.execution_budget.operation(&limits)?;
                     child.operation_index = index;
                     child.operation_byte_offset = operation.operator.byte_offset();
-                    child.invoke_oeration(operation.operator.clone(), device)?;
+                    let visible = child.optional_visible;
+                    child.invoke_oeration(operation.operator.clone(), &mut crate::device::visibility::VisibilityDevice { device, visible })?;
                 }
                 // Empty parser: applies the normal balanced q/Q/BT/marked-content checks.
                 child.run_content(device)?;
@@ -2669,7 +2750,28 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
 
     fn handle_do(&mut self, op: Operator, device: &mut dyn Device) -> PdfResult<()> {
         let name = op.get_as_name(0)?.name();
-        let xobject = self.named_resource("XObject", name)?;
+        let object = self.named_resource("XObject",name)?;
+        let previous = self.optional_visible;
+        if let Some(value) = object.as_stream().and_then(|s| s.dict().get("OC")) {
+            if let Some(visibility) = self.optional_content.as_ref() {
+                self.optional_visible &= visibility.visible(self.ctx,value)?;
+            }
+        }
+        let visible = self.optional_visible;
+        let result = self.handle_do_inner(op, object, &mut crate::device::visibility::VisibilityDevice { device, visible });
+        self.optional_visible = previous;
+        result
+    }
+
+    fn handle_do_inner(&mut self, op: Operator, xobject: PdfObject, device: &mut dyn Device) -> PdfResult<()> {
+        let name = op.get_as_name(0)?.name();
+        if self.semantic_capture.is_some() && self.optional_content.is_none()
+            && xobject.as_stream().is_some_and(|stream| stream.dict().contains_key("OC"))
+        {
+            return Err(PdfError::UnsupportedFeature(
+                "marked extraction XObject optional content visibility".into(),
+            ));
+        }
         if xobject.as_stream().is_none() {
             return Err(PdfError::PageResourceError(
                 "XObject must be a stream".into(),
@@ -2781,6 +2883,9 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                 let mut child =
                     Interpreter::new(self.page, self.ctx, parser).with_resource_scope(scope);
                 child.execution_budget = budget;
+                child.semantic_capture = self.semantic_capture.clone();
+                child.optional_content = self.optional_content.clone();
+                child.optional_visible = self.optional_visible;
                 child.form_depth = depth;
                 child.type3_depth = self.type3_depth;
                 child.type3_uncoloured = self.type3_uncoloured;

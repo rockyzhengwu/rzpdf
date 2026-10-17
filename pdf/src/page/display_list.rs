@@ -6,11 +6,14 @@ use crate::{
 
 #[derive(Debug, Clone, Default)]
 pub struct DisplayList {
+    optional_content_selection: Option<crate::document::optional_content::OptionalContentSelection>,
     provenance: Option<super::source_provenance::PageSourceProvenance>,
     page_width: f32,
     page_height: f32,
     objects: Vec<PageObject>,
     diagnostics: Vec<crate::page::diagnostic::ContentDiagnostic>,
+    retained_payload_bytes: usize,
+    retained_path_segments: usize,
 }
 
 #[cfg(test)]
@@ -291,6 +294,23 @@ mod tests {
 }
 
 impl DisplayList {
+    /// Source stamps alone do not distinguish two configurations of one PDF.
+    pub fn optional_content_selection(&self) -> Option<&crate::document::optional_content::OptionalContentSelection> {
+        self.optional_content_selection.as_ref()
+    }
+    pub(crate) fn set_optional_content_selection(&mut self, selection: crate::document::optional_content::OptionalContentSelection) {
+        self.optional_content_selection = Some(selection);
+    }
+    pub(crate) fn clear_edit_provenance(&mut self) {
+        self.provenance=None;
+        for object in &mut self.objects {
+            match object {
+                PageObject::Image(v)=>v.clear_edit_source(),PageObject::Text(v)=>v.clear_edit_source(),
+                PageObject::Path(v)=>v.clear_edit_source(),PageObject::Shading(v)=>v.clear_edit_source(),
+                _=>{},
+            }
+        }
+    }
     /// Allocation-free image geometry candidates, last-painted first. Non-image
     /// occlusion and clip/mask/alpha visibility are not evaluated. Check collection
     /// provenance before using returned images' source indices for editing.
@@ -331,16 +351,22 @@ impl DisplayList {
     pub fn new(page_width: f32, page_height: f32, objects: Vec<PageObject>) -> Self {
         Self {
             provenance: None,
+            optional_content_selection: None,
             page_width,
             page_height,
             objects,
             diagnostics: Vec::new(),
+            retained_payload_bytes:0,
+            retained_path_segments:0,
         }
     }
 
     pub fn page_width(&self) -> f32 {
         self.page_width
     }
+
+    pub(crate) fn collection_usage(&self)->(usize,usize) {(self.retained_payload_bytes,self.retained_path_segments)}
+    pub(crate) fn set_collection_usage(&mut self,bytes:usize,segments:usize) {self.retained_payload_bytes=bytes;self.retained_path_segments=segments;}
 
     pub fn page_height(&self) -> f32 {
         self.page_height

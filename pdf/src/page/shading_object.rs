@@ -21,6 +21,7 @@ pub struct ShadingObject {
 }
 
 impl ShadingObject {
+    pub(crate) fn clear_edit_source(&mut self) {self.source=None;self.nested_source=None;}
     pub fn new(
         resource_name: String,
         matrix: Matrix,

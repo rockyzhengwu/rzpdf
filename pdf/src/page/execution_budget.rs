@@ -11,6 +11,9 @@ struct Work {
     decoded_bytes: Cell<usize>,
     path_segments: Cell<usize>,
     text_chars: Cell<usize>,
+    semantic_chars: Cell<usize>,
+    semantic_bytes: Cell<usize>,
+    semantic_entries: Cell<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +75,31 @@ impl ExecutionBudget {
         limits
             .max_text_chars
             .saturating_sub(self.work.text_chars.get())
+    }
+
+    pub fn semantic_chars(&self, count: usize, limits: &Limits) -> PdfResult<()> {
+        Self::charge(
+            &self.work.semantic_chars,
+            count,
+            limits.max_text_chars,
+            "marked text cumulative Unicode characters",
+        )
+    }
+    pub fn semantic_bytes(&self, bytes: usize, limits: &Limits) -> PdfResult<()> {
+        Self::charge(
+            &self.work.semantic_bytes,
+            bytes,
+            limits.max_decoded_bytes,
+            "marked text cumulative retained work bytes",
+        )
+    }
+    pub fn semantic_entries(&self, count: usize, limits: &Limits) -> PdfResult<()> {
+        Self::charge(
+            &self.work.semantic_entries,
+            count,
+            limits.max_objects,
+            "marked text cumulative entries",
+        )
     }
 
     /// Repeated invocations are charged separately; not a live-memory counter.

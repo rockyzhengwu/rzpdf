@@ -18,6 +18,9 @@ use std::{fs::File, io::Write};
 #[cfg(test)]
 #[path = "group_tests.rs"]
 mod group_tests;
+#[cfg(test)]
+#[path = "annotation_tests.rs"]
+mod annotation_tests;
 #[path = "knockout.rs"]
 mod knockout;
 #[cfg(test)]

@@ -38,6 +38,23 @@ mod safety_tests {
     use std::collections::HashMap;
 
     #[test]
+    fn base14_differences_without_base_keep_builtin_codes_and_overrides() {
+        let document = crate::document::PdfDocument::new().unwrap();
+        let mut font = PdfDict::default();
+        font.try_insert("Subtype".into(), PdfObject::PdfName(crate::objects::pdf_name::PdfName::new("Type1".into()))).unwrap();
+        font.try_insert("BaseFont".into(), PdfObject::PdfName(crate::objects::pdf_name::PdfName::new("Helvetica".into()))).unwrap();
+        let mut encoding = PdfDict::default();
+        encoding.try_insert("Differences".into(), PdfObject::PdfArray(crate::objects::pdf_array::PdfArray::from_items(vec![
+            PdfObject::PdfNumber(crate::objects::pdf_number::PdfNumber::new(65.)),
+            PdfObject::PdfName(crate::objects::pdf_name::PdfName::new("B".into())),
+        ]))).unwrap();
+        font.try_insert("Encoding".into(), PdfObject::PdfDict(encoding)).unwrap();
+        let font = SimpleFont::try_new(&font, document.ctx()).unwrap();
+        assert_eq!(font.encode_text_with_limits("B C", Default::default()).unwrap(), [65,32,67]);
+        assert!(font.encode_text_with_limits("A", Default::default()).is_err());
+    }
+
+    #[test]
     fn encoding_loading_budget_resolves_indirect_entries_and_retains_result() {
         use crate::{
             budget::OperationBudget,
@@ -1037,8 +1054,11 @@ impl SimpleFont {
                 }
             }
         }
-        if self.encoding.is_none() {
-            // TODO load encoding from font program, implement type1 font parser
+        if !self.descriptor.is_embed() && matches!(self.subtype, SimpleSubType::Type1) {
+            if let (Some(encoding), Some(builtin)) = (&mut self.encoding, find_builtin_font(self.base_font.as_str()).filter(|name| *name == self.base_font.as_str())) {
+                let base = match builtin { "Symbol" => "Symbol", "ZapfDingbats" => "ZapfDingbats", _ => "StandardEncoding" };
+                encoding.default_base(base)?;
+            }
         }
 
         // TODO set default encoding

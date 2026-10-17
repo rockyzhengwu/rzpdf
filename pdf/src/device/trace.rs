@@ -433,7 +433,9 @@ impl TraceDevice {
     }
 
     pub fn into_display_list(self) -> DisplayList {
-        DisplayList::new(self.page_width, self.page_height, self.objects)
+        let mut list=DisplayList::new(self.page_width, self.page_height, self.objects);
+        list.set_collection_usage(self.retained_payload_bytes,self.retained_path_segments);
+        list
     }
 
     pub fn pathname(&self, path: &PathObject) -> &str {

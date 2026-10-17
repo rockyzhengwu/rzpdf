@@ -3,7 +3,7 @@ use crate::{document::identity::DocumentStamp, objects::object_id::ObjectId};
 
 /// One Form call site in its parent's decoded stream, outermost first.
 /// Object IDs are document-local; this is not a persistent edit handle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FormInvocation {
     pub form_id: Option<ObjectId>,
     pub operation_index: usize,

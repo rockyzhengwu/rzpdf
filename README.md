@@ -92,7 +92,7 @@ The creation, merge, and page-selection examples replace an existing regular out
 
 rzpdf is still in early development and APIs may change. Engineering checks cover documented workflows and fixed input matrices, not universal PDF compatibility. No version has been formally released; validate the library against your own documents before production use.
 
-Document interactions cover flat bookmarks and named destinations, page and URI links, Square annotations, attachments, and basic text/checkbox AcroForm fields. The [interaction support matrix](docs/releases/v0.4-support.md) lists exact limits; these are not general annotation or forms APIs.
+Document interactions include [hierarchical navigation](docs/navigation.md), [common annotations](docs/annotations.md), attachments, and [AcroForm fields](docs/forms.md). Forms support multiple widgets, text, checkboxes, radio buttons, choices, and pushbuttons, with explicit embedded-font Unicode appearances. [Page relationship operations](docs/page-relationships.md) preserve supported navigation, annotations and fields with explicit conflict and deletion policies. Actions are preserved, not executed; the topic guides define supported editing and transfer limits.
 
 The [advanced saving APIs](docs/advanced-saving.md) provide bounded incremental saves, AES-256 R6 protection, and external detached CMS approval signing. These are separate workflows: encrypted incremental saves, encrypted signing and multi-signature updates are unsupported. Signing does not establish certificate trust; see the [v0.5 support matrix](docs/releases/v0.5-support.md).
 
@@ -106,7 +106,7 @@ For input limits, supported fonts and images, and verified platforms, see the [v
 
 ## Documentation and development
 
-- Guides: [text extraction](docs/text-extraction.md) · [glyph runs](docs/glyph-runs.md) · [Type3 fonts](docs/type3-fonts.md) · [image extraction](docs/image-extraction.md) · [image codecs](docs/image-codecs.md) · [content editing](docs/content-editing.md) · [advanced saving](docs/advanced-saving.md)
+- Guides: [text extraction](docs/text-extraction.md) · [glyph runs](docs/glyph-runs.md) · [Type3 fonts](docs/type3-fonts.md) · [image extraction](docs/image-extraction.md) · [image codecs](docs/image-codecs.md) · [content editing](docs/content-editing.md) · [advanced saving](docs/advanced-saving.md) · [navigation](docs/navigation.md) · [annotations](docs/annotations.md) · [forms](docs/forms.md)
 - Design: [architecture](docs/architecture.md) · [cache and lifecycle](docs/cache-lifecycle.md)
 - Releases: [roadmap](ROADMAP.md) · [interaction scope](docs/releases/v0.4.md) · [advanced saving scope](docs/releases/v0.5-support.md) · [changelog](CHANGELOG.md)
 - Development and verification: [tasks and implementation history](TODO.md) · [testing](docs/testing.md) · [v0.1 acceptance](docs/releases/v0.1-acceptance.md) · [v0.2 acceptance](docs/releases/v0.2-acceptance.md) · [v0.3 acceptance](docs/releases/v0.3-acceptance.md) · [v0.4 acceptance](docs/releases/v0.4-acceptance.md) · [v0.5 acceptance](docs/releases/v0.5-acceptance.md) · [v0.6 acceptance](docs/releases/v0.6-acceptance.md)

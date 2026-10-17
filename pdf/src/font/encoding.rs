@@ -149,6 +149,15 @@ impl Encoding {
         self.base_encoding.as_ref()
     }
 
+    /// An encoding Differences dictionary may omit BaseEncoding. The font
+    /// loader supplies its actual built-in base, never a guessed Unicode map.
+    pub(crate) fn default_base(&mut self, name: &str) -> PdfResult<()> {
+        if self.base_encoding.is_none() {
+            self.base_encoding = Self::new_from_name(name)?.base_encoding;
+        }
+        Ok(())
+    }
+
     pub fn try_new(enc: &PdfDict) -> PdfResult<Self> {
         Self::try_new_inner(enc, None).map(|(encoding, _)| encoding)
     }

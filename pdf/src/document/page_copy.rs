@@ -11,34 +11,36 @@ use std::io::{Read, Seek};
 impl<R: Read + Seek> PdfDocument<R> {
     /// Copy a page within this document, sharing content and resource objects.
     /// Both indices refer to the pre-insertion order; insertion accepts page_count.
-    /// Returns the new page ID. Annotation/tag/article ownership is not copied.
+    /// Returns the new page ID. Supported annotations are cloned; fields must
+    /// have unique names (use copy_page_with_options for a prefix). Supported
+    /// structure branches migrate with isolated ownership; article graphs reject.
     /// Low-level mutation of shared streams/resources affects both pages; use
     /// page-scoped replacement/resource APIs for copy-on-write editing.
     pub fn copy_page(&self, source_index: u32, insertion_index: u32) -> PdfResult<ObjectId> {
+        self.copy_page_with_options(source_index, insertion_index, &Default::default())
+    }
+
+    pub fn copy_page_with_options(
+        &self,
+        source_index: u32,
+        insertion_index: u32,
+        options: &super::page_transfer::PageTransferOptions,
+    ) -> PdfResult<ObjectId> {
         self.ctx().require_assembly_permission()?;
+        self.ctx().require_content_edit_permission()?;
         let source = self.page_location(source_index)?;
         if insertion_index as usize > self.try_page_count()? {
             return Err(PdfError::PageNotExist);
         }
-        for key in ["StructParents", "B"] {
+        for key in ["B"] {
             if source.page_dict.contains_key(key) {
                 return Err(PdfError::UnsupportedFeature(format!(
                     "Page copy with {key} ownership"
                 )));
             }
         }
-        if let Some(annotations) = source.page_dict.get("Annots") {
-            let value = self.ctx.resolve_owned(annotations)?;
-            match value {
-                PdfObject::PdfNull => {}
-                PdfObject::PdfArray(ref array) if array.len() == 0 => {}
-                _ => {
-                    return Err(PdfError::UnsupportedFeature(
-                        "Page copy with annotations".into(),
-                    ));
-                }
-            }
-        }
+        self.page_relationship_guard()?;
+        let structure_plan=self.plan_structure_transfer(self,&std::collections::HashSet::from([source.page_id]))?;
         let insertion = self.page_insertion_point(insertion_index)?;
         let mut page = source.page_dict;
         let node = PdfObject::PdfReference(PdfReference::from_id(source.page_id));
@@ -65,10 +67,47 @@ impl<R: Read + Seek> PdfDocument<R> {
             "Parent".into(),
             PdfObject::PdfReference(PdfReference::from_id(insertion.parent_id)),
         )?;
-        // Empty Annots may itself be a shared indirect array; omit it in the copy.
+        let annotations = page.get("Annots").cloned();
         page.remove("Annots");
         self.edit_transaction(|doc| {
+            let count = u32::try_from(doc.try_page_count()?)
+                .map_err(|_| PdfError::ResourceLimit("page count".into()))?;
+            let labels = doc.labels_after_page_mapping(
+                (0..insertion_index)
+                    .map(Some)
+                    .chain(std::iter::once(if options.preserve_labels {
+                        Some(source_index)
+                    } else {
+                        None
+                    }))
+                    .chain((insertion_index..count).map(Some)),
+            )?;
             let id = doc.try_insert_object(PdfObject::PdfDict(page))?;
+            let mut importer = super::resource_import::Importer::new(doc, doc);
+            importer.mapped.insert(source.page_id, id);
+            structure_plan.prepare(&mut importer);
+            let (roots, resources) = doc.prepare_page_relationships(
+                &mut importer,
+                &std::collections::HashSet::from([source.page_id]),
+                options,
+            )?;
+            if importer.isolate_structure {
+                let mut page = doc.resolve_object(id)?.into_dict().unwrap();
+                let parent = page.remove("Parent");
+                page.remove("Type");
+                let mut page = importer.object(PdfObject::PdfDict(page), 0)?.into_dict().unwrap();
+                page.try_insert("Type".into(), PdfObject::PdfName(crate::objects::pdf_name::PdfName::new("Page".into())))?;
+                if let Some(parent) = parent { page.try_insert("Parent".into(), parent)?; }
+                doc.update_object(id, PdfObject::PdfDict(page))?;
+            }
+            if let Some(annotations) = annotations {
+                // Resolve the array itself, so a shared indirect Annots container
+                // is not reused by a same-document copy.
+                let annotations = importer.object(doc.ctx().resolve(&annotations)?, 0)?;
+                let mut page = doc.resolve_object(id)?.into_dict().unwrap();
+                page.try_insert("Annots".into(), annotations)?;
+                doc.update_object(id, PdfObject::PdfDict(page))?;
+            }
             doc.update_pages_kids(
                 insertion.parent_id,
                 insertion.kid_index,
@@ -76,6 +115,13 @@ impl<R: Read + Seek> PdfDocument<R> {
                 false,
             )?;
             doc.adjust_page_counts(&insertion.ancestor_ids, 1)?;
+            doc.attach_page_fields(roots, resources)?;
+            doc.transfer_navigation(&mut importer, options)?;
+            doc.validate_annotation_ownership()?;
+            doc.apply_structure_transfer(&mut importer,structure_plan)?;
+            if let Some(labels) = labels {
+                doc.set_page_label_ranges(&labels)?;
+            }
             Ok(id)
         })
     }
