@@ -180,7 +180,9 @@ fn aes256_r6_roundtrip_reads_passwords_strings_streams_attachments_and_metadata(
                 .len(),
             1
         );
-        assert!(reopened.save_incremental_to_bytes().is_err());
+        // v0.11 preserves authenticated R6 protection for append-only saves.
+        // A no-op must retain the exact original ciphertext, not re-encrypt it.
+        assert_eq!(reopened.save_incremental_to_bytes().unwrap(), output);
     }
 }
 

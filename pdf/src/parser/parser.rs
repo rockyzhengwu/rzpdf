@@ -78,7 +78,8 @@ fn load_xref_chain<R: Seek + Read>(
         } else {
             result = Some(revision);
         }
-        if result.as_ref().unwrap().objects().len() > syntax.limits().max_objects {
+        if result.as_ref().unwrap().objects().len()
+            .saturating_add(result.as_ref().unwrap().historical_objects().len()) > syntax.limits().max_objects {
             return Err(PdfError::ResourceLimit("xref object count".into()));
         }
     }
@@ -292,7 +293,7 @@ pub fn parse_xref_stream<R: Seek + Read>(
     Ok(cross_ref_table)
 }
 
-fn parse_xref_section<R: Seek + Read>(
+pub(crate) fn parse_xref_section<R: Seek + Read>(
     syntax: &mut SyntaxParser<R>,
     pos: u64,
 ) -> PdfResult<Option<CrossRefTable>> {
@@ -582,6 +583,17 @@ impl<R: Seek + Read> PdfParser<R> {
             )));
         }
         Ok((indirect.to_obj(), lease))
+    }
+
+    pub(crate) fn indirect_object_end_with_budget(
+        &mut self, offset: u64, expected: crate::objects::object_id::ObjectId,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<u64> {
+        let (object, lease) = self.parse_indirect_obj_checked_with_budget(offset, expected, budget)?;
+        let end = self.syntax.position();
+        drop(object);
+        drop(lease);
+        Ok(end)
     }
 }
 

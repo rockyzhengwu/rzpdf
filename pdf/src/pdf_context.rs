@@ -1155,7 +1155,33 @@ impl<R: Seek + Read> PDFContext<R> {
             *value
         } else {
             let mut signed = false;
+            let mut inspected_members = 0usize;
+            // A later xref may replace or free a signature object. Inspect its
+            // original source version without publishing it to the current
+            // object cache or resolving it through the mutable overlay.
+            for info in self.source_xref().historical_objects() {
+                let (object, _lease) = self.parser.as_ref()
+                    .ok_or_else(|| PdfError::InvalidReference("historical source parser".into()))?
+                    .borrow_mut()
+                    .parse_indirect_obj_checked_with_budget(info.offset(), info.object_id(), budget)?;
+                if crate::signatures::has_signature(&object, self.limits, 0)? {
+                    signed = true;
+                    break;
+                }
+                if object.as_stream().is_some_and(|stream| stream.dict().get("Type")
+                    .and_then(PdfObject::as_name).is_some_and(|n| n.name() == "ObjStm")) {
+                    let decrypted = self.security.as_ref().map(|handler|
+                        self.with_source_resolution(|| handler.transform(self, &object, false, budget)))
+                        .transpose()?;
+                    let inspected = decrypted.as_ref().map_or(&object, |(value, _)| value);
+                    if self.signature_policy_stream(inspected, budget, &mut inspected_members)? {
+                        signed = true;
+                        break;
+                    }
+                }
+            }
             for info in self.source_xref().objects().values() {
+                if signed { break; }
                 if matches!(info.state(), ObjectState::Free)
                     || Some(info.object_id()) == self.encryption_dictionary_id
                 {
@@ -1163,7 +1189,8 @@ impl<R: Seek + Read> PDFContext<R> {
                 }
                 let (object, _lease) =
                     self.source_object_for_policy_with_budget(info.object_id(), budget)?;
-                if crate::signatures::has_signature(&object, self.limits, 0)? {
+                if crate::signatures::has_signature(&object, self.limits, 0)?
+                    || self.signature_policy_stream(&object, budget, &mut inspected_members)? {
                     signed = true;
                     break;
                 }
@@ -1177,6 +1204,30 @@ impl<R: Seek + Read> PDFContext<R> {
             ));
         }
         Ok(())
+    }
+
+    // Inspect all members, including ones hidden by later free/replacement
+    // entries. Do not populate the current object cache from historical data.
+    fn signature_policy_stream(&self, object: &PdfObject,
+        budget: &crate::budget::OperationBudget, inspected: &mut usize) -> PdfResult<bool> {
+        let Some(stream) = object.as_stream().filter(|s| s.dict().get("Type")
+            .and_then(PdfObject::as_name).is_some_and(|n| n.name() == "ObjStm")) else { return Ok(false); };
+        let data = self.with_source_resolution(|| stream.decode_data_with_budget(self, budget))?;
+        let mut parser = ObjectStreams::try_new_with_budget(stream.dict(), data, self.options(), budget)?;
+        let objects = parser.parse_objects()?;
+        *inspected = inspected.checked_add(objects.objects.len())
+            .filter(|n| *n <= self.limits.max_objects)
+            .ok_or_else(|| PdfError::ResourceLimit("signature policy object-stream members".into()))?;
+        for (_, object) in &objects.objects {
+            if crate::signatures::has_signature(object, self.limits, 0)? { return Ok(true); }
+        }
+        Ok(false)
+    }
+
+    pub(crate) fn source_object_end_with_budget(&self, offset: u64, id: ObjectId,
+        budget: &crate::budget::OperationBudget) -> PdfResult<u64> {
+        self.parser.as_ref().ok_or_else(|| PdfError::InvalidReference("signature source parser".into()))?
+            .borrow_mut().indirect_object_end_with_budget(offset, id, budget)
     }
 
     // Policy validation is not materialization. In particular, replacing a

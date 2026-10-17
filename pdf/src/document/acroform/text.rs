@@ -25,7 +25,7 @@ pub(super) struct TextContext {
 }
 
 #[derive(Default)]
-pub(super) struct AppearanceWork {
+pub(crate) struct AppearanceWork {
     characters: usize,
     operations: usize,
     bytes: usize,
@@ -259,6 +259,18 @@ impl<R: Read + Seek> PdfDocument<R> {
         budget: &crate::budget::OperationBudget,
         work: &mut AppearanceWork,
     ) -> PdfResult<PdfDict> {
+        let (object, _payload_lease) = self.field_text_appearance_object(context, width, height, lines, multiline, budget, work)?;
+        let id = self.try_insert_object(PdfObject::PdfStream(object))?;
+        let mut ap = PdfDict::default();
+        ap.try_insert("N".into(), reference(id))?;
+        Ok(ap)
+    }
+
+    fn field_text_appearance_object(
+        &self, context: &TextContext, width: f32, height: f32,
+        lines: &[(String, bool)], multiline: bool,
+        budget: &crate::budget::OperationBudget, work: &mut AppearanceWork,
+    ) -> PdfResult<(crate::objects::pdf_stream::PdfStream, crate::budget::MemoryLease)> {
         let limits = self.ctx().limits();
         work.operations = work
             .operations
@@ -401,9 +413,39 @@ impl<R: Read + Seek> PdfDocument<R> {
         fonts.try_insert(context.resource.clone(), context.font_object.clone())?;
         let mut resources = PdfDict::default();
         resources.try_insert("Font".into(), PdfObject::PdfDict(fonts))?;
-        let id = self.normal_appearance(width, height, resources, content, 1., "Normal")?;
-        let mut ap = PdfDict::default();
-        ap.try_insert("N".into(), reference(id))?;
-        Ok(ap)
+        let mut dict = PdfDict::default();
+        dict.try_insert("Type".into(), name("XObject"))?;
+        dict.try_insert("Subtype".into(), name("Form"))?;
+        dict.try_insert("BBox".into(), crate::document::appearance::nums(&[0., 0., width, height])?)?;
+        dict.try_insert("Matrix".into(), crate::document::appearance::nums(&[1., 0., 0., 1., 0., 0.])?)?;
+        dict.try_insert("Resources".into(), PdfObject::PdfDict(resources))?;
+        Ok((crate::objects::pdf_stream::PdfStream::from_decoded_data(dict, content)?, content_lease))
+    }
+
+    pub(crate) fn signature_text_appearance(
+        &self, text: &str, style: &FormTextStyle, width: f32, height: f32,
+        budget: &crate::budget::OperationBudget,
+        work: &mut AppearanceWork,
+    ) -> PdfResult<(crate::objects::pdf_stream::PdfStream, crate::budget::MemoryLease)> {
+        let limits = self.ctx().limits();
+        if text.len() > limits.max_decoded_bytes || text.chars().count() > limits.max_text_chars {
+            return Err(PdfError::ResourceLimit("signature appearance text".into()));
+        }
+        let count = text.split('\n').count();
+        if count.saturating_mul(8).saturating_add(24) > limits.max_content_operations {
+            return Err(PdfError::ResourceLimit("signature appearance lines".into()));
+        }
+        let _lines_lease = budget.reserve(text.len().checked_add(count.saturating_mul(std::mem::size_of::<(String,bool)>()))
+            .ok_or_else(|| PdfError::ResourceLimit("signature line construction".into()))?)?;
+        let mut form = PdfDict::default();
+        let mut dict = PdfDict::default();
+        self.install_form_style(&mut form, &mut dict, style)?;
+        let node = FieldNode { id: ObjectId::new(0, 0), effective: dict.clone(), dict,
+            parent: None, children: Vec::new(), widgets: Vec::new(), partial: None, name: String::new() };
+        let context = self.form_text_context(&form, &node, budget)?;
+        let mut lines = Vec::new();
+        lines.try_reserve_exact(count).map_err(|_| PdfError::ResourceLimit("signature line allocation".into()))?;
+        for line in text.split('\n') { lines.push((line.to_owned(),false)); }
+        self.field_text_appearance_object(&context, width, height, &lines, true, budget, work)
     }
 }

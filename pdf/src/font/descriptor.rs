@@ -294,6 +294,10 @@ impl Descriptor {
     pub fn flags(&self) -> Option<&u32> {
         self.flags.as_ref()
     }
+
+    pub(crate) fn missing_width(&self) -> f32 {
+        self.missing_width
+    }
     pub fn is_symbolic(&self) -> bool {
         if let Some(flag) = self.flags {
             (flag & 4) != 0

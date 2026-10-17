@@ -1,9 +1,34 @@
 use crate::error::PdfResult;
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, Clone)]
 pub struct PdfString {
     bytes: Vec<u8>,
     is_hex: bool,
+}
+
+// Literal and hexadecimal syntax encode the same PDF byte-string value.
+// Serialization provenance must not manufacture an object or security-identity
+// change when a writer chooses the other legal spelling.
+impl PartialEq for PdfString {
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes == other.bytes
+    }
+}
+
+#[cfg(test)]
+mod equality_tests {
+    use super::PdfString;
+    #[test]
+    fn byte_string_equality_ignores_literal_vs_hex_spelling_not_payload() {
+        assert_eq!(
+            PdfString::new(vec![0, 255, 40], true),
+            PdfString::new(vec![0, 255, 40], false)
+        );
+        assert_ne!(
+            PdfString::new(vec![0, 255], true),
+            PdfString::new(vec![0, 254], true)
+        );
+    }
 }
 
 impl PdfString {

@@ -1,8 +1,22 @@
-//! Single invisible approval signatures on strict, immutable, unencrypted input.
+//! Historical verification, bounded approval signing and controlled signed
+//! updates on strict, immutable, unencrypted input.
 //! The external backend signs the concatenation of `signed_ranges()` as detached
 //! CMS, NOT the PDF digest as a raw RSA operation. Completion verifies SHA-256
-//! signed attributes and RSA PKCS#1 v1.5 (2048..8192 bits), not certificate trust,
-//! expiry, revocation, timestamps, DocMDP or PAdES conformance.
+//! signed attributes and bounded RSA PKCS#1/PSS or P-256 ECDSA, not certificate trust,
+//! expiry, revocation, timestamps or PAdES conformance. Signed revision plans
+//! separately enforce the supported DocMDP/FieldMDP and object-change profile.
+mod history;
+mod algorithms;
+pub(crate) mod append;
+mod fields;
+mod policy;
+mod changes;
+mod controlled;
+pub use fields::{SignatureAppearance, SignatureFieldOptions};
+pub use policy::{DocMdpPermission, FieldLockAction, FieldLockRule, SignatureConstraints};
+pub use changes::{ModificationKind, ModificationAuthorization, RevisionModification};
+pub use controlled::PreparedSignedUpdate;
+pub use history::{SignatureField, SignatureObjectState};
 use crate::{
     budget::{BudgetedBytes, OperationBudget},
     document::{
@@ -25,6 +39,10 @@ use std::{
 
 fn invalid(message: &str) -> PdfError {
     PdfError::UnsupportedFeature(format!("signature: {message}"))
+}
+
+fn malformed(message: &str) -> PdfError {
+    PdfError::MalformedSignature(message.into())
 }
 
 pub(crate) fn has_signature(object: &PdfObject, limits: Limits, depth: usize) -> PdfResult<bool> {
@@ -86,6 +104,8 @@ pub struct PreparedSignature {
     digest: [u8; 32],
     stamp: DocumentStamp,
     completed: Cell<bool>,
+    append_proof: Option<append::AppendProof>,
+    field_proof: Option<fields::FieldProof>,
 }
 impl std::fmt::Debug for PreparedSignature {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -120,6 +140,11 @@ impl PreparedSignature {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignatureVerification {
     NotPerformed,
+    /// Digest and CMS signature match. Does NOT establish certificate trust.
+    Valid,
+    Invalid,
+    Malformed,
+    Unsupported,
 }
 /// Source-byte structural information only. This is NOT a validity or trust
 /// verdict and excludes uncommitted edits in the document overlay.
@@ -130,6 +155,11 @@ pub struct SignatureReport {
     pub signed_revision_bytes: u64,
     pub covers_current_document: bool,
     pub verification: SignatureVerification,
+    /// Zero-based revision index, oldest first, in the actual Prev chain.
+    pub signed_revision: usize,
+    pub signed_revision_xref: u64,
+    pub field: Option<SignatureField>,
+    pub source_object_state: SignatureObjectState,
 }
 
 fn name(value: &str) -> PdfObject {
@@ -429,6 +459,8 @@ impl Document {
             digest: digest.finalize().into(),
             stamp: self.stamp(),
             completed: Cell::new(false),
+            append_proof: None,
+            field_proof: None,
         })
     }
 
@@ -458,7 +490,7 @@ impl Document {
         {
             return Err(invalid("CMS exceeds reservation or 64 KiB limit"));
         }
-        validate_cms(cms, &prepared.digest, budget)?;
+        validate_cms(cms, &prepared.digest, budget, true)?;
         let output = BudgetedBytes::copy_from_slice(budget, prepared.bytes.as_slice())?;
         let (mut bytes, lease) = output.into_reserved_parts();
         const HEX: &[u8] = b"0123456789ABCDEF";
@@ -467,81 +499,33 @@ impl Document {
             bytes[prepared.contents.start + 2 + index * 2] = HEX[(byte & 15) as usize];
         }
         let output = BudgetedBytes::from_reserved_vec(bytes, lease)?;
+        if let Some(proof) = &prepared.append_proof {
+            proof.validate_output(self, output.as_slice(), true, budget)?;
+        }
+        if let Some(proof) = &prepared.field_proof {
+            proof.validate_output(self, output.as_slice(), true, budget)?;
+        }
         prepared.completed.set(true);
         Ok(output)
     }
 
     pub fn signature_reports(&self) -> PdfResult<Vec<SignatureReport>> {
-        let Some(bytes) = self.signature_source()? else {
-            return Ok(Vec::new());
-        };
         let budget = self.ctx().limits().operation_budget();
-        let mut reports = Vec::new();
-        for info in self.ctx().source_xref().objects().values() {
-            if matches!(info.state(), ObjectState::Free) {
-                continue;
-            }
-            let (object, _lease) = self
-                .ctx()
-                .resolve_source_owned_with_budget(info.object_id(), &budget)?;
-            let Some(dict) = object.as_dict().filter(|d| d.contains_key("ByteRange")) else {
-                continue;
-            };
-            if reports.len() >= 16 {
-                return Err(PdfError::ResourceLimit("signature report count".into()));
-            }
-            if dict
-                .get("Contents")
-                .and_then(PdfObject::as_string)
-                .is_none()
-            {
-                return Err(invalid("Contents must be a direct string"));
-            }
-            let array = dict
-                .get("ByteRange")
-                .and_then(PdfObject::as_array)
-                .filter(|a| a.len() == 4)
-                .ok_or_else(|| invalid("ByteRange must contain four direct integers"))?;
-            let mut range = [0u64; 4];
-            for (i, value) in array.into_iter().enumerate() {
-                range[i] = value
-                    .as_number()
-                    .ok_or_else(|| invalid("ByteRange integer required"))?
-                    .as_u64_checked()?;
-            }
-            let end = range[2]
-                .checked_add(range[3])
-                .ok_or_else(|| invalid("ByteRange overflow"))?;
-            if range[0] != 0 || range[1] >= range[2] || end > bytes.len() as u64 {
-                return Err(invalid("overlapping or out-of-bounds ByteRange"));
-            }
-            let locations = signature_locations(bytes, info.object_id(), self.ctx().limits())?;
-            if range[1] != locations.contents.start as u64
-                || range[2] != locations.contents.end as u64
-            {
-                return Err(invalid(
-                    "ByteRange exclusion is not exactly this signature Contents",
-                ));
-            }
-            if !bytes[..end as usize].trim_ascii_end().ends_with(b"%%EOF") {
-                return Err(invalid("signed revision does not end at EOF"));
-            }
-            let mut revision_parser = SyntaxParser::with_options(
-                StreamReader::try_new(Cursor::new(&bytes[..end as usize]))?,
-                self.ctx().options(),
-            );
-            revision_parser.read_header()?;
-            crate::parser::parser::parse_xref_with_offset(&mut revision_parser)?;
-            reports.push(SignatureReport {
-                object_id: info.object_id(),
-                byte_range: range,
-                signed_revision_bytes: end,
-                covers_current_document: end == bytes.len() as u64,
-                verification: SignatureVerification::NotPerformed,
-            });
-        }
-        reports.sort_by_key(|report| report.object_id.obj_num());
-        Ok(reports)
+        self.signature_reports_with_budget(&budget)
+    }
+
+    pub fn signature_reports_with_budget(&self, budget: &OperationBudget) -> PdfResult<Vec<SignatureReport>> {
+        history::reports(self, budget, false)
+    }
+
+    /// Offline CMS verification of immutable source revisions, not trust,
+    /// revocation, timestamps or authorization of subsequent modifications.
+    pub fn verify_signatures(&self) -> PdfResult<Vec<SignatureReport>> {
+        self.verify_signatures_with_budget(&self.ctx().limits().operation_budget())
+    }
+
+    pub fn verify_signatures_with_budget(&self, budget: &OperationBudget) -> PdfResult<Vec<SignatureReport>> {
+        history::reports(self, budget, true)
     }
 }
 
@@ -556,6 +540,12 @@ fn signature_locations(
     bytes: &[u8],
     id: ObjectId,
     limits: Limits,
+) -> PdfResult<SignatureLocations> {
+    signature_locations_with_budget(bytes, id, limits, &limits.operation_budget())
+}
+
+fn signature_locations_with_budget(
+    bytes: &[u8], id: ObjectId, limits: Limits, budget: &OperationBudget,
 ) -> PdfResult<SignatureLocations> {
     let mut parser = SyntaxParser::with_options(
         StreamReader::try_new(Cursor::new(bytes))?,
@@ -590,7 +580,7 @@ fn signature_locations(
             .into_name()
             .ok_or_else(|| invalid("signature dictionary key"))?;
         let start = skip_space(bytes, parser.position() as usize)?;
-        let _value = parser.get_content_object_with_budget(&limits.operation_budget())?;
+        let _value = parser.get_content_object_with_budget(budget)?;
         let end = parser.position() as usize;
         let slot = match key.name() {
             "Contents" => Some(&mut contents),
@@ -693,7 +683,7 @@ mod tests {
     }
 }
 
-fn validate_cms(bytes: &[u8], digest: &[u8; 32], budget: &OperationBudget) -> PdfResult<()> {
+fn validate_cms(bytes: &[u8], digest: &[u8; 32], budget: &OperationBudget, extended: bool) -> PdfResult<()> {
     use cms::{
         cert::CertificateChoices,
         content_info::ContentInfo,
@@ -714,14 +704,14 @@ fn validate_cms(bytes: &[u8], digest: &[u8; 32], budget: &OperationBudget) -> Pd
     let data_oid = oid("1.2.840.113549.1.7.1");
     let sha256 = oid("2.16.840.1.101.3.4.2.1");
     let rsa = oid("1.2.840.113549.1.1.1");
-    let content = ContentInfo::from_der(bytes).map_err(|_| invalid("malformed DER CMS"))?;
+    let content = ContentInfo::from_der(bytes).map_err(|_| malformed("malformed DER CMS"))?;
     if content.content_type != oid("1.2.840.113549.1.7.2") {
         return Err(invalid("CMS SignedData required"));
     }
     let signed: SignedData = content
         .content
         .decode_as()
-        .map_err(|_| invalid("malformed SignedData"))?;
+        .map_err(|_| malformed("malformed SignedData"))?;
     if signed.encap_content_info.econtent_type != data_oid
         || signed.encap_content_info.econtent.is_some()
         || signed.signer_infos.0.len() != 1
@@ -734,11 +724,10 @@ fn validate_cms(bytes: &[u8], digest: &[u8; 32], budget: &OperationBudget) -> Pd
     let signer = signed.signer_infos.0.get(0).unwrap();
     if signer.digest_alg.oid != sha256
         || !valid_algorithm_parameters(&signer.digest_alg.parameters)
-        || ![rsa, oid("1.2.840.113549.1.1.11")].contains(&signer.signature_algorithm.oid)
-        || !valid_algorithm_parameters(&signer.signature_algorithm.parameters)
     {
         return Err(invalid("unsupported signature algorithm"));
     }
+    let scheme = algorithms::scheme(signer, extended)?;
     let attrs = signer
         .signed_attrs
         .as_ref()
@@ -749,16 +738,16 @@ fn validate_cms(bytes: &[u8], digest: &[u8; 32], budget: &OperationBudget) -> Pd
     for attr in attrs.iter() {
         if attr.oid == oid("1.2.840.113549.1.9.4") {
             if found_digest || attr.values.len() != 1 {
-                return Err(invalid("duplicate messageDigest"));
+                return Err(malformed("duplicate messageDigest"));
             }
             let value: OctetString = attr
                 .values
                 .get(0)
                 .unwrap()
                 .decode_as()
-                .map_err(|_| invalid("messageDigest encoding"))?;
+                .map_err(|_| malformed("messageDigest encoding"))?;
             if value.as_bytes() != digest {
-                return Err(invalid("CMS digest does not match prepared PDF"));
+                return Err(PdfError::SignatureMismatch("CMS messageDigest".into()));
             }
             found_digest = true;
         } else if attr.oid == oid("1.2.840.113549.1.9.3") {
@@ -769,16 +758,16 @@ fn validate_cms(bytes: &[u8], digest: &[u8; 32], budget: &OperationBudget) -> Pd
                     .get(0)
                     .unwrap()
                     .decode_as::<ObjectIdentifier>()
-                    .map_err(|_| invalid("contentType encoding"))?
+                    .map_err(|_| malformed("contentType encoding"))?
                     != data_oid
             {
-                return Err(invalid("CMS contentType"));
+                return Err(malformed("CMS contentType"));
             }
             found_type = true;
         }
     }
     if !found_digest || !found_type {
-        return Err(invalid("required signed attributes absent"));
+        return Err(malformed("required signed attributes absent"));
     }
     let SignerIdentifier::IssuerAndSerialNumber(sid) = &signer.sid else {
         return Err(invalid("issuer/serial signer identifier required"));
@@ -795,30 +784,46 @@ fn validate_cms(bytes: &[u8], digest: &[u8; 32], budget: &OperationBudget) -> Pd
                 && cert.tbs_certificate.serial_number == sid.serial_number
             {
                 if certificate.replace(cert).is_some() {
-                    return Err(invalid("ambiguous signing certificate"));
+                    return Err(malformed("ambiguous signing certificate"));
                 }
             }
         }
     }
     let key = &certificate
-        .ok_or_else(|| invalid("signing certificate missing"))?
+        .ok_or_else(|| malformed("signing certificate missing"))?
         .tbs_certificate
         .subject_public_key_info;
-    if key.algorithm.oid != rsa || !valid_algorithm_parameters(&key.algorithm.parameters) {
-        return Err(invalid("RSA certificate required"));
+    match scheme {
+        algorithms::Scheme::Rsa | algorithms::Scheme::Pss => {
+            if key.algorithm.oid != rsa || !valid_algorithm_parameters(&key.algorithm.parameters) {
+                return Err(invalid("unrestricted RSA certificate required"));
+            }
+        }
+        algorithms::Scheme::Ec => {
+            if key.algorithm.oid != oid("1.2.840.10045.2.1")
+                || key.algorithm.parameters.as_ref().and_then(|p| p.decode_as::<ObjectIdentifier>().ok())
+                    != Some(oid("1.2.840.10045.3.1.7")) {
+                return Err(invalid("named P-256 certificate required"));
+            }
+        }
     }
     let key_bytes = key
         .subject_public_key
         .as_bytes()
-        .ok_or_else(|| invalid("invalid RSA public key bits"))?;
+        .ok_or_else(|| malformed("invalid RSA public key bits"))?;
+    if matches!(scheme, algorithms::Scheme::Rsa | algorithms::Scheme::Pss) {
+        algorithms::rsa_key_profile(key_bytes)?;
+    }
     let attributes = attrs
         .to_der()
-        .map_err(|_| invalid("signed attribute encoding"))?;
-    ring::signature::UnparsedPublicKey::new(
-        &ring::signature::RSA_PKCS1_2048_8192_SHA256,
-        key_bytes,
-    )
+        .map_err(|_| malformed("signed attribute encoding"))?;
+    let algorithm: &dyn ring::signature::VerificationAlgorithm = match scheme {
+        algorithms::Scheme::Rsa => &ring::signature::RSA_PKCS1_2048_8192_SHA256,
+        algorithms::Scheme::Pss => &ring::signature::RSA_PSS_2048_8192_SHA256,
+        algorithms::Scheme::Ec => &ring::signature::ECDSA_P256_SHA256_ASN1,
+    };
+    ring::signature::UnparsedPublicKey::new(algorithm, key_bytes)
     .verify(&attributes, signer.signature.as_bytes())
-    .map_err(|_| invalid("CMS cryptographic signature mismatch"))?;
+    .map_err(|_| PdfError::SignatureMismatch("CMS cryptographic signature".into()))?;
     Ok(())
 }

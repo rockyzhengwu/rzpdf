@@ -5,7 +5,7 @@ use crate::{
     parser::options::Limits,
 };
 
-fn ids(
+pub(super) fn ids(
     original: &PdfDict,
     budget: &OperationBudget,
     limits: Limits,

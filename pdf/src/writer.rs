@@ -4,7 +4,7 @@ use std::path::Path;
 mod feature_versions;
 mod incremental;
 mod protection;
-pub(crate) use incremental::{write_incremental, write_signature_incremental};
+pub(crate) use incremental::{write_incremental, write_signature_incremental, write_signed_revision_incremental};
 
 use crate::document::PdfDocument;
 use crate::error::{PdfError, PdfResult};

@@ -7,7 +7,9 @@ mod text;
 mod types;
 mod write;
 mod transfer;
+mod signature;
 pub use graph::{FormFieldNode, FormWidget};
+pub(crate) use text::AppearanceWork;
 pub use model::{
     ChoiceOption, FormFieldDefinition, FormFieldDetails, FormFieldKind, FormTextStyle,
     FormWidgetSpec,

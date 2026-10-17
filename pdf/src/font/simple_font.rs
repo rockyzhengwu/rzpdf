@@ -379,6 +379,43 @@ mod safety_tests {
     }
 
     #[test]
+    fn partial_widths_use_descriptor_missing_width_without_replacing_explicit_zero() {
+        let ctx = PDFContext::<Cursor<Vec<u8>>>::new_without_source(
+            PdfDict::default(),
+            Default::default(),
+        );
+        for subtype in ["Type1", "TrueType"] {
+            let text = format!(
+                "<< /Type /Font /Subtype /{subtype} /BaseFont /Courier \
+                 /Encoding /WinAnsiEncoding /FirstChar 32 /LastChar 33 /Widths [500 0] \
+                 /FontDescriptor << /Type /FontDescriptor /FontName /Courier \
+                 /Flags 33 /FontBBox [0 -200 600 800] /ItalicAngle 0 \
+                 /Ascent 800 /Descent -200 /CapHeight 600 /StemV 80 /MissingWidth 600 >> >>"
+            );
+            let dict = SyntaxParser::new(
+                StreamReader::try_new(Cursor::new(text.into_bytes())).unwrap(),
+            )
+            .get_object()
+            .unwrap()
+            .into_dict()
+            .unwrap();
+            let ordinary = SimpleFont::try_new(&dict, &ctx).unwrap();
+            let pool = crate::budget::OperationBudget::new(16 * 1024 * 1024);
+            let (budgeted, lease) = SimpleFont::try_new_with_budget(&dict, &ctx, &pool).unwrap();
+            for font in [&ordinary, &budgeted] {
+                assert_eq!(font.char_width(32).unwrap(), 500.0);
+                assert_eq!(font.char_width(33).unwrap(), 0.0);
+                for code in [0, 31, 34, b'A', b'T', 255] {
+                    assert_eq!(font.char_width(code).unwrap(), 600.0);
+                }
+            }
+            drop(budgeted);
+            drop(lease);
+            assert_eq!(pool.live_bytes(), 0);
+        }
+    }
+
+    #[test]
     fn width_arrays_and_unicode_are_checked() {
         let parser = PdfParser::new(SyntaxParser::new(
             StreamReader::try_new(Cursor::new(Vec::<u8>::new())).unwrap(),
@@ -422,6 +459,7 @@ mod safety_tests {
         font.load_width(&dict("<< /Widths [500 600] >>"), &ctx)
             .unwrap();
         assert_eq!(font.char_width(255).unwrap(), 600.0);
+        assert_eq!(font.char_width(65).unwrap(), 0.0);
         font.to_unicode = Some(Cmap::default());
         assert_eq!(
             font.unicode_mapping(&CharCode::new(1, 1, 0.0)).unwrap(),
@@ -951,7 +989,10 @@ impl SimpleFont {
                     "Widths length does not match FirstChar/LastChar".to_string(),
                 ));
             }
-            let mut widths = [0.0; 256];
+            // Codes outside FirstChar..=LastChar use MissingWidth (default 0),
+            // not an explicit zero advance. Producers may provide only space's
+            // width for a fixed-pitch signature appearance such as Courier.
+            let mut widths = [self.descriptor.missing_width(); 256];
             for (i, v) in wsa.into_iter().enumerate() {
                 let index = i + first as usize;
                 let (number, _number_lease) = resolve(v)?;

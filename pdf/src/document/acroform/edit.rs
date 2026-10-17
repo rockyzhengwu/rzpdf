@@ -81,7 +81,7 @@ impl<R: Read + Seek> PdfDocument<R> {
 
     /// Structural edits do not rewrite scripts, calculation order or actions
     /// that can name fields. Reject those graphs before publishing anything.
-    fn form_reference_guard(&self, graph: &FieldGraph) -> PdfResult<()> {
+    pub(super) fn form_reference_guard(&self, graph: &FieldGraph) -> PdfResult<()> {
         if graph.form.get("CO").is_some() {
             return Err(PdfError::UnsupportedFeature(
                 "form edit with calculation order".into(),

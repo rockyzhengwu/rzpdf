@@ -1,4 +1,5 @@
 //! Explicit append-only serialization. Original bytes are never rewritten.
+mod security;
 use super::*;
 use crate::{
     budget::{BudgetedBytes, MemoryLease, OperationBudget},
@@ -144,14 +145,20 @@ fn trailer(
     original: &PdfDict,
     size: u32,
     prev: u64,
+    renew_id: bool,
     limits: Limits,
     budget: &OperationBudget,
 ) -> PdfResult<(PdfDict, MemoryLease)> {
     let mut builder = BudgetedDictBuilder::new(budget, limits.max_objects)?;
     for (key, value) in current {
-        if retained_trailer_key(key) && key != "Size" {
+        if retained_trailer_key(key) && key != "Size" && !(renew_id && key == "ID") {
             insert_value(&mut builder, key, value, limits, budget)?;
         }
+    }
+    if renew_id {
+        let (value, value_lease) = super::protection::ids(original, budget, limits)?;
+        let (key, key_lease) = crate::budget::copy_string("ID", budget)?;
+        builder.insert(key, value, key_lease, value_lease)?;
     }
     // Explicit null prevents readers inheriting removed optional entries from
     // previous trailers (e.g. removed Info). Old bytes still remain recoverable.
@@ -173,7 +180,7 @@ pub(crate) fn write_incremental<R: std::io::Read + std::io::Seek>(
     options: IncrementalSaveOptions,
     budget: &OperationBudget,
 ) -> PdfResult<BudgetedBytes> {
-    write_incremental_inner(document, source, prev, original, options, budget, false)
+    write_incremental_inner(document, source, prev, original, options, budget, false, None)
 }
 
 // Private capability: only signature preparation uses this on an isolated
@@ -186,7 +193,14 @@ pub(crate) fn write_signature_incremental<R: std::io::Read + std::io::Seek>(
     options: IncrementalSaveOptions,
     budget: &OperationBudget,
 ) -> PdfResult<BudgetedBytes> {
-    write_incremental_inner(document, source, prev, original, options, budget, true)
+    write_incremental_inner(document, source, prev, original, options, budget, true, None)
+}
+
+pub(crate) fn write_signed_revision_incremental<R: std::io::Read + std::io::Seek>(
+    document: &PdfDocument<R>, source: &[u8], prev: u64, original: &PdfDict,
+    plan: &crate::signatures::append::SignedRevisionPlan, budget: &OperationBudget,
+) -> PdfResult<BudgetedBytes> {
+    write_incremental_inner(document, source, prev, original, Default::default(), budget, true, Some(plan))
 }
 
 fn write_incremental_inner<R: std::io::Read + std::io::Seek>(
@@ -197,6 +211,7 @@ fn write_incremental_inner<R: std::io::Read + std::io::Seek>(
     options: IncrementalSaveOptions,
     budget: &OperationBudget,
     allow_signature: bool,
+    approval: Option<&crate::signatures::append::SignedRevisionPlan>,
 ) -> PdfResult<BudgetedBytes> {
     let limit = options.max_output_bytes;
     if source.len() > limit
@@ -208,13 +223,11 @@ fn write_incremental_inner<R: std::io::Read + std::io::Seek>(
             "incremental source/output bytes".into(),
         ));
     }
-    for dict in [original, &*document.ctx().trailer()] {
-        if dict
-            .get("Encrypt")
-            .is_some_and(|obj| !matches!(obj, PdfObject::PdfNull))
-        {
-            return Err(unsupported("incremental save of encrypted input"));
-        }
+    if allow_signature && document.ctx().source_security().is_some() {
+        return Err(unsupported("encrypted/signature combination"));
+    }
+    if !allow_signature {
+        document.ctx().require_unsigned_source_with_budget(budget)?;
     }
     let effective = document.effective_version_with_budget(budget)?;
     let original_root = original
@@ -226,8 +239,13 @@ fn write_incremental_inner<R: std::io::Read + std::io::Seek>(
     let limits = document.ctx().limits();
     // Leases precede owned values so data is dropped before its accounting.
     let (_changes_lease, mut changes) = {
-        let (snapshot, lease) = document.ctx().save_changes_with_budget(budget)?;
-        (lease, snapshot.into_entries())
+        if let Some(plan) = approval {
+            let (entries, lease) = plan.changes_with_budget(document, source, original, budget)?;
+            (lease, entries)
+        } else {
+            let (snapshot, lease) = document.ctx().save_changes_with_budget(budget)?;
+            (lease, snapshot.into_entries())
+        }
     };
     changes.sort_unstable_by_key(|(id, _)| (id.obj_num(), id.gen_num()));
     let (_trailer_lease, current) = {
@@ -235,11 +253,16 @@ fn write_incremental_inner<R: std::io::Read + std::io::Seek>(
             crate::objects::clone_dict_with_budget(&document.ctx().trailer(), budget, limits, 0)?;
         (lease, dict)
     };
+    security::validate(document, original, &current, &changes, budget)?;
     let (_ids_lease, ids) = {
         let (ids, lease) = document.ctx().object_ids_with_budget(true, budget)?;
         (lease, ids)
     };
     for id in &ids {
+        // The authenticated Encrypt dictionary has a /Perms byte string, not
+        // the Catalog's signature permissions dictionary. Its identity and
+        // unchanged contents were already validated by security::validate.
+        if Some(*id) == document.ctx().encryption_dictionary_id() { continue; }
         // Examine the original even if the caller deleted/overwrote a Sig or
         // Linearized object. Editing the overlay cannot bypass source checks.
         if document
@@ -254,7 +277,7 @@ fn write_incremental_inner<R: std::io::Read + std::io::Seek>(
                     .resolve_source_owned_with_budget(*id, budget)?;
                 (lease, object)
             };
-            inspect(&object, &changes, false, limits, 1, &mut 0, false)?;
+            inspect(&object, &changes, false, limits, 1, &mut 0, approval.is_some())?;
             if structural_stream_type(&object).is_some() && entry(&changes, *id).is_some() {
                 return Err(unsupported(
                     "incremental edits to structural xref/object-stream containers",
@@ -290,9 +313,14 @@ fn write_incremental_inner<R: std::io::Read + std::io::Seek>(
             }
         }
         let mut _lease = None;
-        if let Some(object) = document
-            .ctx()
-            .object_for_write_with_budget(*id, budget)?
+        let selected = if approval.is_some() {
+            match entry(&changes, *id) {
+                Some(StoreEntry::Upsert(object)) => Some(crate::objects::clone_object_with_budget(object, budget, limits, 0)?),
+                Some(StoreEntry::Deleted) => return Err(unsupported("approval plan may not delete objects")),
+                None => document.ctx().object_for_write_with_budget(*id, budget)?,
+            }
+        } else { document.ctx().object_for_write_with_budget(*id, budget)? };
+        if let Some(object) = selected
             .map(|(object, lease)| {
                 _lease = Some(lease);
                 object
@@ -316,7 +344,16 @@ fn write_incremental_inner<R: std::io::Read + std::io::Seek>(
             )?;
         }
     }
-    for (_, object) in &current {
+    if approval.is_some() {
+        for (_, change) in &changes {
+            let StoreEntry::Upsert(object) = change else { return Err(unsupported("approval deletion")); };
+            inspect(object, &changes, true, limits, 1, &mut 0, true)?;
+        }
+    }
+    for (key, object) in &current {
+        // A direct Encrypt dictionary is legal (e.g. MuPDF output). Its Perms
+        // string is authenticated, unchanged, and not a signature transform.
+        if key == "Encrypt" && document.ctx().source_security().is_some() { continue; }
         inspect(object, &changes, true, limits, 1, &mut 0, allow_signature)?;
     }
     let mut output = SerializationOutput {
@@ -332,7 +369,7 @@ fn write_incremental_inner<R: std::io::Read + std::io::Seek>(
         .get("Size")
         .and_then(PdfObject::as_u32)
         .ok_or_else(|| PdfError::ObjectError("incremental source Size must be u32".into()))?;
-    let max = ids.iter().map(|id| id.obj_num()).max().unwrap_or(0);
+    let max = ids.iter().map(|id| id.obj_num()).chain(changes.iter().map(|(id, _)| id.obj_num())).max().unwrap_or(0);
     let size = original_size.max(
         max.checked_add(1)
             .ok_or_else(|| PdfError::ResourceLimit("incremental Size overflow".into()))?,
@@ -400,6 +437,15 @@ fn write_incremental_inner<R: std::io::Read + std::io::Seek>(
                     effective,
                     Some(budget),
                 )?;
+                // The source objects were decrypted once at their original
+                // object boundary. Encrypt only the changed standalone output
+                // object, including updates originally stored in an ObjStm.
+                let mut encrypted_lease = None;
+                let object = if let Some(handler) = document.ctx().source_security() {
+                    let (object, lease) = handler.transform(document.ctx(), &object, true, budget)?;
+                    encrypted_lease = Some(lease);
+                    object
+                } else { object };
                 let offset = u64::try_from(output.len())
                     .map_err(|_| PdfError::ResourceLimit("incremental object offset".into()))?;
                 xref.push((id.obj_num(), offset, id.gen_num(), b'n'));
@@ -410,6 +456,8 @@ fn write_incremental_inner<R: std::io::Read + std::io::Seek>(
                 )?;
                 write_object_limited(&mut output, &object, limit)?;
                 append_output(&mut output, b"\nendobj\n", limit)?;
+                drop(object);
+                drop(encrypted_lease);
             }
         }
     }
@@ -454,7 +502,8 @@ fn write_incremental_inner<R: std::io::Read + std::io::Seek>(
         start = end;
     }
     let (_lease, trailer) = {
-        let (dict, lease) = trailer(&current, original, size, prev, limits, budget)?;
+        let (dict, lease) = trailer(&current, original, size, prev,
+            document.ctx().source_security().is_some(), limits, budget)?;
         (lease, dict)
     };
     validate_serialization_nodes_with_budget(

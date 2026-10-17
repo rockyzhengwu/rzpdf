@@ -1,5 +1,57 @@
 # 解析回归与异常输入验证
 
+## v0.11 字段、外观与受控修改
+
+新增 `v011_signature_fields`（7 项）与 `v011_controlled_updates`（6 项），覆盖层级/多 Widget、Unicode/零面积 AP、保留 Matrix、继承字段、Widget 标志、签名和填值链、权限交集、令牌单次/外来/rollback/panic、累计预算、恰好不足及失败重试。仓库内合成 PDF/CMS 夹具不需运行时私钥或外部签名器。
+
+联合回归命令：
+
+```sh
+cargo test -p pdf --locked -j2 \
+  --test v011_controlled_updates --test v011_signature_fields \
+  --test v011_multisign --test v011_signature_history --test v011_encrypted_incremental \
+  --test v05_signatures --test v05_security --test v05_incremental \
+  --test v09_form_types --test v09_forms --test v09_page_relationships \
+  --test v010_optional_content --test v010_structure_transfer
+```
+
+最终冻结源码该命令退出 0，13 组 156 项，无失败/忽略/过滤，日志 `tmp/pdfs/v011-verified-regression.log`。简单字体专项另有 10 项通过，最终完整工作区仍须使用 `cargo test --workspace --locked -j2`，不得把上述定向结果冒充全量。
+
+最终同一冻结源码的完整工作区命令已退出 0：85 组、1,501 passed，0 failed/ignored/filtered，日志 `tmp/pdfs/v011-verified-workspace.log`。包括 769 项 PDF 单元和 57 项 render 单元，嵌套字体子集长用例正常通过，未跳过。609 项源码/配置/测试资产的前、运行中及后指纹与重新枚举列表一致。
+
+先构建 PDF 的 `v011_sign_verify`、`v011_field_source`、`v011_encrypted_incremental` 和 render 的 `render_annotations`。构建结束后，使用既有环境运行四个独立脚本，每次指定新目录：
+
+```sh
+PYTHONPATH=tmp/pdfs/v05-verifiers:tmp/pdfs/python python3 docs/check-v011-workflows.py NEW_WORKFLOW_DIRECTORY
+PYTHONPATH=tmp/pdfs/v05-verifiers:tmp/pdfs/python python3 docs/check-v011-multisign.py NEW_MULTISIGN_DIRECTORY
+PYTHONPATH=tmp/pdfs/v05-verifiers:tmp/pdfs/python python3 docs/check-v011-signatures.py NEW_HISTORY_DIRECTORY
+PYTHONPATH=tmp/pdfs/v05-verifiers-py311 python3.11 docs/check-v011-encrypted-incremental.py NEW_R6_DIRECTORY
+```
+
+最终四门禁分别退出 0，27/21/42/30 案例；工作流另有八组精确像素、原生产者 Courier 文字跨引擎范围及十个页面渲染结果目视复核。P=3 批注与缺省 P 的独立验证器限制、指纹及最终全量结果详见[验收记录](releases/v0.11-acceptance.md)，不安装工具、Poppler 或运行 fuzz。
+
+## v0.11 多签追加历史检查点
+
+专项为 `cargo test --locked -j2 -p pdf --test v011_multisign --test v011_signature_history --test v05_signatures --test v011_encrypted_incremental --test v05_incremental --test v05_security`，冻结源码运行退出 0，6 组 57 项、无失败/忽略/过滤，日志 `tmp/pdfs/v011-07-verified-regression.log`。新增 9 项多签测试使用仓库内公开合成 PDF/CMS 十六进制夹具，不依赖运行时外部签名器；来源和 decoded hash 见 `pdf/tests/fixtures/v011/README.md`。
+
+先构建 `v011_sign_verify`，再执行 `PYTHONPATH=tmp/pdfs/v05-verifiers:tmp/pdfs/python python3 docs/check-v011-multisign.py <new-directory>`。21 个案例覆盖 classic/ObjStm、两类首签生产者、四签链、旧 CMS/ByteRange 保留及精确对象变更，以及六种 MDP/字段锁和三种归属歧义的拒绝；已有输出不得覆盖。与历史读取门禁不同，本门禁开启 pyHanko diff-policy，限定验证本入口生成的审批变更，不替代阶段 C 的任意输入授权判定。
+
+该检查点 `cargo test --workspace --locked -j2` 退出 0：83 组、1,483 passed、0 failed/ignored/filtered，日志 `tmp/pdfs/v011-07-verified-workspace.log`。471 个 Rust/Cargo/Python/hex 输入在前、运行中及后校验通过，重新枚举文件列表及内容一致。独立多签 21 案例、历史 CMS 42 案例及 R6 30 案例均退出 0。此为 V11-07 的历史范围，不代替上方新增工作流的最终源码验证。
+
+## v0.11 历史签名与公开验签
+
+V11-04～06 的集成专项为 `cargo test --locked -j2 -p pdf --test v011_signature_history --test v05_signatures --test v011_encrypted_incremental --test v05_incremental --test v05_security`，最终退出 0，5 组 48 项通过、0 failed/ignored/filtered。历史专项 9 项及 PSS 参数单元均包含在全量中。单独执行参数单元使用 `cargo test --locked -j2 -p pdf --lib signatures::algorithms::tests`，只算专项；勿省略 `--lib` 后将过滤后的逐集成启动算全量。
+
+先构建 `v011_sign_verify`，再运行 `PYTHONPATH=tmp/pdfs/v05-verifiers:tmp/pdfs/python python3 docs/check-v011-signatures.py <new-directory>`。现有 Python 3.14 环境提供 pyHanko 0.37.0；不要与仅含加密工具的 Python 3.11 目录混用。候选 42 案例覆盖 OpenSSL/pyHanko 两类生产者、RSA/PSS/ECDSA、层级字段与三签链、签名字典替换/删除及摘要、证书、算法、DER、填充、版本负例。此门禁明确关闭独立 diff-policy，只验证 CMS/历史，不作签后修改授权结论。
+
+该阶段冻结源码完整工作区 `cargo test --workspace --locked -j2` 退出 0：82 组、1,474 passed、0 failed/ignored/filtered，日志 `tmp/pdfs/v011-b-verified-workspace.log`。联合、示例构建、42 签名案例、30 R6 案例及两份旧 ObjStm 样本复验均退出 0；466 个输入在前后内容指纹和文件列表一致，见[验收记录](releases/v0.11-acceptance.md)。前两轮 `v011-b-read-workspace.log`、`v011-b-read-final-workspace.log` 分别因字段集合预算和 Contents 别名补强退出 130，不计全量。新指南见[离线验签](signature-verification.md)。当时尚未实现多签写入；当前 V11-07 的结果见上节，不以历史多签读取替代多签保存验证。
+
+## v0.11 R6 加密增量验证
+
+专项命令为 `cargo test --locked -j2 -p pdf --test v011_encrypted_incremental --test v05_incremental --test v05_security --test v05_signatures`，已退出 0，4 组 39 项通过；3 项内部 Encrypt/ID 保护另入完整工作区，不把过滤其他单元的专项算全量。独立入口为 `PYTHONPATH=tmp/pdfs/v05-verifiers-py311 python3.11 docs/check-v011-encrypted-incremental.py <new-directory>`，先构建 `v011_encrypted_incremental` 示例。最终独立验证退出 0，30 个追加案例及拒绝负例通过。使用现有 qpdf/MuPDF/pikepdf，生成命令、版本、hash 和认证/轮次在输出目录登记；没有生产密码或密钥，不安装依赖/Poppler，不运行 fuzz。
+
+完整工作区 `cargo test --workspace --locked -j2` 已退出 0：81 组、1,464 passed、0 failed/ignored/filtered，日志 `tmp/pdfs/v011-a-workspace.log`；461 个 Rust/Cargo/Python 输入在回归前后指纹和文件列表一致。冻结输入及真实退出状态见[阶段记录](releases/v0.11-acceptance.md)。A 的验收不覆盖尚未实现的历史验签/多签/签后修改。只改加密保存、未改绘制算法，独立门禁核对页面内容字节，不将其描述为新像素验收。
+
 ## v0.10 可选内容与整版验证
 
 专项为 `cargo test --locked -j2 -p pdf --test v010_optional_content`。最终联合回归还包括 v010 结构/标记专题、`v03_marked_content`、v09 批注/字段类型/字段关系/导航/页面关系及 `v05_security`，不以专项代替完整工作区。

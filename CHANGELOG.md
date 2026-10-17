@@ -2,6 +2,20 @@
 
 本文件只记录交付变化，不替代长期任务池或原始测试日志。版本范围见 [ROADMAP](ROADMAP.md)。
 
+## Unreleased — v0.11 保存与安全扩展（限定范围已验收）
+
+2026-10-17，V11-00～13 全部按限定范围收口：最终完整工作区 85 组、1,501 项、联合 156 项、四组独立门禁共 120 案例、八组精确像素及目视复核通过；609 项冻结输入前后内容和列表一致。仅本地 macOS x86_64 验收，未提交、推送、改包版本或发布；不等于完整 PDF/PAdES 合规。具体证据见[验收记录](docs/releases/v0.11-acceptance.md)。
+
+新增层级/多 Widget 签名字段、既有空字段签署和 Unicode 可见外观；复用源字体及 AP 管线，不引入自动布局或身份信任背书。新增 DocMDP/FieldMDP 签署版本约束读取、实际 revision 修改分类，以及既有 Tx/checkbox 填值、既有空字段签署和新增 Square 的受控工作流。不可变计划绑定来源并在完成时重验全部旧签和实际变更，不开放普通编辑或保存；未知组合继续拒绝。接口与边界见[受控工作流指南](docs/signed-workflows.md)。
+
+修复字符串相等判断受 literal/hex 写法影响的问题，以及简单字体 Widths 范围外未使用 MissingWidth 导致独立签名 AP 文字重叠的问题；显式零宽不改变。新增跨 MuPDF/Skia 的原生产者文字范围检查，补足同引擎像素参考可能共享错误的盲点。
+
+此前新增 `prepare_additional_signature()`：在严格不可变、未加密 PDF 2.0 的限定扁平字段输入上追加不可见审批签名；保留源前缀和旧签覆盖，准备及完成均逐签重开验证。该旧入口仍拒绝历史 MDP/字段锁、共享归属及未知组合；新的受控入口不扩大它的授权范围。V11-07 历史检查点为完整工作区 1,483 项、联合 57 项、独立多签 21 案例（开启 diff-policy）、历史 CMS 42 案例与 R6 30 案例通过，471 个输入前后指纹一致。接口见[追加审批签名指南](docs/advanced-saving.md#additional-approval-signatures)。
+
+新增历史签名模型和 `verify_signatures()`：按真实 xref/Prev、EOF 和原始 Contents token 绑定签署版本与字段，保留被替换/删除签名字典的报告；公开区分密码学成功、失败、格式错误和不支持。复用现有 CMS/DER/ring，新增 PDF 2.0 的限定 PSS/P-256 支持；完成新签也支持这些算法，不增加依赖。源保护补强为历史普通对象及当前/历史 ObjStm 成员扫描。V11-04～06 子范围验收时完整工作区 1,474 项、联合 48 项、独立签名 42 案例与 R6 30 案例等门禁通过，接口见[验签指南](docs/signature-verification.md)。
+
+新增 authenticated R6 增量保存：校验直接/间接 Encrypt 和原始 ID，保留原文件前缀、密钥/保护参数及第一 ID，实际追加更新第二 ID；只加密变更对象，支持原 ObjStm 成员的独立更新。沿用 metadata/Identity 例外和共享预算，保护参数变更及签名来源仍拒绝。新增 8 项集成和 3 项内部保护测试，修复 Encrypt/Perms 与签名权限字典混淆；R2～5 遗留解密明确暂不纳入。阶段 A 历史检查点为完整工作区 1,464 项、联合专项 39 项、独立追加 30 个案例及源码一致性门禁通过；最终交付证据见[v0.11 验收记录](docs/releases/v0.11-acceptance.md)。
+
 ## Unreleased — v0.10 显式结构与可选内容（限定范围已验收）
 
 新增显式只读 `structure_associations()`：按页面/Form 分离 MCID，扫描真实标记及 Properties、Form 调用，校验 MCR/Stm、批注/Widget 及 XObject OBJR、ParentTree 双向所有权/null 槽/键冲突和 NextKey；累计解码、调用、操作和深度有限额。Form 缺省资源按规范回退到页面，跨页歧义拒绝。

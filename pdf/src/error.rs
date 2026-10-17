@@ -2,6 +2,12 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum PdfError {
+    #[error("malformed signature: {0}")]
+    MalformedSignature(String),
+
+    #[error("signature digest or cryptographic verification failed: {0}")]
+    SignatureMismatch(String),
+
     #[error("document password required")]
     PasswordRequired,
 

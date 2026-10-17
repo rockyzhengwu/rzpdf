@@ -45,6 +45,16 @@ pub struct Document {
 }
 
 impl Document {
+    pub(crate) fn append_validated_revision_with_budget(
+        &self, plan: &crate::signatures::append::SignedRevisionPlan,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<crate::budget::BudgetedBytes> {
+        let source = self.source_baseline.as_ref().ok_or_else(||
+            PdfError::UnsupportedFeature("missing immutable approval baseline".into()))?;
+        crate::writer::write_signed_revision_incremental(&self.inner, source.bytes.as_ref(),
+            source.last_xref_offset, &source.original_trailer, plan, budget)
+    }
+
     pub(crate) fn signature_source(&self) -> PdfResult<Option<&[u8]>> {
         if let Some(source) = &self.source_baseline {
             if source.mode != ParseMode::Strict {

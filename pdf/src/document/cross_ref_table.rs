@@ -55,6 +55,9 @@ impl ObjectInfo {
 #[derive(Debug, Default, Clone)]
 pub struct CrossRefTable {
     objects: HashMap<u32, ObjectInfo>,
+    // Retain replaced/deleted normal source versions for conservative signature
+    // policy inspection. They are never exposed as current resolvable objects.
+    historical_objects: Vec<ObjectInfo>,
     trailer: PdfDict,
     has_hybrid_references: bool,
 }
@@ -63,6 +66,7 @@ impl CrossRefTable {
     pub fn new_empty() -> Self {
         Self {
             objects: HashMap::new(),
+            historical_objects: Vec::new(),
             trailer: PdfDict::default(),
             has_hybrid_references: false,
         }
@@ -73,6 +77,7 @@ impl CrossRefTable {
             .is_some_and(|v| !matches!(v, crate::objects::PdfObject::PdfNull));
         Self {
             objects,
+            historical_objects: Vec::new(),
             trailer,
             has_hybrid_references,
         }
@@ -95,6 +100,7 @@ impl CrossRefTable {
 
     pub fn merge(&mut self, other: CrossRefTable) {
         self.has_hybrid_references |= other.has_hybrid_references;
+        self.historical_objects.extend(other.historical_objects);
         for (key, obj) in other.objects {
             self.objects.insert(key, obj);
         }
@@ -102,9 +108,23 @@ impl CrossRefTable {
 
     pub fn merge_older(&mut self, other: CrossRefTable) {
         self.has_hybrid_references |= other.has_hybrid_references;
+        self.historical_objects.extend(other.historical_objects);
         for (key, object) in other.objects {
+            if matches!(object.state(), ObjectState::Normal)
+                && self.objects.get(&key).is_some_and(|current| {
+                    !matches!(current.state(), ObjectState::Normal)
+                        || current.offset() != object.offset()
+                        || current.object_id() != object.object_id()
+                })
+            {
+                self.historical_objects.push(object.clone());
+            }
             self.objects.entry(key).or_insert(object);
         }
+    }
+
+    pub(crate) fn historical_objects(&self) -> &[ObjectInfo] {
+        &self.historical_objects
     }
 
     pub fn lookup(&self, objnum: &u32) -> Option<&ObjectInfo> {

@@ -232,7 +232,8 @@ impl<R: Read + Seek> PdfDocument<R> {
             let mut children = Vec::new();
             let mut widgets = Vec::new();
             if merged {
-                widgets.push(self.describe_form_widget(id, &dict, &mut owners)?);
+                widgets.push(self.describe_form_widget(id, &dict, &mut owners,
+                    effective.get("FT").and_then(PdfObject::as_name).is_some_and(|n| n.name() == "Sig"))?);
             }
             for kid in &kids {
                 let kid_id = indirect(kid)?;
@@ -255,7 +256,8 @@ impl<R: Read + Seek> PdfDocument<R> {
                     if child.get("Parent").map(indirect).transpose()? != Some(id) {
                         return Err(invalid("widget Parent/Kids mismatch"));
                     }
-                    widgets.push(self.describe_form_widget(kid_id, &child, &mut owners)?);
+                    widgets.push(self.describe_form_widget(kid_id, &child, &mut owners,
+                        effective.get("FT").and_then(PdfObject::as_name).is_some_and(|n| n.name() == "Sig"))?);
                 } else {
                     children.push(kid_id);
                 }
@@ -330,6 +332,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         id: ObjectId,
         dict: &PdfDict,
         owners: &mut HashMap<ObjectId, (u32, ObjectId)>,
+        signature: bool,
     ) -> PdfResult<FormWidget> {
         let (page_index, page_id) = owners
             .remove(&id)
@@ -349,8 +352,9 @@ impl<R: Read + Seek> PdfDocument<R> {
         )?;
         let rect = [r.llx(), r.lly(), r.urx(), r.ury()];
         if !rect.iter().all(|v| v.is_finite())
-            || rect[2] <= rect[0]
-            || rect[3] <= rect[1]
+            || rect[2] < rect[0]
+            || rect[3] < rect[1]
+            || (!signature && (rect[2] == rect[0] || rect[3] == rect[1]))
             || !(rect[2] - rect[0]).is_finite()
             || !(rect[3] - rect[1]).is_finite()
         {
