@@ -85,9 +85,7 @@ impl<R: Read + Seek> PdfDocument<R> {
             let ef = self.ctx().resolve(ef)?.into_dict().ok_or_else(|| {
                 PdfError::DocumentError("Filespec EF must be a dictionary".into())
             })?;
-            let stream = ef
-                .get("F")
-                .ok_or_else(|| PdfError::DocumentError("Filespec EF/F missing".into()))?;
+            let stream = super::embedded_file::payload_reference(&ef, false)?;
             let stream =
                 self.ctx().resolve(stream)?.into_stream().ok_or_else(|| {
                     PdfError::DocumentError("embedded file must be a stream".into())

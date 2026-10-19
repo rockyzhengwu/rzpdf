@@ -25,6 +25,8 @@ pub mod acroform;
 pub mod annotations;
 pub(crate) mod appearance;
 pub mod attachments;
+pub mod associated_files;
+mod embedded_file;
 pub mod bookmarks;
 pub mod catalog;
 mod content_edit;

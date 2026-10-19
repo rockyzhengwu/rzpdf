@@ -1,5 +1,24 @@
 # 解析回归与异常输入验证
 
+## v0.14 关联文件整版门禁
+
+V14-00～09／三个阶段已完成限定验收：完整工作区 93 组／1633 项、十五目标联合 189 项、十二组独立门禁、162 页目视及 30 条性能／预算基线通过；654 项非 Markdown 输入和十四驱动一致。见[验收记录](releases/v0.14-acceptance.md)、[边界](releases/v0.14-boundaries.md)和[指南](associated-files.md)。本版仅 macOS x86_64 验证。
+
+```sh
+cargo test -p pdf --locked --test v014_associated_files
+cargo build -p pdf --locked --example v014_associated_files --example v014_benchmark \
+  --example v013_layers --example v012_layout --example v012_security_layout \
+  --example v012_incremental --example v012_preservation --example v011_sign_verify \
+  --example v011_field_source --example v011_encrypted_incremental \
+  --example inspect_optional_content --example v012_recovery \
+  -p render --example render_optional_content --example render_annotations
+python3 docs/check-v014-release.py NEW_RELEASE_DIRECTORY
+```
+
+runner 的完整命令、日志、退出码及输入／驱动 hash 保存在新目录内；使用已有 Python 验证环境，不自动安装。其内部运行未过滤的 `cargo test --workspace --locked`、联合、基线及十二组独立门禁。AF 门禁从零使用 pikepdf 和 MuPDF 原始生产者，不以重写输入充当第二来源；结构／文字／payload 与 MuPDF、Skia 同后端像素均需核对，162 页逐页目视另行完成。
+
+最终运行目录 `tmp/pdfs/v014-final1/`。完整工作区约 46 分 48 秒（包含编译／启动），长测未 ignore。曾对 68 个新集成 harness 只运行 `--list` 观测启动；不计通过、不替代正式测试、不修改系统安全设置，细节见验收记录。大批量开销见[性能记录](releases/v0.14-performance.md)；不沿用其他版本通过数证明本版。
+
 ## v0.13 图层编写门禁
 
 2026-10-19，V13-00～08／阶段 A、B、C 冻结范围已收口：最终 `v013-final3-` 完整工作区 92 组／1609 项、联合 23 组／273 项及十一组必选独立门禁退出 0，0 failed／ignored／filtered。间接配置补充审计、432 页目视复核和 9 条固定规模基线完成，645 项源清单／重新枚举列表、十三个驱动及 1676 PDF／PNG／JSON 前后核对一致。仅 macOS x86_64 已验证；未提交／推送／改包版本或发布。

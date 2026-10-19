@@ -2,6 +2,12 @@
 
 本文件只记录交付变化，不替代长期任务池或原始测试日志。版本范围见 [ROADMAP](ROADMAP.md)。
 
+## Unreleased — v0.14 关联文件（限定范围已验收）
+
+新增 Catalog／page AF 读取、显式提取、新建／旧附件克隆、绑定／解除及精确幂等；共享数组 copy-on-write、私有键及旧附件／批注语义保持。页面复制／导入／提取／重排／删除、三全量布局、两 unsigned 增量及选定 R6 组合已验证；签名来源／恢复写回仍拒绝，原默认及 options 不变。
+
+22 项新增集成及 2 项 compile-fail；完整工作区 93 组／1633 项、联合 189 项、十二组独立门禁、162 页目视及 30 条基线通过；654 输入、十四驱动及 2069 产物一致。仅 macOS x86_64 验证，大批量非线性成本已记录；见[验收](docs/releases/v0.14-acceptance.md)、[边界](docs/releases/v0.14-boundaries.md)、[指南](docs/associated-files.md)及[规范来源](docs/releases/v0.14-standard-sources.md)。完整 ISO 副本未归档，不宣称完整 ISO／PDF/A；本版未提交、推送或发布。
+
 ## Unreleased — v0.13 图层创建与编辑（限定范围已验收）
 
 新增独立 `optional_content_edit` 模块：OCG 创建／Unicode 重命名、带 stamp 的默认／替代配置目标和状态写入、四类 OCMD 策略及有界 VE。默认配置生成要求 ON／View，旧 Compatible 读取不收紧；复杂 Usage／UI／未知规则的修改继续拒绝。原 options 字段、默认保存及来源／权限保护保持。

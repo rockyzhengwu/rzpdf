@@ -1,6 +1,6 @@
 # PDF standard coverage and evidence
 
-This is a capability index for the declared v0.1–v0.13 profiles, not a PDF conformance score. Read, write, render and edit are separate capabilities. A saved opaque object is not a supported semantic editor. Rows below link the applicable standard area to public entry points, executable positive/negative assertions and the detailed version boundary. Version numbers identify the delivery profile, not a claim to implement every feature of that PDF specification version.
+This is a capability index for the declared v0.1–v0.14 profiles, not a PDF conformance score. Read, write, render and edit are separate capabilities. A saved opaque object is not a supported semantic editor. Rows below link the applicable standard area to public entry points, executable positive/negative assertions and the detailed version boundary. Version numbers identify the delivery profile, not a claim to implement every feature of that PDF specification version.
 
 ## File structure and common objects
 
@@ -13,7 +13,7 @@ This is a capability index for the declared v0.1–v0.13 profiles, not a PDF con
 | 7.6 encryption | v0.5/v0.11/v0.12 selected Standard R6 read/write and unsigned incremental | `Document::from_bytes_with_password`, `SaveSecurity`; [security](../pdf/tests/v05_security.rs), [layout protection](../pdf/tests/v012_layout_security.rs), [encrypted incremental](../pdf/tests/v011_encrypted_incremental.rs) | [security matrix](releases/v0.11-security-matrix.md), [external R6 gate](check-v012-layout-security.py); old handlers/public-key and encrypted signatures excluded |
 | 7.7/7.9 page tree and resource graphs | v0.1/v0.4 read/edit; v0.9/v0.10 relationship-aware migration | `get_page`, `copy_page`, `import_pages_from`, `delete_page`; [page relationships](../pdf/tests/v09_page_relationships.rs), [structure transfer](../pdf/tests/v010_structure_transfer.rs) | [page guide](page-relationships.md); unknown ownership fails atomically |
 | 7.9 name/number trees | v0.9 read/write/edit, ordering/Limits/cycle bounds | named destinations, page labels and attachments; [navigation](../pdf/tests/v09_navigation.rs), [relationships](../pdf/tests/v09_page_relationships.rs) | [navigation](navigation.md), [v0.9 support](releases/v0.9-support.md) |
-| 7.11 and 14.13 files/associated files | v0.1 attachment API; v0.12 opaque AF/AFRelationship preservation, no generic AF editor | `attachment_data`, attachment mutations; [preservation](../pdf/tests/v012_preservation.rs) | [operation matrix](object-preservation.md), [external graph gate](check-v012-preservation.py) |
+| 7.11 and 14.13 files/associated files | v0.14 selected PDF 2.0 Catalog/page AF read/create/link/unlink, page transfers and protected saves; legacy attachment API retained | `associated_files`, `associated_file_data`, `create_associated_file`, `clone_associated_file`, `bind_associated_file`, `unbind_associated_file`; [tests](../pdf/tests/v014_associated_files.rs) | [guide](associated-files.md), [boundary](releases/v0.14-boundaries.md), [independent gate](check-v014-associated-files.py) |
 | 14.3 Info/XMP | v0.1 raw metadata and selected Info editing; preserve unrelated data | `metadata_packet`, `set_metadata_packet`, `info_dict`; [metadata](../pdf/tests/metadata.rs), [private roots](../pdf/tests/v012_preservation.rs) | No full XML schema/synchronization; [operation matrix](object-preservation.md) |
 
 ## Graphics and text
@@ -46,9 +46,9 @@ This is a capability index for the declared v0.1–v0.13 profiles, not a PDF con
 
 ## Reproducible evidence and licensing
 
-### Planned associated file profile
+### Accepted associated file profile
 
-The [v0.14 inventory](releases/v0.14-inventory.md) and [implementation plan](releases/v0.14.md) propose PDF 2.0 Catalog/page AF reading, creation, linking and unlinking, with selected page operations and save protection. No v0.14 capability has been implemented or accepted. The current AF rows above still describe preservation only; the plan does not broaden them to StructElem, content-sequence MCAF, arbitrary owners or PDF/A conformance. The accepted v0.13 checkpoint is `6be4cc3`.
+The [v0.14 profile](releases/v0.14.md) is accepted for Catalog/page AF snapshots, explicit extraction, creation/cloning, linking/unlinking, selected page operations and protected saves. See [final evidence](releases/v0.14-acceptance.md), [API guide](associated-files.md) and [standard-source record](releases/v0.14-standard-sources.md). Official public AF notes and errata support this selected profile; a complete ISO PDF was not obtained or certified. StructElem, content-sequence MCAF, arbitrary owners and PDF/A remain excluded.
 
 ### Read write render and edit distinctions
 
@@ -62,7 +62,7 @@ Every supported cell below is limited to its linked detailed profile and the ass
 | R6 | Authenticated selected profile | Preserve/remove/set under identity rules | Supported decrypted page content | Selected unsigned operations / permissions |
 | Page tree / resource graphs | Selected validation | Known relationships | Geometry/content | Copy/import/delete/reorder with refusal guards |
 | Name/number trees / navigation | Selected models | Balanced supported trees | No action runtime | Selected destinations/bookmarks/labels |
-| EmbeddedFiles / AF | Payload API / raw AF | Payload API / AF preserve | Selected attachment annotation AP only | Names/payload API; no generic AF editor |
+| EmbeddedFiles / AF | Payload API / selected owner snapshots | Payload API / selected AF creation | Selected attachment annotation AP only | Selected Catalog/page bind/unbind/clone and page transfers; not arbitrary owners |
 | Info / XMP | Selected Info / raw packet | Selected Info / raw packet | — | Explicit raw replacement, no XML schema synchronization |
 | Stream filters / image data | Selected codecs/precision | Selected embedding and encoded-data preserve | Selected image/color/mask profiles | Resource/invocation replacement or removal |
 | Graphics state / paths | Selected interpretation | Builder/preserve | Selected raster profile | Source-addressed paths/graphics state |

@@ -489,9 +489,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         let stream = self
             .ctx()
             .resolve(
-                ef.get("UF")
-                    .or_else(|| ef.get("F"))
-                    .ok_or_else(|| invalid("embedded payload missing"))?,
+                crate::document::embedded_file::payload_reference(&ef, true)?,
             )?
             .into_stream()
             .ok_or_else(|| invalid("embedded payload must be stream"))?;
