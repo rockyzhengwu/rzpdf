@@ -16,219 +16,6 @@ pub(crate) struct GlyphClosure<'a> {
     _lease: MemoryLease,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn closure_bounds_ignore_empty_outlines_and_include_cached_composites() {
-        let with_bounds = |mut data: Vec<u8>, bounds: [i16; 4]| {
-            for (slot, value) in data[2..10].chunks_exact_mut(2).zip(bounds) {
-                slot.copy_from_slice(&value.to_be_bytes());
-            }
-            data
-        };
-        // Header-only simple fixtures exercise closure planning, not decoding.
-        let mut simple = vec![0; 10];
-        simple[..2].copy_from_slice(&1i16.to_be_bytes());
-        let glyphs = [
-            with_bounds(vec![0; 10], [-300, -300, 300, 300]),
-            with_bounds(simple, [-4, -7, 12, 20]),
-            with_bounds(composite(&[1]), [-9, -11, 25, 30]),
-            with_bounds(composite(&[0]), [-500, -500, 500, 500]),
-        ];
-        let (offsets, data) = fixture(&glyphs);
-        let locations = GlyphLocations::try_new(&offsets, &data, 4, 1).unwrap();
-        let pool = OperationBudget::new(8192);
-        for roots in [vec![1, 2, 3], vec![2, 1, 3]] {
-            let closure = locations
-                .subset_closure(roots, &Limits::default(), &pool)
-                .unwrap();
-            assert_eq!(closure.bounds(), [-9, -11, 25, 30]);
-            drop(closure);
-            assert_eq!(pool.live_bytes(), 0);
-        }
-        let closure = locations
-            .subset_closure([3], &Limits::default(), &pool)
-            .unwrap();
-        assert_eq!(closure.bounds(), [0; 4]);
-        drop(closure);
-        assert_eq!(pool.live_bytes(), 0);
-    }
-
-    #[test]
-    fn rebuilt_tables_keep_components_and_empty_unselected_ranges() {
-        let selected = composite(&[3]);
-        let (offsets, data) = fixture(&[vec![], selected.clone(), vec![9; 40], vec![]]);
-        let locations = GlyphLocations::try_new(&offsets, &data, 4, 1).unwrap();
-        let pool = OperationBudget::new(8192);
-        let closure = locations
-            .subset_closure([1], &Limits::default(), &pool)
-            .unwrap();
-        let baseline = pool.live_bytes();
-        let (glyf, loca) = closure
-            .rebuild_glyf_loca(&Limits::default(), &pool)
-            .unwrap();
-        assert!(glyf.as_slice().len() < data.len());
-        let rebuilt = GlyphLocations::try_new(loca.as_slice(), glyf.as_slice(), 4, 1).unwrap();
-        assert!(rebuilt.glyph_data(2).unwrap().is_empty());
-        assert_eq!(
-            rebuilt
-                .composite_glyph(1, &Limits::default())
-                .unwrap()
-                .unwrap()
-                .components[0]
-                .glyph_id,
-            3
-        );
-        assert_eq!(&rebuilt.glyph_data(1).unwrap()[..selected.len()], &selected);
-        drop(glyf);
-        drop(loca);
-        assert_eq!(pool.live_bytes(), baseline);
-        drop(closure);
-        assert_eq!(pool.live_bytes(), 0);
-    }
-
-    fn composite(children: &[u16]) -> Vec<u8> {
-        let mut data = vec![255, 255, 0, 0, 0, 0, 0, 10, 0, 10];
-        for (index, &child) in children.iter().enumerate() {
-            let flags: u16 = if index + 1 < children.len() { 34 } else { 2 };
-            data.extend(flags.to_be_bytes());
-            data.extend(child.to_be_bytes());
-            data.extend([0, 0]);
-        }
-        data
-    }
-    fn fixture(glyphs: &[Vec<u8>]) -> (Vec<u8>, Vec<u8>) {
-        let mut offsets = 0u32.to_be_bytes().to_vec();
-        let mut data = Vec::new();
-        for glyph in glyphs {
-            data.extend(glyph);
-            offsets.extend((data.len() as u32).to_be_bytes());
-        }
-        (offsets, data)
-    }
-    #[test]
-    fn closure_deduplicates_roots_and_components_and_holds_result_budget() {
-        let (offsets, data) = fixture(&[vec![], composite(&[2, 2]), vec![], vec![]]);
-        let locations = GlyphLocations::try_new(&offsets, &data, 4, 1).unwrap();
-        let pool = OperationBudget::new(8192);
-        let closure = locations
-            .subset_closure([1, 1], &Limits::default(), &pool)
-            .unwrap();
-        assert_eq!(closure.glyph_ids().collect::<Vec<_>>(), [0, 1, 2]);
-        assert_eq!(pool.live_bytes(), closure.states.capacity());
-        drop(closure);
-        assert_eq!(pool.live_bytes(), 0);
-        let neighbor = pool.reserve(8191).unwrap();
-        assert!(
-            locations
-                .subset_closure([1], &Limits::default(), &pool)
-                .is_err()
-        );
-        assert_eq!(pool.live_bytes(), 8191);
-        drop(neighbor);
-        assert!(
-            locations
-                .subset_closure([1], &Limits::default(), &pool)
-                .is_ok()
-        );
-        assert_eq!(pool.live_bytes(), 0);
-    }
-    #[test]
-    fn closure_parse_peak_and_unwind_boundaries_release_all_scratch() {
-        // Padding keeps the parse boundary above the independent component
-        // storage limit, so the asserted refusal exercises cumulative work.
-        let mut padded = composite(&[2]);
-        padded.resize(128, 0);
-        let (offsets, data) = fixture(&[vec![], padded, vec![]]);
-        let locations = GlyphLocations::try_new(&offsets, &data, 3, 1).unwrap();
-        let limits = Limits {
-            max_decoded_bytes: 256,
-            ..Limits::default()
-        };
-        let probe = OperationBudget::new(8192);
-        let closure = locations.subset_closure([1], &limits, &probe).unwrap();
-        let peak = probe.peak_bytes();
-        drop(closure);
-        assert_eq!(probe.live_bytes(), 0);
-        let exact = OperationBudget::new(peak + 7);
-        let neighbor = exact.reserve(7).unwrap();
-        let closure = locations.subset_closure([1], &limits, &exact).unwrap();
-        assert_eq!(exact.peak_bytes(), peak + 7);
-        drop(closure);
-        assert_eq!(exact.live_bytes(), 7);
-        drop(neighbor);
-        let short = OperationBudget::new(peak + 6);
-        let neighbor = short.reserve(7).unwrap();
-        assert!(matches!(locations.subset_closure([1], &limits, &short),
-            Err(PdfError::ResourceLimit(message)) if message == "operation live bytes"));
-        assert_eq!(short.live_bytes(), 7);
-        drop(neighbor);
-        drop(locations.subset_closure([1], &limits, &short).unwrap());
-        assert_eq!(short.live_bytes(), 0);
-        let too_small = Limits {
-            max_decoded_bytes: 255,
-            ..limits
-        };
-        assert!(matches!(locations.subset_closure([1], &too_small, &probe),
-            Err(PdfError::ResourceLimit(message)) if message == "subset cumulative parse bytes"));
-        assert_eq!(probe.live_bytes(), 0);
-        let mut first = true;
-        let roots = std::iter::from_fn(|| {
-            if first {
-                first = false;
-                Some(1)
-            } else {
-                panic!("root iterator panic")
-            }
-        });
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = locations.subset_closure(roots, &limits, &probe);
-        }));
-        assert!(panic.is_err());
-        assert_eq!(probe.live_bytes(), 0);
-        drop(locations.subset_closure([1], &limits, &probe).unwrap());
-        assert_eq!(probe.live_bytes(), 0);
-    }
-
-    #[test]
-    fn closure_rejects_cycles_range_work_and_cached_long_path() {
-        let (offsets, data) = fixture(&[
-            vec![],
-            composite(&[2]),
-            composite(&[3]),
-            vec![],
-            composite(&[1]),
-        ]);
-        let locations = GlyphLocations::try_new(&offsets, &data, 5, 1).unwrap();
-        let pool = OperationBudget::new(8192);
-        let limits = Limits {
-            max_depth: 3,
-            ..Limits::default()
-        };
-        assert!(
-            matches!(locations.subset_closure([1, 4], &limits, &pool), Err(PdfError::ResourceLimit(message)) if message == "subset dependency depth")
-        );
-        assert_eq!(pool.live_bytes(), 0);
-        assert!(
-            locations
-                .subset_closure([5], &Limits::default(), &pool)
-                .is_err()
-        );
-        let limits = Limits {
-            max_objects: 2,
-            ..Limits::default()
-        };
-        assert!(locations.subset_closure([1], &limits, &pool).is_err());
-        let (offsets, data) = fixture(&[vec![], composite(&[2]), composite(&[1])]);
-        let locations = GlyphLocations::try_new(&offsets, &data, 3, 1).unwrap();
-        assert!(
-            matches!(locations.subset_closure([1], &Limits::default(), &pool), Err(PdfError::FontError(message)) if message == "Cyclic subset glyph dependency")
-        );
-        assert_eq!(pool.live_bytes(), 0);
-    }
-}
-
 impl GlyphClosure<'_> {
     /// Union of retained glyph headers with actual contour-bearing leaves.
     /// All-empty subsets use the zero rectangle; no outline decoding is implied.
@@ -453,5 +240,218 @@ impl<'a> GlyphLocations<'a> {
             locations: *self,
             _lease: lease,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn closure_bounds_ignore_empty_outlines_and_include_cached_composites() {
+        let with_bounds = |mut data: Vec<u8>, bounds: [i16; 4]| {
+            for (slot, value) in data[2..10].as_chunks_mut::<2>().0.iter_mut().zip(bounds) {
+                slot.copy_from_slice(&value.to_be_bytes());
+            }
+            data
+        };
+        // Header-only simple fixtures exercise closure planning, not decoding.
+        let mut simple = vec![0; 10];
+        simple[..2].copy_from_slice(&1i16.to_be_bytes());
+        let glyphs = [
+            with_bounds(vec![0; 10], [-300, -300, 300, 300]),
+            with_bounds(simple, [-4, -7, 12, 20]),
+            with_bounds(composite(&[1]), [-9, -11, 25, 30]),
+            with_bounds(composite(&[0]), [-500, -500, 500, 500]),
+        ];
+        let (offsets, data) = fixture(&glyphs);
+        let locations = GlyphLocations::try_new(&offsets, &data, 4, 1).unwrap();
+        let pool = OperationBudget::new(8192);
+        for roots in [vec![1, 2, 3], vec![2, 1, 3]] {
+            let closure = locations
+                .subset_closure(roots, &Limits::default(), &pool)
+                .unwrap();
+            assert_eq!(closure.bounds(), [-9, -11, 25, 30]);
+            drop(closure);
+            assert_eq!(pool.live_bytes(), 0);
+        }
+        let closure = locations
+            .subset_closure([3], &Limits::default(), &pool)
+            .unwrap();
+        assert_eq!(closure.bounds(), [0; 4]);
+        drop(closure);
+        assert_eq!(pool.live_bytes(), 0);
+    }
+
+    #[test]
+    fn rebuilt_tables_keep_components_and_empty_unselected_ranges() {
+        let selected = composite(&[3]);
+        let (offsets, data) = fixture(&[vec![], selected.clone(), vec![9; 40], vec![]]);
+        let locations = GlyphLocations::try_new(&offsets, &data, 4, 1).unwrap();
+        let pool = OperationBudget::new(8192);
+        let closure = locations
+            .subset_closure([1], &Limits::default(), &pool)
+            .unwrap();
+        let baseline = pool.live_bytes();
+        let (glyf, loca) = closure
+            .rebuild_glyf_loca(&Limits::default(), &pool)
+            .unwrap();
+        assert!(glyf.as_slice().len() < data.len());
+        let rebuilt = GlyphLocations::try_new(loca.as_slice(), glyf.as_slice(), 4, 1).unwrap();
+        assert!(rebuilt.glyph_data(2).unwrap().is_empty());
+        assert_eq!(
+            rebuilt
+                .composite_glyph(1, &Limits::default())
+                .unwrap()
+                .unwrap()
+                .components[0]
+                .glyph_id,
+            3
+        );
+        assert_eq!(&rebuilt.glyph_data(1).unwrap()[..selected.len()], &selected);
+        drop(glyf);
+        drop(loca);
+        assert_eq!(pool.live_bytes(), baseline);
+        drop(closure);
+        assert_eq!(pool.live_bytes(), 0);
+    }
+
+    fn composite(children: &[u16]) -> Vec<u8> {
+        let mut data = vec![255, 255, 0, 0, 0, 0, 0, 10, 0, 10];
+        for (index, &child) in children.iter().enumerate() {
+            let flags: u16 = if index + 1 < children.len() { 34 } else { 2 };
+            data.extend(flags.to_be_bytes());
+            data.extend(child.to_be_bytes());
+            data.extend([0, 0]);
+        }
+        data
+    }
+    fn fixture(glyphs: &[Vec<u8>]) -> (Vec<u8>, Vec<u8>) {
+        let mut offsets = 0u32.to_be_bytes().to_vec();
+        let mut data = Vec::new();
+        for glyph in glyphs {
+            data.extend(glyph);
+            offsets.extend((data.len() as u32).to_be_bytes());
+        }
+        (offsets, data)
+    }
+    #[test]
+    fn closure_deduplicates_roots_and_components_and_holds_result_budget() {
+        let (offsets, data) = fixture(&[vec![], composite(&[2, 2]), vec![], vec![]]);
+        let locations = GlyphLocations::try_new(&offsets, &data, 4, 1).unwrap();
+        let pool = OperationBudget::new(8192);
+        let closure = locations
+            .subset_closure([1, 1], &Limits::default(), &pool)
+            .unwrap();
+        assert_eq!(closure.glyph_ids().collect::<Vec<_>>(), [0, 1, 2]);
+        assert_eq!(pool.live_bytes(), closure.states.capacity());
+        drop(closure);
+        assert_eq!(pool.live_bytes(), 0);
+        let neighbor = pool.reserve(8191).unwrap();
+        assert!(
+            locations
+                .subset_closure([1], &Limits::default(), &pool)
+                .is_err()
+        );
+        assert_eq!(pool.live_bytes(), 8191);
+        drop(neighbor);
+        assert!(
+            locations
+                .subset_closure([1], &Limits::default(), &pool)
+                .is_ok()
+        );
+        assert_eq!(pool.live_bytes(), 0);
+    }
+    #[test]
+    fn closure_parse_peak_and_unwind_boundaries_release_all_scratch() {
+        // Padding keeps the parse boundary above the independent component
+        // storage limit, so the asserted refusal exercises cumulative work.
+        let mut padded = composite(&[2]);
+        padded.resize(128, 0);
+        let (offsets, data) = fixture(&[vec![], padded, vec![]]);
+        let locations = GlyphLocations::try_new(&offsets, &data, 3, 1).unwrap();
+        let limits = Limits {
+            max_decoded_bytes: 256,
+            ..Limits::default()
+        };
+        let probe = OperationBudget::new(8192);
+        let closure = locations.subset_closure([1], &limits, &probe).unwrap();
+        let peak = probe.peak_bytes();
+        drop(closure);
+        assert_eq!(probe.live_bytes(), 0);
+        let exact = OperationBudget::new(peak + 7);
+        let neighbor = exact.reserve(7).unwrap();
+        let closure = locations.subset_closure([1], &limits, &exact).unwrap();
+        assert_eq!(exact.peak_bytes(), peak + 7);
+        drop(closure);
+        assert_eq!(exact.live_bytes(), 7);
+        drop(neighbor);
+        let short = OperationBudget::new(peak + 6);
+        let neighbor = short.reserve(7).unwrap();
+        assert!(matches!(locations.subset_closure([1], &limits, &short),
+            Err(PdfError::ResourceLimit(message)) if message == "operation live bytes"));
+        assert_eq!(short.live_bytes(), 7);
+        drop(neighbor);
+        drop(locations.subset_closure([1], &limits, &short).unwrap());
+        assert_eq!(short.live_bytes(), 0);
+        let too_small = Limits {
+            max_decoded_bytes: 255,
+            ..limits
+        };
+        assert!(matches!(locations.subset_closure([1], &too_small, &probe),
+            Err(PdfError::ResourceLimit(message)) if message == "subset cumulative parse bytes"));
+        assert_eq!(probe.live_bytes(), 0);
+        let mut first = true;
+        let roots = std::iter::from_fn(|| {
+            if first {
+                first = false;
+                Some(1)
+            } else {
+                panic!("root iterator panic")
+            }
+        });
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = locations.subset_closure(roots, &limits, &probe);
+        }));
+        assert!(panic.is_err());
+        assert_eq!(probe.live_bytes(), 0);
+        drop(locations.subset_closure([1], &limits, &probe).unwrap());
+        assert_eq!(probe.live_bytes(), 0);
+    }
+
+    #[test]
+    fn closure_rejects_cycles_range_work_and_cached_long_path() {
+        let (offsets, data) = fixture(&[
+            vec![],
+            composite(&[2]),
+            composite(&[3]),
+            vec![],
+            composite(&[1]),
+        ]);
+        let locations = GlyphLocations::try_new(&offsets, &data, 5, 1).unwrap();
+        let pool = OperationBudget::new(8192);
+        let limits = Limits {
+            max_depth: 3,
+            ..Limits::default()
+        };
+        assert!(
+            matches!(locations.subset_closure([1, 4], &limits, &pool), Err(PdfError::ResourceLimit(message)) if message == "subset dependency depth")
+        );
+        assert_eq!(pool.live_bytes(), 0);
+        assert!(
+            locations
+                .subset_closure([5], &Limits::default(), &pool)
+                .is_err()
+        );
+        let limits = Limits {
+            max_objects: 2,
+            ..Limits::default()
+        };
+        assert!(locations.subset_closure([1], &limits, &pool).is_err());
+        let (offsets, data) = fixture(&[vec![], composite(&[2]), composite(&[1])]);
+        let locations = GlyphLocations::try_new(&offsets, &data, 3, 1).unwrap();
+        assert!(
+            matches!(locations.subset_closure([1], &Limits::default(), &pool), Err(PdfError::FontError(message)) if message == "Cyclic subset glyph dependency")
+        );
+        assert_eq!(pool.live_bytes(), 0);
     }
 }

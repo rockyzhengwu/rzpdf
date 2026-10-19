@@ -22,6 +22,11 @@ pub struct TableRecord {
 }
 
 impl TableRecord {
+    /// Checksum recorded by the source SFNT directory, not a validation result.
+    pub fn checksum(&self) -> u32 {
+        self.check_sum
+    }
+
     pub(crate) fn tag(&self) -> &str {
         &self.tag
     }

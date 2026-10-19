@@ -55,55 +55,6 @@ impl Default for CalRgb {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        document::cross_ref_table::CrossRefTable,
-        io::stream_reader::StreamReader,
-        objects::pdf_dict::PdfDict,
-        parser::{parser::PdfParser, syntax::SyntaxParser},
-    };
-    use std::{collections::HashMap, io::Cursor};
-
-    #[test]
-    fn calrgb_invalid_parameters_and_components_return_errors() {
-        let parser = PdfParser::new(SyntaxParser::new(
-            StreamReader::try_new(Cursor::new(Vec::<u8>::new())).unwrap(),
-        ));
-        let ctx = PDFContext::try_new(
-            parser,
-            CrossRefTable::new(HashMap::new(), PdfDict::default()),
-        )
-        .unwrap();
-        let parse = |source: &str| {
-            let obj = SyntaxParser::new(
-                StreamReader::try_new(Cursor::new(source.as_bytes().to_vec())).unwrap(),
-            )
-            .get_object()
-            .unwrap();
-            CalRgb::try_new(&obj, &ctx)
-        };
-        let color = parse("[/CalRGB << /WhitePoint [0.95 1 1.09] /Gamma [2 2 2] >>]").unwrap();
-        assert!(color.rgb(&color.default_value()).is_ok());
-        assert!(color.rgb(&ColorValue::new(vec![])).is_err());
-        assert!(color.rgb(&ColorValue::new(vec![f32::NAN; 3])).is_err());
-        for source in [
-            "null",
-            "[/CalRGB 1]",
-            "<< >>",
-            "<< /WhitePoint [1 1 1] /Gamma [] >>",
-            "<< /WhitePoint [1 1 1] /Gamma [0 1 1] >>",
-            "<< /WhitePoint [1 /bad 1] >>",
-            "<< /WhitePoint [1 2 1] >>",
-            "<< /WhitePoint [1 1 1] /Matrix [1] >>",
-            "<< /WhitePoint [1 1 1] /BlackPoint [-1 0 0] >>",
-        ] {
-            assert!(parse(source).is_err(), "{source}");
-        }
-    }
-}
-
 impl CalRgb {
     pub fn try_new<R: Seek + Read>(obj: &PdfObject, ctx: &PDFContext<R>) -> PdfResult<Self> {
         let obj = ctx.resolve(obj)?;
@@ -123,9 +74,11 @@ impl CalRgb {
         let dict = parameters
             .as_dict()
             .ok_or_else(|| PdfError::ColorError("CalRGB parameters must be a dictionary".into()))?;
-        let mut color = CalRgb::default();
-        color.white_point = read_parameter::<R, 3>(dict, "WhitePoint", ctx)?
-            .ok_or_else(|| PdfError::ColorError("CalRGB requires WhitePoint".into()))?;
+        let mut color = CalRgb {
+            white_point: read_parameter::<R, 3>(dict, "WhitePoint", ctx)?
+                .ok_or_else(|| PdfError::ColorError("CalRGB requires WhitePoint".into()))?,
+            ..Default::default()
+        };
         if let Some(value) = read_parameter::<R, 3>(dict, "Gamma", ctx)? {
             color.gamma = value;
         }
@@ -178,5 +131,54 @@ impl CalRgb {
             return Err(PdfError::ColorError("CalRGB conversion overflow".into()));
         }
         Ok(ColorRgb::new(r, g, b))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        document::cross_ref_table::CrossRefTable,
+        io::stream_reader::StreamReader,
+        objects::pdf_dict::PdfDict,
+        parser::{parser::PdfParser, syntax::SyntaxParser},
+    };
+    use std::{collections::HashMap, io::Cursor};
+
+    #[test]
+    fn calrgb_invalid_parameters_and_components_return_errors() {
+        let parser = PdfParser::new(SyntaxParser::new(
+            StreamReader::try_new(Cursor::new(Vec::<u8>::new())).unwrap(),
+        ));
+        let ctx = PDFContext::try_new(
+            parser,
+            CrossRefTable::new(HashMap::new(), PdfDict::default()),
+        )
+        .unwrap();
+        let parse = |source: &str| {
+            let obj = SyntaxParser::new(
+                StreamReader::try_new(Cursor::new(source.as_bytes().to_vec())).unwrap(),
+            )
+            .get_object()
+            .unwrap();
+            CalRgb::try_new(&obj, &ctx)
+        };
+        let color = parse("[/CalRGB << /WhitePoint [0.95 1 1.09] /Gamma [2 2 2] >>]").unwrap();
+        assert!(color.rgb(&color.default_value()).is_ok());
+        assert!(color.rgb(&ColorValue::new(vec![])).is_err());
+        assert!(color.rgb(&ColorValue::new(vec![f32::NAN; 3])).is_err());
+        for source in [
+            "null",
+            "[/CalRGB 1]",
+            "<< >>",
+            "<< /WhitePoint [1 1 1] /Gamma [] >>",
+            "<< /WhitePoint [1 1 1] /Gamma [0 1 1] >>",
+            "<< /WhitePoint [1 /bad 1] >>",
+            "<< /WhitePoint [1 2 1] >>",
+            "<< /WhitePoint [1 1 1] /Matrix [1] >>",
+            "<< /WhitePoint [1 1 1] /BlackPoint [-1 0 0] >>",
+        ] {
+            assert!(parse(source).is_err(), "{source}");
+        }
     }
 }

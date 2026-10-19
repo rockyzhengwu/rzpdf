@@ -398,14 +398,13 @@ impl<R: Read + Seek> PdfDocument<R> {
                 .ok_or_else(|| invalid("list capacity overflow"))?,
         )?;
         for input in items {
-            if let Some(id) = input.as_reference().map(|r| r.id()) {
-                if result
+            if let Some(id) = input.as_reference().map(|r| r.id())
+                && result
                     .files
                     .iter()
                     .any(|r| r.filespec.as_ref().is_some_and(|h| h.id == id))
-                {
-                    return Err(invalid("duplicate AF identity"));
-                }
+            {
+                return Err(invalid("duplicate AF identity"));
             }
             result.files.push(self.af_record(input, budget)?);
         }
@@ -570,7 +569,7 @@ impl<R: Read + Seek> PdfDocument<R> {
                 .ok_or_else(|| invalid("indirect Root required"))?
                 .id()
         };
-        if array.len() == 0 {
+        if array.is_empty() {
             dict.remove("AF");
             self.edit_transaction_with_budget(budget, |doc| {
                 doc.update_object(id, PdfObject::PdfDict(dict))

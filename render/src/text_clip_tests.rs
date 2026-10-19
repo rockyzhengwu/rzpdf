@@ -133,7 +133,12 @@ fn zero_and_signed_sizes_clip_to_actual_outline_not_glyph_bounds() {
             }
         );
         if !inside {
-            assert!(data.chunks_exact(4).all(|p| p == [255, 255, 255, 255]));
+            assert!(
+                data.as_chunks::<4>()
+                    .0
+                    .iter()
+                    .all(|p| *p == [255, 255, 255, 255])
+            );
         }
     }
 }

@@ -1,7 +1,7 @@
 use super::value::{ColorRgb, ColorValue};
 use crate::error::{PdfError, PdfResult};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DeviceCmyk {}
 
 impl DeviceCmyk {

@@ -24,27 +24,27 @@ use crate::{
 pub mod acroform;
 pub mod annotations;
 pub(crate) mod appearance;
-pub mod attachments;
 pub mod associated_files;
-mod embedded_file;
+pub mod attachments;
 pub mod bookmarks;
 pub mod catalog;
 mod content_edit;
 pub mod cross_ref_table;
 pub mod destination;
 pub mod destinations;
+mod embedded_file;
 pub mod embedded_font;
 pub mod glyph_run;
 pub mod identity;
 pub mod links;
 pub mod metadata;
 mod nested_edit;
-pub mod outlines;
 pub mod optional_content;
 pub mod optional_content_edit;
+pub mod outlines;
 pub mod owned;
-pub mod recovery;
 pub mod page_labels;
+pub mod recovery;
 mod span_tree;
 pub mod subset_text_edit;
 mod text_event_edit;
@@ -53,11 +53,11 @@ pub use owned::Document;
 mod page_copy;
 mod page_geometry;
 mod page_order;
-pub mod page_transfer;
 pub mod page_overlay;
+pub mod page_transfer;
 pub mod page_tree;
-mod resource_import;
 pub(crate) mod preservation;
+mod resource_import;
 pub mod resource_manager;
 pub mod save_options;
 pub(crate) mod state;
@@ -152,7 +152,9 @@ impl PdfDocument<Cursor<Vec<u8>>> {
 
 impl<R: Seek + Read> PdfDocument<R> {
     /// Bounded file-structure events, including events discovered by lazy reads.
-    pub fn structure_diagnostics(&self) -> PdfResult<Vec<crate::parser::diagnostic::StructureDiagnostic>> {
+    pub fn structure_diagnostics(
+        &self,
+    ) -> PdfResult<Vec<crate::parser::diagnostic::StructureDiagnostic>> {
         self.ctx.structure_diagnostics()
     }
     pub fn read_provenance(&self) -> crate::parser::diagnostic::ReadProvenance {

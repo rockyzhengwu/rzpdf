@@ -15,9 +15,7 @@ fn reference(id: ObjectId) -> PdfObject {
 }
 
 impl<R: Read + Seek> PdfDocument<R> {
-    pub(super) fn destination_entries(
-        &self,
-    ) -> PdfResult<(PdfDict, PdfDict, Vec<(PdfString, PdfObject)>)> {
+    pub(super) fn destination_entries(&self) -> PdfResult<super::trees::NameTreeSnapshot> {
         let root = self.ctx().get_root_owned()?;
         if root.get("Dests").is_some() {
             return Err(PdfError::UnsupportedFeature(
@@ -233,19 +231,18 @@ impl<R: Read + Seek> PdfDocument<R> {
                     if objects.len() >= self.ctx().limits().max_objects {
                         return Err(PdfError::ResourceLimit("navigation object count".into()));
                     }
-                    if let Some(id) = annot.as_reference().map(PdfReference::id) {
-                        if owners
+                    if let Some(id) = annot.as_reference().map(PdfReference::id)
+                        && owners
                             .insert(
                                 id,
                                 u32::try_from(page_index)
                                     .map_err(|_| PdfError::ResourceLimit("page index".into()))?,
                             )
                             .is_some()
-                        {
-                            return Err(PdfError::UnsupportedFeature(
-                                "shared annotation ownership".into(),
-                            ));
-                        }
+                    {
+                        return Err(PdfError::UnsupportedFeature(
+                            "shared annotation ownership".into(),
+                        ));
                     }
                     objects.push((annot.clone(), self.ctx().resolve(annot)?));
                 }

@@ -1,7 +1,7 @@
 use pdf::{
     document::{owned::Document, resource_manager::ResourceKind},
     io::stream_reader::StreamReader,
-    objects::{pdf_stream::PdfStream, PdfObject},
+    objects::{PdfObject, pdf_stream::PdfStream},
     page::page_object::PageObject,
     parser::syntax::{ParseMode, SyntaxParser},
 };
@@ -63,15 +63,16 @@ fn nested_path_edit_rejects_unknown_or_malformed_prefix_without_writes() {
         };
         let revision = doc.revision();
         let resources = doc.get_page(0).unwrap().resource().unwrap();
-        assert!(doc
-            .replace_nested_path_numbers(
+        assert!(
+            doc.replace_nested_path_numbers(
                 0,
                 &root,
                 &source,
                 source.geometry_operation_indices[0],
                 &[2., 2.]
             )
-            .is_err());
+            .is_err()
+        );
         assert_eq!(doc.revision(), revision);
         assert_eq!(doc.get_page(0).unwrap().resource().unwrap(), resources);
         let unchanged = doc.get_page(0).unwrap().content_program().unwrap();
@@ -118,14 +119,16 @@ fn nested_path_membership_respects_discard_and_graphics_state_boundaries() {
     for indices in [vec![0, 2, 5, 7, 8], vec![7, 8], vec![2, 5, 7]] {
         let mut incomplete = source.clone();
         incomplete.geometry_operation_indices = indices;
-        assert!(doc
-            .replace_nested_path_numbers(0, &root, &incomplete, 7, &[9., 9.])
-            .is_err());
+        assert!(
+            doc.replace_nested_path_numbers(0, &root, &incomplete, 7, &[9., 9.])
+                .is_err()
+        );
         assert_eq!(doc.revision(), revision);
     }
-    assert!(doc
-        .replace_nested_path_numbers(0, &root, source, 8, &[])
-        .is_err());
+    assert!(
+        doc.replace_nested_path_numbers(0, &root, source, 8, &[])
+            .is_err()
+    );
     assert_eq!(doc.revision(), revision);
     doc.replace_nested_path_numbers(0, &root, source, 2, &[3., 3.])
         .unwrap();
@@ -346,18 +349,20 @@ fn nested_path_numbers_change_only_selected_invocation() {
     // Sorted, in-range geometry is insufficient: operation 0 belongs to an
     // already-painted path, not the second event.
     forged.geometry_operation_indices = vec![0, 2];
-    assert!(doc
-        .replace_nested_path_numbers(0, &root, &forged, 0, &[1., 2., 3., 4.])
-        .is_err());
+    assert!(
+        doc.replace_nested_path_numbers(0, &root, &forged, 0, &[1., 2., 3., 4.])
+            .is_err()
+    );
     assert_eq!(doc.revision(), revision);
     for (operation, values) in [
         (0, vec![f32::NAN, 0., 2., 2.]),
         (0, vec![1., 2.]),
         (2, vec![1., 2., 3., 4.]),
     ] {
-        assert!(doc
-            .replace_nested_path_numbers(0, &root, source, operation, &values)
-            .is_err());
+        assert!(
+            doc.replace_nested_path_numbers(0, &root, source, operation, &values)
+                .is_err()
+        );
         assert_eq!(doc.revision(), revision);
     }
     let resources = doc.get_page(0).unwrap().resource().unwrap();
@@ -372,9 +377,10 @@ fn nested_path_numbers_change_only_selected_invocation() {
     assert_eq!(refreshed.source_bytes(), root.source_bytes());
     assert_eq!(refreshed.stream_object_id(0), root.stream_object_id(0));
     assert_eq!(doc.get_page(0).unwrap().resource().unwrap(), resources);
-    assert!(doc
-        .replace_nested_path_numbers(0, &root, source, 0, &[5., 6., -2., 4.])
-        .is_err());
+    assert!(
+        doc.replace_nested_path_numbers(0, &root, source, 0, &[5., 6., -2., 4.])
+            .is_err()
+    );
     doc.replace_nested_path_numbers(0, &refreshed, source, 0, &[5., 6., -2., 4.])
         .unwrap();
     let reopened =
@@ -683,10 +689,12 @@ fn nested_edit_materializes_page_fallback_without_losing_font_bindings() {
                 .collect::<String>(),
             "ABAB"
         );
-        assert!(report
-            .characters
-            .iter()
-            .all(|ch| ch.font_name.as_deref() == Some("Helvetica")));
+        assert!(
+            report
+                .characters
+                .iter()
+                .all(|ch| ch.font_name.as_deref() == Some("Helvetica"))
+        );
         assert_eq!(
             document
                 .get_page(1)
@@ -820,9 +828,10 @@ fn nested_path_removal_copies_selected_chain_and_rolls_back_whole_edit() {
         Err(pdf::error::PdfError::ObjectError(_))
     ));
     assert!(doc.remove_nested_path_draw(1, &root, &source).is_err());
-    assert!(doc
-        .remove_nested_path_draw(0, &leaf_program, &source)
-        .is_err());
+    assert!(
+        doc.remove_nested_path_draw(0, &leaf_program, &source)
+            .is_err()
+    );
     assert_eq!(doc.revision(), revision);
     assert_eq!(doc.get_page(0).unwrap().resource().unwrap(), resources);
     let unchanged = doc.get_page(0).unwrap().content_program().unwrap();

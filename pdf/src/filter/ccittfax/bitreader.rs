@@ -25,17 +25,6 @@ impl<'a> BitReader<'a> {
         }
         Some(value)
     }
-
-    pub fn remaining_bits(&self) -> usize {
-        if self.bit_pos > self.data.len() {
-            return 0;
-        }
-        self.data.len() - self.bit_pos
-    }
-
-    pub fn eof(&self) -> bool {
-        self.bit_pos / 8 >= self.data.len()
-    }
 }
 
 #[cfg(test)]

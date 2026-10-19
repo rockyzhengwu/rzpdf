@@ -54,7 +54,7 @@ fn unsupported(message: &str) -> PdfError {
 impl<R: Read + Seek> PdfDocument<R> {
     pub(crate) fn page_relationship_guard(&self) -> PdfResult<()> {
         let root = self.ctx().get_root_owned()?;
-        let structured=self.validate_structure_relationships()?;
+        let structured = self.validate_structure_relationships()?;
         for key in ["AA", "OpenAction", "Dests", "Threads", "OCProperties"] {
             if root.contains_key(key) {
                 return Err(unsupported(&format!(
@@ -81,7 +81,9 @@ impl<R: Read + Seek> PdfDocument<R> {
                     return Err(unsupported(&format!("page relationships with {key}")));
                 }
             }
-            if !structured && page.page_dict.contains_key("StructParents") {return Err(unsupported("page StructParents without supported tree"));}
+            if !structured && page.page_dict.contains_key("StructParents") {
+                return Err(unsupported("page StructParents without supported tree"));
+            }
             for record in self.page_annotations(index as u32)? {
                 total += 1;
                 if total > self.ctx().limits().max_objects {
@@ -114,7 +116,11 @@ impl<R: Read + Seek> PdfDocument<R> {
                         return Err(unsupported(&format!("annotation relationship with {key}")));
                     }
                 }
-                if !structured && dict.contains_key("StructParent") {return Err(unsupported("annotation StructParent without supported tree"));}
+                if !structured && dict.contains_key("StructParent") {
+                    return Err(unsupported(
+                        "annotation StructParent without supported tree",
+                    ));
+                }
                 if dict.contains_key("A") && record.subtype != "Link" {
                     return Err(unsupported("non-Link annotation action"));
                 }
@@ -227,17 +233,17 @@ impl<R: Read + Seek> PdfDocument<R> {
                     .into_dict()
                     .ok_or_else(|| unsupported("annotation dictionary"))?;
                 dict.try_insert("P".into(), reference(page.page_id))?;
-                if record.subtype == "Link" {
-                    if let Some(destination) = importer.source.navigation_destination(&dict)? {
-                        let encoded = importer.source.encode_destination(&destination)?;
-                        if let Some(action) = dict.get("A") {
-                            let mut action =
-                                importer.source.ctx().resolve(action)?.into_dict().unwrap();
-                            action.try_insert("D".into(), encoded)?;
-                            dict.try_insert("A".into(), PdfObject::PdfDict(action))?;
-                        } else {
-                            dict.try_insert("Dest".into(), encoded)?;
-                        }
+                if record.subtype == "Link"
+                    && let Some(destination) = importer.source.navigation_destination(&dict)?
+                {
+                    let encoded = importer.source.encode_destination(&destination)?;
+                    if let Some(action) = dict.get("A") {
+                        let mut action =
+                            importer.source.ctx().resolve(action)?.into_dict().unwrap();
+                        action.try_insert("D".into(), encoded)?;
+                        dict.try_insert("A".into(), PdfObject::PdfDict(action))?;
+                    } else {
+                        dict.try_insert("Dest".into(), encoded)?;
                     }
                 }
                 importer.prepared.insert(id, PdfObject::PdfDict(dict));
@@ -489,7 +495,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         self.edit_transaction(|doc| {
             doc.page_relationship_guard()?;
             let removed = doc.page_location(page)?.page_id;
-            let structure_plan=doc.plan_structure_page_deletion(removed)?;
+            let structure_plan = doc.plan_structure_page_deletion(removed)?;
             if !doc.page_annotations(page)?.is_empty() {
                 doc.ctx().require_annotation_permission()?;
             }
@@ -579,7 +585,9 @@ impl<R: Read + Seek> PdfDocument<R> {
         for (key, value) in &*self.ctx().trailer() {
             if super::preservation::retained_trailer_key(key) {
                 if (&roots).into_iter().len() >= limits.max_objects {
-                    return Err(PdfError::ResourceLimit("page deletion trailer roots".into()));
+                    return Err(PdfError::ResourceLimit(
+                        "page deletion trailer roots".into(),
+                    ));
                 }
                 roots.try_insert(key.clone(), value.clone())?;
             }
@@ -620,11 +628,19 @@ impl<R: Read + Seek> PdfDocument<R> {
                     pending.extend((&dict).into_iter().map(|(_, v)| (v.clone(), depth + 1)));
                 }
                 PdfObject::PdfStream(stream) => {
-                    let kind = stream.dict().get("Type")
-                        .map(|value| self.ctx().resolve_owned(value)).transpose()?;
-                    if kind.as_ref().and_then(PdfObject::as_name)
-                        .is_some_and(|name| matches!(name.name(), "XRef" | "ObjStm")) {
-                        return Err(unsupported("page deletion with live structural container reference"));
+                    let kind = stream
+                        .dict()
+                        .get("Type")
+                        .map(|value| self.ctx().resolve_owned(value))
+                        .transpose()?;
+                    if kind
+                        .as_ref()
+                        .and_then(PdfObject::as_name)
+                        .is_some_and(|name| matches!(name.name(), "XRef" | "ObjStm"))
+                    {
+                        return Err(unsupported(
+                            "page deletion with live structural container reference",
+                        ));
                     }
                     pending.push((PdfObject::PdfDict(stream.dict().clone()), depth + 1))
                 }

@@ -123,14 +123,14 @@ fn decode_inner(
             result.push(first);
         }
 
-        if let Some(prev) = previous {
-            if next_code < 4096 {
-                prefixes[next_code as usize] = prev;
-                suffixes[next_code as usize] = first;
-                next_code += 1;
-                while code_size < 12 && next_code + early_change as u16 > (1_u16 << code_size) {
-                    code_size += 1;
-                }
+        if let Some(prev) = previous
+            && next_code < 4096
+        {
+            prefixes[next_code as usize] = prev;
+            suffixes[next_code as usize] = first;
+            next_code += 1;
+            while code_size < 12 && next_code + early_change as u16 > (1_u16 << code_size) {
+                code_size += 1;
             }
         }
         previous = Some(code);
@@ -172,7 +172,7 @@ mod tests {
     fn literal_stream_crosses_all_widths_saturates_table_and_clears() {
         use crate::{
             budget::OperationBudget,
-            objects::{pdf_dict::PdfDict, pdf_number::PdfNumber, PdfObject},
+            objects::{PdfObject, pdf_dict::PdfDict, pdf_number::PdfNumber},
         };
         fn write_code(bytes: &mut Vec<u8>, offset: &mut usize, code: u16, width: usize) {
             for bit in (0..width).rev() {
@@ -233,7 +233,7 @@ mod tests {
     fn budgeted_lzw_tracks_growth_and_dispatch_result_lifetime() {
         use crate::{
             budget::OperationBudget,
-            filter::{apply_filter_with_budget, FilterContext},
+            filter::{FilterContext, apply_filter_with_budget},
         };
         let encoded = [0x80, 0x0B, 0x60, 0x50, 0x22, 0x0C, 0x0C, 0x85, 0x01];
         let budget = OperationBudget::new(19);
@@ -282,7 +282,7 @@ mod tests {
 
     #[test]
     fn early_change_defaults_only_when_absent() {
-        use crate::objects::{pdf_dict::PdfDict, pdf_number::PdfNumber, PdfObject};
+        use crate::objects::{PdfObject, pdf_dict::PdfDict, pdf_number::PdfNumber};
         let encoded = [0x80, 0x0B, 0x60, 0x50, 0x22, 0x0C, 0x0C, 0x85, 0x01];
         let expected = lzw_decode(&encoded, None).unwrap();
         for value in ["0", "1"] {

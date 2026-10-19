@@ -5,9 +5,9 @@ use crate::{
     error::{PdfError, PdfResult},
     io::stream_reader::StreamReader,
     objects::{
-        pdf_array::PdfArray, pdf_bool::PdfBool, pdf_dict::PdfDict, pdf_indirect::PdfIndirect,
-        pdf_name::PdfName, pdf_number::PdfNumber, pdf_reference::PdfReference,
-        pdf_stream::PdfStream, pdf_string::PdfString, PdfObject,
+        PdfObject, pdf_array::PdfArray, pdf_bool::PdfBool, pdf_dict::PdfDict,
+        pdf_indirect::PdfIndirect, pdf_name::PdfName, pdf_number::PdfNumber,
+        pdf_reference::PdfReference, pdf_stream::PdfStream, pdf_string::PdfString,
     },
     parser::{
         character::{is_delimiter, is_end_of_line, is_number, is_regular, is_white_space},
@@ -87,12 +87,7 @@ impl PdfWord {
     pub fn try_add_char(&mut self, c: u8) -> PdfResult<()> {
         if let Some(budget) = &self.budget {
             if self.raw.len() == self.raw.capacity() {
-                let capacity = self
-                    .raw
-                    .capacity()
-                    .checked_mul(2)
-                    .unwrap_or(usize::MAX)
-                    .max(1);
+                let capacity = self.raw.capacity().saturating_mul(2).max(1);
                 let mut lease = budget.reserve(capacity)?;
                 let mut replacement = Vec::new();
                 replacement
@@ -236,17 +231,35 @@ impl<R: Seek + Read> SyntaxParser<R> {
         self.pos
     }
 
-    pub(crate) fn limit_work(&mut self, steps: u64) { self.work_remaining = Some(steps); }
-    pub(crate) fn remaining_work(&self) -> Option<u64> { self.work_remaining }
-    pub(crate) fn finish_work(&mut self) { self.work_remaining = None; }
+    pub(crate) fn limit_work(&mut self, steps: u64) {
+        self.work_remaining = Some(steps);
+    }
+    pub(crate) fn remaining_work(&self) -> Option<u64> {
+        self.work_remaining
+    }
+    pub(crate) fn finish_work(&mut self) {
+        self.work_remaining = None;
+    }
     fn charge_work(&mut self, steps: u64) -> PdfResult<()> {
         if let Some(remaining) = &mut self.work_remaining {
-            *remaining = remaining.checked_sub(steps).ok_or_else(|| PdfError::ResourceLimit("recovery scan steps".into()))?;
+            *remaining = remaining
+                .checked_sub(steps)
+                .ok_or_else(|| PdfError::ResourceLimit("recovery scan steps".into()))?;
         }
         Ok(())
     }
-    pub(crate) fn report(&self, offset: u64, object: Option<crate::objects::object_id::ObjectId>, reason: super::diagnostic::StructureReason) -> PdfResult<()> {
-        self.diagnostics.record(super::diagnostic::StructureDiagnostic { offset, object: object.or(self.diagnostic_object), reason })
+    pub(crate) fn report(
+        &self,
+        offset: u64,
+        object: Option<crate::objects::object_id::ObjectId>,
+        reason: super::diagnostic::StructureReason,
+    ) -> PdfResult<()> {
+        self.diagnostics
+            .record(super::diagnostic::StructureDiagnostic {
+                offset,
+                object: object.or(self.diagnostic_object),
+                reason,
+            })
     }
 
     pub fn mode(&self) -> ParseMode {
@@ -273,13 +286,22 @@ impl<R: Seek + Read> SyntaxParser<R> {
                     let mut high_bits = 0;
                     while !self.is_eof() {
                         let byte = self.get_next_char()?;
-                        if is_end_of_line(byte) { break; }
+                        if is_end_of_line(byte) {
+                            break;
+                        }
                         high_bits += usize::from(byte >= 128);
-                        if high_bits == 4 { binary = true; break; }
+                        if high_bits == 4 {
+                            binary = true;
+                            break;
+                        }
                     }
                 }
                 if !binary {
-                    self.report(0, None, super::diagnostic::StructureReason::CompatibleHeader)?;
+                    self.report(
+                        0,
+                        None,
+                        super::diagnostic::StructureReason::CompatibleHeader,
+                    )?;
                 }
             }
             self.set_pos(saved_pos)?;
@@ -333,22 +355,27 @@ impl<R: Seek + Read> SyntaxParser<R> {
                 "get_indirect_object obj keyword is expected".to_string(),
             ));
         }
-        let previous_object = self.diagnostic_object.replace(crate::objects::object_id::ObjectId::new(objnum, u32::from(gennum)));
+        let previous_object =
+            self.diagnostic_object
+                .replace(crate::objects::object_id::ObjectId::new(
+                    objnum,
+                    u32::from(gennum),
+                ));
         let result = (|| {
-        let (lease, obj) = if let Some(budget) = budget {
-            let (object, lease) = self.get_content_object_with_budget(budget)?;
-            (Some(lease), object)
-        } else {
-            (None, self.get_object()?)
-        };
-        let end_word = self.get_next_word_inner(budget)?;
-        if !end_word.is_equal(b"endobj") {
-            self.set_pos(saved_pos)?;
-            return Err(PdfError::ParserError(
-                "get_indirect_object endobj keyword is expected".to_string(),
-            ));
-        }
-        Ok((PdfIndirect::new(objnum, gennum, obj), lease))
+            let (lease, obj) = if let Some(budget) = budget {
+                let (object, lease) = self.get_content_object_with_budget(budget)?;
+                (Some(lease), object)
+            } else {
+                (None, self.get_object()?)
+            };
+            let end_word = self.get_next_word_inner(budget)?;
+            if !end_word.is_equal(b"endobj") {
+                self.set_pos(saved_pos)?;
+                return Err(PdfError::ParserError(
+                    "get_indirect_object endobj keyword is expected".to_string(),
+                ));
+            }
+            Ok((PdfIndirect::new(objnum, gennum, obj), lease))
         })();
         self.diagnostic_object = previous_object;
         result
@@ -544,7 +571,11 @@ impl<R: Seek + Read> SyntaxParser<R> {
                     )));
                 }
                 if self.mode == ParseMode::Compatible && dict.contains_key(&key) {
-                    self.report(saved_pos, None, super::diagnostic::StructureReason::DuplicateDictionaryKey)?;
+                    self.report(
+                        saved_pos,
+                        None,
+                        super::diagnostic::StructureReason::DuplicateDictionaryKey,
+                    )?;
                 }
                 let value = self.get_object()?;
                 dict.try_insert(key, value)?;
@@ -605,7 +636,11 @@ impl<R: Seek + Read> SyntaxParser<R> {
         }
 
         self.set_pos(data_start)?;
-        self.report(data_start, None, super::diagnostic::StructureReason::StreamBoundarySearch)?;
+        self.report(
+            data_start,
+            None,
+            super::diagnostic::StructureReason::StreamBoundarySearch,
+        )?;
         let end_of_stream = self.find_stream_end_pos()?;
         if let Some(end_pos) = end_of_stream {
             let data_len = end_pos.saturating_sub(self.pos);
@@ -668,9 +703,13 @@ impl<R: Seek + Read> SyntaxParser<R> {
                 Ok(())
             }
             _ if self.mode == ParseMode::Compatible => {
-                self.report(self.pos - 1, None, super::diagnostic::StructureReason::StreamStartWhitespace)?;
+                self.report(
+                    self.pos - 1,
+                    None,
+                    super::diagnostic::StructureReason::StreamStartWhitespace,
+                )?;
                 self.set_pos(self.pos - 1)?;
-                self.to_next_line()
+                self.skip_line()
             }
             _ => Err(PdfError::ParserError(
                 "stream keyword must be followed by an end-of-line marker".to_string(),
@@ -802,6 +841,7 @@ impl<R: Seek + Read> SyntaxParser<R> {
         Ok(())
     }
 
+    #[cfg(test)]
     fn read_block(&mut self, len: u64) -> PdfResult<Vec<u8>> {
         self.read_stream_block(len, None).map(|(bytes, _)| bytes)
     }
@@ -842,7 +882,7 @@ impl<R: Seek + Read> SyntaxParser<R> {
         }
     }
 
-    fn to_next_line(&mut self) -> PdfResult<()> {
+    fn skip_line(&mut self) -> PdfResult<()> {
         // These callers discard the line: retain neither bytes nor capacity.
         let mut length = 0usize;
         loop {
@@ -996,7 +1036,11 @@ impl<R: Seek + Read> SyntaxParser<R> {
                         ));
                     }
                     if self.mode == ParseMode::Compatible && builder.contains_key(&key) {
-                        self.report(start, None, super::diagnostic::StructureReason::DuplicateDictionaryKey)?;
+                        self.report(
+                            start,
+                            None,
+                            super::diagnostic::StructureReason::DuplicateDictionaryKey,
+                        )?;
                     }
                     let (value, value_lease) = self.get_content_object_with_budget(budget)?;
                     builder.insert(key, value, key_lease, value_lease)?;
@@ -1275,7 +1319,7 @@ impl<R: Seek + Read> SyntaxParser<R> {
         &mut self,
         budget: Option<&crate::budget::OperationBudget>,
     ) -> PdfResult<PdfWord> {
-        self.to_next_word()?;
+        self.skip_to_word()?;
         let mut word = PdfWord::default();
         if let Some(budget) = budget {
             word.lease = Some(budget.reserve(0)?);
@@ -1345,7 +1389,7 @@ impl<R: Seek + Read> SyntaxParser<R> {
         Ok(word)
     }
 
-    fn to_next_word(&mut self) -> PdfResult<()> {
+    fn skip_to_word(&mut self) -> PdfResult<()> {
         let mut c = self.get_next_char()?;
         loop {
             while is_white_space(c) {
@@ -1359,13 +1403,21 @@ impl<R: Seek + Read> SyntaxParser<R> {
             let mut prefix_count = 0;
             loop {
                 c = self.get_next_char()?;
-                if prefix_count < comment_prefix.len() { comment_prefix[prefix_count] = c; prefix_count += 1; }
+                if prefix_count < comment_prefix.len() {
+                    comment_prefix[prefix_count] = c;
+                    prefix_count += 1;
+                }
                 if is_end_of_line(c) {
                     break;
                 }
             }
-            if self.work_remaining.is_some() && (&comment_prefix[..4] == b"%EOF" || (&comment_prefix[..4] == b"PDF-" && comment_start != 0)) {
-                return Err(PdfError::UnsupportedFeature("recovery refuses embedded revision/header markers".into()));
+            if self.work_remaining.is_some()
+                && (&comment_prefix[..4] == b"%EOF"
+                    || (&comment_prefix[..4] == b"PDF-" && comment_start != 0))
+            {
+                return Err(PdfError::UnsupportedFeature(
+                    "recovery refuses embedded revision/header markers".into(),
+                ));
             }
         }
         self.set_pos(self.pos - 1)?;
@@ -1562,7 +1614,7 @@ mod tests {
             let mut retained = new_parser(source);
             retained.read_line().unwrap();
             let mut skipped = new_parser(source);
-            skipped.to_next_line().unwrap();
+            skipped.skip_line().unwrap();
             assert_eq!(skipped.position(), retained.position(), "{source}");
         }
         for source in ["abc", "abcd", "abc\r\nnext"] {
@@ -1570,7 +1622,7 @@ mod tests {
             let mut skipped = new_parser(source);
             retained.limits.max_token_bytes = 3;
             skipped.limits.max_token_bytes = 3;
-            assert_eq!(skipped.to_next_line().is_ok(), retained.read_line().is_ok());
+            assert_eq!(skipped.skip_line().is_ok(), retained.read_line().is_ok());
             assert_eq!(skipped.position(), retained.position());
         }
         let mut parser = new_parser("  ignored\r\nabc");
@@ -1719,9 +1771,11 @@ mod tests {
         )>();
         let budget = crate::budget::OperationBudget::new(entry + pair + 1);
         let neighbor = budget.reserve(1).unwrap();
-        assert!(new_parser("<< /A null >>")
-            .get_content_object_with_budget(&budget)
-            .is_err());
+        assert!(
+            new_parser("<< /A null >>")
+                .get_content_object_with_budget(&budget)
+                .is_err()
+        );
         assert_eq!(budget.live_bytes(), 1);
         drop(neighbor);
         let (object, lease) = new_parser("<< /A null >>")
@@ -1791,7 +1845,7 @@ mod tests {
         drop(object);
         drop(lease);
         assert_eq!(budget.live_bytes(), 0);
-        let neighbor = budget.reserve(1).unwrap();
+        let _neighbor = budget.reserve(1).unwrap();
         for source in ["[(abc) [1 (unterminated]", "[1 /#gg]", "[true", "[[null]"] {
             let mut parser = new_parser(source);
             assert!(parser.get_content_object_with_budget(&budget).is_err());
@@ -1859,9 +1913,11 @@ mod tests {
         let budget = crate::budget::OperationBudget::new(5);
         let neighbor = budget.reserve(1).unwrap();
         // First token, second token, and R coexist: 2 + 2 + 1 bytes.
-        assert!(new_parser("12 34 R")
-            .get_number_with_budget(&budget)
-            .is_err());
+        assert!(
+            new_parser("12 34 R")
+                .get_number_with_budget(&budget)
+                .is_err()
+        );
         assert_eq!(budget.live_bytes(), 1);
         drop(neighbor);
         let (object, lease) = new_parser("12 34 R")
@@ -2161,7 +2217,7 @@ mod tests {
         assert!(parser.read_line().is_err());
         assert_eq!(parser.position(), 1);
         parser.set_pos(0).unwrap();
-        assert!(parser.to_next_line().is_err());
+        assert!(parser.skip_line().is_err());
         parser.set_pos(0).unwrap();
         assert_eq!(parser.get_next_char().unwrap(), b'a');
         parser.set_pos(2).unwrap();
@@ -2202,7 +2258,7 @@ mod tests {
             assert_eq!(parser.read_line().unwrap(), b"a");
             assert_eq!(parser.get_next_char().unwrap(), b'b');
             parser.set_pos(0).unwrap();
-            parser.to_next_line().unwrap();
+            parser.skip_line().unwrap();
             assert_eq!(parser.get_next_char().unwrap(), b'b');
         }
         for source in ["a", "a\r", "a\n", "a\r\n"] {

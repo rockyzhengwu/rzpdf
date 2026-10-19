@@ -88,12 +88,12 @@ impl<R: Read + Seek> PdfDocument<R> {
                 return Err(invalid("EF key has no matching Filespec filename"));
             }
         }
-        if let (Some(f), Some(uf)) = (ef.get("F"), ef.get("UF")) {
-            if f != uf {
-                return Err(PdfError::UnsupportedFeature(
-                    "ambiguous EF F/UF payloads".into(),
-                ));
-            }
+        if let (Some(f), Some(uf)) = (ef.get("F"), ef.get("UF"))
+            && f != uf
+        {
+            return Err(PdfError::UnsupportedFeature(
+                "ambiguous EF F/UF payloads".into(),
+            ));
         }
         let value = payload_reference(&ef, true)?;
         if value.as_reference().is_none() {

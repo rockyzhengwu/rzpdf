@@ -47,7 +47,9 @@ pub(super) struct EmbeddedCidFontObjects {
 }
 impl EmbeddedCidFontObjects {
     #[cfg(test)]
-    pub(super) fn metric_bytes(&self) -> usize { self._metric_lease.bytes() }
+    pub(super) fn metric_bytes(&self) -> usize {
+        self._metric_lease.bytes()
+    }
     pub(super) fn encoding(&self) -> &UnicodeCidEncoding {
         &self.encoding
     }
@@ -120,21 +122,34 @@ struct MetricArrayBuilder<'a> {
 }
 
 impl<'a> MetricArrayBuilder<'a> {
-    fn new(count: usize, limits: crate::parser::options::Limits,
-        budget: &'a crate::budget::OperationBudget) -> PdfResult<Self> {
-        let bytes = count.checked_mul(std::mem::size_of::<PdfObject>())
+    fn new(
+        count: usize,
+        limits: crate::parser::options::Limits,
+        budget: &'a crate::budget::OperationBudget,
+    ) -> PdfResult<Self> {
+        let bytes = count
+            .checked_mul(std::mem::size_of::<PdfObject>())
             .filter(|_| count <= limits.max_objects)
             .filter(|&bytes| bytes <= limits.max_operation_bytes)
             .ok_or_else(|| PdfError::ResourceLimit("font metric array size".into()))?;
         let mut lease = budget.reserve(bytes)?;
         let mut items = Vec::new();
-        items.try_reserve_exact(count)
+        items
+            .try_reserve_exact(count)
             .map_err(|_| PdfError::ResourceLimit("font metric array allocation".into()))?;
-        let actual = items.capacity().checked_mul(std::mem::size_of::<PdfObject>())
+        let actual = items
+            .capacity()
+            .checked_mul(std::mem::size_of::<PdfObject>())
             .filter(|&bytes| bytes <= limits.max_operation_bytes)
             .ok_or_else(|| PdfError::ResourceLimit("font metric array capacity".into()))?;
         lease.resize(actual)?;
-        Ok(Self { items, count, limits, budget, lease })
+        Ok(Self {
+            items,
+            count,
+            limits,
+            budget,
+            lease,
+        })
     }
 
     fn push_number(&mut self, value: f64) -> PdfResult<()> {
@@ -174,171 +189,14 @@ impl<'a> MetricArrayBuilder<'a> {
         let budget = self.budget;
         let count = self.count;
         let (inner, mut inner_lease) = self.finish()?;
-        if count == 0 { return Ok((inner, inner_lease)); }
+        if count == 0 {
+            return Ok((inner, inner_lease));
+        }
         let mut outer = Self::new(2, limits, budget)?;
         outer.push_number(1.0)?;
         outer.lease.absorb(&mut inner_lease)?;
         outer.items.push(PdfObject::PdfArray(inner));
         outer.finish()
-    }
-}
-
-#[cfg(test)]
-mod metric_array_tests {
-    use super::*;
-    use crate::{budget::OperationBudget, parser::options::Limits};
-
-    #[test]
-    fn registered_metric_owner_survives_until_outer_content_failure() {
-        let source = crate::font::truetype::subset::tests::fixture();
-        let doc = crate::document::PdfDocument::new().unwrap();
-        doc.add_page(0).unwrap();
-        let before = doc.save_to_bytes().unwrap();
-        let pool = OperationBudget::new(16 * 1024 * 1024);
-        let neighbor = pool.reserve(7).unwrap();
-        let register = |doc: &crate::document::PdfDocument<std::io::Cursor<Vec<u8>>>| {
-            doc.resources().embed_truetype_subset_font_objects(
-                Some(0), &source, "A", TrueTypeEmbeddingOptions {
-                    postscript_name: "Demo".into(), cap_height: 60.0,
-                    stem_v: 80.0, serif: false,
-                }, *b"OWNERX", false, &pool,
-            )
-        };
-        let result: PdfResult<()> = doc.edit_transaction(|doc| {
-            let registered = register(doc)?;
-            let metric_bytes = registered.font._metric_lease.bytes();
-            assert!(metric_bytes >= 3 * std::mem::size_of::<PdfObject>());
-            assert!(pool.live_bytes() >= 7 + metric_bytes);
-            let remaining = pool.maximum_bytes() - pool.live_bytes();
-            assert!(pool.reserve(remaining + 1).is_err());
-            // Font publication succeeded; later page-content publication fails.
-            let result = doc.replace_page_contents(1, b"BT ET".to_vec());
-            assert!(result.is_err());
-            assert!(pool.live_bytes() >= 7 + metric_bytes);
-            result
-        });
-        assert!(result.is_err());
-        assert_eq!(pool.live_bytes(), 7);
-        assert_eq!(doc.save_to_bytes().unwrap(), before);
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _: PdfResult<()> = doc.edit_transaction(|doc| {
-                let _registered = register(doc)?;
-                doc.replace_page_contents(0, b"BT ET".to_vec())?;
-                panic!("registered metric content rollback");
-            });
-        }));
-        assert_eq!(panic.unwrap_err().downcast_ref::<&str>(), Some(&"registered metric content rollback"));
-        assert_eq!(pool.live_bytes(), 7);
-        assert_eq!(doc.save_to_bytes().unwrap(), before);
-        doc.edit_transaction(|doc| {
-            let _registered = register(doc)?;
-            doc.replace_page_contents(0, b"BT ET".to_vec())
-        }).unwrap();
-        assert_eq!(pool.live_bytes(), 7);
-        drop(neighbor);
-        assert_eq!(pool.live_bytes(), 0);
-        crate::document::PdfDocument::from_bytes_with_mode(
-            doc.save_to_bytes().unwrap(), crate::parser::syntax::ParseMode::Strict,
-        ).unwrap();
-    }
-
-    #[test]
-    fn metric_token_and_outer_failure_release_and_unwind_keeps_neighbor() {
-        let limits = Limits::default();
-        let pool = OperationBudget::new(4096);
-        let neighbor = pool.reserve(7).unwrap();
-        let mut builder = MetricArrayBuilder::new(1, Limits { max_token_bytes: 1, ..limits }, &pool).unwrap();
-        let slots = pool.live_bytes();
-        assert!(matches!(builder.push_number(12.0), Err(PdfError::ResourceLimit(_))));
-        assert_eq!(pool.live_bytes(), slots);
-        builder.push_number(1.0).unwrap();
-        drop(builder.finish_widths().unwrap());
-        assert_eq!(pool.live_bytes(), 7);
-        let mut builder = MetricArrayBuilder::new(1, limits, &pool).unwrap();
-        builder.push_number(1.0).unwrap();
-        let inner_bytes = pool.live_bytes() - 7;
-        drop(builder);
-        let tight = OperationBudget::new(inner_bytes);
-        let mut builder = MetricArrayBuilder::new(1, limits, &tight).unwrap();
-        builder.push_number(1.0).unwrap();
-        assert!(builder.finish_widths().is_err());
-        assert_eq!(tight.live_bytes(), 0);
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut builder = MetricArrayBuilder::new(3, limits, &pool).unwrap();
-            for value in [-1000.0, 500.0, 880.0] { builder.push_number(value).unwrap(); }
-            let _retained = builder.finish_widths().unwrap();
-            panic!("metric owner unwind");
-        }));
-        assert_eq!(panic.unwrap_err().downcast_ref::<&str>(), Some(&"metric owner unwind"));
-        assert_eq!(pool.live_bytes(), 7);
-        drop(neighbor);
-        assert_eq!(pool.live_bytes(), 0);
-    }
-
-    #[test]
-    fn width_container_counts_outer_slots_and_neighbor_overlap() {
-        let limits = Limits::default();
-        let build = |pool: &OperationBudget| -> PdfResult<_> {
-            let mut builder = MetricArrayBuilder::new(3, limits, pool)?;
-            for value in [-1000.0, 500.0, 880.0] { builder.push_number(value)?; }
-            builder.finish_widths()
-        };
-        let pool = OperationBudget::new(4096);
-        let (array, lease) = build(&pool).unwrap();
-        assert_eq!(array.len(), 2);
-        let exact = lease.bytes();
-        assert!(exact >= 5 * std::mem::size_of::<PdfObject>() + 12);
-        drop((array, lease));
-        assert_eq!(pool.live_bytes(), 0);
-        let tight = OperationBudget::new(exact);
-        let neighbor = tight.reserve(1).unwrap();
-        assert!(build(&tight).is_err());
-        assert_eq!(tight.live_bytes(), 1);
-        drop(neighbor);
-        let success = build(&tight).unwrap();
-        assert_eq!(tight.live_bytes(), exact);
-        drop(success);
-        assert_eq!(tight.live_bytes(), 0);
-        let empty = MetricArrayBuilder::new(0, limits, &tight).unwrap().finish_widths().unwrap();
-        assert_eq!(empty.0.len(), 0);
-        assert_eq!(tight.live_bytes(), 0);
-    }
-
-    #[test]
-    fn metric_array_charges_slots_and_tokens_and_retries_after_release() {
-        let limits = Limits::default();
-        let pool = OperationBudget::new(4096);
-        let mut builder = MetricArrayBuilder::new(3, limits, &pool).unwrap();
-        for value in [-1000.0, 250.5, 0.0] {
-            builder.push_number(value).unwrap();
-        }
-        assert!(builder.push_number(1.0).is_err());
-        let (array, lease) = builder.finish().unwrap();
-        let exact = lease.bytes();
-        assert!(exact >= 3 * std::mem::size_of::<PdfObject>() + 11);
-        assert_eq!(pool.live_bytes(), exact);
-        drop((array, lease));
-        assert_eq!(pool.live_bytes(), 0);
-        for maximum in [exact - 1, exact] {
-            let tight = OperationBudget::new(maximum);
-            let result = (|| {
-                let mut builder = MetricArrayBuilder::new(3, limits, &tight)?;
-                for value in [-1000.0, 250.5, 0.0] { builder.push_number(value)?; }
-                builder.finish()
-            })();
-            assert_eq!(result.is_ok(), maximum == exact);
-            drop(result);
-            assert_eq!(tight.live_bytes(), 0);
-        }
-        let neighbor = pool.reserve(7).unwrap();
-        let mut builder = MetricArrayBuilder::new(1, limits, &pool).unwrap();
-        assert!(builder.push_number(f64::NAN).is_err());
-        assert!(builder.finish().is_err());
-        assert_eq!(pool.live_bytes(), 7);
-        drop(neighbor);
-        assert_eq!(pool.live_bytes(), 0);
-        assert!(MetricArrayBuilder::new(usize::MAX, limits, &pool).is_err());
-        assert!(MetricArrayBuilder::new(1, Limits { max_objects: 0, ..limits }, &pool).is_err());
     }
 }
 
@@ -349,6 +207,10 @@ impl<R: Read + Seek> ResourceManager<'_, R> {
     /// publication, not legacy parser or document-resident allocations.
     /// Known layout and optional device/printer-table
     /// omission requires explicit opt-in; all omissions are reported.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "keep source identity, text geometry and operation budget explicit"
+    )]
     pub fn embed_truetype_subset_font(
         &self,
         page_index: u32,
@@ -377,23 +239,43 @@ impl<R: Read + Seek> ResourceManager<'_, R> {
 
     /// Embed a static original-GID subset with explicit Identity-V/W2 metrics.
     /// Requires source vhea/vmtx; does not apply vertical substitutions.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "keep source identity, text geometry and operation budget explicit"
+    )]
     pub fn embed_truetype_vertical_subset_font(
-        &self, page_index: u32, source: &[u8], repertoire: &str,
-        options: TrueTypeEmbeddingOptions, subset_tag: [u8; 6],
-        omit_layout_and_auxiliary: bool, budget: &crate::budget::OperationBudget,
+        &self,
+        page_index: u32,
+        source: &[u8],
+        repertoire: &str,
+        options: TrueTypeEmbeddingOptions,
+        subset_tag: [u8; 6],
+        omit_layout_and_auxiliary: bool,
+        budget: &crate::budget::OperationBudget,
     ) -> PdfResult<RegisteredSubsetCidFont> {
         let objects = self.embed_truetype_subset_font_objects_with_mode(
-            Some(page_index), source, repertoire, options, subset_tag,
-            omit_layout_and_auxiliary, budget, true,
+            Some(page_index),
+            source,
+            repertoire,
+            options,
+            subset_tag,
+            omit_layout_and_auxiliary,
+            budget,
+            true,
         )?;
         Ok(RegisteredSubsetCidFont {
-            font: objects.font.into_registered()?, omitted_tables: objects.omitted_tables,
+            font: objects.font.into_registered()?,
+            omitted_tables: objects.omitted_tables,
             _report_lease: objects._report_lease,
         })
     }
 
     /// Create validated font objects in the current transaction. None means
     /// the caller binds the handle into a copied local scope before publication.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "keep source identity, text geometry and operation budget explicit"
+    )]
     pub(super) fn embed_truetype_subset_font_objects(
         &self,
         page_index: Option<u32>,
@@ -405,15 +287,30 @@ impl<R: Read + Seek> ResourceManager<'_, R> {
         budget: &crate::budget::OperationBudget,
     ) -> PdfResult<EmbeddedSubsetFontObjects> {
         self.embed_truetype_subset_font_objects_with_mode(
-            page_index, source, repertoire, options, subset_tag,
-            omit_layout_and_auxiliary, budget, false,
+            page_index,
+            source,
+            repertoire,
+            options,
+            subset_tag,
+            omit_layout_and_auxiliary,
+            budget,
+            false,
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "keep source identity, text geometry and operation budget explicit"
+    )]
     pub(super) fn embed_truetype_subset_font_objects_with_mode(
-        &self, page_index: Option<u32>, source: &[u8], repertoire: &str,
-        mut options: TrueTypeEmbeddingOptions, subset_tag: [u8; 6],
-        omit_layout_and_auxiliary: bool, budget: &crate::budget::OperationBudget,
+        &self,
+        page_index: Option<u32>,
+        source: &[u8],
+        repertoire: &str,
+        mut options: TrueTypeEmbeddingOptions,
+        subset_tag: [u8; 6],
+        omit_layout_and_auxiliary: bool,
+        budget: &crate::budget::OperationBudget,
         vertical: bool,
     ) -> PdfResult<EmbeddedSubsetFontObjects> {
         if let Some(page) = page_index {
@@ -487,8 +384,17 @@ impl<R: Read + Seek> ResourceManager<'_, R> {
         repertoire: &str,
         options: TrueTypeEmbeddingOptions,
     ) -> PdfResult<RegisteredCidFont> {
-        self.embed_truetype_font_impl(Some(page_index), data, repertoire, options, false, None, false, None)?
-            .into_registered()
+        self.embed_truetype_font_impl(
+            Some(page_index),
+            data,
+            repertoire,
+            options,
+            false,
+            None,
+            false,
+            None,
+        )?
+        .into_registered()
     }
 
     /// Embed static TrueType for Identity-V using explicit source vhea/vmtx
@@ -501,10 +407,23 @@ impl<R: Read + Seek> ResourceManager<'_, R> {
         repertoire: &str,
         options: TrueTypeEmbeddingOptions,
     ) -> PdfResult<RegisteredCidFont> {
-        self.embed_truetype_font_impl(Some(page_index), data, repertoire, options, false, None, true, None)?
-            .into_registered()
+        self.embed_truetype_font_impl(
+            Some(page_index),
+            data,
+            repertoire,
+            options,
+            false,
+            None,
+            true,
+            None,
+        )?
+        .into_registered()
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "keep source identity, text geometry and operation budget explicit"
+    )]
     fn embed_truetype_font_impl(
         &self,
         page_index: Option<u32>,
@@ -566,25 +485,43 @@ impl<R: Read + Seek> ResourceManager<'_, R> {
         let local_budget = limits.operation_budget();
         let metric_budget = budget.unwrap_or(&local_budget);
         let count = encoding.widths().count();
-        let numeric_count = count.checked_mul(if vertical { 4 } else { 1 })
-            .and_then(|n| n.checked_add(if count == 0 { 0 } else if vertical { 4 } else { 2 }))
+        let numeric_count = count
+            .checked_mul(if vertical { 4 } else { 1 })
+            .and_then(|n| {
+                n.checked_add(if count == 0 {
+                    0
+                } else if vertical {
+                    4
+                } else {
+                    2
+                })
+            })
             .filter(|&n| n <= limits.max_objects)
             .ok_or_else(|| PdfError::ResourceLimit("font W/W2 object count".into()))?;
-        numeric_count.checked_mul(std::mem::size_of::<PdfObject>())
+        numeric_count
+            .checked_mul(std::mem::size_of::<PdfObject>())
             .filter(|&bytes| bytes <= limits.max_operation_bytes)
             .ok_or_else(|| PdfError::ResourceLimit("font W/W2 storage bytes".into()))?;
         let mut metric_lease = metric_budget.reserve(0)?;
         let vertical_widths = if vertical {
             let vertical_metrics = TrueTypeProgram::checked_vertical_metrics(&data, limits)?
-                .ok_or_else(|| PdfError::FontError("Vertical embedding requires vhea/vmtx".into()))?;
+                .ok_or_else(|| {
+                    PdfError::FontError("Vertical embedding requires vhea/vmtx".into())
+                })?;
             let locations = TrueTypeProgram::checked_glyph_locations(&data, limits)?;
-            let triple_count = count.checked_mul(3)
+            let triple_count = count
+                .checked_mul(3)
                 .ok_or_else(|| PdfError::ResourceLimit("font W2 object count".into()))?;
             let mut triples = MetricArrayBuilder::new(triple_count, limits, metric_budget)?;
             for (_, _, gid, _) in encoding.glyph_mappings() {
-                let y_max = locations.glyph_header(gid)?.map_or(0, |header| header.bounds[3]);
+                let y_max = locations
+                    .glyph_header(gid)?
+                    .map_or(0, |header| header.bounds[3]);
                 for value in vertical_metrics.pdf_metric(
-                    gid, metrics.units_per_em(), metrics.advance_width(gid)?, y_max,
+                    gid,
+                    metrics.units_per_em(),
+                    metrics.advance_width(gid)?,
+                    y_max,
                 )? {
                     triples.push_number(value)?;
                 }
@@ -592,7 +529,9 @@ impl<R: Read + Seek> ResourceManager<'_, R> {
             let (array, mut lease) = triples.finish_widths()?;
             metric_lease.absorb(&mut lease)?;
             Some(array)
-        } else { None };
+        } else {
+            None
+        };
         let to_unicode = encoding.to_unicode_cmap()?;
         let gid_map = encoding.cid_to_gid_map()?;
         let scale = 1000.0 / f64::from(metrics.units_per_em());
@@ -672,7 +611,10 @@ impl<R: Read + Seek> ResourceManager<'_, R> {
                 ("Type", "Font"),
                 ("Subtype", "Type0"),
                 ("BaseFont", &options.postscript_name),
-                ("Encoding", if vertical { "Identity-V" } else { "Identity-H" }),
+                (
+                    "Encoding",
+                    if vertical { "Identity-V" } else { "Identity-H" },
+                ),
             ] {
                 font.try_insert(key.into(), name(value))?;
             }
@@ -693,5 +635,211 @@ impl<R: Read + Seek> ResourceManager<'_, R> {
             handle,
             _metric_lease: metric_lease,
         })
+    }
+}
+
+#[cfg(test)]
+mod metric_array_tests {
+    use super::*;
+    use crate::{budget::OperationBudget, parser::options::Limits};
+
+    #[test]
+    fn registered_metric_owner_survives_until_outer_content_failure() {
+        let source = crate::font::truetype::subset::tests::fixture();
+        let doc = crate::document::PdfDocument::new().unwrap();
+        doc.add_page(0).unwrap();
+        let before = doc.save_to_bytes().unwrap();
+        let pool = OperationBudget::new(16 * 1024 * 1024);
+        let neighbor = pool.reserve(7).unwrap();
+        let register = |doc: &crate::document::PdfDocument<std::io::Cursor<Vec<u8>>>| {
+            doc.resources().embed_truetype_subset_font_objects(
+                Some(0),
+                &source,
+                "A",
+                TrueTypeEmbeddingOptions {
+                    postscript_name: "Demo".into(),
+                    cap_height: 60.0,
+                    stem_v: 80.0,
+                    serif: false,
+                },
+                *b"OWNERX",
+                false,
+                &pool,
+            )
+        };
+        let result: PdfResult<()> = doc.edit_transaction(|doc| {
+            let registered = register(doc)?;
+            let metric_bytes = registered.font._metric_lease.bytes();
+            assert!(metric_bytes >= 3 * std::mem::size_of::<PdfObject>());
+            assert!(pool.live_bytes() >= 7 + metric_bytes);
+            let remaining = pool.maximum_bytes() - pool.live_bytes();
+            assert!(pool.reserve(remaining + 1).is_err());
+            // Font publication succeeded; later page-content publication fails.
+            let result = doc.replace_page_contents(1, b"BT ET".to_vec());
+            assert!(result.is_err());
+            assert!(pool.live_bytes() >= 7 + metric_bytes);
+            result
+        });
+        assert!(result.is_err());
+        assert_eq!(pool.live_bytes(), 7);
+        assert_eq!(doc.save_to_bytes().unwrap(), before);
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: PdfResult<()> = doc.edit_transaction(|doc| {
+                let _registered = register(doc)?;
+                doc.replace_page_contents(0, b"BT ET".to_vec())?;
+                panic!("registered metric content rollback");
+            });
+        }));
+        assert_eq!(
+            panic.unwrap_err().downcast_ref::<&str>(),
+            Some(&"registered metric content rollback")
+        );
+        assert_eq!(pool.live_bytes(), 7);
+        assert_eq!(doc.save_to_bytes().unwrap(), before);
+        doc.edit_transaction(|doc| {
+            let _registered = register(doc)?;
+            doc.replace_page_contents(0, b"BT ET".to_vec())
+        })
+        .unwrap();
+        assert_eq!(pool.live_bytes(), 7);
+        drop(neighbor);
+        assert_eq!(pool.live_bytes(), 0);
+        crate::document::PdfDocument::from_bytes_with_mode(
+            doc.save_to_bytes().unwrap(),
+            crate::parser::syntax::ParseMode::Strict,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn metric_token_and_outer_failure_release_and_unwind_keeps_neighbor() {
+        let limits = Limits::default();
+        let pool = OperationBudget::new(4096);
+        let neighbor = pool.reserve(7).unwrap();
+        let mut builder = MetricArrayBuilder::new(
+            1,
+            Limits {
+                max_token_bytes: 1,
+                ..limits
+            },
+            &pool,
+        )
+        .unwrap();
+        let slots = pool.live_bytes();
+        assert!(matches!(
+            builder.push_number(12.0),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(pool.live_bytes(), slots);
+        builder.push_number(1.0).unwrap();
+        drop(builder.finish_widths().unwrap());
+        assert_eq!(pool.live_bytes(), 7);
+        let mut builder = MetricArrayBuilder::new(1, limits, &pool).unwrap();
+        builder.push_number(1.0).unwrap();
+        let inner_bytes = pool.live_bytes() - 7;
+        drop(builder);
+        let tight = OperationBudget::new(inner_bytes);
+        let mut builder = MetricArrayBuilder::new(1, limits, &tight).unwrap();
+        builder.push_number(1.0).unwrap();
+        assert!(builder.finish_widths().is_err());
+        assert_eq!(tight.live_bytes(), 0);
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut builder = MetricArrayBuilder::new(3, limits, &pool).unwrap();
+            for value in [-1000.0, 500.0, 880.0] {
+                builder.push_number(value).unwrap();
+            }
+            let _retained = builder.finish_widths().unwrap();
+            panic!("metric owner unwind");
+        }));
+        assert_eq!(
+            panic.unwrap_err().downcast_ref::<&str>(),
+            Some(&"metric owner unwind")
+        );
+        assert_eq!(pool.live_bytes(), 7);
+        drop(neighbor);
+        assert_eq!(pool.live_bytes(), 0);
+    }
+
+    #[test]
+    fn width_container_counts_outer_slots_and_neighbor_overlap() {
+        let limits = Limits::default();
+        let build = |pool: &OperationBudget| -> PdfResult<_> {
+            let mut builder = MetricArrayBuilder::new(3, limits, pool)?;
+            for value in [-1000.0, 500.0, 880.0] {
+                builder.push_number(value)?;
+            }
+            builder.finish_widths()
+        };
+        let pool = OperationBudget::new(4096);
+        let (array, lease) = build(&pool).unwrap();
+        assert_eq!(array.len(), 2);
+        let exact = lease.bytes();
+        assert!(exact >= 5 * std::mem::size_of::<PdfObject>() + 12);
+        drop((array, lease));
+        assert_eq!(pool.live_bytes(), 0);
+        let tight = OperationBudget::new(exact);
+        let neighbor = tight.reserve(1).unwrap();
+        assert!(build(&tight).is_err());
+        assert_eq!(tight.live_bytes(), 1);
+        drop(neighbor);
+        let success = build(&tight).unwrap();
+        assert_eq!(tight.live_bytes(), exact);
+        drop(success);
+        assert_eq!(tight.live_bytes(), 0);
+        let empty = MetricArrayBuilder::new(0, limits, &tight)
+            .unwrap()
+            .finish_widths()
+            .unwrap();
+        assert_eq!(empty.0.len(), 0);
+        assert_eq!(tight.live_bytes(), 0);
+    }
+
+    #[test]
+    fn metric_array_charges_slots_and_tokens_and_retries_after_release() {
+        let limits = Limits::default();
+        let pool = OperationBudget::new(4096);
+        let mut builder = MetricArrayBuilder::new(3, limits, &pool).unwrap();
+        for value in [-1000.0, 250.5, 0.0] {
+            builder.push_number(value).unwrap();
+        }
+        assert!(builder.push_number(1.0).is_err());
+        let (array, lease) = builder.finish().unwrap();
+        let exact = lease.bytes();
+        assert!(exact >= 3 * std::mem::size_of::<PdfObject>() + 11);
+        assert_eq!(pool.live_bytes(), exact);
+        drop((array, lease));
+        assert_eq!(pool.live_bytes(), 0);
+        for maximum in [exact - 1, exact] {
+            let tight = OperationBudget::new(maximum);
+            let result = (|| {
+                let mut builder = MetricArrayBuilder::new(3, limits, &tight)?;
+                for value in [-1000.0, 250.5, 0.0] {
+                    builder.push_number(value)?;
+                }
+                builder.finish()
+            })();
+            assert_eq!(result.is_ok(), maximum == exact);
+            drop(result);
+            assert_eq!(tight.live_bytes(), 0);
+        }
+        let neighbor = pool.reserve(7).unwrap();
+        let mut builder = MetricArrayBuilder::new(1, limits, &pool).unwrap();
+        assert!(builder.push_number(f64::NAN).is_err());
+        assert!(builder.finish().is_err());
+        assert_eq!(pool.live_bytes(), 7);
+        drop(neighbor);
+        assert_eq!(pool.live_bytes(), 0);
+        assert!(MetricArrayBuilder::new(usize::MAX, limits, &pool).is_err());
+        assert!(
+            MetricArrayBuilder::new(
+                1,
+                Limits {
+                    max_objects: 0,
+                    ..limits
+                },
+                &pool
+            )
+            .is_err()
+        );
     }
 }

@@ -31,6 +31,7 @@ pub mod graphic_state;
 pub mod image_extraction;
 pub mod image_object;
 pub mod inline_image;
+pub mod marked_text;
 pub mod opcode;
 pub mod operator;
 pub mod page_builder;
@@ -41,7 +42,6 @@ pub mod pdf_image;
 pub mod shading_object;
 pub mod source_provenance;
 pub mod text_extraction;
-pub mod marked_text;
 pub mod text_object;
 pub mod text_state;
 pub mod transparency;
@@ -222,9 +222,9 @@ impl<'a, R: Seek + Read> PdfPage<'a, R> {
                 .ok_or(PdfError::PageResourcesIsNotDict)?;
             return Ok(resource_dict);
         }
-        return Err(PdfError::PageResourceError(format!(
-            "Page Resources is not found"
-        )));
+        Err(PdfError::PageResourceError(
+            "Page Resources is not found".to_string(),
+        ))
     }
     pub(crate) fn resource_with_budget(
         &self,
@@ -281,9 +281,9 @@ impl<'a, R: Seek + Read> PdfPage<'a, R> {
                 self.ctx
                     .resolve_owned(extend)?
                     .into_dict()
-                    .ok_or(PdfError::PageResourceError(format!(
-                        "Extend in Resource is not dict"
-                    )))?;
+                    .ok_or(PdfError::PageResourceError(
+                        "Extend in Resource is not dict".to_string(),
+                    ))?;
             if let Some(obj) = extend_dict.get(name) {
                 return self.ctx.resolve_owned(obj);
             }
@@ -316,9 +316,9 @@ impl<'a, R: Seek + Read> PdfPage<'a, R> {
                 self.ctx
                     .resolve_owned(fonts)?
                     .into_dict()
-                    .ok_or(PdfError::PageResourceError(format!(
-                        "page font is not dict"
-                    )))?;
+                    .ok_or(PdfError::PageResourceError(
+                        "page font is not dict".to_string(),
+                    ))?;
             if let Some(font) = fonts_dict.get(fontname) {
                 return self.ctx.resolve_owned(font).map(Some);
             }
@@ -393,7 +393,7 @@ impl<'a, R: Seek + Read> PdfPage<'a, R> {
         let reader = StreamReader::try_new(Cursor::new(all_content))?;
         let syntax = SyntaxParser::with_options(reader, self.ctx.options());
         let content_parser = ContentParser::new(syntax);
-        let mut interpreter = Interpreter::new(self, &self.ctx, content_parser);
+        let mut interpreter = Interpreter::new(self, self.ctx, content_parser);
         interpreter.run_to_display_list()
     }
 
@@ -403,23 +403,42 @@ impl<'a, R: Seek + Read> PdfPage<'a, R> {
 
     /// Build a visibility-filtered list without changing source operations or
     /// edit addresses. Selection must belong to the current document revision.
-    pub fn display_list_with_optional_content(&mut self, visibility: &crate::document::optional_content::OptionalContentVisibility) -> PdfResult<display_list::DisplayList> {
+    pub fn display_list_with_optional_content(
+        &mut self,
+        visibility: &crate::document::optional_content::OptionalContentVisibility,
+    ) -> PdfResult<display_list::DisplayList> {
         visibility.validate(self.ctx)?;
         self.update_dimensions()?;
         let content = self.content_bytes()?;
         let work = execution_budget::ExecutionBudget::new();
         work.decoded(content.len(), &self.ctx.limits())?;
-        let syntax = SyntaxParser::with_options(StreamReader::try_new(Cursor::new(content))?,self.ctx.options());
-        Interpreter::new(self,self.ctx,ContentParser::new(syntax)).with_execution_budget(work).with_optional_content(visibility)?.run_to_display_list()
+        let syntax = SyntaxParser::with_options(
+            StreamReader::try_new(Cursor::new(content))?,
+            self.ctx.options(),
+        );
+        Interpreter::new(self, self.ctx, ContentParser::new(syntax))
+            .with_execution_budget(work)
+            .with_optional_content(visibility)?
+            .run_to_display_list()
     }
 
-    fn display_list_for_annotation_composition(&mut self,work:execution_budget::ExecutionBudget,visibility:Option<&crate::document::optional_content::OptionalContentVisibility>)->PdfResult<display_list::DisplayList> {
+    fn display_list_for_annotation_composition(
+        &mut self,
+        work: execution_budget::ExecutionBudget,
+        visibility: Option<&crate::document::optional_content::OptionalContentVisibility>,
+    ) -> PdfResult<display_list::DisplayList> {
         self.update_dimensions()?;
-        let content=self.content_bytes()?;
-        work.decoded(content.len(),&self.ctx.limits())?;
-        let syntax=SyntaxParser::with_options(StreamReader::try_new(Cursor::new(content))?,self.ctx.options());
-        let mut interpreter = Interpreter::new(self,self.ctx,ContentParser::new(syntax)).with_execution_budget(work);
-        if let Some(visibility) = visibility { interpreter = interpreter.with_optional_content(visibility)?; }
+        let content = self.content_bytes()?;
+        work.decoded(content.len(), &self.ctx.limits())?;
+        let syntax = SyntaxParser::with_options(
+            StreamReader::try_new(Cursor::new(content))?,
+            self.ctx.options(),
+        );
+        let mut interpreter = Interpreter::new(self, self.ctx, ContentParser::new(syntax))
+            .with_execution_budget(work);
+        if let Some(visibility) = visibility {
+            interpreter = interpreter.with_optional_content(visibility)?;
+        }
         interpreter.run_to_display_list()
     }
 }

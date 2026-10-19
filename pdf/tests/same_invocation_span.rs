@@ -32,12 +32,22 @@ fn page_text_endpoint_is_explicit_and_does_not_become_a_form_leaf() {
     for preserve in [false, true] {
         let doc = Doc::new().unwrap();
         doc.add_page(0).unwrap();
-        let font = doc.resources().register_standard_font(0, StandardFont::Courier).unwrap();
-        doc.replace_page_contents(0,
-            format!("BT /{font} 12 Tf 20 50 Td (ABC) Tj ET").into_bytes()).unwrap();
+        let font = doc
+            .resources()
+            .register_standard_font(0, StandardFont::Courier)
+            .unwrap();
+        doc.replace_page_contents(
+            0,
+            format!("BT /{font} 12 Tf 20 50 Td (ABC) Tj ET").into_bytes(),
+        )
+        .unwrap();
         doc.copy_page(0, 1).unwrap();
         let root = doc.get_page(0).unwrap().content_program().unwrap();
-        let report = doc.get_page(0).unwrap().extract_characters_paint_order_report().unwrap();
+        let report = doc
+            .get_page(0)
+            .unwrap()
+            .extract_characters_paint_order_report()
+            .unwrap();
         assert!(report.characters[0].nested_source.is_none());
         let plain = report.characters[0].source.as_ref().unwrap();
         let source = NestedDrawSource::from_page_text(plain);
@@ -46,19 +56,42 @@ fn page_text_endpoint_is_explicit_and_does_not_become_a_form_leaf() {
         assert_eq!(source.operation_index, plain.operation_index);
         assert_eq!(source.operator_byte_offset, plain.operator_byte_offset);
         let saved = doc.save_to_bytes().unwrap();
-        assert!(doc.get_page(0).unwrap().nested_content_program(&root, &source).is_err());
+        assert!(
+            doc.get_page(0)
+                .unwrap()
+                .nested_content_program(&root, &source)
+                .is_err()
+        );
         assert_eq!(doc.save_to_bytes().unwrap(), saved);
-        let range = NestedTextCodePosition { source: &source, array_item: None, offset: 1 }
-            ..NestedTextCodePosition { source: &source, array_item: None, offset: 2 };
+        let range = NestedTextCodePosition {
+            source: &source,
+            array_item: None,
+            offset: 1,
+        }..NestedTextCodePosition {
+            source: &source,
+            array_item: None,
+            offset: 2,
+        };
         if preserve {
-            doc.replace_nested_text_span_preserving_advance(0, &root, range, "X").unwrap();
+            doc.replace_nested_text_span_preserving_advance(0, &root, range, "X")
+                .unwrap();
         } else {
             doc.replace_nested_text_span(0, &root, range, "X").unwrap();
         }
-        let reopened = Doc::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict).unwrap();
+        let reopened =
+            Doc::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict).unwrap();
         for (page, expected) in [(0, "AXC"), (1, "ABC")] {
-            assert_eq!(reopened.get_page(page).unwrap().extract_characters_paint_order().unwrap()
-                .iter().filter_map(|character| character.unicode.as_deref()).collect::<String>(), expected);
+            assert_eq!(
+                reopened
+                    .get_page(page)
+                    .unwrap()
+                    .extract_characters_paint_order()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|character| character.unicode.as_deref())
+                    .collect::<String>(),
+                expected
+            );
         }
     }
 }

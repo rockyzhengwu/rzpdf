@@ -54,8 +54,12 @@ mod tests {
 
     #[test]
     fn bundled_inputs_are_available_from_read_only_sources() {
-        assert!(get_builtin_font_data("Helvetica").unwrap().starts_with(&[0x80, 0x01]));
-        assert!(get_builtin_font_matrices("Courier").unwrap().starts_with(b"StartFontMetrics"));
+        assert!(get_builtin_font_data("Helvetica")
+            .unwrap()
+            .starts_with(&[0x80, 0x01]));
+        assert!(get_builtin_font_matrices("Courier")
+            .unwrap()
+            .starts_with(b"StartFontMetrics"));
         assert!(cmap::get_predefine_cmap_data("Identity-H").is_some());
         assert!(cmap::get_predefine_cmap_data("Identity-V").is_some());
         assert!(cmap::get_predefine_cmap_data("Not-A-CMap").is_none());

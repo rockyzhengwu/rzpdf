@@ -75,7 +75,7 @@ impl<R: Read + Seek> PdfPage<'_, R> {
         &mut self,
         options: AnnotationRenderOptions,
     ) -> PdfResult<AnnotatedDisplayList> {
-        self.display_list_with_annotations_selected(options,None)
+        self.display_list_with_annotations_selected(options, None)
     }
 
     pub fn display_list_with_annotations_and_optional_content(
@@ -84,7 +84,7 @@ impl<R: Read + Seek> PdfPage<'_, R> {
         visibility: &crate::document::optional_content::OptionalContentVisibility,
     ) -> PdfResult<AnnotatedDisplayList> {
         visibility.validate(self.ctx)?;
-        self.display_list_with_annotations_selected(options,Some(visibility))
+        self.display_list_with_annotations_selected(options, Some(visibility))
     }
 
     fn display_list_with_annotations_selected(
@@ -97,7 +97,7 @@ impl<R: Read + Seek> PdfPage<'_, R> {
         }
         let geometry = self.geometry()?;
         let work = super::execution_budget::ExecutionBudget::new();
-        let contents = self.display_list_for_annotation_composition(work.clone(),visibility)?;
+        let contents = self.display_list_for_annotation_composition(work.clone(), visibility)?;
         let page = self.pagedict()?;
         let Some(annots) = page.get("Annots") else {
             return Ok(AnnotatedDisplayList {
@@ -123,12 +123,11 @@ impl<R: Read + Seek> PdfPage<'_, R> {
                 .resolve(annot)?
                 .into_dict()
                 .ok_or_else(|| invalid("annotation dictionary expected"))?;
-            if let Some(owner) = dict.get("P") {
-                if self.page_node.as_object_id().is_some()
-                    && owner.as_object_id() != self.page_node.as_object_id()
-                {
-                    return Err(invalid("annotation P does not match rendered page"));
-                }
+            if let Some(owner) = dict.get("P")
+                && self.page_node.as_object_id().is_some()
+                && owner.as_object_id() != self.page_node.as_object_id()
+            {
+                return Err(invalid("annotation P does not match rendered page"));
             }
             let subtype = self.ctx.resolve(
                 dict.get("Subtype")
@@ -191,8 +190,15 @@ impl<R: Read + Seek> PdfPage<'_, R> {
                 continue;
             }
             if let Some(value) = dict.get("OC") {
-                let visibility = visibility.ok_or_else(|| PdfError::UnsupportedFeature("annotation optional-content visibility requires an explicit selection".into()))?;
-                if !visibility.visible(self.ctx,value)? { continue; }
+                let visibility = visibility.ok_or_else(|| {
+                    PdfError::UnsupportedFeature(
+                        "annotation optional-content visibility requires an explicit selection"
+                            .into(),
+                    )
+                })?;
+                if !visibility.visible(self.ctx, value)? {
+                    continue;
+                }
             }
             let Some(ap) = dict.get("AP") else {
                 if subtype == "Link" {
@@ -338,7 +344,8 @@ impl<R: Read + Seek> PdfPage<'_, R> {
                 PdfObject::PdfStream(PdfStream::from_decoded_data(PdfDict::default(), bytes)?),
             )?;
             let mut temporary = PdfPage::new(PdfObject::PdfDict(synthetic), self.ctx);
-            let mut list = temporary.display_list_for_annotation_composition(work.clone(),visibility)?;
+            let mut list =
+                temporary.display_list_for_annotation_composition(work.clone(), visibility)?;
             list.clear_edit_provenance();
             let (bytes, segments) = list.collection_usage();
             total_bytes = total_bytes

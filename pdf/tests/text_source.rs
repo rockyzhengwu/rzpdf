@@ -50,7 +50,6 @@ fn substring_edit_checks_final_character_count_before_committing() {
                 max_text_chars: 3,
                 ..Default::default()
             },
-            ..Default::default()
         },
     )
     .unwrap();
@@ -246,7 +245,8 @@ fn substring_edit_preserves_suffix_tj_spacing_quotes_and_shared_page() {
         doc.copy_page(0, 1).unwrap();
         let snapshot = doc.get_page(0).unwrap().content_program().unwrap();
         let revision = doc.revision();
-        for range in [4..5, 3..2] {
+        // Keep a reversed selection as a validation negative, not an iterator.
+        for range in [4..5, std::ops::Range { start: 3, end: 2 }] {
             assert!(
                 doc.replace_page_text_range(0, &snapshot, 2, item, range, "X")
                     .is_err()

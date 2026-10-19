@@ -1,6 +1,6 @@
 use crate::{
     error::{PdfError, PdfResult},
-    objects::{object_id::ObjectId, pdf_dict::PdfDict, PdfObject},
+    objects::{PdfObject, object_id::ObjectId, pdf_dict::PdfDict},
     pdf_context::PDFContext,
 };
 use std::{
@@ -98,14 +98,16 @@ mod budget_tests {
         .unwrap();
         let pool = OperationBudget::new(65536);
         let neighbor = pool.reserve(7).unwrap();
-        assert!(PageTree::inherited_attribute_with_budget(
-            doc.ctx(),
-            &PdfObject::PdfDict(PdfDict::default()),
-            "Resources",
-            &pool
-        )
-        .unwrap()
-        .is_none());
+        assert!(
+            PageTree::inherited_attribute_with_budget(
+                doc.ctx(),
+                &PdfObject::PdfDict(PdfDict::default()),
+                "Resources",
+                &pool
+            )
+            .unwrap()
+            .is_none()
+        );
         assert_eq!(pool.live_bytes(), 7);
         assert!(matches!(
             PageTree::inherited_attribute_with_budget(
@@ -298,14 +300,11 @@ impl BudgetedTreeWalk<'_> {
             .binary_search_by_key(&(id.obj_num(), id.gen_num()), |id| {
                 (id.obj_num(), id.gen_num())
             })
-            .map_or_else(
-                |position| Ok(position),
-                |_| {
-                    Err(PdfError::DocumentError(format!(
-                        "cycle or duplicate page tree node: {id:?}"
-                    )))
-                },
-            )?;
+            .map_or_else(Ok, |_| {
+                Err(PdfError::DocumentError(format!(
+                    "cycle or duplicate page tree node: {id:?}"
+                )))
+            })?;
         self.visited.data.insert(position, id);
         Ok(())
     }
@@ -425,7 +424,7 @@ impl BudgetedTreeWalk<'_> {
                 _ => {
                     return Err(PdfError::DocumentError(
                         "page tree node missing valid Type".into(),
-                    ))
+                    ));
                 }
             }
         }
@@ -517,7 +516,8 @@ impl PageTree {
                 visited.push(reference.id());
             }
             let (object, _dict_lease) = ctx.resolve_owned_with_budget(&current.0, budget)?;
-            current = (PdfObject::PdfNull, budget.reserve(0)?);
+            // Release the previous node and its quota before cloning Parent.
+            drop(current);
             let dict = object.into_dict().ok_or(PdfError::PageParentIsNotDict)?;
             if let Some(value) = dict.get(name) {
                 return ctx.resolve_owned_with_budget(value, budget).map(Some);
@@ -542,10 +542,10 @@ impl PageTree {
         let mut current = node.clone();
         let mut visited = HashSet::new();
         for _ in 0..ctx.limits().max_depth {
-            if let Some(reference) = current.as_reference() {
-                if !visited.insert(reference.id()) {
-                    return Err(PdfError::DocumentError("cycle in page inheritance".into()));
-                }
+            if let Some(reference) = current.as_reference()
+                && !visited.insert(reference.id())
+            {
+                return Err(PdfError::DocumentError("cycle in page inheritance".into()));
             }
             let dict = ctx
                 .resolve_owned(&current)?

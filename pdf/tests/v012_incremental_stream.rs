@@ -364,7 +364,9 @@ fn signed_and_non_strict_or_non_owned_sources_remain_rejected() {
         .filter(|b| !b.is_ascii_whitespace())
         .collect();
     let signed = open(
-        hex.chunks_exact(2)
+        hex.as_chunks::<2>()
+            .0
+            .iter()
             .map(|p| u8::from_str_radix(std::str::from_utf8(p).unwrap(), 16).unwrap())
             .collect(),
     );

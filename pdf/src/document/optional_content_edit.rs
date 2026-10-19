@@ -575,12 +575,12 @@ impl<R: Read + Seek> PdfDocument<R> {
                 }
             }
         }
-        if target.is_some_and(|t| t.index.is_none()) {
-            if let Some(value) = d.get("Intent") {
-                let value = self.ctx.resolve(value)?;
-                if !value.as_name().is_some_and(|n| n.name() == "View") {
-                    return Err(unsupported("default Intent must be View"));
-                }
+        if target.is_some_and(|t| t.index.is_none())
+            && let Some(value) = d.get("Intent")
+        {
+            let value = self.ctx.resolve(value)?;
+            if !value.as_name().is_some_and(|n| n.name() == "View") {
+                return Err(unsupported("default Intent must be View"));
             }
         }
         d.remove("Name");

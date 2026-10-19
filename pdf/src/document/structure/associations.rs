@@ -135,36 +135,35 @@ impl<R: Read + Seek> PdfDocument<R> {
             if !page_ids.contains(&page) {
                 return Err(invalid("content Pg is not a document page"));
             }
-            if let Some(dict) = dict {
-                if self.structure_name(dict, "Type")?.as_deref() == Some("OBJR") {
-                    let object =
-                        indirect(dict.get("Obj").ok_or_else(|| invalid("OBJR Obj missing"))?)?;
-                    if !index.annotations.contains(&(page, object))
-                        && !index.reachable.contains(&(page, object))
-                    {
-                        return Err(invalid(
-                            "OBJR object is not an annotation or invoked XObject on Pg",
-                        ));
-                    }
-                    if !index.objects.contains_key(&object) {
-                        return Err(invalid("OBJR object StructParent missing"));
-                    }
-                    if !object_occurrences.insert((page, object)) {
-                        return Err(invalid("duplicate OBJR on page"));
-                    }
-                    if expected_objects
-                        .insert(object, element.handle.object_id())
-                        .is_some_and(|old| old != element.handle.object_id())
-                    {
-                        return Err(invalid("object has multiple structure parents"));
-                    }
-                    items.push(StructureAssociation::ObjectReference {
-                        element: element.handle.clone(),
-                        page: self.object_handle(page)?,
-                        object: self.object_handle(object)?,
-                    });
-                    continue;
+            if let Some(dict) = dict
+                && self.structure_name(dict, "Type")?.as_deref() == Some("OBJR")
+            {
+                let object = indirect(dict.get("Obj").ok_or_else(|| invalid("OBJR Obj missing"))?)?;
+                if !index.annotations.contains(&(page, object))
+                    && !index.reachable.contains(&(page, object))
+                {
+                    return Err(invalid(
+                        "OBJR object is not an annotation or invoked XObject on Pg",
+                    ));
                 }
+                if !index.objects.contains_key(&object) {
+                    return Err(invalid("OBJR object StructParent missing"));
+                }
+                if !object_occurrences.insert((page, object)) {
+                    return Err(invalid("duplicate OBJR on page"));
+                }
+                if expected_objects
+                    .insert(object, element.handle.object_id())
+                    .is_some_and(|old| old != element.handle.object_id())
+                {
+                    return Err(invalid("object has multiple structure parents"));
+                }
+                items.push(StructureAssociation::ObjectReference {
+                    element: element.handle.clone(),
+                    page: self.object_handle(page)?,
+                    object: self.object_handle(object)?,
+                });
+                continue;
             }
             let (domain, mcid) = if let Some(dict) = dict {
                 if dict.contains_key("StmOwn") {
@@ -361,10 +360,10 @@ impl<R: Read + Seek> PdfDocument<R> {
                     {
                         return Err(invalid("OBJR annotation Type"));
                     }
-                    if let Some(p) = dict.get("P") {
-                        if indirect(p)? != page.page_id {
-                            return Err(invalid("annotation P/page mismatch"));
-                        }
+                    if let Some(p) = dict.get("P")
+                        && indirect(p)? != page.page_id
+                    {
+                        return Err(invalid("annotation P/page mismatch"));
                     }
                     self.association_owner(id, &dict, &mut index)?;
                 }

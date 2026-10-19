@@ -74,7 +74,7 @@ pub fn profile() -> Vec<u8> {
     }
     bytes[128..132].copy_from_slice(&(tags.len() as u32).to_be_bytes());
     for (index, (name, payload)) in tags.into_iter().enumerate() {
-        while bytes.len() % 4 != 0 {
+        while !bytes.len().is_multiple_of(4) {
             bytes.push(0);
         }
         let offset = 132 + index * 12;

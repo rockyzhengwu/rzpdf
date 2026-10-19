@@ -42,14 +42,22 @@ impl ExtractedCharacter {
     /// Horizontal outline origin, including the vertical font's W2 offset.
     /// The text origin remains available independently in `position`.
     pub fn glyph_origin_display(&self) -> PdfResult<Point> {
-        let x = -f64::from(self.vertical_origin[0]) * f64::from(self.font_size)
-            * f64::from(self.horizontal_scale) / 1000.;
+        let x = -f64::from(self.vertical_origin[0])
+            * f64::from(self.font_size)
+            * f64::from(self.horizontal_scale)
+            / 1000.;
         let y = -f64::from(self.vertical_origin[1]) * f64::from(self.font_size) / 1000.;
-        let x_display = f64::from(self.position.x()) + x * f64::from(self.matrix.a()) + y * f64::from(self.matrix.c());
-        let y_display = f64::from(self.position.y()) + x * f64::from(self.matrix.b()) + y * f64::from(self.matrix.d());
+        let x_display = f64::from(self.position.x())
+            + x * f64::from(self.matrix.a())
+            + y * f64::from(self.matrix.c());
+        let y_display = f64::from(self.position.y())
+            + x * f64::from(self.matrix.b())
+            + y * f64::from(self.matrix.d());
         let point = Point::new(x_display as f32, y_display as f32);
         if !point.x().is_finite() || !point.y().is_finite() {
-            return Err(PdfError::ObjectError("character glyph origin overflows".into()));
+            return Err(PdfError::ObjectError(
+                "character glyph origin overflows".into(),
+            ));
         }
         Ok(point)
     }
@@ -369,10 +377,13 @@ impl<R: Read + Seek> PdfPage<'_, R> {
                         .map(|font| font.writting_mode()),
                     unicode,
                     position: item.pos().clone(),
-                    vertical_origin: if text.state.text_state.font.as_ref()
-                        .is_some_and(|font| font.writting_mode() == crate::font::WritingMode::Vertical) {
+                    vertical_origin: if text.state.text_state.font.as_ref().is_some_and(|font| {
+                        font.writting_mode() == crate::font::WritingMode::Vertical
+                    }) {
                         [item.charcode().origin_x(), item.charcode().origin_y()]
-                    } else { [0., 0.] },
+                    } else {
+                        [0., 0.]
+                    },
                     matrix: text.matrix.clone(),
                 });
             }

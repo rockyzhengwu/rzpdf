@@ -306,7 +306,7 @@ fn source(objects: &[(u32, u32, Vec<u8>)], trailer_extra: &str, size: u32) -> Ve
     let mut offsets = BTreeMap::new();
     for (number, generation, body) in objects {
         offsets.insert(*number, (out.len(), *generation));
-        write!(out, "{number} {generation} obj\n").unwrap();
+        writeln!(out, "{number} {generation} obj").unwrap();
         out.extend(body);
         out.extend(b"\nendobj\n");
     }
@@ -633,7 +633,9 @@ fn low_version_protection_and_signed_source_guards_apply_to_packed_layout() {
         .filter(|b| !b.is_ascii_whitespace())
         .collect();
     let signed = open(
-        hex.chunks_exact(2)
+        hex.as_chunks::<2>()
+            .0
+            .iter()
             .map(|p| u8::from_str_radix(std::str::from_utf8(p).unwrap(), 16).unwrap())
             .collect(),
     );

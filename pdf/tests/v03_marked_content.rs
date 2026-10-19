@@ -61,7 +61,10 @@ fn property_marked_content_stays_diagnostic() {
         .unwrap();
     assert_eq!(report.diagnostics.len(), 1);
     assert_eq!(report.diagnostics[0].operator, "BDC");
-    assert_eq!(report.diagnostics[0].kind, DiagnosticKind::UnsupportedOperator);
+    assert_eq!(
+        report.diagnostics[0].kind,
+        DiagnosticKind::UnsupportedOperator
+    );
     let strict = PdfDocument::from_bytes_with_mode(bytes, ParseMode::Strict).unwrap();
     assert!(strict.get_page(0).unwrap().display_list().is_err());
 }

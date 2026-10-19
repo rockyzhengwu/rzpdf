@@ -128,9 +128,7 @@ impl Encoding {
             return super::glyph_name::adobe_glyph_list_to_unicode(name).unwrap_or(65533);
         }
         match &self.base_encoding {
-            Some(b) => b
-                .unicode_from_charcode(char.to_owned())
-                .unwrap_or_else(|| 65533),
+            Some(b) => b.unicode_from_charcode(char.to_owned()).unwrap_or(65533),
             None => 65533,
         }
     }
@@ -184,8 +182,8 @@ impl Encoding {
                 .ok_or_else(|| PdfError::FontError("Differences must be an array".into()))?;
             let mut code: Option<u32> = None;
             for v in arr.into_iter() {
-                match &v {
-                    &PdfObject::PdfNumber(n) => {
+                match v {
+                    PdfObject::PdfNumber(n) => {
                         let value = n.as_u32_checked().map_err(|_| {
                             PdfError::FontError("Differences code must be an integer".into())
                         })?;
@@ -194,7 +192,7 @@ impl Encoding {
                         }
                         code = Some(value);
                     }
-                    &PdfObject::PdfName(n) => {
+                    PdfObject::PdfName(n) => {
                         let s = n.name();
                         let current = code.filter(|c| *c <= 255).ok_or_else(|| {
                             PdfError::FontError(
@@ -400,19 +398,18 @@ pub enum FontEncoding {
 
 impl FontEncoding {
     pub fn code_to_name(&self, charcode: u8) -> Option<&'static str> {
-        let mut index: usize = 0;
         let charcode = charcode as usize;
-        if self == &FontEncoding::PdfDoc {
+        let index = if self == &FontEncoding::PdfDoc {
             if charcode < PDF_DOC_ENCODING_FIRST_CHAR {
                 return None;
             }
-            index = charcode - PDF_DOC_ENCODING_FIRST_CHAR;
+            charcode - PDF_DOC_ENCODING_FIRST_CHAR
         } else {
             if charcode < ENCODING_TABLE_FIST_CHAR {
                 return None;
             }
-            index = charcode - ENCODING_TABLE_FIST_CHAR;
-        }
+            charcode - ENCODING_TABLE_FIST_CHAR
+        };
         match self {
             FontEncoding::PdfDoc => Some(PDF_DOC_ENCODING_NAMES[index]),
             FontEncoding::WinAnsi => Some(ADOBE_WINANSI_ENCODING_NAMES[index]),

@@ -385,7 +385,7 @@ fn jbig2_indirect_metadata_is_checked_against_the_compressed_page() {
         if allowed {
             let rgba = result.unwrap()[0].image.rgba_buffer().unwrap();
             let expected = include_bytes!("fixtures/v06/mono.samples");
-            for (pixel, sample) in rgba.chunks_exact(4).zip(expected) {
+            for (pixel, sample) in rgba.as_chunks::<4>().0.iter().zip(expected) {
                 assert_eq!(pixel, &[*sample, *sample, *sample, 255]);
             }
         }

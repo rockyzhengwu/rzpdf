@@ -82,7 +82,7 @@ mod tests {
         document::PdfDocument,
         error::PdfError,
         io::stream_reader::StreamReader,
-        objects::{pdf_dict::PdfDict, pdf_number::PdfNumber, pdf_stream::PdfStream, PdfObject},
+        objects::{PdfObject, pdf_dict::PdfDict, pdf_number::PdfNumber, pdf_stream::PdfStream},
         parser::syntax::SyntaxParser,
     };
     use std::io::Cursor;
@@ -223,13 +223,14 @@ mod tests {
             Err(PdfError::ResourceLimit(_))
         ));
         doc.replace_page_contents(index, b"q Q".to_vec()).unwrap();
-        assert!(doc
-            .get_page(index)
-            .unwrap()
-            .display_list()
-            .unwrap()
-            .diagnostics()
-            .is_empty());
+        assert!(
+            doc.get_page(index)
+                .unwrap()
+                .display_list()
+                .unwrap()
+                .diagnostics()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -703,9 +704,11 @@ mod tests {
                 Err(PdfError::ResourceLimit(_))
             ));
         }
-        assert!(PdfStream::new(PdfDict::default(), b"ok".to_vec())
-            .decode_data(doc.ctx())
-            .is_ok());
+        assert!(
+            PdfStream::new(PdfDict::default(), b"ok".to_vec())
+                .decode_data(doc.ctx())
+                .is_ok()
+        );
     }
 
     #[test]

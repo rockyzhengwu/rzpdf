@@ -16,6 +16,187 @@ pub struct DisplayList {
     retained_path_segments: usize,
 }
 
+impl DisplayList {
+    /// Source stamps alone do not distinguish two configurations of one PDF.
+    pub fn optional_content_selection(
+        &self,
+    ) -> Option<&crate::document::optional_content::OptionalContentSelection> {
+        self.optional_content_selection.as_ref()
+    }
+    pub(crate) fn set_optional_content_selection(
+        &mut self,
+        selection: crate::document::optional_content::OptionalContentSelection,
+    ) {
+        self.optional_content_selection = Some(selection);
+    }
+    pub(crate) fn clear_edit_provenance(&mut self) {
+        self.provenance = None;
+        for object in &mut self.objects {
+            match object {
+                PageObject::Image(v) => v.clear_edit_source(),
+                PageObject::Text(v) => v.clear_edit_source(),
+                PageObject::Path(v) => v.clear_edit_source(),
+                PageObject::Shading(v) => v.clear_edit_source(),
+                _ => {}
+            }
+        }
+    }
+    /// Allocation-free image geometry candidates, last-painted first. Non-image
+    /// occlusion and clip/mask/alpha visibility are not evaluated. Check collection
+    /// provenance before using returned images' source indices for editing.
+    pub fn image_geometry_hits(
+        &self,
+        x: f32,
+        y: f32,
+    ) -> impl Iterator<Item = PdfResult<(usize, &super::image_object::ImageObject)>> {
+        self.objects
+            .iter()
+            .enumerate()
+            .rev()
+            .filter_map(move |(index, object)| {
+                let PageObject::Image(image) = object else {
+                    return None;
+                };
+                match image.geometry_contains_display_point(x, y) {
+                    Ok(true) => Some(Ok((index, image))),
+                    Ok(false) => None,
+                    Err(error) => Some(Err(error)),
+                }
+            })
+    }
+    pub fn source_stamp(&self) -> Option<&crate::document::identity::DocumentStamp> {
+        self.provenance.as_ref().map(|source| &source.stamp)
+    }
+    pub fn matches_program(&self, program: &super::content_program::ContentProgram) -> bool {
+        self.provenance
+            .as_ref()
+            .is_some_and(|source| source.matches_program(program))
+    }
+    pub(crate) fn set_provenance(
+        &mut self,
+        provenance: super::source_provenance::PageSourceProvenance,
+    ) {
+        self.provenance = Some(provenance);
+    }
+    pub fn new(page_width: f32, page_height: f32, objects: Vec<PageObject>) -> Self {
+        Self {
+            provenance: None,
+            optional_content_selection: None,
+            page_width,
+            page_height,
+            objects,
+            diagnostics: Vec::new(),
+            retained_payload_bytes: 0,
+            retained_path_segments: 0,
+        }
+    }
+
+    pub fn page_width(&self) -> f32 {
+        self.page_width
+    }
+
+    pub(crate) fn collection_usage(&self) -> (usize, usize) {
+        (self.retained_payload_bytes, self.retained_path_segments)
+    }
+    pub(crate) fn set_collection_usage(&mut self, bytes: usize, segments: usize) {
+        self.retained_payload_bytes = bytes;
+        self.retained_path_segments = segments;
+    }
+
+    pub fn page_height(&self) -> f32 {
+        self.page_height
+    }
+
+    pub fn objects(&self) -> &[PageObject] {
+        &self.objects
+    }
+
+    /// Consume the list and move its objects without cloning decoded payloads.
+    pub fn into_objects(self) -> Vec<PageObject> {
+        self.objects
+    }
+
+    /// Move interpreted objects and diagnostics together without payload copies.
+    pub fn into_objects_with_diagnostics(
+        self,
+    ) -> (
+        Vec<PageObject>,
+        Vec<crate::page::diagnostic::ContentDiagnostic>,
+    ) {
+        (self.objects, self.diagnostics)
+    }
+
+    pub fn diagnostics(&self) -> &[crate::page::diagnostic::ContentDiagnostic] {
+        &self.diagnostics
+    }
+
+    pub(crate) fn set_diagnostics(
+        &mut self,
+        diagnostics: Vec<crate::page::diagnostic::ContentDiagnostic>,
+    ) {
+        self.diagnostics = diagnostics;
+    }
+
+    pub fn replay(&self, device: &mut dyn Device) -> PdfResult<()> {
+        device.start_page(self.page_width, self.page_height)?;
+        self.replay_contents(device)?;
+        device.end_page()
+    }
+
+    /// Replay into an already started page (e.g. a caller-owned transparency
+    /// group). Only groups opened by this list are unwound on failure.
+    pub fn replay_contents(&self, device: &mut dyn Device) -> PdfResult<()> {
+        let mut device = crate::device::painting::PaintingDevice(device);
+        let mut groups = 0usize;
+        let result = (|| -> PdfResult<()> {
+            for object in &self.objects {
+                match object {
+                    PageObject::Image(image) => device.do_image(image.clone())?,
+                    PageObject::Text(text) => device.show_text(text.clone())?,
+                    PageObject::Path(path) => match (path.stroke(), path.fill_type()) {
+                        (true, FillType::NoFill) => device.stroke_path(path.clone())?,
+                        (false, _) => device.fill_path(path.clone())?,
+                        _ => device.fill_and_stroke_path(path.clone())?,
+                    },
+                    PageObject::Shading(shading) => device.do_shading(shading.clone())?,
+                    PageObject::Form => {}
+                    PageObject::GroupBegin(group) => {
+                        let next = groups.checked_add(1).ok_or_else(|| {
+                            crate::error::PdfError::ResourceLimit("display group depth".into())
+                        })?;
+                        device.begin_group(group.clone())?;
+                        groups = next;
+                    }
+                    PageObject::GroupEnd => {
+                        if groups == 0 {
+                            return Err(crate::error::PdfError::PageOperatorError(
+                                "unmatched display group end".into(),
+                            ));
+                        }
+                        // The backend consumes its boundary even if compositing fails.
+                        groups -= 1;
+                        device.end_group(true)?;
+                    }
+                }
+            }
+            if groups != 0 {
+                return Err(crate::error::PdfError::PageOperatorError(
+                    "unclosed display group".into(),
+                ));
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            while groups > 0 {
+                let _ = device.end_group(false);
+                groups -= 1;
+            }
+        }
+        result?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,174 +471,5 @@ mod tests {
                 .contains("path")
         );
         assert_eq!(device.calls, vec!["start", "path"]);
-    }
-}
-
-impl DisplayList {
-    /// Source stamps alone do not distinguish two configurations of one PDF.
-    pub fn optional_content_selection(&self) -> Option<&crate::document::optional_content::OptionalContentSelection> {
-        self.optional_content_selection.as_ref()
-    }
-    pub(crate) fn set_optional_content_selection(&mut self, selection: crate::document::optional_content::OptionalContentSelection) {
-        self.optional_content_selection = Some(selection);
-    }
-    pub(crate) fn clear_edit_provenance(&mut self) {
-        self.provenance=None;
-        for object in &mut self.objects {
-            match object {
-                PageObject::Image(v)=>v.clear_edit_source(),PageObject::Text(v)=>v.clear_edit_source(),
-                PageObject::Path(v)=>v.clear_edit_source(),PageObject::Shading(v)=>v.clear_edit_source(),
-                _=>{},
-            }
-        }
-    }
-    /// Allocation-free image geometry candidates, last-painted first. Non-image
-    /// occlusion and clip/mask/alpha visibility are not evaluated. Check collection
-    /// provenance before using returned images' source indices for editing.
-    pub fn image_geometry_hits(
-        &self,
-        x: f32,
-        y: f32,
-    ) -> impl Iterator<Item = PdfResult<(usize, &super::image_object::ImageObject)>> {
-        self.objects
-            .iter()
-            .enumerate()
-            .rev()
-            .filter_map(move |(index, object)| {
-                let PageObject::Image(image) = object else {
-                    return None;
-                };
-                match image.geometry_contains_display_point(x, y) {
-                    Ok(true) => Some(Ok((index, image))),
-                    Ok(false) => None,
-                    Err(error) => Some(Err(error)),
-                }
-            })
-    }
-    pub fn source_stamp(&self) -> Option<&crate::document::identity::DocumentStamp> {
-        self.provenance.as_ref().map(|source| &source.stamp)
-    }
-    pub fn matches_program(&self, program: &super::content_program::ContentProgram) -> bool {
-        self.provenance
-            .as_ref()
-            .is_some_and(|source| source.matches_program(program))
-    }
-    pub(crate) fn set_provenance(
-        &mut self,
-        provenance: super::source_provenance::PageSourceProvenance,
-    ) {
-        self.provenance = Some(provenance);
-    }
-    pub fn new(page_width: f32, page_height: f32, objects: Vec<PageObject>) -> Self {
-        Self {
-            provenance: None,
-            optional_content_selection: None,
-            page_width,
-            page_height,
-            objects,
-            diagnostics: Vec::new(),
-            retained_payload_bytes:0,
-            retained_path_segments:0,
-        }
-    }
-
-    pub fn page_width(&self) -> f32 {
-        self.page_width
-    }
-
-    pub(crate) fn collection_usage(&self)->(usize,usize) {(self.retained_payload_bytes,self.retained_path_segments)}
-    pub(crate) fn set_collection_usage(&mut self,bytes:usize,segments:usize) {self.retained_payload_bytes=bytes;self.retained_path_segments=segments;}
-
-    pub fn page_height(&self) -> f32 {
-        self.page_height
-    }
-
-    pub fn objects(&self) -> &[PageObject] {
-        &self.objects
-    }
-
-    /// Consume the list and move its objects without cloning decoded payloads.
-    pub fn into_objects(self) -> Vec<PageObject> {
-        self.objects
-    }
-
-    /// Move interpreted objects and diagnostics together without payload copies.
-    pub fn into_objects_with_diagnostics(
-        self,
-    ) -> (
-        Vec<PageObject>,
-        Vec<crate::page::diagnostic::ContentDiagnostic>,
-    ) {
-        (self.objects, self.diagnostics)
-    }
-
-    pub fn diagnostics(&self) -> &[crate::page::diagnostic::ContentDiagnostic] {
-        &self.diagnostics
-    }
-
-    pub(crate) fn set_diagnostics(
-        &mut self,
-        diagnostics: Vec<crate::page::diagnostic::ContentDiagnostic>,
-    ) {
-        self.diagnostics = diagnostics;
-    }
-
-    pub fn replay(&self, device: &mut dyn Device) -> PdfResult<()> {
-        device.start_page(self.page_width, self.page_height)?;
-        self.replay_contents(device)?;
-        device.end_page()
-    }
-
-    /// Replay into an already started page (e.g. a caller-owned transparency
-    /// group). Only groups opened by this list are unwound on failure.
-    pub fn replay_contents(&self, device: &mut dyn Device) -> PdfResult<()> {
-        let mut device = crate::device::painting::PaintingDevice(device);
-        let mut groups = 0usize;
-        let result = (|| -> PdfResult<()> {
-            for object in &self.objects {
-                match object {
-                    PageObject::Image(image) => device.do_image(image.clone())?,
-                    PageObject::Text(text) => device.show_text(text.clone())?,
-                    PageObject::Path(path) => match (path.stroke(), path.fill_type()) {
-                        (true, FillType::NoFill) => device.stroke_path(path.clone())?,
-                        (false, _) => device.fill_path(path.clone())?,
-                        _ => device.fill_and_stroke_path(path.clone())?,
-                    },
-                    PageObject::Shading(shading) => device.do_shading(shading.clone())?,
-                    PageObject::Form => {}
-                    PageObject::GroupBegin(group) => {
-                        let next = groups.checked_add(1).ok_or_else(|| {
-                            crate::error::PdfError::ResourceLimit("display group depth".into())
-                        })?;
-                        device.begin_group(group.clone())?;
-                        groups = next;
-                    }
-                    PageObject::GroupEnd => {
-                        if groups == 0 {
-                            return Err(crate::error::PdfError::PageOperatorError(
-                                "unmatched display group end".into(),
-                            ));
-                        }
-                        // The backend consumes its boundary even if compositing fails.
-                        groups -= 1;
-                        device.end_group(true)?;
-                    }
-                }
-            }
-            if groups != 0 {
-                return Err(crate::error::PdfError::PageOperatorError(
-                    "unclosed display group".into(),
-                ));
-            }
-            Ok(())
-        })();
-        if result.is_err() {
-            while groups > 0 {
-                let _ = device.end_group(false);
-                groups -= 1;
-            }
-        }
-        result?;
-        Ok(())
     }
 }

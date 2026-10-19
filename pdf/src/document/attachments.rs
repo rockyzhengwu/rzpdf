@@ -18,16 +18,23 @@ fn reference(id: ObjectId) -> PdfObject {
 impl<R: Read + Seek> PdfDocument<R> {
     /// Address an existing embedded Filespec for FileAttachment annotations.
     /// Reading a payload never launches or opens the embedded file.
-    pub fn attachment_filespec(&self,name:&str)->PdfResult<Option<super::identity::ObjectHandle>> {
-        for (key,value) in self.attachment_entries()?.2 {
-            if key.text_content_with_limits(&self.ctx().limits())?==name {
-                let id=value.as_reference().map(PdfReference::id).ok_or_else(||PdfError::UnsupportedFeature("direct attachment Filespec has no stable handle".into()))?;
+    pub fn attachment_filespec(
+        &self,
+        name: &str,
+    ) -> PdfResult<Option<super::identity::ObjectHandle>> {
+        for (key, value) in self.attachment_entries()?.2 {
+            if key.text_content_with_limits(&self.ctx().limits())? == name {
+                let id = value.as_reference().map(PdfReference::id).ok_or_else(|| {
+                    PdfError::UnsupportedFeature(
+                        "direct attachment Filespec has no stable handle".into(),
+                    )
+                })?;
                 return self.object_handle(id).map(Some);
             }
         }
         Ok(None)
     }
-    fn attachment_entries(&self) -> PdfResult<(PdfDict, PdfDict, Vec<(PdfString, PdfObject)>)> {
+    fn attachment_entries(&self) -> PdfResult<super::trees::NameTreeSnapshot> {
         let root = self.ctx().get_root_owned()?;
         let names = match root.get("Names") {
             Some(value) => self.ctx().resolve(value)?.into_dict().ok_or_else(|| {

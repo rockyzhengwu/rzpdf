@@ -1,6 +1,6 @@
 pub(crate) mod painting;
-pub(crate) mod visibility;
 pub mod trace;
+pub(crate) mod visibility;
 use crate::error::PdfResult;
 use crate::page::{image_object::ImageObject, path_object::PathObject, text_object::TextObject};
 

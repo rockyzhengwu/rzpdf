@@ -1,9 +1,9 @@
-use super::{resource_manager::ResourceKind, PdfDocument};
+use super::{PdfDocument, resource_manager::ResourceKind};
 use crate::{
     error::{PdfError, PdfResult},
     objects::{
-        object_id::ObjectId, pdf_dict::PdfDict, pdf_name::PdfName, pdf_reference::PdfReference,
-        pdf_stream::PdfStream, PdfObject,
+        PdfObject, object_id::ObjectId, pdf_dict::PdfDict, pdf_name::PdfName,
+        pdf_reference::PdfReference, pdf_stream::PdfStream,
     },
     page::{content_program::ContentProgram, source_provenance::NestedDrawSource},
 };
@@ -223,40 +223,85 @@ impl<R: Read + Seek> PdfDocument<R> {
         range: std::ops::Range<(usize, usize)>,
         text: &str,
     ) -> PdfResult<()> {
-        self.replace_nested_unicode(page, root, source, NestedTextEdit::ArrayRange(range), text, false)
+        self.replace_nested_unicode(
+            page,
+            root,
+            source,
+            NestedTextEdit::ArrayRange(range),
+            text,
+            false,
+        )
     }
 
     /// Replace nested Tj/quote Unicode text, preserving following writing-axis
     /// positions and quote line/spacing effects. Copies only the selected chain.
     /// Inherits effective font/size/spacing; does not shape or fit glyph bounds.
     pub fn replace_nested_text_preserving_advance(
-        &self, page: u32, root: &ContentProgram, source: &NestedDrawSource, text: &str,
+        &self,
+        page: u32,
+        root: &ContentProgram,
+        source: &NestedDrawSource,
+        text: &str,
     ) -> PdfResult<()> {
-        self.replace_nested_unicode(page, root, source, NestedTextEdit::WholeString { item: None }, text, true)
+        self.replace_nested_unicode(
+            page,
+            root,
+            source,
+            NestedTextEdit::WholeString { item: None },
+            text,
+            true,
+        )
     }
 
     /// Compensate one nested TJ string immediately after that string. Inserting
     /// the number shifts subsequent array indices; refresh root and source.
     pub fn replace_nested_text_array_item_preserving_advance(
-        &self, page: u32, root: &ContentProgram, source: &NestedDrawSource, item: usize, text: &str,
+        &self,
+        page: u32,
+        root: &ContentProgram,
+        source: &NestedDrawSource,
+        item: usize,
+        text: &str,
     ) -> PdfResult<()> {
-        self.replace_nested_unicode(page, root, source, NestedTextEdit::WholeString { item: Some(item) }, text, true)
+        self.replace_nested_unicode(
+            page,
+            root,
+            source,
+            NestedTextEdit::WholeString { item: Some(item) },
+            text,
+            true,
+        )
     }
 
     /// Compensate a range across nested TJ strings before each retained suffix.
     /// Endpoints are complete character-code byte boundaries, not Unicode indices.
     pub fn replace_nested_text_array_range_preserving_advance(
-        &self, page: u32, root: &ContentProgram, source: &NestedDrawSource,
-        range: std::ops::Range<(usize, usize)>, text: &str,
+        &self,
+        page: u32,
+        root: &ContentProgram,
+        source: &NestedDrawSource,
+        range: std::ops::Range<(usize, usize)>,
+        text: &str,
     ) -> PdfResult<()> {
-        self.replace_nested_unicode(page, root, source, NestedTextEdit::ArrayRange(range), text, true)
+        self.replace_nested_unicode(
+            page,
+            root,
+            source,
+            NestedTextEdit::ArrayRange(range),
+            text,
+            true,
+        )
     }
 
     /// Replace a range of events in one selected leaf Form invocation without
     /// compensating advance. The source must anchor the range's start event.
     pub fn replace_nested_text_event_range(
-        &self, page: u32, root: &ContentProgram, source: &NestedDrawSource,
-        range: std::ops::Range<crate::page::content_program::TextCodePosition>, text: &str,
+        &self,
+        page: u32,
+        root: &ContentProgram,
+        source: &NestedDrawSource,
+        range: std::ops::Range<crate::page::content_program::TextCodePosition>,
+        text: &str,
     ) -> PdfResult<()> {
         self.replace_nested_text_event_range_inner(page, root, source, range, text, false)
     }
@@ -264,8 +309,12 @@ impl<R: Read + Seek> PdfDocument<R> {
     /// Preserve each selected event's advance using its inherited original state.
     /// Endpoints belong to the same selected leaf, not different Form invocations.
     pub fn replace_nested_text_event_range_preserving_advance(
-        &self, page: u32, root: &ContentProgram, source: &NestedDrawSource,
-        range: std::ops::Range<crate::page::content_program::TextCodePosition>, text: &str,
+        &self,
+        page: u32,
+        root: &ContentProgram,
+        source: &NestedDrawSource,
+        range: std::ops::Range<crate::page::content_program::TextCodePosition>,
+        text: &str,
     ) -> PdfResult<()> {
         self.replace_nested_text_event_range_inner(page, root, source, range, text, true)
     }
@@ -273,7 +322,9 @@ impl<R: Read + Seek> PdfDocument<R> {
     /// Source-qualified endpoints in original expanded paint order.
     /// Different Form invocations are edited in one transaction.
     pub fn replace_nested_text_span(
-        &self, page: u32, root: &ContentProgram,
+        &self,
+        page: u32,
+        root: &ContentProgram,
         range: std::ops::Range<crate::page::source_provenance::NestedTextCodePosition<'_>>,
         text: &str,
     ) -> PdfResult<()> {
@@ -281,7 +332,9 @@ impl<R: Read + Seek> PdfDocument<R> {
     }
 
     pub fn replace_nested_text_span_preserving_advance(
-        &self, page: u32, root: &ContentProgram,
+        &self,
+        page: u32,
+        root: &ContentProgram,
         range: std::ops::Range<crate::page::source_provenance::NestedTextCodePosition<'_>>,
         text: &str,
     ) -> PdfResult<()> {
@@ -289,9 +342,12 @@ impl<R: Read + Seek> PdfDocument<R> {
     }
 
     fn replace_nested_text_span_inner(
-        &self, page: u32, root: &ContentProgram,
+        &self,
+        page: u32,
+        root: &ContentProgram,
         range: std::ops::Range<crate::page::source_provenance::NestedTextCodePosition<'_>>,
-        text: &str, preserve_advance: bool,
+        text: &str,
+        preserve_advance: bool,
     ) -> PdfResult<()> {
         // The expanded walker authenticates both endpoints and permits an
         // explicit page-root source. Ordinary Form-only edits retain their
@@ -303,20 +359,33 @@ impl<R: Read + Seek> PdfDocument<R> {
     }
 
     fn replace_nested_text_event_range_inner(
-        &self, page: u32, root: &ContentProgram, source: &NestedDrawSource,
-        range: std::ops::Range<crate::page::content_program::TextCodePosition>, text: &str,
+        &self,
+        page: u32,
+        root: &ContentProgram,
+        source: &NestedDrawSource,
+        range: std::ops::Range<crate::page::content_program::TextCodePosition>,
+        text: &str,
         preserve_advance: bool,
     ) -> PdfResult<()> {
         if source.operation_index != range.start.operation {
-            return Err(PdfError::ObjectError("nested range source must anchor its start event".into()));
+            return Err(PdfError::ObjectError(
+                "nested range source must anchor its start event".into(),
+            ));
         }
         let budget = self.ctx.limits().operation_budget();
         let current_page = self.get_page_with_budget(page, &budget)?;
         let chain = current_page.prepare_form_chain_with_budget(root, source, &budget)?;
-        let leaf = chain.last().ok_or_else(|| PdfError::PageResourceError("Nested leaf absent".into()))?;
+        let leaf = chain
+            .last()
+            .ok_or_else(|| PdfError::PageResourceError("Nested leaf absent".into()))?;
         let (page_scope, _page_scope_lease) = current_page.resource_with_budget(&budget)?;
         let edited = self.build_text_event_edit_plan(
-            &leaf.program, range, text, preserve_advance, &budget, |target| {
+            &leaf.program,
+            range,
+            text,
+            preserve_advance,
+            &budget,
+            |target| {
                 // Reconstruct each original prefix; no bare font clone, no
                 // prior event commit that changes indices or inherited state.
                 let mut state = Default::default();
@@ -327,12 +396,22 @@ impl<R: Read + Seek> PdfDocument<R> {
                         (&*chain[index - 1].program, &chain[index - 1].resource_scope)
                     };
                     state = current_page.text_state_before_operation_in_scope_with_budget(
-                        program, call.operation_index, scope, state, &budget,
+                        program,
+                        call.operation_index,
+                        scope,
+                        state,
+                        &budget,
                     )?;
                 }
-                current_page.text_state_before_operation_in_scope_with_budget(
-                    &leaf.program, target, &leaf.resource_scope, state, &budget,
-                )?.into_metrics()
+                current_page
+                    .text_state_before_operation_in_scope_with_budget(
+                        &leaf.program,
+                        target,
+                        &leaf.resource_scope,
+                        state,
+                        &budget,
+                    )?
+                    .into_metrics()
             },
         )?;
         self.commit_nested_edit_with_budget(page, root, source, chain, edited, &budget)
@@ -370,15 +449,15 @@ impl<R: Read + Seek> PdfDocument<R> {
                     _ => {
                         return Err(PdfError::ObjectError(
                             "nested text target/item mismatch".into(),
-                        ))
-                    }
-                };
-                if let NestedTextEdit::StringRange { range, .. } = &edit {
-                    if range.start > range.end || range.end > string.bytes().len() {
-                        return Err(PdfError::ObjectError(
-                            "text code range out of bounds".into(),
                         ));
                     }
+                };
+                if let NestedTextEdit::StringRange { range, .. } = &edit
+                    && (range.start > range.end || range.end > string.bytes().len())
+                {
+                    return Err(PdfError::ObjectError(
+                        "text code range out of bounds".into(),
+                    ));
                 }
             }
             NestedTextEdit::ArrayRange(range) => {
@@ -395,9 +474,13 @@ impl<R: Read + Seek> PdfDocument<R> {
                 if preserve_advance {
                     let array = target.get_as_array(0)?;
                     let count = (range.start.0..=range.end.0)
-                        .filter(|&index| array.get(index).and_then(PdfObject::as_string).is_some()).count();
-                    if count.checked_mul(2).and_then(|count| count.checked_add(array.len()))
-                        .is_none_or(|count| count > self.ctx.limits().max_objects) {
+                        .filter(|&index| array.get(index).and_then(PdfObject::as_string).is_some())
+                        .count();
+                    if count
+                        .checked_mul(2)
+                        .and_then(|count| count.checked_add(array.len()))
+                        .is_none_or(|count| count > self.ctx.limits().max_objects)
+                    {
                         return Err(PdfError::ResourceLimit("TJ adjusted array items".into()));
                     }
                 }
@@ -422,14 +505,13 @@ impl<R: Read + Seek> PdfDocument<R> {
         let leaf = chain
             .last()
             .ok_or_else(|| PdfError::PageResourceError("Nested leaf absent".into()))?;
-        let state = current_page
-            .text_state_before_operation_in_scope_with_budget(
-                &leaf.program,
-                source.operation_index,
-                &leaf.resource_scope,
-                state,
-                &budget,
-            )?;
+        let state = current_page.text_state_before_operation_in_scope_with_budget(
+            &leaf.program,
+            source.operation_index,
+            &leaf.resource_scope,
+            state,
+            &budget,
+        )?;
         let state = state.into_metrics()?;
         let font = &state.font;
         let mut codes = font.encode_text_with_budget(text, self.ctx.limits(), &budget)?;
@@ -438,21 +520,43 @@ impl<R: Read + Seek> PdfDocument<R> {
             NestedTextEdit::WholeString { item } => {
                 if preserve_advance {
                     let old = match item {
-                        Some(item) => target.get_as_array(0)?.get(item).and_then(PdfObject::as_string)
-                            .ok_or_else(|| PdfError::ObjectError("TJ compensation requires a string item".into()))?.bytes(),
+                        Some(item) => target
+                            .get_as_array(0)?
+                            .get(item)
+                            .and_then(PdfObject::as_string)
+                            .ok_or_else(|| {
+                                PdfError::ObjectError(
+                                    "TJ compensation requires a string item".into(),
+                                )
+                            })?
+                            .bytes(),
                         None if target.name() == "\"" => target.get_as_string(2)?.bytes(),
                         None => target.get_as_string(0)?.bytes(),
                     };
-                    let adjustment = state.replacement_adjustment(old, codes.as_slice(), self.ctx.limits())?;
+                    let adjustment =
+                        state.replacement_adjustment(old, codes.as_slice(), self.ctx.limits())?;
                     let edited = match item {
-                        Some(item) => leaf.program.with_adjusted_text_array_item_codes_with_budget(
-                            source.operation_index, item, codes.as_slice(), adjustment, self.ctx.options(), &budget,
-                        )?,
+                        Some(item) => leaf
+                            .program
+                            .with_adjusted_text_array_item_codes_with_budget(
+                                source.operation_index,
+                                item,
+                                codes.as_slice(),
+                                adjustment,
+                                self.ctx.options(),
+                                &budget,
+                            )?,
                         None => leaf.program.with_adjusted_text_codes_with_budget(
-                            source.operation_index, codes.as_slice(), adjustment, self.ctx.options(), &budget,
+                            source.operation_index,
+                            codes.as_slice(),
+                            adjustment,
+                            self.ctx.options(),
+                            &budget,
                         )?,
                     };
-                    return self.commit_nested_edit_with_budget(page, root, source, chain, edited, &budget);
+                    return self.commit_nested_edit_with_budget(
+                        page, root, source, chain, edited, &budget,
+                    );
                 }
                 (item, None)
             }
@@ -464,7 +568,7 @@ impl<R: Read + Seek> PdfDocument<R> {
                 }
                 let replacements = super::content_edit::budgeted_text_array_range_replacements(
                     &budget,
-                    &font,
+                    font,
                     target.get_as_array(0)?,
                     range.clone(),
                     codes.as_slice(),
@@ -474,13 +578,25 @@ impl<R: Read + Seek> PdfDocument<R> {
                     super::content_edit::BudgetedTextItems::new(&budget, replacements.as_slice())?;
                 if preserve_advance {
                     let adjustments = super::content_edit::budgeted_text_array_range_adjustments(
-                        &budget, target.get_as_array(0)?, &range, codes.as_slice(), borrowed.as_slice(),
+                        &budget,
+                        target.get_as_array(0)?,
+                        &range,
+                        codes.as_slice(),
+                        borrowed.as_slice(),
                         |old, new| state.replacement_adjustment(old, new, self.ctx.limits()),
                     )?;
-                    let edited = leaf.program.with_adjusted_text_array_items_codes_with_budget(
-                        source.operation_index, borrowed.as_slice(), adjustments.as_slice(), self.ctx.options(), &budget,
-                    )?;
-                    return self.commit_nested_edit_with_budget(page, root, source, chain, edited, &budget);
+                    let edited = leaf
+                        .program
+                        .with_adjusted_text_array_items_codes_with_budget(
+                            source.operation_index,
+                            borrowed.as_slice(),
+                            adjustments.as_slice(),
+                            self.ctx.options(),
+                            &budget,
+                        )?;
+                    return self.commit_nested_edit_with_budget(
+                        page, root, source, chain, edited, &budget,
+                    );
                 }
                 let edited = leaf
                     .program
@@ -509,7 +625,7 @@ impl<R: Read + Seek> PdfDocument<R> {
                 _ => {
                     return Err(PdfError::ObjectError(
                         "text range target/item mismatch".into(),
-                    ))
+                    ));
                 }
             };
             let old = string.bytes();
@@ -525,7 +641,7 @@ impl<R: Read + Seek> PdfDocument<R> {
                 .ok_or_else(|| PdfError::ResourceLimit("text range replacement bytes".into()))?;
             range_lease.resize(size)?;
             let replacement = super::content_edit::text_range_replacement(
-                &font,
+                font,
                 old,
                 range,
                 codes.as_slice(),
@@ -644,44 +760,46 @@ impl<R: Read + Seek> PdfDocument<R> {
             .last_mut()
             .ok_or_else(|| PdfError::PageResourceError("Nested leaf absent".into()))?;
         let operation = &leaf.program.operations()[source.operation_index].operator;
-        if operation.inline_image().is_none() && (operation.name() != "Do" || operation.num_operands() != 1) {
+        if operation.inline_image().is_none()
+            && (operation.name() != "Do" || operation.num_operands() != 1)
+        {
             return Err(PdfError::ObjectError(
                 "Nested image edit requires a named Do".into(),
             ));
         }
         if operation.inline_image().is_none() {
-        let entries = self
-            .ctx
-            .resolve_owned(
-                leaf.resource_scope
-                    .get("XObject")
+            let entries = self
+                .ctx
+                .resolve_owned(
+                    leaf.resource_scope
+                        .get("XObject")
+                        .ok_or(PdfError::PageXobjectNotFound)?,
+                )?
+                .into_dict()
+                .ok_or(PdfError::PageXobjectIsNotDict)?;
+            let image = self.ctx.resolve_owned(
+                entries
+                    .get(operation.get_as_name(0)?.name())
                     .ok_or(PdfError::PageXobjectNotFound)?,
-            )?
-            .into_dict()
-            .ok_or(PdfError::PageXobjectIsNotDict)?;
-        let image = self.ctx.resolve_owned(
-            entries
-                .get(operation.get_as_name(0)?.name())
-                .ok_or(PdfError::PageXobjectNotFound)?,
-        )?;
-        let stream = image
-            .as_stream()
-            .ok_or_else(|| PdfError::ObjectError("Nested image target must be stream".into()))?;
-        let subtype = stream
-            .dict()
-            .get("Subtype")
-            .ok_or_else(|| PdfError::ObjectError("Nested image subtype missing".into()))?;
-        if self
-            .ctx
-            .resolve_owned(subtype)?
-            .as_name()
-            .map(|name| name.name())
-            != Some("Image")
-        {
-            return Err(PdfError::ObjectError(
-                "Nested image target requires Subtype Image".into(),
-            ));
-        }
+            )?;
+            let stream = image.as_stream().ok_or_else(|| {
+                PdfError::ObjectError("Nested image target must be stream".into())
+            })?;
+            let subtype = stream
+                .dict()
+                .get("Subtype")
+                .ok_or_else(|| PdfError::ObjectError("Nested image subtype missing".into()))?;
+            if self
+                .ctx
+                .resolve_owned(subtype)?
+                .as_name()
+                .map(|name| name.name())
+                != Some("Image")
+            {
+                return Err(PdfError::ObjectError(
+                    "Nested image target requires Subtype Image".into(),
+                ));
+            }
         }
         let edited = match edit {
             NestedImageEdit::Replace(replacement) => {
@@ -1003,8 +1121,11 @@ impl<R: Read + Seek> PdfDocument<R> {
             let (value, lease) = self.ctx.resolve_owned_with_budget(value, budget)?;
             _entries_lease = Some(lease);
             value.into_dict().ok_or_else(|| {
-                if category == "XObject" { PdfError::PageXobjectIsNotDict }
-                else { PdfError::PageResourceError("Form Font resources must be a dictionary".into()) }
+                if category == "XObject" {
+                    PdfError::PageXobjectIsNotDict
+                } else {
+                    PdfError::PageResourceError("Form Font resources must be a dictionary".into())
+                }
             })?
         } else {
             PdfDict::default()
@@ -1065,6 +1186,62 @@ fn checked_edited_bytes(retained: usize, next: usize, limit: usize) -> PdfResult
         .ok_or_else(|| PdfError::ResourceLimit("Nested edited decoded bytes".into()))
 }
 
+fn form_do(name: &str) -> PdfResult<Vec<u8>> {
+    let mut bytes = Vec::new();
+    crate::writer::write_name(&mut bytes, &PdfName::new(name.to_owned()))?;
+    bytes.extend_from_slice(b" Do");
+    Ok(bytes)
+}
+
+pub(super) fn form_do_with_budget(
+    name: &str,
+    limits: crate::parser::options::Limits,
+    budget: &crate::budget::OperationBudget,
+) -> PdfResult<crate::budget::BudgetedBytes> {
+    let length = crate::writer::serialized_name_bytes_length(name.as_bytes())?
+        .checked_add(3)
+        .ok_or_else(|| PdfError::ResourceLimit("Form Do size".into()))?;
+    if length > limits.max_decoded_bytes {
+        return Err(PdfError::ResourceLimit("Form Do bytes".into()));
+    }
+    let mut lease = budget.reserve(length)?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(length)
+        .map_err(|_| PdfError::ResourceLimit("Form Do allocation".into()))?;
+    lease.resize(bytes.capacity())?;
+    crate::writer::write_name_bytes(&mut bytes, name.as_bytes())?;
+    bytes.extend_from_slice(b" Do");
+    crate::budget::BudgetedBytes::from_reserved_vec(bytes, lease)
+}
+
+fn rebuild_form_call(
+    program: &ContentProgram,
+    operation: usize,
+    name: &str,
+    options: crate::parser::options::ParseOptions,
+    budget: Option<&crate::budget::OperationBudget>,
+) -> PdfResult<crate::page::source_provenance::PreparedProgram> {
+    use crate::page::source_provenance::PreparedProgram;
+    if let Some(budget) = budget {
+        let replacement = form_do_with_budget(name, options.limits, budget)?;
+        Ok(PreparedProgram::Budgeted(
+            program.with_replaced_operation_with_budget(
+                operation,
+                replacement.as_slice(),
+                options,
+                budget,
+            )?,
+        ))
+    } else {
+        Ok(PreparedProgram::Plain(program.with_replaced_operation(
+            operation,
+            &form_do(name)?,
+            options,
+        )?))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1075,33 +1252,64 @@ mod tests {
         let id = ObjectId::new(17, 0);
         let mut entries = PdfDict::default();
         for name in ["FontEdit1", "FontEdit2"] {
-            entries.insert(name.into(), PdfObject::PdfReference(PdfReference::from_id(id)));
+            entries.insert(
+                name.into(),
+                PdfObject::PdfReference(PdfReference::from_id(id)),
+            );
         }
         let mut original = PdfDict::default();
         original.insert("Font".into(), PdfObject::PdfDict(entries));
-        original.insert("Keep".into(), PdfObject::PdfName(PdfName::new("kept".repeat(128))));
+        original.insert(
+            "Keep".into(),
+            PdfObject::PdfName(PdfName::new("kept".repeat(128))),
+        );
         let pool = OperationBudget::new(65536);
-        let (mut resources, input_lease) = crate::objects::clone_dict_with_budget(&original, &pool, doc.ctx.limits(), 0).unwrap();
-        let (name, lease) = doc.bind_local_font_with_budget(&mut resources, id, &pool).unwrap();
+        let (mut resources, input_lease) =
+            crate::objects::clone_dict_with_budget(&original, &pool, doc.ctx.limits(), 0).unwrap();
+        let (name, lease) = doc
+            .bind_local_font_with_budget(&mut resources, id, &pool)
+            .unwrap();
         assert_eq!(name, "FontEdit3");
         assert_eq!(resources.get("Keep"), original.get("Keep"));
-        assert_eq!(resources.get("Font").unwrap().as_dict().unwrap().get(&name), Some(&PdfObject::PdfReference(PdfReference::from_id(id))));
-        assert!(original.get("Font").unwrap().as_dict().unwrap().get(&name).is_none());
+        assert_eq!(
+            resources.get("Font").unwrap().as_dict().unwrap().get(&name),
+            Some(&PdfObject::PdfReference(PdfReference::from_id(id)))
+        );
+        assert!(
+            original
+                .get("Font")
+                .unwrap()
+                .as_dict()
+                .unwrap()
+                .get(&name)
+                .is_none()
+        );
         assert_eq!(pool.live_bytes(), input_lease.bytes() + lease.bytes());
         let peak = pool.peak_bytes();
         drop((resources, name, lease, input_lease));
         assert_eq!(pool.live_bytes(), 0);
         let limited = OperationBudget::new(peak - 1);
-        let (mut resources, input_lease) = crate::objects::clone_dict_with_budget(&original, &limited, doc.ctx.limits(), 0).unwrap();
-        assert!(matches!(doc.bind_local_font_with_budget(&mut resources, id, &limited), Err(PdfError::ResourceLimit(_))));
+        let (mut resources, input_lease) =
+            crate::objects::clone_dict_with_budget(&original, &limited, doc.ctx.limits(), 0)
+                .unwrap();
+        assert!(matches!(
+            doc.bind_local_font_with_budget(&mut resources, id, &limited),
+            Err(PdfError::ResourceLimit(_))
+        ));
         assert_eq!(resources, original);
         assert_eq!(limited.live_bytes(), input_lease.bytes());
         drop((resources, input_lease));
         assert_eq!(limited.live_bytes(), 0);
         let mut malformed = PdfDict::default();
-        malformed.insert("Font".into(), PdfObject::PdfNumber(crate::objects::pdf_number::PdfNumber::new(1.0)));
+        malformed.insert(
+            "Font".into(),
+            PdfObject::PdfNumber(crate::objects::pdf_number::PdfNumber::new(1.0)),
+        );
         let saved = malformed.clone();
-        assert!(matches!(doc.bind_local_font_with_budget(&mut malformed, id, &pool), Err(PdfError::PageResourceError(_))));
+        assert!(matches!(
+            doc.bind_local_font_with_budget(&mut malformed, id, &pool),
+            Err(PdfError::PageResourceError(_))
+        ));
         assert_eq!(malformed, saved);
         assert_eq!(pool.live_bytes(), 0);
     }
@@ -1128,15 +1336,17 @@ mod tests {
         }
         let pool = OperationBudget::new(65536);
         assert!(form_do_with_budget("Bad\0Name", Limits::default(), &pool).is_err());
-        assert!(form_do_with_budget(
-            "Fm1",
-            Limits {
-                max_decoded_bytes: 6,
-                ..Default::default()
-            },
-            &pool
-        )
-        .is_err());
+        assert!(
+            form_do_with_budget(
+                "Fm1",
+                Limits {
+                    max_decoded_bytes: 6,
+                    ..Default::default()
+                },
+                &pool
+            )
+            .is_err()
+        );
         assert_eq!(pool.live_bytes(), 0);
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _bytes = form_do_with_budget("Fm1", Limits::default(), &pool).unwrap();
@@ -1301,10 +1511,12 @@ mod tests {
         assert_eq!(pool.live_bytes(), 0);
         assert_eq!(rollback.get_page(0).unwrap().resource().unwrap(), before);
         let invalid = rollback.try_insert_object(PdfObject::PdfNull).unwrap();
-        assert!(rollback
-            .resources()
-            .register_form_with_budget(0, invalid, &pool)
-            .is_err());
+        assert!(
+            rollback
+                .resources()
+                .register_form_with_budget(0, invalid, &pool)
+                .is_err()
+        );
         assert_eq!(pool.live_bytes(), 0);
         assert_eq!(rollback.get_page(0).unwrap().resource().unwrap(), before);
     }
@@ -1490,61 +1702,5 @@ mod tests {
         assert!(checked_edited_bytes(forms, 11, 25).is_err());
         assert!(checked_edited_bytes(usize::MAX, 1, usize::MAX).is_err());
         assert_eq!(checked_edited_bytes(0, 0, 0).unwrap(), 0);
-    }
-}
-
-fn form_do(name: &str) -> PdfResult<Vec<u8>> {
-    let mut bytes = Vec::new();
-    crate::writer::write_name(&mut bytes, &PdfName::new(name.to_owned()))?;
-    bytes.extend_from_slice(b" Do");
-    Ok(bytes)
-}
-
-pub(super) fn form_do_with_budget(
-    name: &str,
-    limits: crate::parser::options::Limits,
-    budget: &crate::budget::OperationBudget,
-) -> PdfResult<crate::budget::BudgetedBytes> {
-    let length = crate::writer::serialized_name_bytes_length(name.as_bytes())?
-        .checked_add(3)
-        .ok_or_else(|| PdfError::ResourceLimit("Form Do size".into()))?;
-    if length > limits.max_decoded_bytes {
-        return Err(PdfError::ResourceLimit("Form Do bytes".into()));
-    }
-    let mut lease = budget.reserve(length)?;
-    let mut bytes = Vec::new();
-    bytes
-        .try_reserve_exact(length)
-        .map_err(|_| PdfError::ResourceLimit("Form Do allocation".into()))?;
-    lease.resize(bytes.capacity())?;
-    crate::writer::write_name_bytes(&mut bytes, name.as_bytes())?;
-    bytes.extend_from_slice(b" Do");
-    crate::budget::BudgetedBytes::from_reserved_vec(bytes, lease)
-}
-
-fn rebuild_form_call(
-    program: &ContentProgram,
-    operation: usize,
-    name: &str,
-    options: crate::parser::options::ParseOptions,
-    budget: Option<&crate::budget::OperationBudget>,
-) -> PdfResult<crate::page::source_provenance::PreparedProgram> {
-    use crate::page::source_provenance::PreparedProgram;
-    if let Some(budget) = budget {
-        let replacement = form_do_with_budget(name, options.limits, budget)?;
-        Ok(PreparedProgram::Budgeted(
-            program.with_replaced_operation_with_budget(
-                operation,
-                replacement.as_slice(),
-                options,
-                budget,
-            )?,
-        ))
-    } else {
-        Ok(PreparedProgram::Plain(program.with_replaced_operation(
-            operation,
-            &form_do(name)?,
-            options,
-        )?))
     }
 }

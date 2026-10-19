@@ -36,6 +36,7 @@ impl<T, K: Copy + Ord + std::hash::Hash> MappingTable<T, K> {
             sorted: Some(Vec::new()),
         }
     }
+    #[cfg(test)]
     pub(super) fn capacity(&self) -> usize {
         self.sorted
             .as_ref()
@@ -163,15 +164,31 @@ impl CodeSpaceRange {
 
 #[derive(Debug, Clone, Default)]
 pub struct CidRange {
+    // Retained for the existing public record type; lookups use MappingTable.
+    #[expect(
+        dead_code,
+        reason = "legacy public range record, not the lookup storage"
+    )]
     start: u32,
+    #[expect(
+        dead_code,
+        reason = "legacy public range record, not the lookup storage"
+    )]
     end: u32,
+    #[expect(
+        dead_code,
+        reason = "legacy public range record, not the lookup storage"
+    )]
     start_cid: u32,
+    #[expect(
+        dead_code,
+        reason = "legacy public range record, not the lookup storage"
+    )]
     length: u8,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Cmap {
-    name: String,
     wmode: Option<u8>,
     cmap_type: Option<u8>,
     code_space_range: Vec<CodeSpaceRange>,
@@ -385,7 +402,8 @@ impl Cmap {
         if !self.admits_unicode_code(char.code, char.length) {
             return None;
         }
-        self.cid_to_unicode.get(&(char.length, char.code))
+        self.cid_to_unicode
+            .get(&(char.length, char.code))
             .or_else(|| self.cid_to_unicode.get(&(0, char.code)))
             .map(String::as_str)
     }
@@ -400,7 +418,9 @@ impl Cmap {
         let mut result = None;
         for length in 0..=4 {
             if let Some(value) = self.code_to_cids.get(&(length, code)) {
-                if result.is_some_and(|previous| previous != *value) { return 0; }
+                if result.is_some_and(|previous| previous != *value) {
+                    return 0;
+                }
                 result = Some(*value);
             }
         }
@@ -409,9 +429,11 @@ impl Cmap {
 
     /// Encoding lookup preserves source byte length; an unmapped code is .notdef.
     pub fn cid_for_char(&self, ch: &CharCode) -> u32 {
-        self.code_to_cids.get(&(ch.length, ch.code))
+        self.code_to_cids
+            .get(&(ch.length, ch.code))
             .or_else(|| self.code_to_cids.get(&(0, ch.code)))
-            .copied().unwrap_or(0)
+            .copied()
+            .unwrap_or(0)
     }
 
     pub(crate) fn unicode_entries(&self) -> impl Iterator<Item = (u32, u8, &str)> {
@@ -516,8 +538,7 @@ mod tests {
     fn sorted_mapping_budget_tracks_capacity_duplicates_and_retry() {
         use crate::budget::OperationBudget;
         let run = |pool: &OperationBudget| {
-            let mut table = super::MappingTable::<u32>::default();
-            table.sorted = Some(Vec::new());
+            let mut table = super::MappingTable::<u32>::new_budgeted();
             let mut lease = None;
             for (key, value) in [(u32::MAX, 9), (5, 10), (0, 11), (5, 12)] {
                 if table.get(&key).is_none() {

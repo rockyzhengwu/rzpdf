@@ -303,8 +303,10 @@ fn appearance_character_work_is_cumulative_across_widgets() {
         ],
     )
     .unwrap();
-    let mut parse = pdf::parser::options::ParseOptions::default();
-    parse.mode = ParseMode::Strict;
+    let mut parse = pdf::parser::options::ParseOptions {
+        mode: ParseMode::Strict,
+        ..Default::default()
+    };
     parse.limits.max_text_chars = 10;
     let doc = Document::from_bytes_with_options(doc.save_to_bytes().unwrap(), parse).unwrap();
     let stamp = doc.stamp();

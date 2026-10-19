@@ -49,7 +49,7 @@ fn crypt_bytes(
             .and_then(|n| n.checked_add(16))
             .ok_or_else(|| PdfError::ResourceLimit("AES ciphertext length".into()))?
     } else {
-        if input.len() < 32 || (input.len() - 16) % 16 != 0 {
+        if input.len() < 32 || !(input.len() - 16).is_multiple_of(16) {
             return Err(malformed("IV-prefixed AES ciphertext length"));
         }
         input.len() - 16
@@ -261,17 +261,17 @@ pub(crate) fn plain_output<R: Read + Seek>(
     object: &PdfObject,
     budget: &OperationBudget,
 ) -> PdfResult<(PdfObject, MemoryLease)> {
-    if let PdfObject::PdfStream(stream) = object {
-        if stream.crypt_processed() {
-            let settings = settings(ctx, stream, budget)?;
-            if settings.name.is_some() {
-                let (dict, mut lease) =
-                    rewrite_crypt_name(stream, &settings, "Identity", ctx.limits(), budget)?;
-                let (data, mut child) = BudgetedBytes::copy_from_slice(budget, stream.raw_data())?
-                    .into_reserved_parts();
-                lease.absorb(&mut child)?;
-                return Ok((PdfObject::PdfStream(PdfStream::new(dict, data)), lease));
-            }
+    if let PdfObject::PdfStream(stream) = object
+        && stream.crypt_processed()
+    {
+        let settings = settings(ctx, stream, budget)?;
+        if settings.name.is_some() {
+            let (dict, mut lease) =
+                rewrite_crypt_name(stream, &settings, "Identity", ctx.limits(), budget)?;
+            let (data, mut child) =
+                BudgetedBytes::copy_from_slice(budget, stream.raw_data())?.into_reserved_parts();
+            lease.absorb(&mut child)?;
+            return Ok((PdfObject::PdfStream(PdfStream::new(dict, data)), lease));
         }
     }
     crate::objects::clone_object_with_budget(object, budget, ctx.limits(), 0)
@@ -470,18 +470,36 @@ mod tests {
         let pool = OperationBudget::new(4 * 1024 * 1024);
         let (handler, _lease) = SecurityHandler::generate(
             &EncryptionOptions::new("user", "owner").unwrap(),
-            crate::parser::options::Limits::default(), &pool,
-        ).unwrap();
+            crate::parser::options::Limits::default(),
+            &pool,
+        )
+        .unwrap();
         let live = pool.live_bytes();
-        for (length, ciphertext) in [(0,32), (15,32), (16,48), (31,48), (32,64)] {
-            let input = vec![42;length];
-            assert!(matches!(handler.encrypt_object_stream_bytes(&input,ciphertext-1,&pool), Err(PdfError::ResourceLimit(_))));
-            assert_eq!(pool.live_bytes(),live);
-            let bytes = handler.encrypt_object_stream_bytes(&input,ciphertext,&pool).unwrap();
-            assert_eq!(bytes.as_slice().len(),ciphertext);
-            let (plain, lease) = crypt_bytes(handler.streams,&*handler.key,bytes.as_slice(),false,ciphertext,&pool).unwrap();
-            assert_eq!(plain,input); drop(plain); drop(lease); drop(bytes);
-            assert_eq!(pool.live_bytes(),live);
+        for (length, ciphertext) in [(0, 32), (15, 32), (16, 48), (31, 48), (32, 64)] {
+            let input = vec![42; length];
+            assert!(matches!(
+                handler.encrypt_object_stream_bytes(&input, ciphertext - 1, &pool),
+                Err(PdfError::ResourceLimit(_))
+            ));
+            assert_eq!(pool.live_bytes(), live);
+            let bytes = handler
+                .encrypt_object_stream_bytes(&input, ciphertext, &pool)
+                .unwrap();
+            assert_eq!(bytes.as_slice().len(), ciphertext);
+            let (plain, lease) = crypt_bytes(
+                handler.streams,
+                &*handler.key,
+                bytes.as_slice(),
+                false,
+                ciphertext,
+                &pool,
+            )
+            .unwrap();
+            assert_eq!(plain, input);
+            drop(plain);
+            drop(lease);
+            drop(bytes);
+            assert_eq!(pool.live_bytes(), live);
         }
     }
 

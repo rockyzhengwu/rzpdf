@@ -6,23 +6,50 @@ impl<R: Read + Seek> Interpreter<'_, R> {
     /// The explicit layer renderer can draw tagged text without requesting a
     /// logical replacement. Validate known metadata; never apply it to glyphs.
     pub(super) fn validate_selected_properties(&self, op: &Operator) -> PdfResult<()> {
-        let tag=op.get_as_name(0)?.name();
-        if tag=="OC" { return Ok(()); } // membership already evaluated by begin_optional_mark
-        let value=op.operand(1)?;
-        let value=if let Some(name)=value.as_name() { self.named_resource("Properties",name.name())? } else { self.ctx.resolve(value)? };
-        let dict=value.as_dict().ok_or_else(||PdfError::PageOperatorError("BDC properties must be a dictionary".into()))?;
-        for (key,value) in dict {
+        let tag = op.get_as_name(0)?.name();
+        if tag == "OC" {
+            return Ok(());
+        } // membership already evaluated by begin_optional_mark
+        let value = op.operand(1)?;
+        let value = if let Some(name) = value.as_name() {
+            self.named_resource("Properties", name.name())?
+        } else {
+            self.ctx.resolve(value)?
+        };
+        let dict = value.as_dict().ok_or_else(|| {
+            PdfError::PageOperatorError("BDC properties must be a dictionary".into())
+        })?;
+        for (key, value) in dict {
             match key.as_str() {
-                "MCID"=> { self.ctx.resolve(value)?.as_number().ok_or_else(||PdfError::PageOperatorError("MCID integer".into()))?.as_u32_checked()?; },
-                "ActualText"|"Alt"|"Lang"=> {
-                    if key=="ActualText" && !matches!(tag,"Span"|"Artifact") { return Err(PdfError::UnsupportedFeature("ActualText requires Span or Artifact".into())); }
-                    let value=self.ctx.resolve(value)?;
-                    let text=value.as_string().ok_or_else(||PdfError::PageOperatorError("marked text string".into()))?.text_content_with_limits(&self.ctx.limits())?;
-                    self.execution_budget.semantic_bytes(text.len(),&self.ctx.limits())?;
-                    self.execution_budget.semantic_chars(text.chars().count(),&self.ctx.limits())?;
-                },
-                "Type"|"Subtype"|"BBox"|"Attached" if tag=="Artifact"=>{},
-                _=>return Err(PdfError::UnsupportedFeature(format!("selected rendering marked property {key}"))),
+                "MCID" => {
+                    self.ctx
+                        .resolve(value)?
+                        .as_number()
+                        .ok_or_else(|| PdfError::PageOperatorError("MCID integer".into()))?
+                        .as_u32_checked()?;
+                }
+                "ActualText" | "Alt" | "Lang" => {
+                    if key == "ActualText" && !matches!(tag, "Span" | "Artifact") {
+                        return Err(PdfError::UnsupportedFeature(
+                            "ActualText requires Span or Artifact".into(),
+                        ));
+                    }
+                    let value = self.ctx.resolve(value)?;
+                    let text = value
+                        .as_string()
+                        .ok_or_else(|| PdfError::PageOperatorError("marked text string".into()))?
+                        .text_content_with_limits(&self.ctx.limits())?;
+                    self.execution_budget
+                        .semantic_bytes(text.len(), &self.ctx.limits())?;
+                    self.execution_budget
+                        .semantic_chars(text.chars().count(), &self.ctx.limits())?;
+                }
+                "Type" | "Subtype" | "BBox" | "Attached" if tag == "Artifact" => {}
+                _ => {
+                    return Err(PdfError::UnsupportedFeature(format!(
+                        "selected rendering marked property {key}"
+                    )));
+                }
             }
         }
         Ok(())

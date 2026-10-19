@@ -33,7 +33,9 @@ fn pixels(renderer: &mut SkiaRender, w: usize, h: usize) -> Vec<u8> {
 }
 fn bounds(bytes: &[u8], w: usize, color: [u8; 3]) -> (usize, usize, usize, usize) {
     let pts: Vec<_> = bytes
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .enumerate()
         .filter(|(_, p)| p[..3] == color)
         .map(|(i, _)| (i % w, i / w))

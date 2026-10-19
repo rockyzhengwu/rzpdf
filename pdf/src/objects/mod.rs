@@ -270,11 +270,7 @@ impl PdfObject {
     }
 
     pub fn as_f32(&self) -> Option<f32> {
-        if let Some(num) = self.as_number() {
-            Some(num.value())
-        } else {
-            None
-        }
+        self.as_number().map(|num| num.value())
     }
     pub fn get_attr(&self, name: &str) -> Option<&PdfObject> {
         match self {

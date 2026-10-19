@@ -3,6 +3,8 @@
 #[path = "shading_tensor_tests.rs"]
 mod tensor_tests;
 
+type TensorInterior = ([[f64; 2]; 4], [[Interval; 2]; 4]);
+
 #[derive(Debug, Clone)]
 pub(crate) struct CoonsPatch {
     // PDF stream order: corners are points 0, 3, 6, 9.
@@ -12,7 +14,7 @@ pub(crate) struct CoonsPatch {
     encoded: Option<EncodedGeometry>,
     // Type7 supplies these controls independently of its boundary. PDF order
     // is (u,v)=(1/3,1/3),(1/3,2/3),(2/3,2/3),(2/3,1/3).
-    tensor_interior: Option<([[f64; 2]; 4], [[Interval; 2]; 4])>,
+    tensor_interior: Option<TensorInterior>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -26,6 +28,7 @@ fn unit(value: f64) -> bool {
     value.is_finite() && (0.0..=1.0).contains(&value)
 }
 
+#[cfg(test)]
 fn cubic(points: [[f64; 2]; 4], t: f64) -> [f64; 2] {
     // de Casteljau interpolation also preserves endpoints exactly.
     let mix = |a: [f64; 2], b: [f64; 2]| [a[0] * (1.0 - t) + b[0] * t, a[1] * (1.0 - t) + b[1] * t];
@@ -35,6 +38,7 @@ fn cubic(points: [[f64; 2]; 4], t: f64) -> [f64; 2] {
     mix(mix(a, b), mix(b, c))
 }
 
+#[cfg(test)]
 type TensorControls = [[[f64; 2]; 4]; 4];
 
 /// Parameter-space corner interpolation with uncertain roots/components.
@@ -219,6 +223,7 @@ impl PatchMesh {
 /// Decode a preflighted stream into owned geometry and corner data. The
 /// byte allowance counts borrowed input length and visible Vec capacities,
 /// not allocator metadata, stack frames or a full operation-wide lease.
+#[cfg(test)]
 pub(crate) fn decode_patch_stream(
     bytes: &[u8],
     encoding: &PatchEncoding<'_>,
@@ -376,6 +381,7 @@ pub(crate) struct PatchStreamPlan {
 
 /// Structural preflight without allocations. Only the final partial byte
 /// is padding; complete trailing bytes must form complete patch records.
+#[cfg(test)]
 pub(crate) fn scan_patch_stream(
     bytes: &[u8],
     flag_bits: u8,
@@ -556,6 +562,7 @@ pub(crate) struct PatchBits<'a> {
 impl<'a> PatchBits<'a> {
     /// Assemble one record without hidden heap storage. `scratch` may be
     /// overwritten on failure; decoded outputs and stream position are atomic.
+    #[cfg(test)]
     pub(crate) fn decoded_record(
         &mut self,
         encoding: &PatchEncoding<'_>,
@@ -672,6 +679,7 @@ impl<'a> PatchBits<'a> {
 
     /// Read raw integers into caller storage, geometry first then colors.
     /// Whole-record preflight precedes any buffer write or cursor change.
+    #[cfg(test)]
     pub(crate) fn record(
         &mut self,
         flag_bits: u8,
@@ -692,6 +700,10 @@ impl<'a> PatchBits<'a> {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "PDF component geometry and limits are independent inputs"
+    )]
     fn record_kind(
         &mut self,
         flag_bits: u8,
@@ -739,6 +751,7 @@ pub(crate) struct PatchRecordLayout {
 
 /// Bit payload only; deliberately does not assume a byte-padding policy.
 /// The supplied flag is already decoded, not an unmasked raw flag field.
+#[cfg(test)]
 pub(crate) fn patch_record_layout(
     flag: u8,
     flag_bits: u8,
@@ -1026,6 +1039,7 @@ fn certify_unique_straight_edge(
 
 /// Select only when the PDF v/u precedence is proven by root enclosures.
 /// Overlapping v intervals cannot be epsilon-tied or midpoint-sorted.
+#[cfg(test)]
 pub(crate) fn preferred_certified_root(
     roots: &[[Interval; 2]],
     remaining: &mut usize,
@@ -1076,6 +1090,7 @@ fn preferred_certified_root_impl(
 /// image contains every root even without an existence certificate; each
 /// intersection therefore preserves completeness. Only a subsequent strict
 /// certificate supplies existence and uniqueness, never the contraction alone.
+#[cfg(test)]
 fn contract_candidate_cell(
     controls: IntervalControls,
     target: [f64; 2],
@@ -1516,6 +1531,7 @@ pub(crate) fn interval_tensor_box(
 
 /// Candidate traversal using inherited interval uncertainty, without an
 /// ad-hoc padding. A successful traversal still does not certify its leaves.
+#[cfg(test)]
 pub(crate) fn visit_interval_candidates(
     controls: IntervalControls,
     point: [f64; 2],
@@ -1591,6 +1607,10 @@ pub(crate) fn interval_tensor_bounds(controls: &IntervalControls) -> Option<[Int
 
 /// Local-unit-parameter derivative hulls [du/dv][x/y]. On a subdivided
 /// cell these are derivatives with respect to that cell, not global u/v.
+#[expect(
+    clippy::needless_range_loop,
+    reason = "explicit control-net indices preserve PDF geometry formulas and reference checks"
+)]
 pub(crate) fn interval_tensor_derivatives(
     controls: &IntervalControls,
 ) -> Option<[[Interval; 2]; 2]> {
@@ -1627,6 +1647,10 @@ pub(crate) fn interval_tensor_derivatives(
 
 /// Propagate control enclosures through midpoint subdivision without
 /// discarding conversion uncertainty or subsequent rounding errors.
+#[expect(
+    clippy::needless_range_loop,
+    reason = "explicit control-net indices preserve PDF geometry formulas and reference checks"
+)]
 pub(crate) fn subdivide_interval_tensor(
     controls: IntervalControls,
 ) -> Option<[IntervalControls; 4]> {
@@ -1746,6 +1770,7 @@ pub(crate) enum SearchError {
 /// PDF patch precedence among supplied roots: greatest v, then greatest u.
 /// Caller must establish root validity/completeness before using the result.
 /// No epsilon tie merging: nearly equal v values are not equal parameters.
+#[cfg(test)]
 pub(crate) fn preferred_parameter(roots: &[[f64; 2]]) -> Result<Option<[f64; 2]>, SearchError> {
     if roots.iter().flatten().any(|x| !unit(*x)) {
         return Err(SearchError::InvalidInput);
@@ -1762,6 +1787,7 @@ pub(crate) fn preferred_parameter(roots: &[[f64; 2]]) -> Result<Option<[f64; 2]>
 /// Enumerate candidate parameter rectangles, not verified roots.
 /// Callback results are provisional until this returns Ok: budget failure
 /// must never be interpreted as a complete search or a coverage miss.
+#[cfg(test)]
 pub(crate) fn visit_candidates(
     controls: TensorControls,
     point: [f64; 2],
@@ -1824,6 +1850,7 @@ pub(crate) fn visit_candidates(
 /// Control-hull AABB, outward rounded by one representable value.
 /// Covers the surface represented by these controls, not accumulated errors
 /// from prior conversions/subdivisions; callers must budget those separately.
+#[cfg(test)]
 pub(crate) fn tensor_bounds(controls: &TensorControls) -> Option<[f64; 4]> {
     let mut bounds = [
         f64::INFINITY,
@@ -1850,6 +1877,7 @@ pub(crate) fn tensor_bounds(controls: &TensorControls) -> Option<[f64; 4]> {
 
 /// Determinant enclosure of the Jacobian of this control net.
 /// Excluding zero proves local nonsingularity, not global injectivity.
+#[cfg(test)]
 pub(crate) fn tensor_jacobian_bounds(controls: &TensorControls) -> Option<[f64; 2]> {
     let derivatives = tensor_derivative_bounds(controls)?;
     if derivatives
@@ -1883,6 +1911,7 @@ pub(crate) fn tensor_jacobian_bounds(controls: &TensorControls) -> Option<[f64; 
     }
 }
 
+#[cfg(test)]
 fn split_cubic_half(p: [[f64; 2]; 4]) -> ([[f64; 2]; 4], [[f64; 2]; 4]) {
     // Multiplying before adding avoids overflow for large finite controls.
     let midpoint =
@@ -1899,6 +1928,11 @@ fn split_cubic_half(p: [[f64; 2]; 4]) -> ([[f64; 2]; 4], [[f64; 2]; 4]) {
 /// Bernstein derivative hulls, indexed [du/dv][x/y][lower/upper].
 /// Subtraction and multiplication are outward rounded separately. These
 /// bounds concern this control net, not errors in its prior construction.
+#[cfg(test)]
+#[expect(
+    clippy::needless_range_loop,
+    reason = "explicit control-net indices preserve PDF geometry formulas and reference checks"
+)]
 pub(crate) fn tensor_derivative_bounds(controls: &TensorControls) -> Option<[[[f64; 2]; 2]; 2]> {
     tensor_bounds(controls)?;
     let mut result = [[[f64::INFINITY, f64::NEG_INFINITY]; 2]; 2];
@@ -1928,6 +1962,11 @@ pub(crate) fn tensor_derivative_bounds(controls: &TensorControls) -> Option<[[[f
 
 /// Exact midpoint subdivision, ordered low-v/low-u, low-v/high-u,
 /// high-v/low-u, high-v/high-u. No sampling or dynamic allocation.
+#[cfg(test)]
+#[expect(
+    clippy::needless_range_loop,
+    reason = "explicit control-net indices preserve PDF geometry formulas and reference checks"
+)]
 pub(crate) fn subdivide_tensor(controls: TensorControls) -> Option<[TensorControls; 4]> {
     if !controls.iter().flatten().flatten().all(|x| x.is_finite()) {
         return None;
@@ -1954,6 +1993,7 @@ pub(crate) fn subdivide_tensor(controls: TensorControls) -> Option<[TensorContro
 }
 
 /// Derivative of the cubic Bernstein curve.
+#[cfg(test)]
 fn cubic_derivative(points: [[f64; 2]; 4], t: f64) -> [f64; 2] {
     let differences: [[f64; 2]; 3] = std::array::from_fn(|i| {
         std::array::from_fn(|axis| 3.0 * (points[i + 1][axis] - points[i][axis]))
@@ -1997,6 +2037,10 @@ pub(crate) fn interpolate_corners(
 }
 
 impl CoonsPatch {
+    #[expect(
+        clippy::needless_range_loop,
+        reason = "explicit control-net indices preserve PDF geometry formulas and reference checks"
+    )]
     fn from_tensor_record(
         flag: u8,
         new: &[[u32; 2]],
@@ -2039,6 +2083,10 @@ impl CoonsPatch {
         Some(patch)
     }
 
+    #[expect(
+        clippy::needless_range_loop,
+        reason = "explicit control-net indices preserve PDF geometry formulas and reference checks"
+    )]
     pub(crate) fn continue_decoded(
         &self,
         flag: u8,
@@ -2116,6 +2164,7 @@ impl CoonsPatch {
     /// Borrow inherited corner components plus the two newly encoded corners.
     /// No allocation/conversion: the stream decoder must retain or copy these
     /// under its own storage budget before releasing the previous patch.
+    #[cfg(test)]
     pub(crate) fn continued_components<'a>(
         &self,
         flag: u8,
@@ -2283,6 +2332,7 @@ impl CoonsPatch {
     /// Local Newton refinement constrained to a candidate rectangle.
     /// None means unresolved (including singularity), never proven absence.
     /// A residual-qualified point is not a proof of uniqueness/completeness.
+    #[cfg(test)]
     pub(crate) fn refine_candidate(
         &self,
         target: [f64; 2],
@@ -2333,14 +2383,13 @@ impl CoonsPatch {
                     && next[0] <= rect[2]
                     && next[1] >= rect[1]
                     && next[1] <= rect[3]
+                    && let Some(p) = self.point(next[0], next[1])
                 {
-                    if let Some(p) = self.point(next[0], next[1]) {
-                        let error = (p[0] - target[0]).abs().max((p[1] - target[1]).abs());
-                        if error < residual[0].abs().max(residual[1].abs()) {
-                            uv = next;
-                            accepted = true;
-                            break;
-                        }
+                    let error = (p[0] - target[0]).abs().max((p[1] - target[1]).abs());
+                    if error < residual[0].abs().max(residual[1].abs()) {
+                        uv = next;
+                        accepted = true;
+                        break;
                     }
                 }
                 factor *= 0.5;
@@ -2354,6 +2403,7 @@ impl CoonsPatch {
 
     /// Exact bicubic Bernstein representation, indexed [v][u].
     /// Unlike corner bounds, its convex hull contains folded interiors too.
+    #[cfg(test)]
     pub(crate) fn tensor_controls(&self) -> Option<[[[f64; 2]; 4]; 4]> {
         let p = &self.points;
         if let Some((q, _)) = self.tensor_interior {
@@ -2437,6 +2487,7 @@ impl CoonsPatch {
             })
     }
 
+    #[cfg(test)]
     pub(crate) fn point(&self, u: f64, v: f64) -> Option<[f64; 2]> {
         let weights = corner_weights(u, v)?;
         if self.tensor_interior.is_some() {
@@ -2459,6 +2510,7 @@ impl CoonsPatch {
     }
 
     /// Analytic derivatives in u/v order; not an inverse or fold resolver.
+    #[cfg(test)]
     pub(crate) fn derivatives(&self, u: f64, v: f64) -> Option<[[f64; 2]; 2]> {
         if !unit(u) || !unit(v) {
             return None;
@@ -3034,6 +3086,10 @@ mod tests {
         assert_eq!(&source.raw[4..], &[[1; 2]; 8]);
     }
     #[test]
+    #[expect(
+        clippy::needless_range_loop,
+        reason = "explicit control-net indices preserve PDF geometry formulas and reference checks"
+    )]
     fn decoded_continuations_preserve_both_inherited_and_new_point_errors() {
         let raw = rectangle().map(|point| point.map(|x| (x * 85.0) as u32));
         let patch = CoonsPatch::from_decoded_points(raw, 8, [0.0, 3.0, 0.0, 3.0]).unwrap();
@@ -3069,6 +3125,10 @@ mod tests {
         assert_eq!(patch.points, rectangle());
     }
     #[test]
+    #[expect(
+        clippy::needless_range_loop,
+        reason = "explicit control-net indices preserve PDF geometry formulas and reference checks"
+    )]
     fn decoded_coordinate_uncertainty_survives_conversion_and_shared_edges() {
         let raw = rectangle().map(|point| point.map(|x| (x * 85.0) as u32));
         let patch = CoonsPatch::from_decoded_points(raw, 8, [0.0, 3.0, 0.0, 3.0]).unwrap();
@@ -4067,6 +4127,10 @@ mod tests {
         );
     }
     #[test]
+    #[expect(
+        clippy::needless_range_loop,
+        reason = "explicit control-net indices preserve PDF geometry formulas and reference checks"
+    )]
     fn interval_hulls_and_derivatives_retain_uncertainty_and_local_scaling() {
         let patch = CoonsPatch::try_new(rectangle()).unwrap();
         let controls = patch.tensor_control_enclosures();
@@ -4099,6 +4163,10 @@ mod tests {
         assert!(interval_tensor_derivatives(&uncertain).is_none());
     }
     #[test]
+    #[expect(
+        clippy::needless_range_loop,
+        reason = "explicit control-net indices preserve PDF geometry formulas and reference checks"
+    )]
     fn interval_subdivision_carries_conversion_error_across_levels() {
         let patch = CoonsPatch::try_new(rectangle()).unwrap();
         let first = subdivide_interval_tensor(patch.tensor_control_enclosures()).unwrap();
@@ -4129,6 +4197,10 @@ mod tests {
         assert!(subdivide_interval_tensor(invalid).is_none());
     }
     #[test]
+    #[expect(
+        clippy::needless_range_loop,
+        reason = "explicit control-net indices preserve PDF geometry formulas and reference checks"
+    )]
     fn conversion_intervals_enclose_exact_rectangle_and_curved_controls() {
         let mut patch = CoonsPatch::try_new(rectangle()).unwrap();
         let intervals = patch.tensor_control_enclosures();
@@ -4461,6 +4533,10 @@ mod tests {
         );
     }
     #[test]
+    #[expect(
+        clippy::needless_range_loop,
+        reason = "explicit control-net indices preserve PDF geometry formulas and reference checks"
+    )]
     fn subdivision_preserves_parent_parameters_and_shared_edges() {
         let mut patch = CoonsPatch::try_new(rectangle()).unwrap();
         patch.points[4][1] = 6.0;

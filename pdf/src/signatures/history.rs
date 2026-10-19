@@ -112,7 +112,10 @@ fn revisions(bytes: &[u8], options: ParseOptions) -> PdfResult<Vec<Revision>> {
 }
 
 pub(super) fn revision_ends(bytes: &[u8], options: ParseOptions) -> PdfResult<Vec<usize>> {
-    Ok(revisions(bytes, options)?.into_iter().map(|revision| revision.end).collect())
+    Ok(revisions(bytes, options)?
+        .into_iter()
+        .map(|revision| revision.end)
+        .collect())
 }
 
 fn signature_range(dict: &PdfDict) -> PdfResult<[u64; 4]> {

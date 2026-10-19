@@ -12,7 +12,7 @@ fn unicode_text_commit_binds_effective_font_and_restores_q_state() {
         },
         io::stream_reader::StreamReader,
         objects::{
-            pdf_dict::PdfDict, pdf_reference::PdfReference, pdf_stream::PdfStream, PdfObject,
+            PdfObject, pdf_dict::PdfDict, pdf_reference::PdfReference, pdf_stream::PdfStream,
         },
         parser::syntax::{ParseMode, SyntaxParser},
     };
@@ -128,7 +128,7 @@ fn composite_font_unicode_encoding_commits_and_strictly_round_trips() {
         document::{owned::Document, resource_manager::ResourceKind},
         io::stream_reader::StreamReader,
         objects::{
-            pdf_dict::PdfDict, pdf_reference::PdfReference, pdf_stream::PdfStream, PdfObject,
+            PdfObject, pdf_dict::PdfDict, pdf_reference::PdfReference, pdf_stream::PdfStream,
         },
         parser::syntax::{ParseMode, SyntaxParser},
     };
@@ -207,34 +207,42 @@ fn tj_item_replacement_preserves_spacing_comments_and_other_strings() {
     }
     assert_eq!(after.get(2).unwrap().as_string().unwrap().bytes(), &[0, 66]);
     for index in [1, 3, 5, usize::MAX] {
-        assert!(original
-            .with_replaced_text_array_item_codes(0, index, b"X", ParseOptions::default())
-            .is_err());
+        assert!(
+            original
+                .with_replaced_text_array_item_codes(0, index, b"X", ParseOptions::default())
+                .is_err()
+        );
     }
-    assert!(original
-        .with_replaced_text_array_item_codes(1, 0, b"X", ParseOptions::default())
-        .is_err());
+    assert!(
+        original
+            .with_replaced_text_array_item_codes(1, 0, b"X", ParseOptions::default())
+            .is_err()
+    );
     let invalid =
         ContentProgram::from_decoded_bytes(b"[(A) /Bad] TJ".to_vec(), ParseOptions::default())
             .unwrap();
-    assert!(invalid
-        .with_replaced_text_array_item_codes(0, 0, b"X", ParseOptions::default())
-        .is_err());
+    assert!(
+        invalid
+            .with_replaced_text_array_item_codes(0, 0, b"X", ParseOptions::default())
+            .is_err()
+    );
     let limits = Limits {
         max_token_bytes: 3,
         ..Default::default()
     };
-    assert!(original
-        .with_replaced_text_array_item_codes(
-            0,
-            2,
-            &[0, 66],
-            ParseOptions {
-                limits,
-                ..Default::default()
-            }
-        )
-        .is_err());
+    assert!(
+        original
+            .with_replaced_text_array_item_codes(
+                0,
+                2,
+                &[0, 66],
+                ParseOptions {
+                    limits,
+                    ..Default::default()
+                }
+            )
+            .is_err()
+    );
     assert_eq!(original.source_bytes(), source);
     assert!(edited.source_stamp().is_none());
 }
@@ -260,9 +268,11 @@ fn tj_batch_replacement_keeps_numbers_comments_and_unselected_tokens() {
         vec![(1, b"X".as_slice())],
         vec![(5, b"X".as_slice())],
     ] {
-        assert!(original
-            .with_replaced_text_array_items_codes(0, &entries, options)
-            .is_err());
+        assert!(
+            original
+                .with_replaced_text_array_items_codes(0, &entries, options)
+                .is_err()
+        );
     }
     assert_eq!(
         original.operations()[0]
@@ -346,39 +356,45 @@ fn document_tj_item_commit_strictly_round_trips_with_existing_font() {
     .unwrap();
     let snapshot = doc.get_page(0).unwrap().content_program().unwrap();
     let revision = doc.revision();
-    assert!(doc
-        .replace_page_text_array_item_codes(0, &snapshot, 3, 1, b"C")
-        .is_err());
+    assert!(
+        doc.replace_page_text_array_item_codes(0, &snapshot, 3, 1, b"C")
+            .is_err()
+    );
     assert_eq!(doc.revision(), revision);
     let codes = doc
         .get_page(0)
         .unwrap()
         .encode_text_for_font(&font, "CD")
         .unwrap();
-    assert!(doc
-        .get_page(0)
-        .unwrap()
-        .encode_text_for_font("Missing", "A")
-        .is_err());
-    assert!(doc
-        .get_page(0)
-        .unwrap()
-        .encode_text_for_font(&font, "中文")
-        .is_err());
+    assert!(
+        doc.get_page(0)
+            .unwrap()
+            .encode_text_for_font("Missing", "A")
+            .is_err()
+    );
+    assert!(
+        doc.get_page(0)
+            .unwrap()
+            .encode_text_for_font(&font, "中文")
+            .is_err()
+    );
     assert_eq!(codes, b"CD");
     doc.replace_page_text_array_item(0, &snapshot, 3, 2, "CD")
         .unwrap();
-    assert!(doc
-        .replace_page_text_array_item_codes(0, &snapshot, 3, 2, b"E")
-        .is_err());
+    assert!(
+        doc.replace_page_text_array_item_codes(0, &snapshot, 3, 2, b"E")
+            .is_err()
+    );
     let reopened =
         Document::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict).unwrap();
     let mut page = reopened.get_page(0).unwrap();
     let program = page.content_program().unwrap();
-    assert!(program
-        .source_bytes()
-        .windows(b"-120.00 %keep\n".len())
-        .any(|part| part == b"-120.00 %keep\n"));
+    assert!(
+        program
+            .source_bytes()
+            .windows(b"-120.00 %keep\n".len())
+            .any(|part| part == b"-120.00 %keep\n")
+    );
     let report = page.extract_characters_paint_order_report().unwrap();
     assert!(report.diagnostics.is_empty());
     let text: String = report
@@ -470,16 +486,18 @@ fn replacement_retains_unknown_neighbor_operands_and_checks_output_budget() {
         max_decoded_bytes: edited.source_bytes().len() - 1,
         ..Default::default()
     };
-    assert!(program
-        .with_replaced_operation(
-            1,
-            replacement,
-            ParseOptions {
-                limits,
-                ..Default::default()
-            }
-        )
-        .is_err());
+    assert!(
+        program
+            .with_replaced_operation(
+                1,
+                replacement,
+                ParseOptions {
+                    limits,
+                    ..Default::default()
+                }
+            )
+            .is_err()
+    );
     assert_eq!(
         program.operations()[1]
             .operator
@@ -526,14 +544,18 @@ fn encoded_text_replacement_can_be_saved_and_extracted_with_existing_font() {
             .bytes(),
         b"BC"
     );
-    assert!(original
-        .with_replaced_text_codes(0, b"BC", ParseOptions::default())
-        .is_err());
+    assert!(
+        original
+            .with_replaced_text_codes(0, b"BC", ParseOptions::default())
+            .is_err()
+    );
     let foreign = Document::new().unwrap();
     foreign.add_page(0).unwrap();
-    assert!(foreign
-        .replace_page_text_codes(0, &original, 3, &codes)
-        .is_err());
+    assert!(
+        foreign
+            .replace_page_text_codes(0, &original, 3, &codes)
+            .is_err()
+    );
     let offline = ContentProgram::from_decoded_bytes(
         original.source_bytes().to_vec(),
         ParseOptions::default(),
@@ -541,9 +563,10 @@ fn encoded_text_replacement_can_be_saved_and_extracted_with_existing_font() {
     .unwrap();
     assert!(doc.replace_page_text_codes(0, &offline, 3, &codes).is_err());
     let revision = doc.revision();
-    assert!(doc
-        .replace_page_text_codes(0, &original, 0, &codes)
-        .is_err());
+    assert!(
+        doc.replace_page_text_codes(0, &original, 0, &codes)
+            .is_err()
+    );
     assert_eq!(doc.revision(), revision);
     doc.replace_page_text_codes(0, &original, 3, &codes)
         .unwrap();
@@ -591,15 +614,21 @@ fn operation_replacement_preserves_comments_streams_and_unknown_neighbors() {
     assert_eq!(edited.operations()[2].operator.name(), "Q");
     assert!(edited.source_stamp().is_none());
     assert_eq!(program.operations()[1].operator.name(), "CustomOp");
-    assert!(program
-        .with_replaced_operation(1, b"q Q", ParseOptions::default())
-        .is_err());
-    assert!(program
-        .with_replaced_operation(1, b"", ParseOptions::default())
-        .is_err());
-    assert!(program
-        .with_replaced_operation(99, b"q", ParseOptions::default())
-        .is_err());
+    assert!(
+        program
+            .with_replaced_operation(1, b"q Q", ParseOptions::default())
+            .is_err()
+    );
+    assert!(
+        program
+            .with_replaced_operation(1, b"", ParseOptions::default())
+            .is_err()
+    );
+    assert!(
+        program
+            .with_replaced_operation(99, b"q", ParseOptions::default())
+            .is_err()
+    );
 }
 
 #[test]
@@ -707,14 +736,16 @@ fn multi_stream_source_preserves_boundaries_and_cross_stream_tokens() {
         max_decoded_bytes: 25,
         ..Default::default()
     };
-    assert!(ContentProgram::from_decoded_streams(
-        chunks,
-        ParseOptions {
-            limits,
-            ..Default::default()
-        }
-    )
-    .is_err());
+    assert!(
+        ContentProgram::from_decoded_streams(
+            chunks,
+            ParseOptions {
+                limits,
+                ..Default::default()
+            }
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -792,19 +823,22 @@ fn page_program_budget_charges_source_growth_and_retains_return_owner() {
     assert_eq!(result.program().operations().len(), 2);
     assert_eq!(result.program().stream_ranges(), [0..2, 2..3]);
     assert_eq!(budget.live_bytes(), metadata + 4 + 2 * operation_size + 2);
-    assert!(budget
-        .reserve(budget.maximum_bytes() - budget.live_bytes() + 1)
-        .is_err());
+    assert!(
+        budget
+            .reserve(budget.maximum_bytes() - budget.live_bytes() + 1)
+            .is_err()
+    );
     drop(result);
     assert_eq!(budget.live_bytes(), 0);
     doc.replace_page_contents(0, b"q (unterminated".to_vec())
         .unwrap();
     let budget = OperationBudget::new(64);
-    assert!(doc
-        .get_page(0)
-        .unwrap()
-        .content_program_with_budget(&budget)
-        .is_err());
+    assert!(
+        doc.get_page(0)
+            .unwrap()
+            .content_program_with_budget(&budget)
+            .is_err()
+    );
     assert_eq!(budget.live_bytes(), 0);
 }
 
@@ -829,11 +863,12 @@ fn empty_streams_still_charge_program_metadata() {
     drop(probed);
     assert_eq!(probe.live_bytes(), 0);
     let too_small = OperationBudget::new(peak - 1);
-    assert!(doc
-        .get_page(0)
-        .unwrap()
-        .content_program_with_budget(&too_small)
-        .is_err());
+    assert!(
+        doc.get_page(0)
+            .unwrap()
+            .content_program_with_budget(&too_small)
+            .is_err()
+    );
     assert_eq!(too_small.live_bytes(), 0);
     let budget = OperationBudget::new(peak);
     let result = doc
@@ -871,11 +906,12 @@ fn numeric_operand_tables_remain_charged_with_page_program() {
     assert_eq!(probe.live_bytes(), 0);
     let budget = OperationBudget::new(peak);
     let neighbor = budget.reserve(1).unwrap();
-    assert!(doc
-        .get_page(0)
-        .unwrap()
-        .content_program_with_budget(&budget)
-        .is_err());
+    assert!(
+        doc.get_page(0)
+            .unwrap()
+            .content_program_with_budget(&budget)
+            .is_err()
+    );
     assert_eq!(budget.live_bytes(), 1);
     drop(neighbor);
     let result = doc
@@ -1032,9 +1068,11 @@ fn rebuilt_operation_program_retains_budget_and_accounts_fragment_overlap() {
     assert_eq!(probe.live_bytes(), 0);
     let budget = OperationBudget::new(peak);
     let neighbor = budget.reserve(1).unwrap();
-    assert!(original
-        .with_replaced_operation_with_budget(0, replacement, options, &budget)
-        .is_err());
+    assert!(
+        original
+            .with_replaced_operation_with_budget(0, replacement, options, &budget)
+            .is_err()
+    );
     assert_eq!(budget.live_bytes(), 1);
     assert_eq!(original.source_bytes(), b"q Q");
     drop(neighbor);
@@ -1046,9 +1084,11 @@ fn rebuilt_operation_program_retains_budget_and_accounts_fragment_overlap() {
     drop(result);
     assert_eq!(budget.live_bytes(), 0);
     for replacement in [b"q Q".as_slice(), b"(unterminated".as_slice()] {
-        assert!(original
-            .with_replaced_operation_with_budget(0, replacement, options, &budget)
-            .is_err());
+        assert!(
+            original
+                .with_replaced_operation_with_budget(0, replacement, options, &budget)
+                .is_err()
+        );
         assert_eq!(budget.live_bytes(), 0);
     }
 }
@@ -1130,9 +1170,11 @@ fn budgeted_text_replacement_preserves_tj_and_quote_operations() {
         assert_eq!(probe.live_bytes(), 0);
         let budget = OperationBudget::new(peak);
         let neighbor = budget.reserve(1).unwrap();
-        assert!(original
-            .with_replaced_text_codes_with_budget(0, &[0, 255], options, &budget)
-            .is_err());
+        assert!(
+            original
+                .with_replaced_text_codes_with_budget(0, &[0, 255], options, &budget)
+                .is_err()
+        );
         assert_eq!(budget.live_bytes(), 1);
         drop(neighbor);
         let result = original
@@ -1184,9 +1226,11 @@ fn budgeted_tj_replacement_preserves_spacing_and_cross_stream_ranges() {
     assert_eq!(probe.live_bytes(), 0);
     let budget = OperationBudget::new(peak);
     let neighbor = budget.reserve(1).unwrap();
-    assert!(original
-        .with_replaced_text_array_items_codes_with_budget(0, &replacements, options, &budget)
-        .is_err());
+    assert!(
+        original
+            .with_replaced_text_array_items_codes_with_budget(0, &replacements, options, &budget)
+            .is_err()
+    );
     assert_eq!(budget.live_bytes(), 1);
     drop(neighbor);
     let result = original
@@ -1196,9 +1240,11 @@ fn budgeted_tj_replacement_preserves_spacing_and_cross_stream_ranges() {
     drop(result);
     assert_eq!(budget.live_bytes(), 0);
     for invalid in [vec![(1, &b"x"[..])], vec![(0, &b"x"[..]), (0, &b"y"[..])]] {
-        assert!(original
-            .with_replaced_text_array_items_codes_with_budget(0, &invalid, options, &budget)
-            .is_err());
+        assert!(
+            original
+                .with_replaced_text_array_items_codes_with_budget(0, &invalid, options, &budget)
+                .is_err()
+        );
         assert_eq!(budget.live_bytes(), 0);
     }
 }
@@ -1217,11 +1263,12 @@ fn partial_program_parse_failure_releases_accumulated_operand_tables() {
     let budget = OperationBudget::new(16 * 1024);
     let neighbor = BudgetedBytes::copy_from_slice(&budget, b"neighbor").unwrap();
     let retained = budget.live_bytes();
-    assert!(doc
-        .get_page(0)
-        .unwrap()
-        .content_program_with_budget(&budget)
-        .is_err());
+    assert!(
+        doc.get_page(0)
+            .unwrap()
+            .content_program_with_budget(&budget)
+            .is_err()
+    );
     assert_eq!(budget.live_bytes(), retained);
     assert_eq!(neighbor.as_slice(), b"neighbor");
     assert_eq!(doc.revision(), revision);
@@ -1337,20 +1384,24 @@ fn source_program_preserves_unknown_operations_and_lexical_bytes() {
         let offset = operation.operator.byte_offset().unwrap() as usize;
         assert!(operation.source_range.contains(&offset));
         assert!(operation.lexical_range.contains(&offset));
-        assert!(program.source_bytes()[operation.source_range.clone()]
-            .ends_with(operation.operator.name().as_bytes()));
+        assert!(
+            program.source_bytes()[operation.source_range.clone()]
+                .ends_with(operation.operator.name().as_bytes())
+        );
     }
     let limits = Limits {
         max_content_operations: 3,
         ..Default::default()
     };
-    assert!(ContentProgram::from_decoded_bytes(
-        bytes,
-        ParseOptions {
-            limits,
-            ..Default::default()
-        }
-    )
-    .is_err());
+    assert!(
+        ContentProgram::from_decoded_bytes(
+            bytes,
+            ParseOptions {
+                limits,
+                ..Default::default()
+            }
+        )
+        .is_err()
+    );
     assert!(ContentProgram::from_decoded_bytes(b"1 2".to_vec(), ParseOptions::default()).is_err());
 }

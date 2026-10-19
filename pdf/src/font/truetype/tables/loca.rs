@@ -282,15 +282,15 @@ mod tests {
         for bounded in [
             Limits {
                 max_depth: 2,
-                ..limits.clone()
+                ..limits
             },
             Limits {
                 max_objects: 4,
-                ..limits.clone()
+                ..limits
             },
             Limits {
                 max_decoded_bytes: 256,
-                ..limits.clone()
+                ..limits
             },
         ] {
             assert!(matches!(

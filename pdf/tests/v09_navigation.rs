@@ -187,10 +187,16 @@ fn link_crud_uses_stable_handles_and_rejects_foreign_page() {
         target: LinkTarget::Destination(doc.destination(1, DestinationView::FitV(None)).unwrap()),
     };
     let handle = doc.add_link(0, &link).unwrap();
-    assert_eq!(doc.page_link_handles(0).unwrap(), [handle.clone()]);
+    assert_eq!(
+        doc.page_link_handles(0).unwrap().as_slice(),
+        std::slice::from_ref(&handle)
+    );
     link.target = LinkTarget::Uri("https://example.org/updated".into());
     doc.update_page_link(0, &handle, &link).unwrap();
-    assert_eq!(doc.page_links(0).unwrap(), [link.clone()]);
+    assert_eq!(
+        doc.page_links(0).unwrap().as_slice(),
+        std::slice::from_ref(&link)
+    );
     let revision = doc.commit_revision();
     assert!(doc.remove_page_link(1, &handle).is_err());
     link.rect[0] = f32::INFINITY;

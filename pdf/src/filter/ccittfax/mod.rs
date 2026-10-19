@@ -1,15 +1,14 @@
-//use group4::decode_g4;
-
 use crate::{
     error::{PdfError, PdfResult},
     objects::pdf_dict::PdfDict,
 };
-use fax::decoder::{decode_g4, pels, DecodeStatus, Group3Decoder};
 use fax::Color;
+use fax::decoder::{DecodeStatus, Group3Decoder, decode_g4, pels};
 
+// Production decoding uses the bounded fax backend below. The small legacy
+// bit-reader remains only as a unit-test reference.
+#[cfg(test)]
 mod bitreader;
-mod fax_table;
-mod group4;
 
 pub struct Param {
     k: i32,
@@ -290,7 +289,7 @@ fn append_line(
 
 #[cfg(test)]
 mod tests {
-    use crate::objects::{pdf_bool::PdfBool, pdf_dict::PdfDict, pdf_number::PdfNumber, PdfObject};
+    use crate::objects::{PdfObject, pdf_bool::PdfBool, pdf_dict::PdfDict, pdf_number::PdfNumber};
 
     use super::ccittfax_decode;
 
@@ -430,13 +429,10 @@ mod tests {
             drop(decoded);
             assert_eq!(budget.live_bytes(), 0);
         }
-        assert!(super::ccittfax_decode_with_budget(
-            &buffer,
-            Some(&pd),
-            expected.len() - 1,
-            &budget
-        )
-        .is_err());
+        assert!(
+            super::ccittfax_decode_with_budget(&buffer, Some(&pd), expected.len() - 1, &budget)
+                .is_err()
+        );
         assert_eq!(budget.live_bytes(), 0);
         pd.insert("BlackIs1".into(), PdfObject::PdfBool(PdfBool::new(b"true")));
         assert_eq!(

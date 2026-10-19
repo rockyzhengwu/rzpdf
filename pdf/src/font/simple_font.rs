@@ -41,17 +41,38 @@ mod safety_tests {
     fn base14_differences_without_base_keep_builtin_codes_and_overrides() {
         let document = crate::document::PdfDocument::new().unwrap();
         let mut font = PdfDict::default();
-        font.try_insert("Subtype".into(), PdfObject::PdfName(crate::objects::pdf_name::PdfName::new("Type1".into()))).unwrap();
-        font.try_insert("BaseFont".into(), PdfObject::PdfName(crate::objects::pdf_name::PdfName::new("Helvetica".into()))).unwrap();
+        font.try_insert(
+            "Subtype".into(),
+            PdfObject::PdfName(crate::objects::pdf_name::PdfName::new("Type1".into())),
+        )
+        .unwrap();
+        font.try_insert(
+            "BaseFont".into(),
+            PdfObject::PdfName(crate::objects::pdf_name::PdfName::new("Helvetica".into())),
+        )
+        .unwrap();
         let mut encoding = PdfDict::default();
-        encoding.try_insert("Differences".into(), PdfObject::PdfArray(crate::objects::pdf_array::PdfArray::from_items(vec![
-            PdfObject::PdfNumber(crate::objects::pdf_number::PdfNumber::new(65.)),
-            PdfObject::PdfName(crate::objects::pdf_name::PdfName::new("B".into())),
-        ]))).unwrap();
-        font.try_insert("Encoding".into(), PdfObject::PdfDict(encoding)).unwrap();
+        encoding
+            .try_insert(
+                "Differences".into(),
+                PdfObject::PdfArray(crate::objects::pdf_array::PdfArray::from_items(vec![
+                    PdfObject::PdfNumber(crate::objects::pdf_number::PdfNumber::new(65.)),
+                    PdfObject::PdfName(crate::objects::pdf_name::PdfName::new("B".into())),
+                ])),
+            )
+            .unwrap();
+        font.try_insert("Encoding".into(), PdfObject::PdfDict(encoding))
+            .unwrap();
         let font = SimpleFont::try_new(&font, document.ctx()).unwrap();
-        assert_eq!(font.encode_text_with_limits("B C", Default::default()).unwrap(), [65,32,67]);
-        assert!(font.encode_text_with_limits("A", Default::default()).is_err());
+        assert_eq!(
+            font.encode_text_with_limits("B C", Default::default())
+                .unwrap(),
+            [65, 32, 67]
+        );
+        assert!(
+            font.encode_text_with_limits("A", Default::default())
+                .is_err()
+        );
     }
 
     #[test]
@@ -392,13 +413,12 @@ mod safety_tests {
                  /Flags 33 /FontBBox [0 -200 600 800] /ItalicAngle 0 \
                  /Ascent 800 /Descent -200 /CapHeight 600 /StemV 80 /MissingWidth 600 >> >>"
             );
-            let dict = SyntaxParser::new(
-                StreamReader::try_new(Cursor::new(text.into_bytes())).unwrap(),
-            )
-            .get_object()
-            .unwrap()
-            .into_dict()
-            .unwrap();
+            let dict =
+                SyntaxParser::new(StreamReader::try_new(Cursor::new(text.into_bytes())).unwrap())
+                    .get_object()
+                    .unwrap()
+                    .into_dict()
+                    .unwrap();
             let ordinary = SimpleFont::try_new(&dict, &ctx).unwrap();
             let pool = crate::budget::OperationBudget::new(16 * 1024 * 1024);
             let (budgeted, lease) = SimpleFont::try_new_with_budget(&dict, &ctx, &pool).unwrap();
@@ -954,6 +974,7 @@ impl SimpleFont {
         Ok(result_lease)
     }
 
+    #[cfg(test)]
     fn load_width<R: Seek + Read>(&mut self, dict: &PdfDict, ctx: &PDFContext<R>) -> PdfResult<()> {
         self.load_width_inner(dict, ctx, None).map(|_| ())
     }
@@ -1002,23 +1023,22 @@ impl SimpleFont {
             }
             self.widths = Some(widths);
         }
-        if let Some(name) = find_builtin_font(self.base_font()) {
-            if let Some(afm_data) = load_builtin_metrics(name) {
-                if afm_data.len() > ctx.limits().max_decoded_bytes {
-                    return Err(PdfError::ResourceLimit("AFM input bytes".into()));
-                }
-                let s = std::str::from_utf8(afm_data)
-                    .map_err(|_| PdfError::FontError("afm data not utf8".to_string()))?;
-                let (afm, lease) = if let Some(pool) = budget {
-                    let (afm, lease) =
-                        super::afm::parse_afm_str_with_budget(s, &ctx.limits(), pool)?;
-                    (afm, Some(lease))
-                } else {
-                    (parse_afm_str_with_limits(s, &ctx.limits())?, None)
-                };
-                self.afm = Some(afm);
-                return Ok(lease);
+        if let Some(name) = find_builtin_font(self.base_font())
+            && let Some(afm_data) = load_builtin_metrics(name)
+        {
+            if afm_data.len() > ctx.limits().max_decoded_bytes {
+                return Err(PdfError::ResourceLimit("AFM input bytes".into()));
             }
+            let s = std::str::from_utf8(afm_data)
+                .map_err(|_| PdfError::FontError("afm data not utf8".to_string()))?;
+            let (afm, lease) = if let Some(pool) = budget {
+                let (afm, lease) = super::afm::parse_afm_str_with_budget(s, &ctx.limits(), pool)?;
+                (afm, Some(lease))
+            } else {
+                (parse_afm_str_with_limits(s, &ctx.limits())?, None)
+            };
+            self.afm = Some(afm);
+            return Ok(lease);
         }
         Ok(None)
     }
@@ -1095,26 +1115,35 @@ impl SimpleFont {
                 }
             }
         }
-        if !self.descriptor.is_embed() && matches!(self.subtype, SimpleSubType::Type1) {
-            if let (Some(encoding), Some(builtin)) = (&mut self.encoding, find_builtin_font(self.base_font.as_str()).filter(|name| *name == self.base_font.as_str())) {
-                let base = match builtin { "Symbol" => "Symbol", "ZapfDingbats" => "ZapfDingbats", _ => "StandardEncoding" };
-                encoding.default_base(base)?;
-            }
+        if !self.descriptor.is_embed()
+            && matches!(self.subtype, SimpleSubType::Type1)
+            && let (Some(encoding), Some(builtin)) = (
+                &mut self.encoding,
+                find_builtin_font(self.base_font.as_str())
+                    .filter(|name| *name == self.base_font.as_str()),
+            )
+        {
+            let base = match builtin {
+                "Symbol" => "Symbol",
+                "ZapfDingbats" => "ZapfDingbats",
+                _ => "StandardEncoding",
+            };
+            encoding.default_base(base)?;
         }
 
         // TODO set default encoding
-        if self.encoding.is_none() {
-            if let Some(builtin_name) = find_builtin_font(self.base_font.as_str()) {
-                if builtin_name == "Symbol" {
-                    let encoding = Encoding::new_from_name("Symbol")?;
-                    self.encoding = Some(encoding);
-                } else if builtin_name == "ZapfDingbats" {
-                    let encoding = Encoding::new_from_name("ZapfDingbats")?;
-                    self.encoding = Some(encoding);
-                } else {
-                    let encoding = Encoding::new_from_name("StandardEncoding")?;
-                    self.encoding = Some(encoding);
-                }
+        if self.encoding.is_none()
+            && let Some(builtin_name) = find_builtin_font(self.base_font.as_str())
+        {
+            if builtin_name == "Symbol" {
+                let encoding = Encoding::new_from_name("Symbol")?;
+                self.encoding = Some(encoding);
+            } else if builtin_name == "ZapfDingbats" {
+                let encoding = Encoding::new_from_name("ZapfDingbats")?;
+                self.encoding = Some(encoding);
+            } else {
+                let encoding = Encoding::new_from_name("StandardEncoding")?;
+                self.encoding = Some(encoding);
             }
         }
         Ok(result_lease)
@@ -1124,16 +1153,14 @@ impl SimpleFont {
         if let Some(widths) = self.widths {
             return Ok(widths[code.to_owned() as usize]);
         }
-        if let Some(afm) = self.afm.as_ref() {
-            if let Some(enc) = &self.encoding {
-                if let Some(name) = enc.get_glyph_name(code) {
-                    if let Some(w) = afm.get_char_width(name) {
-                        return Ok(w);
-                    }
-                }
-            }
+        if let Some(afm) = self.afm.as_ref()
+            && let Some(enc) = &self.encoding
+            && let Some(name) = enc.get_glyph_name(code)
+            && let Some(w) = afm.get_char_width(name)
+        {
+            return Ok(w);
         }
-        return Err(PdfError::FontError("Font width is erro".to_string()));
+        Err(PdfError::FontError("Font width is erro".to_string()))
     }
 
     pub fn unicode_mapping(&self, ch: &CharCode) -> PdfResult<Option<String>> {
@@ -1154,9 +1181,15 @@ impl SimpleFont {
     }
 
     pub(crate) fn matches_unicode(&self, ch: &CharCode, expected: &str) -> bool {
-        if ch.length() != 1 || ch.code() > 255 { return false; }
-        if let Some(cmap) = &self.to_unicode { return cmap.unicode(ch) == Some(expected); }
-        let actual = self.encoding.as_ref()
+        if ch.length() != 1 || ch.code() > 255 {
+            return false;
+        }
+        if let Some(cmap) = &self.to_unicode {
+            return cmap.unicode(ch) == Some(expected);
+        }
+        let actual = self
+            .encoding
+            .as_ref()
             .and_then(|encoding| encoding.unicode_mapping(ch.code() as u8))
             .and_then(char::from_u32);
         let mut chars = expected.chars();

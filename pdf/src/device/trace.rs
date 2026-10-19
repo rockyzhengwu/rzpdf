@@ -24,77 +24,9 @@ pub struct TraceDevice {
     writer: Writer<Cursor<Vec<u8>>>,
 }
 
-#[cfg(test)]
-mod collection_tests {
-    use super::*;
-
-    #[test]
-    fn shading_collection_counts_shared_function_payload_per_draw() {
-        use crate::{
-            color::shading::Shading,
-            document::PdfDocument,
-            geom::matrix::Matrix,
-            io::stream_reader::StreamReader,
-            page::{graphic_state::GraphicState, shading_object::ShadingObject},
-            parser::syntax::SyntaxParser,
-        };
-        let doc = PdfDocument::new().unwrap();
-        let object = SyntaxParser::new(StreamReader::try_new(Cursor::new(b"<< /ShadingType 2 /ColorSpace /DeviceGray /Coords [0 0 10 0] /Function << /FunctionType 2 /Domain [0 1] /N 1 >> >>".to_vec())).unwrap()).get_object().unwrap();
-        let shading = ShadingObject::new(
-            "S".into(),
-            Matrix::default(),
-            Shading::try_new(&object, doc.ctx()).unwrap(),
-            GraphicState::default(),
-        );
-        let bytes = shading.retained_payload_bytes().unwrap();
-        assert!(bytes > 0);
-        let clone = shading.clone();
-        assert!(std::sync::Arc::ptr_eq(&clone.shading, &shading.shading));
-        let mut trace = TraceDevice::for_display_list(crate::parser::options::Limits {
-            max_decoded_bytes: bytes,
-            ..Default::default()
-        });
-        trace.start_page(10.0, 10.0).unwrap();
-        trace.do_shading(shading.clone()).unwrap();
-        assert!(
-            matches!(trace.do_shading(clone), Err(PdfError::ResourceLimit(message)) if message == "display retained payload bytes")
-        );
-        assert_eq!(trace.objects().len(), 1);
-        assert_eq!(trace.to_xml(), "");
-        let mut trace = TraceDevice::for_display_list(crate::parser::options::Limits {
-            max_objects: 1,
-            ..Default::default()
-        });
-        trace.do_shading(shading.clone()).unwrap();
-        assert!(
-            matches!(trace.do_shading(shading), Err(PdfError::ResourceLimit(message)) if message == "display object count")
-        );
-    }
-
-    #[test]
-    fn display_collection_is_bounded_and_does_not_duplicate_xml() {
-        let mut display = TraceDevice::for_display_list(crate::parser::options::Limits {
-            max_objects: 1,
-            ..Default::default()
-        });
-        display.start_page(10., 10.).unwrap();
-        display.fill_path(PathObject::default()).unwrap();
-        assert!(matches!(
-            display.fill_path(PathObject::default()),
-            Err(PdfError::ResourceLimit(_))
-        ));
-        assert_eq!(display.objects().len(), 1);
-        display.end_page().unwrap();
-        assert_eq!(display.to_xml(), "");
-
-        let mut debug = TraceDevice::new();
-        debug.start_page(10., 10.).unwrap();
-        debug.fill_path(PathObject::default()).unwrap();
-        debug.end_page().unwrap();
-        let xml = debug.to_xml();
-        assert!(xml.contains("<page"));
-        assert!(xml.contains("fill_path"));
-        assert!(xml.ends_with("</page>"));
+impl Default for TraceDevice {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -317,12 +249,12 @@ impl TraceDevice {
                 .ok_or_else(|| {
                     PdfError::ResourceLimit("colour profile draw payload overflow".into())
                 })?;
-            if let crate::color::colorspace::ColorSpace::Pattern(space) = space {
-                if let Some(paint) = space.paint() {
-                    total = total.checked_add(paint.retained_bytes).ok_or_else(|| {
-                        PdfError::ResourceLimit("pattern draw payload overflow".into())
-                    })?;
-                }
+            if let crate::color::colorspace::ColorSpace::Pattern(space) = space
+                && let Some(paint) = space.paint()
+            {
+                total = total.checked_add(paint.retained_bytes).ok_or_else(|| {
+                    PdfError::ResourceLimit("pattern draw payload overflow".into())
+                })?;
             }
         }
         if self
@@ -389,12 +321,12 @@ impl TraceDevice {
             &state.color_state.fill_color_space,
             &state.color_state.stroke_color_space,
         ] {
-            if let crate::color::colorspace::ColorSpace::Pattern(space) = space {
-                if let Some(paint) = space.paint() {
-                    total = total.checked_add(paint.retained_segments).ok_or_else(|| {
-                        PdfError::ResourceLimit("pattern draw segments overflow".into())
-                    })?;
-                }
+            if let crate::color::colorspace::ColorSpace::Pattern(space) = space
+                && let Some(paint) = space.paint()
+            {
+                total = total.checked_add(paint.retained_segments).ok_or_else(|| {
+                    PdfError::ResourceLimit("pattern draw segments overflow".into())
+                })?;
             }
         }
         for path in path
@@ -433,8 +365,8 @@ impl TraceDevice {
     }
 
     pub fn into_display_list(self) -> DisplayList {
-        let mut list=DisplayList::new(self.page_width, self.page_height, self.objects);
-        list.set_collection_usage(self.retained_payload_bytes,self.retained_path_segments);
+        let mut list = DisplayList::new(self.page_width, self.page_height, self.objects);
+        list.set_collection_usage(self.retained_payload_bytes, self.retained_path_segments);
         list
     }
 
@@ -473,17 +405,17 @@ impl TraceDevice {
             char_item.push_attribute(("x", format!("{}", x).as_str()));
             char_item.push_attribute(("y", format!("{}", y).as_str()));
             if let Some(unicode) = char.unicode() {
-                char_item.push_attribute(("unicode", format!("{}", unicode).as_str()));
+                char_item.push_attribute(("unicode", unicode.to_string().as_str()));
             }
-            if let Some(fo) = font {
-                if let Some(glyph) = fo.get_glyph(char.charcode()) {
-                    match glyph {
-                        GlyphDesc::Name(name) => {
-                            char_item.push_attribute(("glyph", format!("{}", name).as_str()));
-                        }
-                        GlyphDesc::Gid(gid) => {
-                            char_item.push_attribute(("glyph", format!("{}", gid).as_str()));
-                        }
+            if let Some(fo) = font
+                && let Some(glyph) = fo.get_glyph(char.charcode())
+            {
+                match glyph {
+                    GlyphDesc::Name(name) => {
+                        char_item.push_attribute(("glyph", name.to_string().as_str()));
+                    }
+                    GlyphDesc::Gid(gid) => {
+                        char_item.push_attribute(("glyph", format!("{}", gid).as_str()));
                     }
                 }
             }
@@ -604,5 +536,79 @@ impl TraceDevice {
     pub fn to_xml(self) -> String {
         let buffer = self.writer.into_inner().into_inner();
         String::from_utf8(buffer).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod collection_tests {
+    use super::*;
+
+    #[test]
+    fn shading_collection_counts_shared_function_payload_per_draw() {
+        use crate::{
+            color::shading::Shading,
+            document::PdfDocument,
+            geom::matrix::Matrix,
+            io::stream_reader::StreamReader,
+            page::{graphic_state::GraphicState, shading_object::ShadingObject},
+            parser::syntax::SyntaxParser,
+        };
+        let doc = PdfDocument::new().unwrap();
+        let object = SyntaxParser::new(StreamReader::try_new(Cursor::new(b"<< /ShadingType 2 /ColorSpace /DeviceGray /Coords [0 0 10 0] /Function << /FunctionType 2 /Domain [0 1] /N 1 >> >>".to_vec())).unwrap()).get_object().unwrap();
+        let shading = ShadingObject::new(
+            "S".into(),
+            Matrix::default(),
+            Shading::try_new(&object, doc.ctx()).unwrap(),
+            GraphicState::default(),
+        );
+        let bytes = shading.retained_payload_bytes().unwrap();
+        assert!(bytes > 0);
+        let clone = shading.clone();
+        assert!(std::sync::Arc::ptr_eq(&clone.shading, &shading.shading));
+        let mut trace = TraceDevice::for_display_list(crate::parser::options::Limits {
+            max_decoded_bytes: bytes,
+            ..Default::default()
+        });
+        trace.start_page(10.0, 10.0).unwrap();
+        trace.do_shading(shading.clone()).unwrap();
+        assert!(
+            matches!(trace.do_shading(clone), Err(PdfError::ResourceLimit(message)) if message == "display retained payload bytes")
+        );
+        assert_eq!(trace.objects().len(), 1);
+        assert_eq!(trace.to_xml(), "");
+        let mut trace = TraceDevice::for_display_list(crate::parser::options::Limits {
+            max_objects: 1,
+            ..Default::default()
+        });
+        trace.do_shading(shading.clone()).unwrap();
+        assert!(
+            matches!(trace.do_shading(shading), Err(PdfError::ResourceLimit(message)) if message == "display object count")
+        );
+    }
+
+    #[test]
+    fn display_collection_is_bounded_and_does_not_duplicate_xml() {
+        let mut display = TraceDevice::for_display_list(crate::parser::options::Limits {
+            max_objects: 1,
+            ..Default::default()
+        });
+        display.start_page(10., 10.).unwrap();
+        display.fill_path(PathObject::default()).unwrap();
+        assert!(matches!(
+            display.fill_path(PathObject::default()),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(display.objects().len(), 1);
+        display.end_page().unwrap();
+        assert_eq!(display.to_xml(), "");
+
+        let mut debug = TraceDevice::new();
+        debug.start_page(10., 10.).unwrap();
+        debug.fill_path(PathObject::default()).unwrap();
+        debug.end_page().unwrap();
+        let xml = debug.to_xml();
+        assert!(xml.contains("<page"));
+        assert!(xml.contains("fill_path"));
+        assert!(xml.ends_with("</page>"));
     }
 }

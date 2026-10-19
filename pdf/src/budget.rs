@@ -466,7 +466,10 @@ mod tests {
     #[test]
     fn budgeted_input_failure_preserves_neighbor_and_releases_temporary_bytes() {
         use std::io::{self, Read};
-        struct FailingReader { calls: usize, panic_on_failure: bool }
+        struct FailingReader {
+            calls: usize,
+            panic_on_failure: bool,
+        }
         impl Read for FailingReader {
             fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
                 self.calls += 1;
@@ -474,24 +477,35 @@ mod tests {
                     out[0] = b'x';
                     return Ok(1);
                 }
-                if self.panic_on_failure { panic!("injected input unwind"); }
+                if self.panic_on_failure {
+                    panic!("injected input unwind");
+                }
                 Err(io::Error::other("injected partial input failure"))
             }
         }
         let pool = OperationBudget::new(8);
         let neighbor = BudgetedBytes::copy_from_slice(&pool, b"keep").unwrap();
         let retained = pool.live_bytes();
-        let mut rejected = FailingReader { calls: 0, panic_on_failure: false };
+        let mut rejected = FailingReader {
+            calls: 0,
+            panic_on_failure: false,
+        };
         assert!(BudgetedBytes::read_exact_from(&pool, &mut rejected, 5).is_err());
         assert_eq!(rejected.calls, 0);
         assert_eq!(pool.live_bytes(), retained);
         for panic_on_failure in [false, true] {
-            let mut reader = FailingReader { calls: 0, panic_on_failure };
+            let mut reader = FailingReader {
+                calls: 0,
+                panic_on_failure,
+            };
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 BudgetedBytes::read_exact_from(&pool, &mut reader, 4)
             }));
-            if panic_on_failure { assert!(result.is_err()); }
-            else { assert!(result.unwrap().is_err()); }
+            if panic_on_failure {
+                assert!(result.is_err());
+            } else {
+                assert!(result.unwrap().is_err());
+            }
             assert_eq!(reader.calls, 2);
             assert_eq!(pool.live_bytes(), retained);
             assert_eq!(neighbor.as_slice(), b"keep");

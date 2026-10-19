@@ -154,16 +154,15 @@ fn removing_every_current_signature_marker_cannot_erase_source_policy() {
         pages.gen_num()
     );
     for info in table.objects().values() {
-        if let Ok(PdfObject::PdfDict(dict)) = doc.resolve_object(info.object_id()) {
-            if dict.contains_key("ByteRange")
+        if let Ok(PdfObject::PdfDict(dict)) = doc.resolve_object(info.object_id())
+            && (dict.contains_key("ByteRange")
                 || dict.contains_key("SigFlags")
                 || dict
                     .get("FT")
                     .and_then(PdfObject::as_name)
-                    .is_some_and(|n| n.name() == "Sig")
-            {
-                replacements.push((info.object_id().obj_num(), Some("null")));
-            }
+                    .is_some_and(|n| n.name() == "Sig"))
+        {
+            replacements.push((info.object_id().obj_num(), Some("null")));
         }
     }
     replacements.retain(|(id, _)| *id != root.obj_num());

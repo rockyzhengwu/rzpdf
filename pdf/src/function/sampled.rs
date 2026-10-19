@@ -129,11 +129,15 @@ impl Sampled {
             || function.size.contains(&0)
             || function
                 .domain
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .any(|p| !p[0].is_finite() || !p[1].is_finite() || p[0] >= p[1])
             || function
                 .range
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .any(|p| !p[0].is_finite() || !p[1].is_finite() || p[0] > p[1])
         {
             return Err(PdfError::FunctionError(
@@ -272,7 +276,7 @@ impl Sampled {
             ));
         }
         let mut bitreader = BitReader::endian(Cursor::new(bytes), BigEndian);
-        let sample_mul = 1.0 / (2.0_f32.powf(function.bits_per_sample as f32) as f32 - 1.0);
+        let sample_mul = 1.0 / (2.0_f32.powf(function.bits_per_sample as f32) - 1.0);
         for _ in 0..sample_count {
             let v = bitreader
                 .read_var::<u32>(function.bits_per_sample as u32)

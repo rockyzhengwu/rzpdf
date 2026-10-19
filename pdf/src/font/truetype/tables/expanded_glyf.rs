@@ -366,7 +366,7 @@ mod tests {
             glyph
                 .outline_commands(&Limits {
                     max_path_segments: 3,
-                    ..limits.clone()
+                    ..limits
                 })
                 .is_err()
         );
@@ -374,7 +374,7 @@ mod tests {
             glyph
                 .outline_commands(&Limits {
                     max_decoded_bytes: 1,
-                    ..limits.clone()
+                    ..limits
                 })
                 .is_err()
         );
@@ -448,15 +448,15 @@ mod tests {
         for bounded in [
             Limits {
                 max_depth: 2,
-                ..limits.clone()
+                ..limits
             },
             Limits {
                 max_path_segments: 5,
-                ..limits.clone()
+                ..limits
             },
             Limits {
                 max_decoded_bytes: 300,
-                ..limits.clone()
+                ..limits
             },
         ] {
             assert!(matches!(

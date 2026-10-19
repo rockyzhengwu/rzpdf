@@ -2,8 +2,7 @@
 //! Usage: v03_font_matrix OUTPUT.pdf
 use pdf::{
     document::{
-        PdfDocument, embedded_font::TrueTypeEmbeddingOptions,
-        resource_manager::StandardFont,
+        PdfDocument, embedded_font::TrueTypeEmbeddingOptions, resource_manager::StandardFont,
     },
     error::{PdfError, PdfResult},
     page::{content_builder::ContentBuilder, page_builder::PageBuilder},
@@ -34,12 +33,9 @@ fn main() -> PdfResult<()> {
         "你好，世界！Hello PDF",
         options(),
     )?;
-    let vertical = doc.resources().embed_truetype_vertical_font(
-        1,
-        data.to_vec(),
-        "竖排测试",
-        options(),
-    )?;
+    let vertical =
+        doc.resources()
+            .embed_truetype_vertical_font(1, data.to_vec(), "竖排测试", options())?;
     for (index, font, text) in [
         (0, &horizontal, "你好，世界！Hello PDF"),
         (1, &vertical, "竖排测试"),
@@ -53,7 +49,9 @@ fn main() -> PdfResult<()> {
         content.end_text();
         doc.replace_page_content_builder(index, &content)?;
     }
-    let courier = doc.resources().register_standard_font(2, StandardFont::Courier)?;
+    let courier = doc
+        .resources()
+        .register_standard_font(2, StandardFont::Courier)?;
     let mut content = ContentBuilder::new();
     content.begin_text();
     content.try_set_font(&courier, 24.0)?;
@@ -64,7 +62,9 @@ fn main() -> PdfResult<()> {
     doc.save_to_file(&args[0])?;
     let reopened = PdfDocument::open_with_mode(&args[0], ParseMode::Strict)?;
     if reopened.try_page_count()? != 3 {
-        return Err(PdfError::DocumentError("font matrix page count mismatch".into()));
+        return Err(PdfError::DocumentError(
+            "font matrix page count mismatch".into(),
+        ));
     }
     for index in 0..3 {
         reopened.get_page(index)?.display_list()?;

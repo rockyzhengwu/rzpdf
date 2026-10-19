@@ -21,6 +21,190 @@ pub struct DeviceN {
     transform: Function,
 }
 
+impl DeviceN {
+    pub(crate) fn retained_profile_bytes(&self) -> PdfResult<usize> {
+        self.alternate.retained_profile_bytes()
+    }
+    pub fn is_nonpainting(&self) -> bool {
+        self.all_none
+    }
+    pub fn try_new<R: Read + Seek>(array: &PdfArray, ctx: &PDFContext<R>) -> PdfResult<Self> {
+        if !matches!(array.len(), 4 | 5) {
+            return Err(PdfError::ColorError(
+                "DeviceN requires four or five entries".into(),
+            ));
+        }
+        let tag = ctx.resolve(
+            array
+                .get(0)
+                .ok_or_else(|| PdfError::ColorError("missing DeviceN family".into()))?,
+        )?;
+        if tag.as_name().is_none_or(|name| name.name() != "DeviceN") {
+            return Err(PdfError::ColorError(
+                "DeviceN array must start with /DeviceN".into(),
+            ));
+        }
+        let names = ctx.resolve(
+            array
+                .get(1)
+                .ok_or_else(|| PdfError::ColorError("missing DeviceN names".into()))?,
+        )?;
+        let names = names
+            .as_array()
+            .ok_or_else(|| PdfError::ColorError("DeviceN names must be an array".into()))?;
+        let count = names.len();
+        if count == 0 {
+            return Err(PdfError::ColorError("DeviceN names cannot be empty".into()));
+        }
+        if count > ctx.limits().max_objects
+            || count
+                .checked_mul(std::mem::size_of::<String>())
+                .is_none_or(|n| n > ctx.limits().max_decoded_bytes)
+        {
+            return Err(PdfError::ResourceLimit("DeviceN components".into()));
+        }
+        let mut resolved_names = Vec::<String>::new();
+        resolved_names
+            .try_reserve_exact(count)
+            .map_err(|_| PdfError::ResourceLimit("DeviceN names allocation".into()))?;
+        let mut bytes = 0usize;
+        for name in names {
+            let object = ctx.resolve(name)?;
+            let name = object
+                .as_name()
+                .ok_or_else(|| PdfError::ColorError("DeviceN component must be a name".into()))?
+                .name();
+            if name == "All" {
+                return Err(PdfError::ColorError(
+                    "All is not a DeviceN component".into(),
+                ));
+            }
+            bytes = bytes
+                .checked_add(name.len())
+                .filter(|n| *n <= ctx.limits().max_decoded_bytes)
+                .ok_or_else(|| PdfError::ResourceLimit("DeviceN name bytes".into()))?;
+            let mut copied = String::new();
+            copied
+                .try_reserve_exact(name.len())
+                .map_err(|_| PdfError::ResourceLimit("DeviceN name allocation".into()))?;
+            copied.push_str(name);
+            resolved_names.push(copied);
+        }
+        resolved_names.sort_unstable();
+        if resolved_names
+            .windows(2)
+            .any(|pair| pair[0] == pair[1] && pair[0] != "None")
+        {
+            return Err(PdfError::ColorError(
+                "DeviceN component names must be distinct".into(),
+            ));
+        }
+        let all_none = resolved_names.iter().all(|name| name == "None");
+        if let Some(attributes) = array.get(4) {
+            let attributes = ctx.resolve(attributes)?;
+            let attributes = attributes.as_dict().ok_or_else(|| {
+                PdfError::ColorError("DeviceN attributes must be a dictionary".into())
+            })?;
+            if let Some(subtype) = attributes.get("Subtype") {
+                let subtype = ctx.resolve(subtype)?;
+                let subtype = subtype
+                    .as_name()
+                    .ok_or_else(|| PdfError::ColorError("DeviceN Subtype must be a name".into()))?
+                    .name();
+                if !matches!(subtype, "DeviceN" | "NChannel")
+                    || (subtype == "NChannel" && resolved_names.iter().any(|name| name == "None"))
+                {
+                    return Err(PdfError::ColorError(
+                        "invalid DeviceN subtype/components".into(),
+                    ));
+                }
+            }
+        }
+        let alternate = ColorSpace::try_new(
+            array
+                .get(2)
+                .ok_or_else(|| PdfError::ColorError("missing DeviceN alternate".into()))?,
+            ctx,
+        )?;
+        if matches!(
+            alternate,
+            ColorSpace::Pattern(_)
+                | ColorSpace::Indexed(_)
+                | ColorSpace::Separation(_)
+                | ColorSpace::DeviceN(_)
+        ) {
+            return Err(PdfError::ColorError(
+                "invalid DeviceN alternate color space".into(),
+            ));
+        }
+        let transform = create_function(
+            array
+                .get(3)
+                .ok_or_else(|| PdfError::ColorError("missing DeviceN transform".into()))?,
+            ctx,
+        )?;
+        if transform.dimensions() != (count, alternate.number_of_components()?) {
+            return Err(PdfError::ColorError(
+                "DeviceN tint-transform dimensions do not match".into(),
+            ));
+        }
+        Ok(Self {
+            components: count,
+            all_none,
+            alternate: Box::new(alternate),
+            transform,
+        })
+    }
+
+    pub fn number_of_components(&self) -> usize {
+        self.components
+    }
+
+    pub fn default_value(&self) -> PdfResult<ColorValue> {
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(self.components)
+            .map_err(|_| PdfError::ResourceLimit("DeviceN default allocation".into()))?;
+        values.resize(self.components, 1.0);
+        Ok(ColorValue::new(values))
+    }
+
+    pub fn rgb(&self, value: &ColorValue) -> PdfResult<ColorRgb> {
+        self.rgb_with_context(value, &super::conversion::ColorConversionContext::default())
+    }
+    pub fn rgb_with_context(
+        &self,
+        value: &ColorValue,
+        context: &super::conversion::ColorConversionContext,
+    ) -> PdfResult<ColorRgb> {
+        if value.value_size() != self.components || value.values().iter().any(|v| !v.is_finite()) {
+            return Err(PdfError::ColorError(
+                "DeviceN requires one finite tint per component".into(),
+            ));
+        }
+        if self.all_none {
+            return Err(PdfError::UnsupportedFeature(
+                "all-None DeviceN requires paint suppression, not an RGB color".into(),
+            ));
+        }
+        let mut tints = Vec::new();
+        tints
+            .try_reserve_exact(self.components)
+            .map_err(|_| PdfError::ResourceLimit("DeviceN tint allocation".into()))?;
+        tints.extend(value.values().iter().map(|v| v.clamp(0.0, 1.0)));
+        let values = self.transform.eval(&tints)?;
+        if values.len() != self.alternate.number_of_components()?
+            || values.iter().any(|v| !v.is_finite())
+        {
+            return Err(PdfError::ColorError(
+                "invalid DeviceN transform output".into(),
+            ));
+        }
+        self.alternate
+            .rgb_with_context(&ColorValue::new(values), context)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,189 +410,5 @@ mod tests {
                 Err(PdfError::ColorError(_))
             ));
         }
-    }
-}
-
-impl DeviceN {
-    pub(crate) fn retained_profile_bytes(&self) -> PdfResult<usize> {
-        self.alternate.retained_profile_bytes()
-    }
-    pub fn is_nonpainting(&self) -> bool {
-        self.all_none
-    }
-    pub fn try_new<R: Read + Seek>(array: &PdfArray, ctx: &PDFContext<R>) -> PdfResult<Self> {
-        if !matches!(array.len(), 4 | 5) {
-            return Err(PdfError::ColorError(
-                "DeviceN requires four or five entries".into(),
-            ));
-        }
-        let tag = ctx.resolve(
-            array
-                .get(0)
-                .ok_or_else(|| PdfError::ColorError("missing DeviceN family".into()))?,
-        )?;
-        if tag.as_name().is_none_or(|name| name.name() != "DeviceN") {
-            return Err(PdfError::ColorError(
-                "DeviceN array must start with /DeviceN".into(),
-            ));
-        }
-        let names = ctx.resolve(
-            array
-                .get(1)
-                .ok_or_else(|| PdfError::ColorError("missing DeviceN names".into()))?,
-        )?;
-        let names = names
-            .as_array()
-            .ok_or_else(|| PdfError::ColorError("DeviceN names must be an array".into()))?;
-        let count = names.len();
-        if count == 0 {
-            return Err(PdfError::ColorError("DeviceN names cannot be empty".into()));
-        }
-        if count > ctx.limits().max_objects
-            || count
-                .checked_mul(std::mem::size_of::<String>())
-                .is_none_or(|n| n > ctx.limits().max_decoded_bytes)
-        {
-            return Err(PdfError::ResourceLimit("DeviceN components".into()));
-        }
-        let mut resolved_names = Vec::<String>::new();
-        resolved_names
-            .try_reserve_exact(count)
-            .map_err(|_| PdfError::ResourceLimit("DeviceN names allocation".into()))?;
-        let mut bytes = 0usize;
-        for name in names {
-            let object = ctx.resolve(name)?;
-            let name = object
-                .as_name()
-                .ok_or_else(|| PdfError::ColorError("DeviceN component must be a name".into()))?
-                .name();
-            if name == "All" {
-                return Err(PdfError::ColorError(
-                    "All is not a DeviceN component".into(),
-                ));
-            }
-            bytes = bytes
-                .checked_add(name.len())
-                .filter(|n| *n <= ctx.limits().max_decoded_bytes)
-                .ok_or_else(|| PdfError::ResourceLimit("DeviceN name bytes".into()))?;
-            let mut copied = String::new();
-            copied
-                .try_reserve_exact(name.len())
-                .map_err(|_| PdfError::ResourceLimit("DeviceN name allocation".into()))?;
-            copied.push_str(name);
-            resolved_names.push(copied);
-        }
-        resolved_names.sort_unstable();
-        if resolved_names
-            .windows(2)
-            .any(|pair| pair[0] == pair[1] && pair[0] != "None")
-        {
-            return Err(PdfError::ColorError(
-                "DeviceN component names must be distinct".into(),
-            ));
-        }
-        let all_none = resolved_names.iter().all(|name| name == "None");
-        if let Some(attributes) = array.get(4) {
-            let attributes = ctx.resolve(attributes)?;
-            let attributes = attributes.as_dict().ok_or_else(|| {
-                PdfError::ColorError("DeviceN attributes must be a dictionary".into())
-            })?;
-            if let Some(subtype) = attributes.get("Subtype") {
-                let subtype = ctx.resolve(subtype)?;
-                let subtype = subtype
-                    .as_name()
-                    .ok_or_else(|| PdfError::ColorError("DeviceN Subtype must be a name".into()))?
-                    .name();
-                if !matches!(subtype, "DeviceN" | "NChannel")
-                    || (subtype == "NChannel" && resolved_names.iter().any(|name| name == "None"))
-                {
-                    return Err(PdfError::ColorError(
-                        "invalid DeviceN subtype/components".into(),
-                    ));
-                }
-            }
-        }
-        let alternate = ColorSpace::try_new(
-            array
-                .get(2)
-                .ok_or_else(|| PdfError::ColorError("missing DeviceN alternate".into()))?,
-            ctx,
-        )?;
-        if matches!(
-            alternate,
-            ColorSpace::Pattern(_)
-                | ColorSpace::Indexed(_)
-                | ColorSpace::Separation(_)
-                | ColorSpace::DeviceN(_)
-        ) {
-            return Err(PdfError::ColorError(
-                "invalid DeviceN alternate color space".into(),
-            ));
-        }
-        let transform = create_function(
-            array
-                .get(3)
-                .ok_or_else(|| PdfError::ColorError("missing DeviceN transform".into()))?,
-            ctx,
-        )?;
-        if transform.dimensions() != (count, alternate.number_of_components()?) {
-            return Err(PdfError::ColorError(
-                "DeviceN tint-transform dimensions do not match".into(),
-            ));
-        }
-        Ok(Self {
-            components: count,
-            all_none,
-            alternate: Box::new(alternate),
-            transform,
-        })
-    }
-
-    pub fn number_of_components(&self) -> usize {
-        self.components
-    }
-
-    pub fn default_value(&self) -> PdfResult<ColorValue> {
-        let mut values = Vec::new();
-        values
-            .try_reserve_exact(self.components)
-            .map_err(|_| PdfError::ResourceLimit("DeviceN default allocation".into()))?;
-        values.resize(self.components, 1.0);
-        Ok(ColorValue::new(values))
-    }
-
-    pub fn rgb(&self, value: &ColorValue) -> PdfResult<ColorRgb> {
-        self.rgb_with_context(value, &super::conversion::ColorConversionContext::default())
-    }
-    pub fn rgb_with_context(
-        &self,
-        value: &ColorValue,
-        context: &super::conversion::ColorConversionContext,
-    ) -> PdfResult<ColorRgb> {
-        if value.value_size() != self.components || value.values().iter().any(|v| !v.is_finite()) {
-            return Err(PdfError::ColorError(
-                "DeviceN requires one finite tint per component".into(),
-            ));
-        }
-        if self.all_none {
-            return Err(PdfError::UnsupportedFeature(
-                "all-None DeviceN requires paint suppression, not an RGB color".into(),
-            ));
-        }
-        let mut tints = Vec::new();
-        tints
-            .try_reserve_exact(self.components)
-            .map_err(|_| PdfError::ResourceLimit("DeviceN tint allocation".into()))?;
-        tints.extend(value.values().iter().map(|v| v.clamp(0.0, 1.0)));
-        let values = self.transform.eval(&tints)?;
-        if values.len() != self.alternate.number_of_components()?
-            || values.iter().any(|v| !v.is_finite())
-        {
-            return Err(PdfError::ColorError(
-                "invalid DeviceN transform output".into(),
-            ));
-        }
-        self.alternate
-            .rgb_with_context(&ColorValue::new(values), context)
     }
 }

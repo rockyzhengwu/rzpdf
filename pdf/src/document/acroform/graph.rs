@@ -232,8 +232,17 @@ impl<R: Read + Seek> PdfDocument<R> {
             let mut children = Vec::new();
             let mut widgets = Vec::new();
             if merged {
-                widgets.push(self.describe_form_widget(id, &dict, &mut owners,
-                    effective.get("FT").and_then(PdfObject::as_name).is_some_and(|n| n.name() == "Sig"))?);
+                widgets.push(
+                    self.describe_form_widget(
+                        id,
+                        &dict,
+                        &mut owners,
+                        effective
+                            .get("FT")
+                            .and_then(PdfObject::as_name)
+                            .is_some_and(|n| n.name() == "Sig"),
+                    )?,
+                );
             }
             for kid in &kids {
                 let kid_id = indirect(kid)?;
@@ -256,8 +265,17 @@ impl<R: Read + Seek> PdfDocument<R> {
                     if child.get("Parent").map(indirect).transpose()? != Some(id) {
                         return Err(invalid("widget Parent/Kids mismatch"));
                     }
-                    widgets.push(self.describe_form_widget(kid_id, &child, &mut owners,
-                        effective.get("FT").and_then(PdfObject::as_name).is_some_and(|n| n.name() == "Sig"))?);
+                    widgets.push(
+                        self.describe_form_widget(
+                            kid_id,
+                            &child,
+                            &mut owners,
+                            effective
+                                .get("FT")
+                                .and_then(PdfObject::as_name)
+                                .is_some_and(|n| n.name() == "Sig"),
+                        )?,
+                    );
                 } else {
                     children.push(kid_id);
                 }
@@ -318,10 +336,10 @@ impl<R: Read + Seek> PdfDocument<R> {
                         .cloned()
                 })
                 .collect();
-            if let Some(old) = terminal_values.insert(node.name.as_str(), values.clone()) {
-                if old != values {
-                    return Err(invalid("same-named unnamed fields disagree on FT/V/DV"));
-                }
+            if let Some(old) = terminal_values.insert(node.name.as_str(), values.clone())
+                && old != values
+            {
+                return Err(invalid("same-named unnamed fields disagree on FT/V/DV"));
             }
         }
         Ok(FieldGraph { form, nodes })

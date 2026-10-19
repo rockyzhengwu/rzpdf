@@ -17,7 +17,7 @@ fn source(extra: &[u8], trailer: &str, xref: bool) -> Vec<u8> {
     let content = b"0 0 1 rg 10 10 40 30 re f\n% 99 0 obj trailer << /Root 99 0 R >> endobj\n";
     let mut bytes = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n".to_vec();
     let mut offsets = Vec::new();
-    let objects = vec![
+    let objects = [
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 160 120] /Resources << >> /Contents 4 0 R >>"

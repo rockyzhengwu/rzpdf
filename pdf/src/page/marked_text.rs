@@ -57,7 +57,8 @@ pub struct MarkedTextSpan {
 }
 #[derive(Debug, Clone)]
 pub struct MarkedTextReport {
-    pub optional_content_selection: Option<crate::document::optional_content::OptionalContentSelection>,
+    pub optional_content_selection:
+        Option<crate::document::optional_content::OptionalContentSelection>,
     pub stamp: DocumentStamp,
     pub page: ObjectHandle,
     pub spans: Vec<MarkedTextSpan>,
@@ -252,7 +253,12 @@ impl Capture {
             }
         }
     }
-    pub fn text(&mut self, text: &TextObject, location: TextContentLocation, visible: bool) -> PdfResult<()> {
+    pub fn text(
+        &mut self,
+        text: &TextObject,
+        location: TextContentLocation,
+        visible: bool,
+    ) -> PdfResult<()> {
         for glyph in &text.items {
             self.entry()?;
             self.location(&location)?;
@@ -300,7 +306,9 @@ impl Capture {
                     }
                 }
                 Item::Mark(index) => {
-                    if !self.nodes[index].mark.visible { continue; }
+                    if !self.nodes[index].mark.visible {
+                        continue;
+                    }
                     let artifact = artifact || self.nodes[index].mark.tag == "Artifact";
                     if artifact && !options.include_artifacts {
                         continue;
@@ -393,7 +401,7 @@ impl<R: Read + Seek> PdfPage<'_, R> {
         options: MarkedTextOptions,
         work: super::execution_budget::ExecutionBudget,
     ) -> PdfResult<MarkedTextReport> {
-        self.extract_marked_text_selected(options,work,None)
+        self.extract_marked_text_selected(options, work, None)
     }
 
     /// Explicit visibility filtering; hidden bytes are still executed and
@@ -403,7 +411,11 @@ impl<R: Read + Seek> PdfPage<'_, R> {
         options: MarkedTextOptions,
         visibility: &crate::document::optional_content::OptionalContentVisibility,
     ) -> PdfResult<MarkedTextReport> {
-        self.extract_marked_text_selected(options,super::execution_budget::ExecutionBudget::new(),Some(visibility))
+        self.extract_marked_text_selected(
+            options,
+            super::execution_budget::ExecutionBudget::new(),
+            Some(visibility),
+        )
     }
 
     pub(crate) fn extract_marked_text_selected(
@@ -412,7 +424,9 @@ impl<R: Read + Seek> PdfPage<'_, R> {
         work: super::execution_budget::ExecutionBudget,
         visibility: Option<&crate::document::optional_content::OptionalContentVisibility>,
     ) -> PdfResult<MarkedTextReport> {
-        if let Some(visibility) = visibility { visibility.validate(self.ctx)?; }
+        if let Some(visibility) = visibility {
+            visibility.validate(self.ctx)?;
+        }
         self.update_dimensions()?;
         let provenance = self.source_provenance();
         let page = ObjectHandle {
@@ -429,7 +443,9 @@ impl<R: Read + Seek> PdfPage<'_, R> {
         ));
         let capture = Rc::new(RefCell::new(Capture::new(self.ctx.limits(), work.clone())));
         let mut interpreter = Interpreter::new(self, self.ctx, parser).with_execution_budget(work);
-        if let Some(visibility) = visibility { interpreter = interpreter.with_optional_content(visibility)?; }
+        if let Some(visibility) = visibility {
+            interpreter = interpreter.with_optional_content(visibility)?;
+        }
         interpreter.capture_marked_text(capture.clone());
         // Normal interpretation validates fonts/graphics and bounds work; the
         // capture never changes the display objects or rendering state.

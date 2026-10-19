@@ -110,17 +110,26 @@ impl UnicodeCidEncoding {
         budget: &crate::budget::OperationBudget,
     ) -> PdfResult<crate::budget::BudgetedBytes> {
         let count = crate::font::pdf_font::encoding_character_count(text, self.limits)?;
-        let length = count.checked_mul(2)
+        let length = count
+            .checked_mul(2)
             .filter(|&value| value <= self.limits.max_decoded_bytes)
             .ok_or_else(|| PdfError::ResourceLimit("CID text size".into()))?;
         let mut lease = budget.reserve(length)?;
         let mut output = Vec::new();
-        output.try_reserve_exact(length)
+        output
+            .try_reserve_exact(length)
             .map_err(|_| PdfError::ResourceLimit("CID text allocation".into()))?;
         lease.resize(output.capacity())?;
         for character in text.chars() {
-            let index = self.entries.binary_search_by_key(&character, |entry| entry.0)
-                .map_err(|_| PdfError::FontError(format!("Character U+{:04X} is outside CID repertoire", character as u32)))?;
+            let index = self
+                .entries
+                .binary_search_by_key(&character, |entry| entry.0)
+                .map_err(|_| {
+                    PdfError::FontError(format!(
+                        "Character U+{:04X} is outside CID repertoire",
+                        character as u32
+                    ))
+                })?;
             output.extend_from_slice(&((index + 1) as u16).to_be_bytes());
         }
         crate::budget::BudgetedBytes::from_reserved_vec(output, lease)
@@ -132,9 +141,10 @@ impl UnicodeCidEncoding {
     pub(crate) fn glyph_mappings(
         &self,
     ) -> impl ExactSizeIterator<Item = (u16, char, u16, f64)> + '_ {
-        self.entries.iter().enumerate().map(|(index, entry)| {
-            ((index + 1) as u16, entry.0, entry.1, entry.2)
-        })
+        self.entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| ((index + 1) as u16, entry.0, entry.1, entry.2))
     }
 
     pub fn cid_to_gid_map(&self) -> PdfResult<Vec<u8>> {
@@ -156,14 +166,25 @@ impl UnicodeCidEncoding {
     /// Standalone Unicode-platform (0/4) format-12 cmap for the fixed scalar
     /// repertoire. Original GIDs stay unchanged; no variation/shaping mapping.
     pub(crate) fn subset_cmap(
-        &self, budget: &crate::budget::OperationBudget,
+        &self,
+        budget: &crate::budget::OperationBudget,
     ) -> PdfResult<crate::budget::BudgetedBytes> {
-        let length = self.entries.len().checked_mul(12).and_then(|bytes| bytes.checked_add(28))
-            .filter(|&bytes| bytes <= self.limits.max_decoded_bytes && bytes <= self.limits.max_raw_stream_bytes && bytes <= u32::MAX as usize)
+        let length = self
+            .entries
+            .len()
+            .checked_mul(12)
+            .and_then(|bytes| bytes.checked_add(28))
+            .filter(|&bytes| {
+                bytes <= self.limits.max_decoded_bytes
+                    && bytes <= self.limits.max_raw_stream_bytes
+                    && bytes <= u32::MAX as usize
+            })
             .ok_or_else(|| PdfError::ResourceLimit("Subset cmap bytes".into()))?;
         let mut lease = budget.reserve(length)?;
         let mut output = Vec::new();
-        output.try_reserve_exact(length).map_err(|_| PdfError::ResourceLimit("Subset cmap allocation".into()))?;
+        output
+            .try_reserve_exact(length)
+            .map_err(|_| PdfError::ResourceLimit("Subset cmap allocation".into()))?;
         lease.resize(output.capacity())?;
         // One Unicode full-repertoire record, pointing at the format-12 table.
         output.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 4, 0, 0, 0, 12]);
@@ -226,7 +247,8 @@ mod tests {
     use super::*;
     #[test]
     fn budgeted_encoding_owns_capacity_and_releases_on_failure_and_retry() {
-        let encoding = UnicodeCidEncoding::build("A中𠀀", Limits::default(), |_| Ok((7, 500.0))).unwrap();
+        let encoding =
+            UnicodeCidEncoding::build("A中𠀀", Limits::default(), |_| Ok((7, 500.0))).unwrap();
         let pool = crate::budget::OperationBudget::new(4096);
         let neighbor = pool.reserve(7).unwrap();
         let output = encoding.encode_text_with_budget("中A𠀀", &pool).unwrap();
@@ -246,12 +268,20 @@ mod tests {
 
     #[test]
     fn subset_cmap_keeps_scalar_gids_and_rejects_budget_without_leaks() {
-        let encoding = UnicodeCidEncoding::build("中𠀀A中", Limits::default(), |_| Ok((7, 500.0))).unwrap();
+        let encoding =
+            UnicodeCidEncoding::build("中𠀀A中", Limits::default(), |_| Ok((7, 500.0))).unwrap();
         let pool = crate::budget::OperationBudget::new(4096);
         let bytes = encoding.subset_cmap(&pool).unwrap();
-        let cmap = crate::font::truetype::tables::cmap::TCmap::try_new(0, 4, 12,
-            &mut crate::font::truetype::reader::TrueTypeReader::new(bytes.as_slice())).unwrap();
-        for scalar in ['A', '中', '𠀀'] { assert_eq!(cmap.get_gid_u32(scalar as u32), 7); }
+        let cmap = crate::font::truetype::tables::cmap::TCmap::try_new(
+            0,
+            4,
+            12,
+            &mut crate::font::truetype::reader::TrueTypeReader::new(bytes.as_slice()),
+        )
+        .unwrap();
+        for scalar in ['A', '中', '𠀀'] {
+            assert_eq!(cmap.get_gid_u32(scalar as u32), 7);
+        }
         assert_eq!(cmap.get_gid_u32('B' as u32), 0);
         assert_eq!(bytes.as_slice().len(), 64);
         drop(bytes);

@@ -185,12 +185,7 @@ mod format0_tests {
 
 #[derive(Debug, Clone)]
 pub struct Format4Cmap {
-    seg_count_x2: u16,
-    search_range: u16,
-    entry_selector: u16,
-    range_shift: u16,
     end_code: Vec<u16>,
-    reserved_pad: u16,
     start_code: Vec<u16>,
     id_delta: Vec<i16>,
     id_range_offset: Vec<u16>,
@@ -213,9 +208,9 @@ impl Format4Cmap {
                 "Invalid TrueType cmap format 4 segment count/length".into(),
             ));
         }
-        let search_range = reader.read_be_u16()?;
-        let entry_selector = reader.read_be_u16()?;
-        let range_shift = reader.read_be_u16()?;
+        let _search_range = reader.read_be_u16()?;
+        let _entry_selector = reader.read_be_u16()?;
+        let _range_shift = reader.read_be_u16()?;
         let count = usize::from(seg_count_x2 / 2);
         let mut end_code = reserved_cmap_vec(count)?;
         for _i in 0..seg_count_x2 / 2 {
@@ -268,12 +263,7 @@ impl Format4Cmap {
             glyph_id_array.push(v);
         }
         Ok(Self {
-            seg_count_x2,
-            search_range,
-            entry_selector,
-            range_shift,
             end_code,
-            reserved_pad,
             start_code,
             id_delta,
             id_range_offset,
@@ -306,7 +296,7 @@ impl Format4Cmap {
                 }
             }
         }
-        return 0;
+        0
     }
 }
 
@@ -373,7 +363,6 @@ impl Format12Cmap {
 pub struct TCmap {
     platform_id: u16,
     encoding_id: u16,
-    offset: u32,
     submap: SubCmap,
 }
 impl TCmap {
@@ -396,7 +385,6 @@ impl TCmap {
             return Ok(Self {
                 platform_id,
                 encoding_id,
-                offset,
                 submap,
             });
         }
@@ -416,28 +404,24 @@ impl TCmap {
                 }
                 let sb = Format0Cmap::try_new(reader)?;
                 let submap = SubCmap::F0(sb);
-                return Ok(TCmap {
+                Ok(TCmap {
                     platform_id,
                     encoding_id,
-                    offset,
                     submap,
-                });
+                })
             }
             4 => {
                 let sb = Format4Cmap::try_new(reader, length)?;
                 let submap = SubCmap::F4(sb);
-                return Ok(TCmap {
+                Ok(TCmap {
                     platform_id,
                     encoding_id,
-                    offset,
                     submap,
-                });
+                })
             }
-            _ => {
-                return Err(PdfError::UnsupportedFeature(format!(
-                    "TrueType cmap format {format}"
-                )));
-            }
+            _ => Err(PdfError::UnsupportedFeature(format!(
+                "TrueType cmap format {format}"
+            ))),
         }
     }
 
@@ -449,17 +433,15 @@ impl TCmap {
     pub fn get_gid_u32(&self, charcode: u32) -> u32 {
         match &self.submap {
             SubCmap::F0(f) => {
-                return if charcode > 255 {
+                if charcode > 255 {
                     0
                 } else {
                     u32::from(f.get_gid(charcode as u8))
-                };
+                }
             }
-            SubCmap::F4(f) => {
-                return u16::try_from(charcode)
-                    .map(|code| u32::from(f.get_gid(code)))
-                    .unwrap_or(0);
-            }
+            SubCmap::F4(f) => u16::try_from(charcode)
+                .map(|code| u32::from(f.get_gid(code)))
+                .unwrap_or(0),
             SubCmap::F12(f) => f.get_gid(charcode),
         }
     }

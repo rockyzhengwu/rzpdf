@@ -36,12 +36,9 @@ fn static_cjk_new_glyph_edit_isolates_shared_font_and_rolls_back() -> PdfResult<
     let doc = PdfDocument::new()?;
     doc.add_page(0)?;
     doc.add_page(1)?;
-    let source = doc.resources().embed_truetype_font(
-        0,
-        FONT.to_vec(),
-        "你",
-        options(),
-    )?;
+    let source = doc
+        .resources()
+        .embed_truetype_font(0, FONT.to_vec(), "你", options())?;
     for page in 0..2 {
         let name = source.register_on_page(&doc, page)?;
         let mut builder = ContentBuilder::new();
@@ -80,8 +77,8 @@ fn static_cjk_new_glyph_edit_isolates_shared_font_and_rolls_back() -> PdfResult<
 
     let fresh = doc.get_page(0)?.content_program()?;
     let insufficient = OperationBudget::new(1);
-    assert!(doc
-        .replace_page_text_string_with_subset_and_budget(
+    assert!(
+        doc.replace_page_text_string_with_subset_and_budget(
             0,
             &fresh,
             3,
@@ -96,7 +93,8 @@ fn static_cjk_new_glyph_edit_isolates_shared_font_and_rolls_back() -> PdfResult<
             },
             &insufficient,
         )
-        .is_err());
+        .is_err()
+    );
     assert_eq!(insufficient.live_bytes(), 0);
     assert_eq!(doc.save_to_bytes()?, before);
     assert_eq!(text(&doc, 1), "你");
@@ -134,7 +132,9 @@ fn renamed_latin_font_preserves_composite_glyph_after_subset_edit() -> PdfResult
         stem_v: 80.0,
         serif: false,
     };
-    let font = doc.resources().embed_truetype_font(0, LATIN.to_vec(), "Cafe", options())?;
+    let font = doc
+        .resources()
+        .embed_truetype_font(0, LATIN.to_vec(), "Cafe", options())?;
     let mut builder = ContentBuilder::new();
     builder.begin_text();
     builder.try_set_font(&font.resource_name, 24.0)?;

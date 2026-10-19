@@ -1,12 +1,14 @@
 //! Internal multi-invocation planning and single-transaction publication.
 //! Range expansion and inherited-scope planning validate original sources before
 //! the public span entry publishes prepared edits in one transaction.
+#[cfg(test)]
+use crate::page::source_provenance::NestedDrawSource;
 use crate::{
     budget::{BudgetedBytes, MemoryLease, OperationBudget},
     error::{PdfError, PdfResult},
     page::{
         content_program::{BudgetedContentProgram, ContentProgram, OperationReplacement},
-        source_provenance::{FormInvocation, NestedDrawSource},
+        source_provenance::FormInvocation,
     },
     parser::options::{Limits, ParseOptions},
 };
@@ -138,24 +140,36 @@ impl SpanSelection {
             // the complete chain backwards before reusing it; matching counts
             // or leaf IDs alone do not establish provenance. Other trees keep
             // the general lookup semantics below.
-            if tree.leaves.len() == self.events.items.len() {
-                if let Some(&leaf) = tree.leaves.get(index) {
-                    let mut candidate = leaf;
-                    let mut matches = true;
-                    for invocation in event.path.items.iter().rev() {
-                        match tree.nodes.get(candidate) {
-                            Some(node) if node.invocation.as_ref() == Some(invocation) => {
-                                if let Some(parent) = node.parent { candidate = parent; }
-                                else { matches = false; break; }
+            if tree.leaves.len() == self.events.items.len()
+                && let Some(&leaf) = tree.leaves.get(index)
+            {
+                let mut candidate = leaf;
+                let mut matches = true;
+                for invocation in event.path.items.iter().rev() {
+                    match tree.nodes.get(candidate) {
+                        Some(node) if node.invocation.as_ref() == Some(invocation) => {
+                            if let Some(parent) = node.parent {
+                                candidate = parent;
+                            } else {
+                                matches = false;
+                                break;
                             }
-                            _ => { matches = false; break; }
+                        }
+                        _ => {
+                            matches = false;
+                            break;
                         }
                     }
-                    if matches && candidate == 0 && tree.nodes.first().is_some_and(|root|
-                        root.parent.is_none() && root.invocation.is_none()) {
-                        nodes.items.push(leaf);
-                        continue;
-                    }
+                }
+                if matches
+                    && candidate == 0
+                    && tree
+                        .nodes
+                        .first()
+                        .is_some_and(|root| root.parent.is_none() && root.invocation.is_none())
+                {
+                    nodes.items.push(leaf);
+                    continue;
                 }
             }
             let mut parent = 0;
@@ -353,7 +367,9 @@ struct SpanSubsetPublication<'a> {
 }
 
 impl AsRef<ContentProgram> for SpanSubsetPublication<'_> {
-    fn as_ref(&self) -> &ContentProgram { self.published.as_ref() }
+    fn as_ref(&self) -> &ContentProgram {
+        self.published.as_ref()
+    }
 }
 
 fn check_plan_character_totals(
@@ -401,7 +417,11 @@ impl<R: std::io::Read + std::io::Seek> super::PdfDocument<R> {
         self.edit_transaction_with_budget(budget, |doc| {
             doc.commit_page_content_edit_inner(page, root, Some(budget), || {
                 let mut prepared = doc.prepare_selected_span(page, root, &mapped, budget)?;
-                let first_index = selection.events.items.iter().position(|event| event.first)
+                let first_index = selection
+                    .events
+                    .items
+                    .iter()
+                    .position(|event| event.first)
                     .ok_or_else(|| PdfError::ObjectError("subset span insertion absent".into()))?;
                 let first_node = mapped.nodes.items[first_index];
                 let first = &selection.events.items[first_index];
@@ -414,13 +434,33 @@ impl<R: std::io::Read + std::io::Seek> super::PdfDocument<R> {
                     let mut node_donors = SpanTable::new(events.len(), budget)?;
                     for &index in events {
                         let event = &selection.events.items[index];
-                        let fragment = if index == first_index { None } else {
-                            event.codes.as_ref().map(|range| {
-                                let program = if node == 0 { root } else { &*prepared.get(node).unwrap().program };
-                                doc.build_text_event_fragments(program, range.clone(), "", options.preserve_advance, budget, |operation| {
-                                    doc.span_text_metrics_for_operation(page, root, &tree, &prepared, node, operation, budget)
+                        let fragment = if index == first_index {
+                            None
+                        } else {
+                            event
+                                .codes
+                                .as_ref()
+                                .map(|range| {
+                                    let program = if node == 0 {
+                                        root
+                                    } else {
+                                        &*prepared.get(node).unwrap().program
+                                    };
+                                    doc.build_text_event_fragments(
+                                        program,
+                                        range.clone(),
+                                        "",
+                                        options.preserve_advance,
+                                        budget,
+                                        |operation| {
+                                            doc.span_text_metrics_for_operation(
+                                                page, root, &tree, &prepared, node, operation,
+                                                budget,
+                                            )
+                                        },
+                                    )
                                 })
-                            }).transpose()?
+                                .transpose()?
                         };
                         node_donors.items.push(fragment);
                     }
@@ -429,49 +469,105 @@ impl<R: std::io::Read + std::io::Seek> super::PdfDocument<R> {
                 // Every old-font metric is resolved before registration changes
                 // document revisions. No stale snapshot is refreshed afterward.
                 let metrics = doc.span_text_metrics_for_operation(
-                    page, root, &tree, &prepared, first_node, first.operation, budget,
+                    page,
+                    root,
+                    &tree,
+                    &prepared,
+                    first_node,
+                    first.operation,
+                    budget,
                 )?;
                 let (mut scope, scope_lease) = if first_node == 0 {
                     (None, budget.reserve(0)?)
                 } else {
                     let (scope, lease) = crate::objects::clone_dict_with_budget(
-                        &prepared.get(first_node).unwrap().resource_scope, budget, doc.ctx.limits(), 0,
+                        &prepared.get(first_node).unwrap().resource_scope,
+                        budget,
+                        doc.ctx.limits(),
+                        0,
                     )?;
                     (Some(scope), lease)
                 };
-                let program = if first_node == 0 { root } else { &*prepared.get(first_node).unwrap().program };
+                let program = if first_node == 0 {
+                    root
+                } else {
+                    &*prepared.get(first_node).unwrap().program
+                };
                 let fragment = doc.build_scoped_subset_text_fragment(
-                    page, program, first.operation, codes.start.array_item,
+                    page,
+                    program,
+                    first.operation,
+                    codes.start.array_item,
                     codes.end.array_item.map(|item| (item, codes.end.offset)),
-                    codes.start.offset..codes.end.offset, text, options, metrics, scope.as_mut(), budget,
+                    codes.start.offset..codes.end.offset,
+                    text,
+                    options,
+                    metrics,
+                    scope.as_mut(),
+                    budget,
                 )?;
                 let head = super::text_event_edit::TextEventFragments::single(
-                    fragment.index, fragment.fragment, fragment.operation_count,
-                    fragment.input_chars, fragment.output_chars, budget,
+                    fragment.index,
+                    fragment.fragment,
+                    fragment.operation_count,
+                    fragment.input_chars,
+                    fragment.output_chars,
+                    budget,
                 )?;
-                let slot = groups.for_node(first_node)?.iter().position(|&index| index == first_index).unwrap();
+                let slot = groups
+                    .for_node(first_node)?
+                    .iter()
+                    .position(|&index| index == first_index)
+                    .unwrap();
                 donors.items[first_node].items[slot] = Some(head);
                 let mut plans = SpanTable::new(tree.nodes.len(), budget)?;
                 for node in 0..tree.nodes.len() {
-                    let program = if node == 0 { root } else { &*prepared.get(node).unwrap().program };
+                    let program = if node == 0 {
+                        root
+                    } else {
+                        &*prepared.get(node).unwrap().program
+                    };
                     let donor = &mut donors.items[node];
-                    plans.items.push(if donor.items.iter().any(Option::is_some) {
-                        Some(doc.finish_text_event_fragments(program, &mut donor.items, budget)?)
-                    } else { None });
+                    plans
+                        .items
+                        .push(if donor.items.iter().any(Option::is_some) {
+                            Some(doc.finish_text_event_fragments(
+                                program,
+                                &mut donor.items,
+                                budget,
+                            )?)
+                        } else {
+                            None
+                        });
                 }
                 if let Some(scope) = scope {
-                    prepared.forms.items[first_node].as_mut().unwrap().resource_scope = scope;
+                    prepared.forms.items[first_node]
+                        .as_mut()
+                        .unwrap()
+                        .resource_scope = scope;
                 }
                 let published = doc.build_prepared_span_publication_from_plans(
-                    page, root, &tree, prepared, SpanPublicationPlans::Owned(plans), budget,
+                    page,
+                    root,
+                    &tree,
+                    prepared,
+                    SpanPublicationPlans::Owned(plans),
+                    budget,
                 )?;
                 Ok(SpanSubsetPublication {
-                    published, _font: fragment._font, _binding: fragment._binding, _scope: scope_lease,
+                    published,
+                    _font: fragment._font,
+                    _binding: fragment._binding,
+                    _scope: scope_lease,
                 })
             })
         })
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "keep source identity, text geometry and operation budget explicit"
+    )]
     fn build_selected_span_plans(
         &self,
         page: u32,
@@ -955,32 +1051,31 @@ impl<R: std::io::Read + std::io::Seek> super::PdfDocument<R> {
                     .filter(|&n| n <= limits.max_objects)
                     .ok_or_else(|| PdfError::ResourceLimit("span expanded text events".into()))?;
                 visit(&path.items, program, index)?;
-            } else if op.name() == "Do" {
-                if let Some(call) =
+            } else if op.name() == "Do"
+                && let Some(call) =
                     page.form_call_at_operation_with_budget(program, index, current_scope, budget)?
-                {
-                    if path.items.len() >= limits.max_depth.min(limits.max_objects) {
-                        return Err(PdfError::ResourceLimit("span expanded depth".into()));
-                    }
-                    if call.form_id.is_some()
-                        && path
-                            .items
-                            .iter()
-                            .any(|parent| parent.form_id == call.form_id)
-                    {
-                        return Err(PdfError::PageResourceError("Nested Form cycle".into()));
-                    }
-                    let form = page.prepare_form_call_with_budget(
-                        program,
-                        current_scope,
-                        &scope,
-                        &call,
-                        budget,
-                    )?;
-                    charge(&form.program, &mut work, limits)?;
-                    path.items.push(call);
-                    frames.items.push(Frame { form, next: 0 });
+            {
+                if path.items.len() >= limits.max_depth.min(limits.max_objects) {
+                    return Err(PdfError::ResourceLimit("span expanded depth".into()));
                 }
+                if call.form_id.is_some()
+                    && path
+                        .items
+                        .iter()
+                        .any(|parent| parent.form_id == call.form_id)
+                {
+                    return Err(PdfError::PageResourceError("Nested Form cycle".into()));
+                }
+                let form = page.prepare_form_call_with_budget(
+                    program,
+                    current_scope,
+                    &scope,
+                    &call,
+                    budget,
+                )?;
+                charge(&form.program, &mut work, limits)?;
+                path.items.push(call);
+                frames.items.push(Frame { form, next: 0 });
             }
         }
         Ok(())
@@ -988,6 +1083,10 @@ impl<R: std::io::Read + std::io::Seek> super::PdfDocument<R> {
 
     /// Reconstruct metrics from original caller prefixes, without cloning fonts.
     /// Ancestor lookup rescans the path; no linear-time complexity is claimed.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "keep source identity, text geometry and operation budget explicit"
+    )]
     pub(super) fn span_text_metrics_for_operation(
         &self,
         page: u32,
@@ -1049,6 +1148,7 @@ impl<R: std::io::Read + std::io::Seek> super::PdfDocument<R> {
     }
 
     /// Prepare selected text-source nodes once per invocation, not once per leaf.
+    #[cfg(test)]
     pub(super) fn prepare_span_forms<'a>(
         &self,
         page: u32,
@@ -1204,7 +1304,12 @@ impl<R: std::io::Read + std::io::Seek> super::PdfDocument<R> {
         budget: &OperationBudget,
     ) -> PdfResult<SpanBuild<SpanPublishedNode<'a>>> {
         self.build_prepared_span_publication_from_plans(
-            page, root, tree, prepared, SpanPublicationPlans::Borrowed(plans), budget,
+            page,
+            root,
+            tree,
+            prepared,
+            SpanPublicationPlans::Borrowed(plans),
+            budget,
         )
     }
 
@@ -1217,91 +1322,93 @@ impl<R: std::io::Read + std::io::Seek> super::PdfDocument<R> {
         mut plans: SpanPublicationPlans<'a>,
         budget: &OperationBudget,
     ) -> PdfResult<SpanBuild<SpanPublishedNode<'a>>> {
-                let doc = self;
-                if plans.as_slice().len() != tree.nodes.len() {
-                    return Err(PdfError::ObjectError("span text plan table size mismatch".into()));
-                }
-                check_plan_character_totals(plans.as_slice(), self.ctx.limits().max_text_chars)?;
-                let mut bytes = 0usize;
-                tree.build_prepared_bottom_up::<SpanPublishedNode, _>(
-                    prepared,
-                    budget,
-                    |index, _, mut form, results| {
-                        let mut bindings = budget.reserve(0)?;
-                        let (original, mut scope) = match form.as_mut() {
-                            Some(form) => (&*form.program, Some(&mut form.resource_scope)),
-                            None => (root, None),
-                        };
-                        let bind = |child: usize| {
-                            let id = results[child]
-                                .as_ref()
-                                .and_then(|node| node.id)
-                                .ok_or_else(|| {
-                                    PdfError::ObjectError("span child not published".into())
-                                })?;
-                            let (name, mut lease) = if let Some(scope) = scope.as_deref_mut() {
-                                doc.bind_local_xobject_with_budget(scope, id, budget)?
-                            } else {
-                                doc.resources()
-                                    .register_form_with_budget(page, id, budget)?
-                            };
-                            bindings.absorb(&mut lease)?;
-                            super::nested_edit::form_do_with_budget(&name, doc.ctx.limits(), budget)
-                        };
-                        let program = if let Some(plan) = plans.take(index) {
-                            if !tree.nodes.iter().any(|node| node.parent == Some(index)) {
-                                // No child bindings can alter original indices.
-                                // Reuse the validated plan while its byte/fragment
-                                // owners and leases remain in the caller table.
-                                plan
-                            } else {
-                                let text_plan = match &plan {
-                                    SpanNodeProgram::Planned(plan) => *plan,
-                                    SpanNodeProgram::OwnedPlanned(plan) => plan,
-                                    SpanNodeProgram::Rebuilt(_) => unreachable!("plan table contains only text plans"),
-                                };
-                                SpanNodeProgram::Rebuilt(tree.rebuild_parent_with_text_plan(
-                                    index,
-                                    original,
-                                    text_plan,
-                                    doc.ctx.options(),
-                                    budget,
-                                    bind,
-                                )?)
+        let doc = self;
+        if plans.as_slice().len() != tree.nodes.len() {
+            return Err(PdfError::ObjectError(
+                "span text plan table size mismatch".into(),
+            ));
+        }
+        check_plan_character_totals(plans.as_slice(), self.ctx.limits().max_text_chars)?;
+        let mut bytes = 0usize;
+        tree.build_prepared_bottom_up::<SpanPublishedNode, _>(
+            prepared,
+            budget,
+            |index, _, mut form, results| {
+                let mut bindings = budget.reserve(0)?;
+                let (original, mut scope) = match form.as_mut() {
+                    Some(form) => (&*form.program, Some(&mut form.resource_scope)),
+                    None => (root, None),
+                };
+                let bind = |child: usize| {
+                    let id = results[child]
+                        .as_ref()
+                        .and_then(|node| node.id)
+                        .ok_or_else(|| PdfError::ObjectError("span child not published".into()))?;
+                    let (name, mut lease) = if let Some(scope) = scope.as_deref_mut() {
+                        doc.bind_local_xobject_with_budget(scope, id, budget)?
+                    } else {
+                        doc.resources()
+                            .register_form_with_budget(page, id, budget)?
+                    };
+                    bindings.absorb(&mut lease)?;
+                    super::nested_edit::form_do_with_budget(&name, doc.ctx.limits(), budget)
+                };
+                let program = if let Some(plan) = plans.take(index) {
+                    if !tree.nodes.iter().any(|node| node.parent == Some(index)) {
+                        // No child bindings can alter original indices.
+                        // Reuse the validated plan while its byte/fragment
+                        // owners and leases remain in the caller table.
+                        plan
+                    } else {
+                        let text_plan = match &plan {
+                            SpanNodeProgram::Planned(plan) => *plan,
+                            SpanNodeProgram::OwnedPlanned(plan) => plan,
+                            SpanNodeProgram::Rebuilt(_) => {
+                                unreachable!("plan table contains only text plans")
                             }
-                        } else {
-                            SpanNodeProgram::Rebuilt(tree.rebuild_parent(
-                                index, original, doc.ctx.options(), budget, bind,
-                            )?)
                         };
-                        bytes = bytes
-                            .checked_add(program.as_ref().source_bytes().len())
-                            .filter(|&total| total <= doc.ctx.limits().max_decoded_bytes)
-                            .ok_or_else(|| {
-                                PdfError::ResourceLimit("span aggregate edited bytes".into())
-                            })?;
-                        if let Some(form) = form {
-                            let output =
-                                SpanFormOutput::new(form, program, budget, doc.ctx.limits())?;
-                            let (stream, retained) = output.into_parts();
-                            let id = doc
-                                .try_insert_object(crate::objects::PdfObject::PdfStream(stream))?;
-                            Ok(SpanPublishedNode {
-                                id: Some(id),
-                                root_program: None,
-                                _retained: Some(retained),
-                                _bindings: bindings,
-                            })
-                        } else {
-                            Ok(SpanPublishedNode {
-                                id: None,
-                                root_program: Some(program),
-                                _retained: None,
-                                _bindings: bindings,
-                            })
-                        }
-                    },
-                )
+                        SpanNodeProgram::Rebuilt(tree.rebuild_parent_with_text_plan(
+                            index,
+                            original,
+                            text_plan,
+                            doc.ctx.options(),
+                            budget,
+                            bind,
+                        )?)
+                    }
+                } else {
+                    SpanNodeProgram::Rebuilt(tree.rebuild_parent(
+                        index,
+                        original,
+                        doc.ctx.options(),
+                        budget,
+                        bind,
+                    )?)
+                };
+                bytes = bytes
+                    .checked_add(program.as_ref().source_bytes().len())
+                    .filter(|&total| total <= doc.ctx.limits().max_decoded_bytes)
+                    .ok_or_else(|| PdfError::ResourceLimit("span aggregate edited bytes".into()))?;
+                if let Some(form) = form {
+                    let output = SpanFormOutput::new(form, program, budget, doc.ctx.limits())?;
+                    let (stream, retained) = output.into_parts();
+                    let id = doc.try_insert_object(crate::objects::PdfObject::PdfStream(stream))?;
+                    Ok(SpanPublishedNode {
+                        id: Some(id),
+                        root_program: None,
+                        _retained: Some(retained),
+                        _bindings: bindings,
+                    })
+                } else {
+                    Ok(SpanPublishedNode {
+                        id: None,
+                        root_program: Some(program),
+                        _retained: None,
+                        _bindings: bindings,
+                    })
+                }
+            },
+        )
     }
 }
 
@@ -1361,6 +1468,7 @@ impl SpanInvocationTree {
     /// Validate each selected source using the page's real chain preparer, then
     /// move its owners into unique nodes. Shared ancestors are retained once,
     /// although the existing chain preparer temporarily copies shared prefixes.
+    #[cfg(test)]
     pub fn prepare_forms<F>(
         &self,
         budget: &OperationBudget,
@@ -1605,10 +1713,12 @@ impl SpanInvocationTree {
         Ok(built)
     }
 
+    #[cfg(test)]
     pub fn nodes(&self) -> &[SpanNode] {
         &self.nodes
     }
 
+    #[cfg(test)]
     fn leaf(&self, source: usize) -> PdfResult<usize> {
         self.leaves
             .get(source)
@@ -1625,6 +1735,7 @@ impl SpanInvocationTree {
         depth
     }
 
+    #[cfg(test)]
     pub fn lowest_common_ancestor(
         &self,
         left_source: usize,
@@ -1651,6 +1762,7 @@ impl SpanInvocationTree {
 
     /// Compare original expanded source order, not object IDs or arena order.
     /// Position tuples are (input source slot, leaf operation index).
+    #[cfg(test)]
     pub fn compare_positions(
         &self,
         left: (usize, usize),
@@ -1680,6 +1792,7 @@ impl SpanInvocationTree {
         Ok(order)
     }
 
+    #[cfg(test)]
     pub fn new(
         sources: &[&NestedDrawSource],
         limits: &Limits,
@@ -1736,12 +1849,14 @@ impl SpanInvocationTree {
         // a hit: equal operation indices must not conceal identity/offset changes.
         // The allocator charges real hash-table layouts including growth overlap.
         type PrefixTable = hashbrown::HashMap<
-            (usize, usize), (usize, FormInvocation),
+            (usize, usize),
+            (usize, FormInvocation),
             std::collections::hash_map::RandomState,
             crate::budget::table_allocator::TableAllocator,
         >;
         let mut prefixes = PrefixTable::with_hasher_in(
-            Default::default(), crate::budget::table_allocator::TableAllocator::new(budget),
+            Default::default(),
+            crate::budget::table_allocator::TableAllocator::new(budget),
         );
         let (mut leaves, leaves_lease) = table(source_count, budget)?;
         let mut previous: Option<(&[FormInvocation], usize)> = None;
@@ -1750,11 +1865,11 @@ impl SpanInvocationTree {
             // Expanded events commonly share consecutive invocation paths.
             // Borrow the caller's complete provenance; no new cache allocation
             // and no identity/byte-offset checks omitted on this shortcut.
-            if let Some((original, leaf)) = previous {
-                if original == calls {
-                    leaves.push(leaf);
-                    continue;
-                }
+            if let Some((original, leaf)) = previous
+                && original == calls
+            {
+                leaves.push(leaf);
+                continue;
             }
             let mut parent = 0;
             for invocation in calls {
@@ -1784,9 +1899,18 @@ impl SpanInvocationTree {
             previous = Some((calls, parent));
         }
         let (mut nodes, nodes_lease) = table(prefixes.len() + 1, budget)?;
-        nodes.resize(prefixes.len() + 1, SpanNode { parent: None, invocation: None });
+        nodes.resize(
+            prefixes.len() + 1,
+            SpanNode {
+                parent: None,
+                invocation: None,
+            },
+        );
         for (&(parent, _), &(node, invocation)) in &prefixes {
-            nodes[node] = SpanNode { parent: Some(parent), invocation: Some(invocation) };
+            nodes[node] = SpanNode {
+                parent: Some(parent),
+                invocation: Some(invocation),
+            };
         }
         // Stable first-seen node IDs preserve original leaves/topological order;
         // hash iteration does not determine arena order. Release scratch storage.
@@ -1806,20 +1930,27 @@ mod tests {
     fn owned_publication_plan_keeps_program_budget_after_table_is_dropped() {
         let doc = super::super::PdfDocument::new().unwrap();
         let pool = OperationBudget::new(1024 * 1024);
-        let original = ContentProgram::from_decoded_bytes(
-            b"(A) Tj".to_vec(), doc.ctx.options(),
-        ).unwrap();
+        let original =
+            ContentProgram::from_decoded_bytes(b"(A) Tj".to_vec(), doc.ctx.options()).unwrap();
         let fragment = super::super::text_event_edit::TextEventFragments::single(
-            0, crate::budget::BudgetedBytes::copy_from_slice(&pool, b"(B) Tj").unwrap(),
-            1, 1, 1, &pool,
-        ).unwrap();
-        let plan = doc.finish_text_event_fragments(
-            &original, &mut [Some(fragment)], &pool,
-        ).unwrap();
+            0,
+            crate::budget::BudgetedBytes::copy_from_slice(&pool, b"(B) Tj").unwrap(),
+            1,
+            1,
+            1,
+            &pool,
+        )
+        .unwrap();
+        let plan = doc
+            .finish_text_event_fragments(&original, &mut [Some(fragment)], &pool)
+            .unwrap();
         let mut table = SpanTable::new(1, &pool).unwrap();
         table.items.push(Some(plan));
         let mut plans = SpanPublicationPlans::Owned(table);
-        assert_eq!(check_plan_character_totals(plans.as_slice(), 1).unwrap(), (1, 1));
+        assert_eq!(
+            check_plan_character_totals(plans.as_slice(), 1).unwrap(),
+            (1, 1)
+        );
         let program = plans.take(0).unwrap();
         assert!(matches!(program, SpanNodeProgram::OwnedPlanned(_)));
         assert!(plans.take(0).is_none());
@@ -1852,23 +1983,37 @@ mod tests {
     fn selected_mapping_leaf_hints_do_not_replace_provenance_checks() {
         let owners = OperationBudget::new(1024 * 1024);
         let mut selection = SpanSelection {
-            events: SpanTable::new(2, &owners).unwrap(), stamp: None, page_id: None,
+            events: SpanTable::new(2, &owners).unwrap(),
+            stamp: None,
+            page_id: None,
         };
         for index in 0..2 {
             let original = source(&[1, index + 2]);
             let mut path = SpanTable::new(2, &owners).unwrap();
             path.items.extend_from_slice(&original.invocations);
             selection.events.items.push(SpanSelectedEvent {
-                path, operation: index, byte_offset: Some(0), codes: None, first: index == 0,
+                path,
+                operation: index,
+                byte_offset: Some(0),
+                codes: None,
+                first: index == 0,
             });
         }
         for mutation in 0..4 {
-            let mut tree = SpanInvocationTree::from_selection(&selection, &Default::default(), &owners).unwrap();
+            let mut tree =
+                SpanInvocationTree::from_selection(&selection, &Default::default(), &owners)
+                    .unwrap();
             let expected = tree.leaves.clone();
             match mutation {
                 0 => tree.leaves.swap(0, 1),
                 1 => tree.leaves[0] = usize::MAX,
-                2 => tree.nodes[expected[0]].invocation.as_mut().unwrap().operator_byte_offset = Some(999),
+                2 => {
+                    tree.nodes[expected[0]]
+                        .invocation
+                        .as_mut()
+                        .unwrap()
+                        .operator_byte_offset = Some(999)
+                }
                 3 => tree.nodes[expected[0]].parent = Some(expected[0]),
                 _ => unreachable!(),
             }
@@ -1896,18 +2041,24 @@ mod tests {
             let owners = OperationBudget::new(16 * 1024 * 1024);
             let count = width * 8;
             let mut selection = SpanSelection {
-                events: SpanTable::new(count, &owners).unwrap(), stamp: None, page_id: None,
+                events: SpanTable::new(count, &owners).unwrap(),
+                stamp: None,
+                page_id: None,
             };
             for index in 0..count {
                 let original = source(&[1, index % width + 2]);
                 let mut path = SpanTable::new(2, &owners).unwrap();
                 path.items.extend_from_slice(&original.invocations);
                 selection.events.items.push(SpanSelectedEvent {
-                    path, operation: index, byte_offset: Some(index as u64), codes: None,
+                    path,
+                    operation: index,
+                    byte_offset: Some(index as u64),
+                    codes: None,
                     first: index == 0,
                 });
             }
-            let tree = SpanInvocationTree::from_selection(&selection, &Default::default(), &owners).unwrap();
+            let tree = SpanInvocationTree::from_selection(&selection, &Default::default(), &owners)
+                .unwrap();
             assert_eq!(tree.nodes.len(), width + 2);
             let retained = owners.live_bytes();
             let pool = OperationBudget::new(1024 * 1024);
@@ -1918,8 +2069,11 @@ mod tests {
             assert_eq!(mapped.nodes.items, tree.leaves);
             let actual = pool.live_bytes() - 7;
             assert!(actual >= count * std::mem::size_of::<usize>());
-            println!("mapping-only width={width} events={count} elapsed_us={} tracked_peak={} retained={actual}",
-                elapsed.as_micros(), pool.peak_bytes());
+            println!(
+                "mapping-only width={width} events={count} elapsed_us={} tracked_peak={} retained={actual}",
+                elapsed.as_micros(),
+                pool.peak_bytes()
+            );
             drop(mapped);
             assert_eq!(pool.live_bytes(), 7);
             assert_eq!(owners.live_bytes(), retained);
@@ -1948,7 +2102,10 @@ mod tests {
                     .map(|index| source(&[1, if wide { index + 2 } else { 2 }]))
                     .collect();
                 let borrowed: Vec<_> = sources.iter().collect();
-                let limits = Limits { max_objects: count + 2, ..Default::default() };
+                let limits = Limits {
+                    max_objects: count + 2,
+                    ..Default::default()
+                };
                 let pool = OperationBudget::new(1024 * 1024);
                 let started = std::time::Instant::now();
                 let tree = SpanInvocationTree::new(&borrowed, &limits, &pool).unwrap();
@@ -1957,16 +2114,28 @@ mod tests {
                 assert_eq!(tree.leaves.len(), count);
                 for (index, &leaf) in tree.leaves.iter().enumerate() {
                     assert_eq!(tree.nodes[leaf].parent, Some(1));
-                    assert_eq!(tree.nodes[leaf].invocation.unwrap().operation_index,
-                        if wide { index + 2 } else { 2 });
+                    assert_eq!(
+                        tree.nodes[leaf].invocation.unwrap().operation_index,
+                        if wide { index + 2 } else { 2 }
+                    );
                 }
-                println!("tree-only wide={wide} sources={count} nodes={} elapsed_us={} tracked_peak={}",
-                    tree.nodes.len(), elapsed.as_micros(), pool.peak_bytes());
+                println!(
+                    "tree-only wide={wide} sources={count} nodes={} elapsed_us={} tracked_peak={}",
+                    tree.nodes.len(),
+                    elapsed.as_micros(),
+                    pool.peak_bytes()
+                );
                 drop(tree);
                 assert_eq!(pool.live_bytes(), 0);
                 if wide {
-                    let rejected = SpanInvocationTree::new(&borrowed,
-                        &Limits { max_objects: count + 1, ..limits }, &pool);
+                    let rejected = SpanInvocationTree::new(
+                        &borrowed,
+                        &Limits {
+                            max_objects: count + 1,
+                            ..limits
+                        },
+                        &pool,
+                    );
                     assert!(matches!(rejected,
                         Err(PdfError::ResourceLimit(ref message)) if message == "span node count"));
                     assert_eq!(pool.live_bytes(), 0);
@@ -2086,7 +2255,9 @@ mod tests {
         ));
         assert_eq!(second_table_failure.live_bytes(), 7);
         drop(neighbor);
-        drop(SpanInvocationTree::new(&[&first], &Default::default(), &second_table_failure).unwrap());
+        drop(
+            SpanInvocationTree::new(&[&first], &Default::default(), &second_table_failure).unwrap(),
+        );
         assert_eq!(second_table_failure.live_bytes(), 0);
     }
 
@@ -2346,7 +2517,10 @@ mod tests {
     #[test]
     fn selected_span_many_events_measures_growth_and_releases_budget() {
         use crate::{
-            document::{PdfDocument, resource_manager::{ResourceKind, StandardFont}},
+            document::{
+                PdfDocument,
+                resource_manager::{ResourceKind, StandardFont},
+            },
             objects::{PdfObject, pdf_stream::PdfStream},
             page::source_provenance::NestedTextCodePosition,
         };
@@ -2355,22 +2529,37 @@ mod tests {
             for count in [8, 64, 256] {
                 let doc = PdfDocument::new().unwrap();
                 doc.add_page(0).unwrap();
-                let font = doc.resources().register_standard_font(0, StandardFont::Courier).unwrap();
+                let font = doc
+                    .resources()
+                    .register_standard_font(0, StandardFont::Courier)
+                    .unwrap();
                 let dictionary = crate::parser::syntax::SyntaxParser::new(
                     crate::io::stream_reader::StreamReader::try_new(std::io::Cursor::new(
                         b"<< /Type /XObject /Subtype /Form /BBox [0 0 100 100] >>".to_vec(),
-                    )).unwrap(),
-                ).get_object().unwrap().into_dict().unwrap();
+                    ))
+                    .unwrap(),
+                )
+                .get_object()
+                .unwrap()
+                .into_dict()
+                .unwrap();
                 let mut body = b"BT ".to_vec();
                 body.extend(b"(A) Tj ".repeat(count));
                 body.extend_from_slice(b"ET");
-                let leaf = doc.try_insert_object(PdfObject::PdfStream(
-                    PdfStream::from_decoded_data(dictionary, body).unwrap(),
-                )).unwrap();
-                let name = doc.resources().register_existing(0, ResourceKind::Form, leaf).unwrap();
-                doc.replace_page_contents(0,
+                let leaf = doc
+                    .try_insert_object(PdfObject::PdfStream(
+                        PdfStream::from_decoded_data(dictionary, body).unwrap(),
+                    ))
+                    .unwrap();
+                let name = doc
+                    .resources()
+                    .register_existing(0, ResourceKind::Form, leaf)
+                    .unwrap();
+                doc.replace_page_contents(
+                    0,
                     format!("BT /{font} 12 Tf ET /{name} Do /{name} Do BT (Z) Tj ET").into_bytes(),
-                ).unwrap();
+                )
+                .unwrap();
                 doc.copy_page(0, 1).unwrap();
                 let mut page = doc.get_page(0).unwrap();
                 let root = page.content_program().unwrap();
@@ -2378,17 +2567,26 @@ mod tests {
                 assert_eq!(original.len(), count * 2 + 1);
                 let start = NestedTextCodePosition {
                     source: original[0].nested_source.as_ref().unwrap(),
-                    array_item: None, offset: 0,
+                    array_item: None,
+                    offset: 0,
                 };
                 let end = NestedTextCodePosition {
                     source: original[count * 2 - 1].nested_source.as_ref().unwrap(),
-                    array_item: None, offset: 1,
+                    array_item: None,
+                    offset: 1,
                 };
                 if count == 256 {
                     let saved = doc.save_to_bytes().unwrap();
                     let limited = OperationBudget::new(512 * 1024);
                     assert!(matches!(
-                        doc.replace_selected_text_span(0, &root, start..end, "X", preserve, &limited),
+                        doc.replace_selected_text_span(
+                            0,
+                            &root,
+                            start..end,
+                            "X",
+                            preserve,
+                            &limited
+                        ),
                         Err(PdfError::ResourceLimit(_))
                     ));
                     assert_eq!(limited.live_bytes(), 0);
@@ -2396,20 +2594,43 @@ mod tests {
                     assert_eq!(doc.save_to_bytes().unwrap(), saved);
                 }
                 let budget = OperationBudget::new(16 * 1024 * 1024);
-                doc.replace_selected_text_span(0, &root, start..end, "X", preserve, &budget).unwrap();
+                doc.replace_selected_text_span(0, &root, start..end, "X", preserve, &budget)
+                    .unwrap();
                 assert_eq!(budget.live_bytes(), 0);
                 assert!(budget.peak_bytes() > previous_peak);
                 previous_peak = budget.peak_bytes();
-                println!("many-event span per_call={count} preserve={preserve}: tracked peak={} bytes",
-                    budget.peak_bytes());
+                println!(
+                    "many-event span per_call={count} preserve={preserve}: tracked peak={} bytes",
+                    budget.peak_bytes()
+                );
                 let reopened = PdfDocument::from_bytes_with_mode(
-                    doc.save_to_bytes().unwrap(), crate::parser::syntax::ParseMode::Strict,
-                ).unwrap();
-                let edited = reopened.get_page(0).unwrap().extract_characters_paint_order().unwrap();
-                assert_eq!(edited.iter().filter_map(|ch| ch.unicode.as_deref()).collect::<String>(), "XZ");
-                assert_eq!(reopened.get_page(1).unwrap().extract_characters_paint_order().unwrap()
-                    .iter().filter_map(|ch| ch.unicode.as_deref()).collect::<String>(),
-                    format!("{}Z", "A".repeat(count * 2)));
+                    doc.save_to_bytes().unwrap(),
+                    crate::parser::syntax::ParseMode::Strict,
+                )
+                .unwrap();
+                let edited = reopened
+                    .get_page(0)
+                    .unwrap()
+                    .extract_characters_paint_order()
+                    .unwrap();
+                assert_eq!(
+                    edited
+                        .iter()
+                        .filter_map(|ch| ch.unicode.as_deref())
+                        .collect::<String>(),
+                    "XZ"
+                );
+                assert_eq!(
+                    reopened
+                        .get_page(1)
+                        .unwrap()
+                        .extract_characters_paint_order()
+                        .unwrap()
+                        .iter()
+                        .filter_map(|ch| ch.unicode.as_deref())
+                        .collect::<String>(),
+                    format!("{}Z", "A".repeat(count * 2))
+                );
                 let old = original.last().unwrap();
                 let new = edited.last().unwrap();
                 assert!((old.position.x() - new.position.x()).abs() < 0.002);
@@ -2753,7 +2974,7 @@ mod tests {
             })
             .unwrap();
             assert_eq!(events.len(), 16);
-            for (call, group) in events.chunks_exact(4).enumerate() {
+            for (call, group) in events.as_chunks::<4>().0.iter().enumerate() {
                 assert_eq!(
                     group.iter().map(|event| event.1).collect::<Vec<_>>(),
                     [1, 2, 3, 4]
@@ -3045,14 +3266,23 @@ mod tests {
                     array_item: None,
                     offset: 0,
                 };
-                let duplicate = doc.build_text_event_fragments(
-                    &form.program,
-                    duplicate_start..TextCodePosition { offset: 2, ..duplicate_start },
-                    "X", preserve, &pool,
-                    |index| doc.span_text_metrics_for_operation(
-                        0, &root, &tree, &prepared, node, index, &pool,
-                    ),
-                ).unwrap();
+                let duplicate = doc
+                    .build_text_event_fragments(
+                        &form.program,
+                        duplicate_start..TextCodePosition {
+                            offset: 2,
+                            ..duplicate_start
+                        },
+                        "X",
+                        preserve,
+                        &pool,
+                        |index| {
+                            doc.span_text_metrics_for_operation(
+                                0, &root, &tree, &prepared, node, index, &pool,
+                            )
+                        },
+                    )
+                    .unwrap();
                 let mut repeated = [donors[0].take(), Some(duplicate)];
                 let repeated_bytes = pool.live_bytes();
                 assert!(matches!(
@@ -3284,24 +3514,50 @@ mod tests {
                 offset: 1,
             };
             let measured_budget = OperationBudget::new(8 * 1024 * 1024);
-            rollback_reopened.replace_selected_text_span(
-                0, &measured_root, start..end, "X", preserve, &measured_budget,
-            ).unwrap();
+            rollback_reopened
+                .replace_selected_text_span(
+                    0,
+                    &measured_root,
+                    start..end,
+                    "X",
+                    preserve,
+                    &measured_budget,
+                )
+                .unwrap();
             assert_eq!(measured_budget.live_bytes(), 0);
             assert!(measured_budget.peak_bytes() > 0);
-            println!("full four-call span preserve={preserve}: tracked peak={} bytes",
-                measured_budget.peak_bytes());
+            println!(
+                "full four-call span preserve={preserve}: tracked peak={} bytes",
+                measured_budget.peak_bytes()
+            );
             let measured_reopen = PdfDocument::from_bytes_with_mode(
                 rollback_reopened.save_to_bytes().unwrap(),
                 crate::parser::syntax::ParseMode::Strict,
-            ).unwrap();
-            let edited_chars = measured_reopen.get_page(0).unwrap()
-                .extract_characters_paint_order().unwrap();
-            assert_eq!(edited_chars.iter().filter_map(|ch| ch.unicode.as_deref())
-                .collect::<String>(), "AXBC");
-            assert_eq!(measured_reopen.get_page(1).unwrap()
-                .extract_characters_paint_order().unwrap().iter()
-                .filter_map(|ch| ch.unicode.as_deref()).collect::<String>(), "ABCABCABCABC");
+            )
+            .unwrap();
+            let edited_chars = measured_reopen
+                .get_page(0)
+                .unwrap()
+                .extract_characters_paint_order()
+                .unwrap();
+            assert_eq!(
+                edited_chars
+                    .iter()
+                    .filter_map(|ch| ch.unicode.as_deref())
+                    .collect::<String>(),
+                "AXBC"
+            );
+            assert_eq!(
+                measured_reopen
+                    .get_page(1)
+                    .unwrap()
+                    .extract_characters_paint_order()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|ch| ch.unicode.as_deref())
+                    .collect::<String>(),
+                "ABCABCABCABC"
+            );
             if preserve {
                 for (old, new) in original_chars[10..].iter().zip(&edited_chars[2..]) {
                     assert!((old.position.x() - new.position.x()).abs() < 0.002);

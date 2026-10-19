@@ -29,7 +29,8 @@ pub struct StructuredTextSpan {
 }
 #[derive(Debug, Clone)]
 pub struct StructuredTextReport {
-    pub optional_content_selection: Option<crate::document::optional_content::OptionalContentSelection>,
+    pub optional_content_selection:
+        Option<crate::document::optional_content::OptionalContentSelection>,
     pub stamp: DocumentStamp,
     pub root: ObjectHandle,
     pub spans: Vec<StructuredTextSpan>,
@@ -136,7 +137,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         &self,
         options: MarkedTextOptions,
     ) -> PdfResult<Option<StructuredTextReport>> {
-        self.extract_text_structure_order_selected(options,None)
+        self.extract_text_structure_order_selected(options, None)
     }
 
     /// Declared order with explicit optional-content states. Structure-level
@@ -147,7 +148,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         visibility: &crate::document::optional_content::OptionalContentVisibility,
     ) -> PdfResult<Option<StructuredTextReport>> {
         visibility.validate(self.ctx())?;
-        self.extract_text_structure_order_selected(options,Some(visibility))
+        self.extract_text_structure_order_selected(options, Some(visibility))
     }
 
     fn extract_text_structure_order_selected(
@@ -158,7 +159,10 @@ impl<R: Read + Seek> PdfDocument<R> {
         let Some(tree) = self.structure_tree()? else {
             return Ok(None);
         };
-        if visibility.is_some() && options.use_actual_text && tree.elements.iter().any(|e| e.actual_text.is_some()) {
+        if visibility.is_some()
+            && options.use_actual_text
+            && tree.elements.iter().any(|e| e.actual_text.is_some())
+        {
             return Err(PdfError::UnsupportedFeature("structure ActualText with optional-content filtering requires explicit partitioning".into()));
         }
         let associations = self
@@ -193,7 +197,7 @@ impl<R: Read + Seek> PdfDocument<R> {
                 ),
                 self.ctx(),
             );
-            let report = page.extract_marked_text_selected(options, work.clone(),visibility)?;
+            let report = page.extract_marked_text_selected(options, work.clone(), visibility)?;
             if !report.diagnostics.is_empty() {
                 return Err(PdfError::UnsupportedFeature(
                     "structured text requires interpretation without diagnostics".into(),

@@ -1,12 +1,13 @@
-use super::{content_program::ContentProgram, PdfPage};
+use super::{PdfPage, content_program::ContentProgram};
 use crate::{
     error::{PdfError, PdfResult},
-    font::{pdf_font::Font, type3::{Type3Font, Type3GlyphProgram}},
+    font::{
+        pdf_font::Font,
+        type3::{Type3Font, Type3GlyphProgram},
+    },
     objects::PdfObject,
 };
-use std::{
-    io::{Read, Seek},
-};
+use std::io::{Read, Seek};
 #[cfg(test)]
 use std::rc::Rc;
 
@@ -27,11 +28,15 @@ struct ResolvedResource {
 
 impl std::ops::Deref for ResolvedResource {
     type Target = PdfObject;
-    fn deref(&self) -> &PdfObject { &self.object }
+    fn deref(&self) -> &PdfObject {
+        &self.object
+    }
 }
 
 impl std::borrow::Borrow<PdfObject> for ResolvedResource {
-    fn borrow(&self) -> &PdfObject { &self.object }
+    fn borrow(&self) -> &PdfObject {
+        &self.object
+    }
 }
 
 // q/Q aliases retain the same derived font data and reservation.
@@ -48,14 +53,18 @@ struct FontSlot {
 /// Stable indices share fonts without an opaque Rc control allocation. Vacant
 /// slots are reused; the allocator charges the actual old/new vector layouts.
 struct FontSelections {
-    slots: allocator_api2::vec::Vec<Option<FontSlot>, crate::budget::table_allocator::TableAllocator>,
+    slots:
+        allocator_api2::vec::Vec<Option<FontSlot>, crate::budget::table_allocator::TableAllocator>,
 }
 
 impl FontSelections {
     fn new(budget: Option<&crate::budget::OperationBudget>) -> Self {
-        let allocator = budget.map(crate::budget::table_allocator::TableAllocator::new)
+        let allocator = budget
+            .map(crate::budget::table_allocator::TableAllocator::new)
             .unwrap_or_else(crate::budget::table_allocator::TableAllocator::persistent);
-        Self { slots: allocator_api2::vec::Vec::new_in(allocator) }
+        Self {
+            slots: allocator_api2::vec::Vec::new_in(allocator),
+        }
     }
 
     fn insert(&mut self, font: SelectedFont) -> PdfResult<usize> {
@@ -64,7 +73,9 @@ impl FontSelections {
             self.slots[index] = Some(slot);
             return Ok(index);
         }
-        self.slots.try_reserve(1).map_err(|_| PdfError::ResourceLimit("font selection slots".into()))?;
+        self.slots
+            .try_reserve(1)
+            .map_err(|_| PdfError::ResourceLimit("font selection slots".into()))?;
         let index = self.slots.len();
         self.slots.push(Some(slot));
         Ok(index)
@@ -72,7 +83,9 @@ impl FontSelections {
 
     fn share(&mut self, index: usize) -> PdfResult<()> {
         let slot = self.slots[index].as_mut().expect("live font selection");
-        slot.aliases = slot.aliases.checked_add(1)
+        slot.aliases = slot
+            .aliases
+            .checked_add(1)
             .ok_or_else(|| PdfError::ResourceLimit("font selection aliases".into()))?;
         Ok(())
     }
@@ -80,11 +93,18 @@ impl FontSelections {
     fn release(&mut self, index: usize) {
         let slot = self.slots[index].as_mut().expect("live font selection");
         slot.aliases -= 1;
-        if slot.aliases == 0 { self.slots[index] = None; }
+        if slot.aliases == 0 {
+            self.slots[index] = None;
+        }
     }
 
     fn take(&mut self, index: usize) -> PdfResult<SelectedFont> {
-        if self.slots[index].as_ref().expect("live font selection").aliases != 1 {
+        if self.slots[index]
+            .as_ref()
+            .expect("live font selection")
+            .aliases
+            != 1
+        {
             return Err(PdfError::FontError("font selection still shared".into()));
         }
         Ok(self.slots[index].take().unwrap().font)
@@ -101,7 +121,12 @@ pub(crate) struct TextMetrics {
 
 impl Default for TextMetrics {
     fn default() -> Self {
-        Self { font_size: 1.0, char_space: 0.0, word_space: 0.0, horizontal_scale: 1.0 }
+        Self {
+            font_size: 1.0,
+            char_space: 0.0,
+            word_space: 0.0,
+            horizontal_scale: 1.0,
+        }
     }
 }
 
@@ -121,7 +146,9 @@ pub(crate) struct BudgetedTextState {
 impl BudgetedTextState {
     pub(crate) fn into_metrics(self) -> PdfResult<BudgetedTextMetrics> {
         Ok(BudgetedTextMetrics {
-            font: self.font.ok_or_else(|| PdfError::FontError("Nested text has no effective font".into()))?,
+            font: self
+                .font
+                .ok_or_else(|| PdfError::FontError("Nested text has no effective font".into()))?,
             metrics: self.metrics,
         })
     }
@@ -134,7 +161,13 @@ impl BudgetedTextMetrics {
         font: Font,
         lease: crate::budget::MemoryLease,
     ) -> Self {
-        Self { font: BudgetedFont { font, _lease: lease }, metrics: self.metrics }
+        Self {
+            font: BudgetedFont {
+                font,
+                _lease: lease,
+            },
+            metrics: self.metrics,
+        }
     }
 
     /// Advance in TJ units for this effective font and spacing. Preserve f64
@@ -146,21 +179,26 @@ impl BudgetedTextMetrics {
         limits: crate::parser::options::Limits,
     ) -> PdfResult<f64> {
         if self.metrics.font_size == 0.0 {
-            return Err(PdfError::UnsupportedFeature("Advance compensation at zero font size".into()));
+            return Err(PdfError::UnsupportedFeature(
+                "Advance compensation at zero font size".into(),
+            ));
         }
         let mut total = 0.0f64;
-        self.font.visit_chars_limited(codes, limits.max_text_chars, |character| {
-            let mut advance = f64::from(character.width())
-                + 1000.0 * f64::from(self.metrics.char_space) / f64::from(self.metrics.font_size);
-            if character.code() == 32 && character.length() == 1 {
-                advance += 1000.0 * f64::from(self.metrics.word_space) / f64::from(self.metrics.font_size);
-            }
-            total += advance;
-            if !total.is_finite() {
-                return Err(PdfError::FontError("Text advance overflows".into()));
-            }
-            Ok(())
-        })?;
+        self.font
+            .visit_chars_limited(codes, limits.max_text_chars, |character| {
+                let mut advance = f64::from(character.width())
+                    + 1000.0 * f64::from(self.metrics.char_space)
+                        / f64::from(self.metrics.font_size);
+                if character.code() == 32 && character.length() == 1 {
+                    advance += 1000.0 * f64::from(self.metrics.word_space)
+                        / f64::from(self.metrics.font_size);
+                }
+                total += advance;
+                if !total.is_finite() {
+                    return Err(PdfError::FontError("Text advance overflows".into()));
+                }
+                Ok(())
+            })?;
         Ok(total)
     }
 
@@ -184,10 +222,15 @@ impl BudgetedTextMetrics {
         new: &[u8],
         limits: crate::parser::options::Limits,
     ) -> PdfResult<f32> {
-        if self.metrics != replacement.metrics || self.font.writting_mode() != replacement.font.writting_mode() {
-            return Err(PdfError::UnsupportedFeature("Cross-font compensation requires matching text state and writing axis".into()));
+        if self.metrics != replacement.metrics
+            || self.font.writting_mode() != replacement.font.writting_mode()
+        {
+            return Err(PdfError::UnsupportedFeature(
+                "Cross-font compensation requires matching text state and writing axis".into(),
+            ));
         }
-        let adjustment = (replacement.advance_1000(new, limits)? - self.advance_1000(old, limits)?) as f32;
+        let adjustment =
+            (replacement.advance_1000(new, limits)? - self.advance_1000(old, limits)?) as f32;
         if !adjustment.is_finite() {
             return Err(PdfError::FontError("TJ compensation overflows".into()));
         }
@@ -218,21 +261,35 @@ impl<R: Read + Seek> PdfPage<'_, R> {
         self.inspect_font_with_budget(name, &self.ctx.limits().operation_budget())
     }
 
-    pub fn inspect_font_with_budget(&self, name: &str, budget: &crate::budget::OperationBudget) -> PdfResult<BudgetedFont> {
+    pub fn inspect_font_with_budget(
+        &self,
+        name: &str,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<BudgetedFont> {
         self.named_font_with_budget(name, budget)
     }
 
     pub(crate) fn named_font_with_budget(
-        &self, name: &str, budget: &crate::budget::OperationBudget,
+        &self,
+        name: &str,
+        budget: &crate::budget::OperationBudget,
     ) -> PdfResult<BudgetedFont> {
         let (scope, _scope_lease) = self.resource_with_budget(budget)?;
         let object = self.font_scope_resource(&scope, "Font", name, &mut |value| {
             let (object, lease) = self.ctx.resolve_owned_with_budget(value, budget)?;
-            Ok(ResolvedResource { object, _lease: Some(lease) })
+            Ok(ResolvedResource {
+                object,
+                _lease: Some(lease),
+            })
         })?;
-        let dict = object.as_dict().ok_or_else(|| PdfError::FontError("font resource must be a dictionary".into()))?;
+        let dict = object
+            .as_dict()
+            .ok_or_else(|| PdfError::FontError("font resource must be a dictionary".into()))?;
         let (font, lease) = Font::try_new_with_budget(dict, self.ctx, budget)?;
-        Ok(BudgetedFont { font, _lease: lease })
+        Ok(BudgetedFont {
+            font,
+            _lease: lease,
+        })
     }
 
     /// Inspect a page font without enabling Type 3 text rendering.
@@ -248,9 +305,14 @@ impl<R: Read + Seek> PdfPage<'_, R> {
         let (scope, _scope_lease) = self.resource_with_budget(budget)?;
         let object = self.font_scope_resource(&scope, "Font", name, &mut |value| {
             let (object, lease) = self.ctx.resolve_owned_with_budget(value, budget)?;
-            Ok(ResolvedResource { object, _lease: Some(lease) })
+            Ok(ResolvedResource {
+                object,
+                _lease: Some(lease),
+            })
         })?;
-        let dict = object.as_dict().ok_or_else(|| PdfError::FontError("Type3 font must be a dictionary".into()))?;
+        let dict = object
+            .as_dict()
+            .ok_or_else(|| PdfError::FontError("Type3 font must be a dictionary".into()))?;
         Type3Font::try_new_with_budget(dict, self.ctx, budget)
     }
 
@@ -279,7 +341,9 @@ impl<R: Read + Seek> PdfPage<'_, R> {
         target: usize,
         budget: &crate::budget::OperationBudget,
     ) -> PdfResult<BudgetedFont> {
-        Ok(self.text_metrics_for_operation_with_budget(program, target, budget)?.font)
+        Ok(self
+            .text_metrics_for_operation_with_budget(program, target, budget)?
+            .font)
     }
 
     pub(crate) fn text_metrics_for_operation_with_budget(
@@ -316,11 +380,15 @@ impl<R: Read + Seek> PdfPage<'_, R> {
             scope_lease.absorb(&mut lease)?;
         }
         Ok(BudgetedTextMetrics {
-            font: BudgetedFont { font, _lease: scope_lease },
+            font: BudgetedFont {
+                font,
+                _lease: scope_lease,
+            },
             metrics,
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn font_for_text_operation(
         &self,
         program: &ContentProgram,
@@ -331,6 +399,7 @@ impl<R: Read + Seek> PdfPage<'_, R> {
 
     /// Prefix font selection within one explicit effective resource scope.
     /// Does not infer an inherited caller font when this stream has no binding.
+    #[cfg(test)]
     pub(crate) fn font_for_text_operation_in_scope(
         &self,
         program: &ContentProgram,
@@ -352,6 +421,7 @@ impl<R: Read + Seek> PdfPage<'_, R> {
 
     /// Caller font is inherited into a Form; local Tf/gs can replace it and q/Q
     /// restores the actual font, rather than an index from a different stream.
+    #[cfg(test)]
     pub(crate) fn font_before_operation_in_scope(
         &self,
         program: &ContentProgram,
@@ -364,6 +434,7 @@ impl<R: Read + Seek> PdfPage<'_, R> {
 
     /// Move the inherited owner across stream boundaries without cloning or
     /// releasing its reservation while the next prefix is being interpreted.
+    #[cfg(test)]
     pub(crate) fn font_before_operation_in_scope_with_budget(
         &self,
         program: &ContentProgram,
@@ -420,20 +491,34 @@ impl<R: Read + Seek> PdfPage<'_, R> {
                 font: font.font,
                 lease: Some(std::mem::replace(&mut lease, budget.reserve(0)?)),
             })
-        } else { None };
+        } else {
+            None
+        };
         let mut retained = None;
         let mut metrics = initial_metrics;
         let font = self.font_before_operation_in_scope_tracked(
-            program, target, scope, inherited_font, Some(budget), &mut retained,
-            Some(&mut metrics), initial_metrics,
+            program,
+            target,
+            scope,
+            inherited_font,
+            Some(budget),
+            &mut retained,
+            Some(&mut metrics),
+            initial_metrics,
         )?;
-        if let Some(mut retained) = retained { lease.absorb(&mut retained)?; }
+        if let Some(mut retained) = retained {
+            lease.absorb(&mut retained)?;
+        }
         Ok(BudgetedTextState {
-            font: font.map(|font| BudgetedFont { font, _lease: lease }),
+            font: font.map(|font| BudgetedFont {
+                font,
+                _lease: lease,
+            }),
             metrics,
         })
     }
 
+    #[cfg(test)]
     fn font_before_operation_in_scope_inner(
         &self,
         program: &ContentProgram,
@@ -443,12 +528,21 @@ impl<R: Read + Seek> PdfPage<'_, R> {
         budget: Option<&crate::budget::OperationBudget>,
     ) -> PdfResult<Option<Font>> {
         self.font_before_operation_in_scope_tracked(
-            program, target, scope,
+            program,
+            target,
+            scope,
             inherited.map(|font| SelectedFont { font, lease: None }),
-            budget, &mut None, None, TextMetrics::default(),
+            budget,
+            &mut None,
+            None,
+            TextMetrics::default(),
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "keep source identity, text geometry and operation budget explicit"
+    )]
     fn font_before_operation_in_scope_tracked(
         &self,
         program: &ContentProgram,
@@ -463,9 +557,15 @@ impl<R: Read + Seek> PdfPage<'_, R> {
         let construct = |dict: &crate::objects::pdf_dict::PdfDict| -> PdfResult<SelectedFont> {
             if let Some(pool) = budget {
                 let (font, lease) = Font::try_new_with_budget(dict, self.ctx, pool)?;
-                Ok(SelectedFont { font, lease: Some(lease) })
+                Ok(SelectedFont {
+                    font,
+                    lease: Some(lease),
+                })
             } else {
-                Ok(SelectedFont { font: Font::try_new(dict, self.ctx)?, lease: None })
+                Ok(SelectedFont {
+                    font: Font::try_new(dict, self.ctx)?,
+                    lease: None,
+                })
             }
         };
         let target_op = program.operations().get(target).ok_or_else(|| {
@@ -492,19 +592,25 @@ impl<R: Read + Seek> PdfPage<'_, R> {
                     "font binding across unknown content operator".into(),
                 ));
             }
-            if let Some(count) = super::opcode::operand_count(op.name()) {
-                if op.num_operands() != count {
-                    return Err(PdfError::ContentParseError(
-                        "font binding prefix operand count".into(),
-                    ));
-                }
+            if let Some(count) = super::opcode::operand_count(op.name())
+                && op.num_operands() != count
+            {
+                return Err(PdfError::ContentParseError(
+                    "font binding prefix operand count".into(),
+                ));
             }
             let mut resolve = |object: &PdfObject| -> PdfResult<ResolvedResource> {
                 if let Some(pool) = budget {
                     let (object, lease) = self.ctx.resolve_owned_with_budget(object, pool)?;
-                    Ok(ResolvedResource { object, _lease: Some(lease) })
+                    Ok(ResolvedResource {
+                        object,
+                        _lease: Some(lease),
+                    })
                 } else {
-                    Ok(ResolvedResource { object: self.ctx.resolve_owned(object)?, _lease: None })
+                    Ok(ResolvedResource {
+                        object: self.ctx.resolve_owned(object)?,
+                        _lease: None,
+                    })
                 }
             };
             match op.name() {
@@ -549,11 +655,15 @@ impl<R: Read + Seek> PdfPage<'_, R> {
                             PdfError::ResourceLimit("font binding stack allocation".into())
                         })?;
                     }
-                    if let Some(index) = selection { selections.share(index)?; }
+                    if let Some(index) = selection {
+                        selections.share(index)?;
+                    }
                     stack.push((selection, metrics));
                 }
                 "Q" => {
-                    if let Some(index) = selection { selections.release(index); }
+                    if let Some(index) = selection {
+                        selections.release(index);
+                    }
                     (selection, metrics) = stack.pop().ok_or_else(|| {
                         PdfError::ContentParseError("font binding Q without q".into())
                     })?
@@ -586,7 +696,9 @@ impl<R: Read + Seek> PdfPage<'_, R> {
                         PdfError::FontError("text font resource is not a dictionary".into())
                     })?;
                     let next = selections.insert(construct(dict)?)?;
-                    if let Some(index) = selection { selections.release(index); }
+                    if let Some(index) = selection {
+                        selections.release(index);
+                    }
                     selection = Some(next);
                 }
                 "gs" => {
@@ -604,28 +716,30 @@ impl<R: Read + Seek> PdfPage<'_, R> {
                             "font binding across unsupported ExtGState".into(),
                         ));
                     }
-                    if let Some(value) = dict.get("BM") {
-                        if super::general_state::resolve_blend_mode_using(
+                    if let Some(value) = dict.get("BM")
+                        && super::general_state::resolve_blend_mode_using(
                             value,
                             limits,
                             &mut resolve,
                         )?
                         .is_none()
-                        {
-                            return Err(PdfError::UnsupportedFeature(
-                                "font binding across unknown blend mode".into(),
-                            ));
-                        }
+                    {
+                        return Err(PdfError::UnsupportedFeature(
+                            "font binding across unknown blend mode".into(),
+                        ));
                     }
                     if let Some(value) = dict.get("Font") {
                         let (font, size) = self.ext_state_font(value, &mut resolve)?;
                         metrics.font_size = size;
-                        let next = selections.insert(construct(font.as_dict().ok_or_else(|| {
-                            PdfError::FontError(
-                                "ExtGState Font must reference a font dictionary".into(),
-                            )
-                        })?)?)?;
-                        if let Some(index) = selection { selections.release(index); }
+                        let next =
+                            selections.insert(construct(font.as_dict().ok_or_else(|| {
+                                PdfError::FontError(
+                                    "ExtGState Font must reference a font dictionary".into(),
+                                )
+                            })?)?)?;
+                        if let Some(index) = selection {
+                            selections.release(index);
+                        }
                         selection = Some(next);
                     }
                 }
@@ -651,22 +765,26 @@ impl<R: Read + Seek> PdfPage<'_, R> {
         }
         // Drop all saved aliases before transferring the selected Font out.
         for (saved, _) in stack.drain(..) {
-            if let Some(index) = saved { selections.release(index); }
+            if let Some(index) = saved {
+                selections.release(index);
+            }
         }
         drop(stack);
-        let selected = selection
-            .map(|index| selections.take(index))
-            .transpose()?;
+        let selected = selection.map(|index| selections.take(index)).transpose()?;
         let result = if let Some(mut selected) = selected {
             *retained = selected.lease.take();
             Some(selected.font)
-        } else { None };
+        } else {
+            None
+        };
         // The target double quote sets spacing before painting its string.
         if target_op.operator.name() == "\"" {
             metrics.word_space = finite_text_metric(target_op.operator.get_as_f32(0)?)?;
             metrics.char_space = finite_text_metric(target_op.operator.get_as_f32(1)?)?;
         }
-        if let Some(output) = metrics_out { *output = metrics; }
+        if let Some(output) = metrics_out {
+            *output = metrics;
+        }
         Ok(result)
     }
 
@@ -702,7 +820,8 @@ impl<R: Read + Seek> PdfPage<'_, R> {
             .ok_or_else(|| PdfError::FontError("ExtGState Font requires [font size]".into()))?;
         let size = {
             let size = resolve(array.get(1).unwrap())?;
-            size.as_f32().filter(|size| size.is_finite())
+            size.as_f32()
+                .filter(|size| size.is_finite())
                 .ok_or_else(|| PdfError::FontError("ExtGState font size must be finite".into()))?
         };
         let font = resolve(array.get(0).unwrap())?;
@@ -716,8 +835,11 @@ impl<R: Read + Seek> PdfPage<'_, R> {
 }
 
 fn finite_text_metric(value: f32) -> PdfResult<f32> {
-    if value.is_finite() { Ok(value) }
-    else { Err(PdfError::FontError("Non-finite text metric".into())) }
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(PdfError::FontError("Non-finite text metric".into()))
+    }
 }
 
 #[cfg(test)]
@@ -725,19 +847,31 @@ mod tests {
     use super::*;
     #[test]
     fn resolved_resource_blend_elements_release_individually_and_retry() {
-        use crate::{budget::OperationBudget, objects::{pdf_array::PdfArray, pdf_name::PdfName}, parser::options::Limits};
+        use crate::{
+            budget::OperationBudget,
+            objects::{pdf_array::PdfArray, pdf_name::PdfName},
+            parser::options::Limits,
+        };
         let limits = Limits::default();
         let name = || PdfObject::PdfName(PdfName::new("Multiply".into()));
         let value = PdfObject::PdfArray(PdfArray::from_items((0..32).map(|_| name()).collect()));
         let measure = OperationBudget::new(1024 * 1024);
-        let (object, lease) = crate::objects::clone_object_with_budget(&value, &measure, limits, 0).unwrap();
+        let (object, lease) =
+            crate::objects::clone_object_with_budget(&value, &measure, limits, 0).unwrap();
         let array_bytes = measure.live_bytes();
-        drop(ResolvedResource { object, _lease: Some(lease) });
+        drop(ResolvedResource {
+            object,
+            _lease: Some(lease),
+        });
         assert_eq!(measure.live_bytes(), 0);
         let child_pool = OperationBudget::new(65536);
-        let (object, lease) = crate::objects::clone_object_with_budget(&name(), &child_pool, limits, 0).unwrap();
+        let (object, lease) =
+            crate::objects::clone_object_with_budget(&name(), &child_pool, limits, 0).unwrap();
         let child_peak = child_pool.peak_bytes();
-        drop(ResolvedResource { object, _lease: Some(lease) });
+        drop(ResolvedResource {
+            object,
+            _lease: Some(lease),
+        });
         assert_eq!(child_pool.live_bytes(), 0);
         let parse = |input: &PdfObject, pool: &OperationBudget, panic_at: Option<usize>| {
             let mut calls = 0;
@@ -747,30 +881,48 @@ mod tests {
                     assert_eq!(pool.live_bytes(), array_bytes);
                 }
                 calls += 1;
-                if panic_at == Some(calls) { panic!("resource resolver unwind"); }
-                let (object, lease) = crate::objects::clone_object_with_budget(source, pool, limits, 0)?;
-                Ok(ResolvedResource { object, _lease: Some(lease) })
+                if panic_at == Some(calls) {
+                    panic!("resource resolver unwind");
+                }
+                let (object, lease) =
+                    crate::objects::clone_object_with_budget(source, pool, limits, 0)?;
+                Ok(ResolvedResource {
+                    object,
+                    _lease: Some(lease),
+                })
             })
         };
         let probe = OperationBudget::new(1024 * 1024);
-        assert_eq!(parse(&value, &probe, None).unwrap(), Some(super::super::general_state::BlendMode::Multiply));
+        assert_eq!(
+            parse(&value, &probe, None).unwrap(),
+            Some(super::super::general_state::BlendMode::Multiply)
+        );
         assert_eq!(probe.peak_bytes(), array_bytes + child_peak);
         assert_eq!(probe.live_bytes(), 0);
         let tight = OperationBudget::new(probe.peak_bytes());
         let neighbor = tight.reserve(1).unwrap();
         // Use an equivalent independent input to avoid the no-neighbor assertion.
         let copy = value.clone();
-        assert!(matches!(parse(&copy, &tight, None), Err(PdfError::ResourceLimit(_))));
+        assert!(matches!(
+            parse(&copy, &tight, None),
+            Err(PdfError::ResourceLimit(_))
+        ));
         assert_eq!(tight.live_bytes(), 1);
         drop(neighbor);
         assert!(parse(&value, &tight, None).is_ok());
         assert_eq!(tight.live_bytes(), 0);
         let invalid = PdfObject::PdfArray(PdfArray::from_items(vec![name(), PdfObject::PdfNull]));
-        assert!(matches!(parse(&invalid, &probe, None), Err(PdfError::PageResourceError(_))));
+        assert!(matches!(
+            parse(&invalid, &probe, None),
+            Err(PdfError::PageResourceError(_))
+        ));
         assert_eq!(probe.live_bytes(), 0);
-        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = parse(&value, &probe, Some(5));
-        })).is_err());
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = parse(&value, &probe, Some(5));
+            }))
+            .is_err()
+        );
         assert_eq!(probe.live_bytes(), 0);
     }
 
@@ -779,21 +931,50 @@ mod tests {
         use crate::budget::OperationBudget;
         let doc = Document::new().unwrap();
         doc.add_page(0).unwrap();
-        let name = doc.resources().register_standard_font(0, StandardFont::Courier).unwrap();
-        doc.replace_page_contents(0, format!("BT /{name} 10 Tf 2 Tc 7 Tw -75 Tz (A A) Tj ET").into_bytes()).unwrap();
+        let name = doc
+            .resources()
+            .register_standard_font(0, StandardFont::Courier)
+            .unwrap();
+        doc.replace_page_contents(
+            0,
+            format!("BT /{name} 10 Tf 2 Tc 7 Tw -75 Tz (A A) Tj ET").into_bytes(),
+        )
+        .unwrap();
         let page = doc.get_page(0).unwrap();
         let program = page.content_program().unwrap();
-        let target = program.operations().iter().position(|op| op.operator.name() == "Tj").unwrap();
+        let target = program
+            .operations()
+            .iter()
+            .position(|op| op.operator.name() == "Tj")
+            .unwrap();
         let pool = OperationBudget::new(4 * 1024 * 1024);
-        let mut state = page.text_metrics_for_operation_with_budget(&program, target, &pool).unwrap();
+        let mut state = page
+            .text_metrics_for_operation_with_budget(&program, target, &pool)
+            .unwrap();
         let limits = crate::parser::options::Limits::default();
         assert_eq!(state.advance_1000(b"A A", limits).unwrap(), 3100.0);
         assert_eq!(state.advance_1000(b"", limits).unwrap(), 0.0);
-        assert_eq!(state.replacement_adjustment(b"A A", b"A", limits).unwrap(), -2300.0);
-        assert!(state.advance_1000(b"A A", crate::parser::options::Limits { max_text_chars: 2, ..limits }).is_err());
+        assert_eq!(
+            state.replacement_adjustment(b"A A", b"A", limits).unwrap(),
+            -2300.0
+        );
+        assert!(
+            state
+                .advance_1000(
+                    b"A A",
+                    crate::parser::options::Limits {
+                        max_text_chars: 2,
+                        ..limits
+                    }
+                )
+                .is_err()
+        );
         assert_eq!(state.advance_1000(b"A A", limits).unwrap(), 3100.0);
         state.metrics.font_size = 0.0;
-        assert!(matches!(state.advance_1000(b"A", limits), Err(PdfError::UnsupportedFeature(_))));
+        assert!(matches!(
+            state.advance_1000(b"A", limits),
+            Err(PdfError::UnsupportedFeature(_))
+        ));
         drop(state);
         assert_eq!(pool.live_bytes(), 0);
     }
@@ -803,24 +984,60 @@ mod tests {
         use crate::budget::OperationBudget;
         let doc = Document::new().unwrap();
         doc.add_page(0).unwrap();
-        let courier = doc.resources().register_standard_font(0, StandardFont::Courier).unwrap();
-        let helvetica = doc.resources().register_standard_font(0, StandardFont::Helvetica).unwrap();
-        doc.replace_page_contents(0, format!("BT /{courier} 10 Tf 2 Tc 7 Tw -75 Tz (A A) Tj /{helvetica} 10 Tf (A A) Tj ET").into_bytes()).unwrap();
+        let courier = doc
+            .resources()
+            .register_standard_font(0, StandardFont::Courier)
+            .unwrap();
+        let helvetica = doc
+            .resources()
+            .register_standard_font(0, StandardFont::Helvetica)
+            .unwrap();
+        doc.replace_page_contents(
+            0,
+            format!("BT /{courier} 10 Tf 2 Tc 7 Tw -75 Tz (A A) Tj /{helvetica} 10 Tf (A A) Tj ET")
+                .into_bytes(),
+        )
+        .unwrap();
         let page = doc.get_page(0).unwrap();
         let program = page.content_program().unwrap();
-        let targets: Vec<_> = program.operations().iter().enumerate().filter_map(|(index, op)| (op.operator.name() == "Tj").then_some(index)).collect();
+        let targets: Vec<_> = program
+            .operations()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, op)| (op.operator.name() == "Tj").then_some(index))
+            .collect();
         let pool = OperationBudget::new(4 * 1024 * 1024);
-        let old = page.text_metrics_for_operation_with_budget(&program, targets[0], &pool).unwrap();
-        let mut new = page.text_metrics_for_operation_with_budget(&program, targets[1], &pool).unwrap();
+        let old = page
+            .text_metrics_for_operation_with_budget(&program, targets[0], &pool)
+            .unwrap();
+        let mut new = page
+            .text_metrics_for_operation_with_budget(&program, targets[1], &pool)
+            .unwrap();
         let limits = crate::parser::options::Limits::default();
-        let adjustment = old.replacement_adjustment_to(b"A A", &new, b"A A", limits).unwrap();
+        let adjustment = old
+            .replacement_adjustment_to(b"A A", &new, b"A A", limits)
+            .unwrap();
         assert_ne!(adjustment, 0.0);
-        assert_eq!(adjustment, (new.advance_1000(b"A A", limits).unwrap() - old.advance_1000(b"A A", limits).unwrap()) as f32);
-        assert_eq!(old.replacement_adjustment(b"A A", b"A A", limits).unwrap(), 0.0);
+        assert_eq!(
+            adjustment,
+            (new.advance_1000(b"A A", limits).unwrap() - old.advance_1000(b"A A", limits).unwrap())
+                as f32
+        );
+        assert_eq!(
+            old.replacement_adjustment(b"A A", b"A A", limits).unwrap(),
+            0.0
+        );
         new.metrics.word_space += 1.0;
-        assert!(matches!(old.replacement_adjustment_to(b"A A", &new, b"A A", limits), Err(PdfError::UnsupportedFeature(_))));
+        assert!(matches!(
+            old.replacement_adjustment_to(b"A A", &new, b"A A", limits),
+            Err(PdfError::UnsupportedFeature(_))
+        ));
         new.metrics = old.metrics;
-        assert_eq!(old.replacement_adjustment_to(b"A A", &new, b"A A", limits).unwrap(), adjustment);
+        assert_eq!(
+            old.replacement_adjustment_to(b"A A", &new, b"A A", limits)
+                .unwrap(),
+            adjustment
+        );
         drop(old);
         drop(new);
         assert_eq!(pool.live_bytes(), 0);
@@ -831,49 +1048,127 @@ mod tests {
         use crate::budget::OperationBudget;
         let doc = Document::new().unwrap();
         doc.add_page(0).unwrap();
-        let courier = doc.resources().register_standard_font(0, StandardFont::Courier).unwrap();
-        let helvetica = doc.resources().register_standard_font(0, StandardFont::Helvetica).unwrap();
+        let courier = doc
+            .resources()
+            .register_standard_font(0, StandardFont::Courier)
+            .unwrap();
+        let helvetica = doc
+            .resources()
+            .register_standard_font(0, StandardFont::Helvetica)
+            .unwrap();
         let page = doc.get_page(0).unwrap();
         let scope = page.resource().unwrap();
-        let parse = |bytes: Vec<u8>| ContentProgram::from_decoded_bytes(bytes, Default::default()).unwrap();
+        let parse =
+            |bytes: Vec<u8>| ContentProgram::from_decoded_bytes(bytes, Default::default()).unwrap();
         let unbound = parse(b"2 Tc 7 Tw -75 Tz /Outer Do".to_vec());
-        let parent = parse(format!("BT /{courier} 10 Tf 2 Tc 7 Tw -75 Tz ET /Outer Do").into_bytes());
+        let parent =
+            parse(format!("BT /{courier} 10 Tf 2 Tc 7 Tw -75 Tz ET /Outer Do").into_bytes());
         let middle = parse(b"q 8 Tc 9 Tw 50 Tz /Inner Do Q /Inner Do".to_vec());
-        let leaf = parse(format!("BT q /{helvetica} 20 Tf 4 Tc 5 Tw 25 Tz Q (A) Tj ET").into_bytes());
+        let leaf =
+            parse(format!("BT q /{helvetica} 20 Tf 4 Tc 5 Tw 25 Tz Q (A) Tj ET").into_bytes());
         let bound_leaf = parse(format!("BT /{courier} 10 Tf (A) Tj ET").into_bytes());
         let pool = OperationBudget::new(4 * 1024 * 1024);
         let neighbor = pool.reserve(7).unwrap();
-        let state = page.text_state_before_operation_in_scope_with_budget(&unbound, 3, &scope, Default::default(), &pool).unwrap();
+        let state = page
+            .text_state_before_operation_in_scope_with_budget(
+                &unbound,
+                3,
+                &scope,
+                Default::default(),
+                &pool,
+            )
+            .unwrap();
         assert!(state.font.is_none());
         assert_eq!(state.metrics.char_space, 2.0);
         assert_eq!(state.metrics.word_space, 7.0);
         assert_eq!(state.metrics.horizontal_scale, -0.75);
         assert_eq!(pool.live_bytes(), 7);
-        let state = page.text_state_before_operation_in_scope_with_budget(&bound_leaf, 2, &scope, state, &pool).unwrap();
-        assert_eq!(state.metrics, TextMetrics { font_size: 10.0, char_space: 2.0, word_space: 7.0, horizontal_scale: -0.75 });
+        let state = page
+            .text_state_before_operation_in_scope_with_budget(&bound_leaf, 2, &scope, state, &pool)
+            .unwrap();
+        assert_eq!(
+            state.metrics,
+            TextMetrics {
+                font_size: 10.0,
+                char_space: 2.0,
+                word_space: 7.0,
+                horizontal_scale: -0.75
+            }
+        );
         assert_eq!(state.font.as_ref().unwrap().name(), "Courier");
         drop(state);
         assert_eq!(pool.live_bytes(), 7);
         for (target, char_space, word_space, scale) in [(4, 8.0, 9.0, 0.5), (6, 2.0, 7.0, -0.75)] {
-            let state = page.text_state_before_operation_in_scope_with_budget(&parent, 6, &scope, Default::default(), &pool).unwrap();
-            let state = page.text_state_before_operation_in_scope_with_budget(&middle, target, &scope, state, &pool).unwrap();
-            let state = page.text_state_before_operation_in_scope_with_budget(&leaf, 7, &scope, state, &pool).unwrap();
-            assert_eq!(state.metrics, TextMetrics { font_size: 10.0, char_space, word_space, horizontal_scale: scale });
+            let state = page
+                .text_state_before_operation_in_scope_with_budget(
+                    &parent,
+                    6,
+                    &scope,
+                    Default::default(),
+                    &pool,
+                )
+                .unwrap();
+            let state = page
+                .text_state_before_operation_in_scope_with_budget(
+                    &middle, target, &scope, state, &pool,
+                )
+                .unwrap();
+            let state = page
+                .text_state_before_operation_in_scope_with_budget(&leaf, 7, &scope, state, &pool)
+                .unwrap();
+            assert_eq!(
+                state.metrics,
+                TextMetrics {
+                    font_size: 10.0,
+                    char_space,
+                    word_space,
+                    horizontal_scale: scale
+                }
+            );
             assert_eq!(state.font.as_ref().unwrap().name(), "Courier");
-            assert_eq!(pool.live_bytes(), state.font.as_ref().unwrap()._lease.bytes() + 7);
+            assert_eq!(
+                pool.live_bytes(),
+                state.font.as_ref().unwrap()._lease.bytes() + 7
+            );
             drop(state);
             assert_eq!(pool.live_bytes(), 7);
         }
         let invalid = parse(b"BT bogus (A) Tj ET".to_vec());
-        let state = page.text_state_before_operation_in_scope_with_budget(&parent, 6, &scope, Default::default(), &pool).unwrap();
-        assert!(page.text_state_before_operation_in_scope_with_budget(&invalid, 2, &scope, state, &pool).is_err());
+        let state = page
+            .text_state_before_operation_in_scope_with_budget(
+                &parent,
+                6,
+                &scope,
+                Default::default(),
+                &pool,
+            )
+            .unwrap();
+        assert!(
+            page.text_state_before_operation_in_scope_with_budget(
+                &invalid, 2, &scope, state, &pool
+            )
+            .is_err()
+        );
         assert_eq!(pool.live_bytes(), 7);
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let state = page.text_state_before_operation_in_scope_with_budget(&parent, 6, &scope, Default::default(), &pool).unwrap();
-            let _state = page.text_state_before_operation_in_scope_with_budget(&leaf, 7, &scope, state, &pool).unwrap();
+            let state = page
+                .text_state_before_operation_in_scope_with_budget(
+                    &parent,
+                    6,
+                    &scope,
+                    Default::default(),
+                    &pool,
+                )
+                .unwrap();
+            let _state = page
+                .text_state_before_operation_in_scope_with_budget(&leaf, 7, &scope, state, &pool)
+                .unwrap();
             panic!("inherited text state owner unwind");
         }));
-        assert_eq!(caught.unwrap_err().downcast_ref::<&str>().copied(), Some("inherited text state owner unwind"));
+        assert_eq!(
+            caught.unwrap_err().downcast_ref::<&str>().copied(),
+            Some("inherited text state owner unwind")
+        );
         assert_eq!(pool.live_bytes(), 7);
         drop(neighbor);
         assert_eq!(pool.live_bytes(), 0);
@@ -884,25 +1179,61 @@ mod tests {
         use crate::budget::OperationBudget;
         let doc = Document::new().unwrap();
         doc.add_page(0).unwrap();
-        let courier = doc.resources().register_standard_font(0, StandardFont::Courier).unwrap();
-        let helvetica = doc.resources().register_standard_font(0, StandardFont::Helvetica).unwrap();
+        let courier = doc
+            .resources()
+            .register_standard_font(0, StandardFont::Courier)
+            .unwrap();
+        let helvetica = doc
+            .resources()
+            .register_standard_font(0, StandardFont::Helvetica)
+            .unwrap();
         doc.replace_page_contents(0, format!(
             "BT /{courier} 12 Tf 2 Tc 3 Tw 50 Tz q /{helvetica} 24 Tf 7 Tc 8 Tw -75 Tz (X) Tj Q 9 10 (Y) \" (Z) Tj ET"
         ).into_bytes()).unwrap();
         let page = doc.get_page(0).unwrap();
         let program = page.content_program().unwrap();
-        let targets: Vec<_> = program.operations().iter().enumerate()
+        let targets: Vec<_> = program
+            .operations()
+            .iter()
+            .enumerate()
             .filter(|(_, op)| matches!(op.operator.name(), "Tj" | "\""))
-            .map(|(index, _)| index).collect();
+            .map(|(index, _)| index)
+            .collect();
         let expected = [
-            ("Helvetica", TextMetrics { font_size: 24.0, char_space: 7.0, word_space: 8.0, horizontal_scale: -0.75 }),
-            ("Courier", TextMetrics { font_size: 12.0, char_space: 10.0, word_space: 9.0, horizontal_scale: 0.5 }),
-            ("Courier", TextMetrics { font_size: 12.0, char_space: 10.0, word_space: 9.0, horizontal_scale: 0.5 }),
+            (
+                "Helvetica",
+                TextMetrics {
+                    font_size: 24.0,
+                    char_space: 7.0,
+                    word_space: 8.0,
+                    horizontal_scale: -0.75,
+                },
+            ),
+            (
+                "Courier",
+                TextMetrics {
+                    font_size: 12.0,
+                    char_space: 10.0,
+                    word_space: 9.0,
+                    horizontal_scale: 0.5,
+                },
+            ),
+            (
+                "Courier",
+                TextMetrics {
+                    font_size: 12.0,
+                    char_space: 10.0,
+                    word_space: 9.0,
+                    horizontal_scale: 0.5,
+                },
+            ),
         ];
         let pool = OperationBudget::new(2 * 1024 * 1024);
         let neighbor = pool.reserve(7).unwrap();
         for (&target, (name, metrics)) in targets.iter().zip(expected) {
-            let owned = page.text_metrics_for_operation_with_budget(&program, target, &pool).unwrap();
+            let owned = page
+                .text_metrics_for_operation_with_budget(&program, target, &pool)
+                .unwrap();
             assert_eq!(owned.font.name(), name);
             assert_eq!(owned.metrics, metrics);
             assert_eq!(pool.live_bytes(), owned.font._lease.bytes() + 7);
@@ -910,7 +1241,9 @@ mod tests {
             assert_eq!(pool.live_bytes(), 7);
         }
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _owned = page.text_metrics_for_operation_with_budget(&program, targets[0], &pool).unwrap();
+            let _owned = page
+                .text_metrics_for_operation_with_budget(&program, targets[0], &pool)
+                .unwrap();
             panic!("text metric owner unwind");
         }));
         assert!(caught.is_err());
@@ -921,41 +1254,91 @@ mod tests {
 
     #[test]
     fn ext_state_font_size_is_tracked_and_restored_with_budget() {
-        use crate::{budget::OperationBudget, objects::{pdf_array::PdfArray, pdf_dict::PdfDict, pdf_number::PdfNumber}};
+        use crate::{
+            budget::OperationBudget,
+            objects::{pdf_array::PdfArray, pdf_dict::PdfDict, pdf_number::PdfNumber},
+        };
         let doc = Document::new().unwrap();
         doc.add_page(0).unwrap();
         let page_id = doc.get_page(0).unwrap().page_node.as_object_id().unwrap();
-        let courier = doc.resources().register_standard_font(0, StandardFont::Courier).unwrap();
-        let helvetica = doc.resources().register_standard_font(0, StandardFont::Helvetica).unwrap();
+        let courier = doc
+            .resources()
+            .register_standard_font(0, StandardFont::Courier)
+            .unwrap();
+        let helvetica = doc
+            .resources()
+            .register_standard_font(0, StandardFont::Helvetica)
+            .unwrap();
         let mut scope = doc.get_page(0).unwrap().resource().unwrap();
-        let font = scope.get("Font").unwrap().as_dict().unwrap().get(&helvetica).unwrap().clone();
+        let font = scope
+            .get("Font")
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get(&helvetica)
+            .unwrap()
+            .clone();
         let mut gs = PdfDict::default();
-        gs.insert("Font".into(), PdfObject::PdfArray(PdfArray::from_items(vec![font, PdfObject::PdfNumber(PdfNumber::new(17.0))])));
+        gs.insert(
+            "Font".into(),
+            PdfObject::PdfArray(PdfArray::from_items(vec![
+                font,
+                PdfObject::PdfNumber(PdfNumber::new(17.0)),
+            ])),
+        );
         let mut states = PdfDict::default();
         states.insert("GS".into(), PdfObject::PdfDict(gs));
         scope.insert("ExtGState".into(), PdfObject::PdfDict(states));
         let mut dict = doc.resolve_object(page_id).unwrap().into_dict().unwrap();
         dict.insert("Resources".into(), PdfObject::PdfDict(scope));
-        doc.update_object(page_id, PdfObject::PdfDict(dict)).unwrap();
-        doc.replace_page_contents(0, format!("BT /{courier} 12 Tf 2 Tc 3 Tw 50 Tz q /GS gs (X) Tj Q (Y) Tj ET").into_bytes()).unwrap();
+        doc.update_object(page_id, PdfObject::PdfDict(dict))
+            .unwrap();
+        doc.replace_page_contents(
+            0,
+            format!("BT /{courier} 12 Tf 2 Tc 3 Tw 50 Tz q /GS gs (X) Tj Q (Y) Tj ET").into_bytes(),
+        )
+        .unwrap();
         let page = doc.get_page(0).unwrap();
         let program = page.content_program().unwrap();
-        let targets: Vec<_> = program.operations().iter().enumerate()
-            .filter(|(_, op)| op.operator.name() == "Tj").map(|(index, _)| index).collect();
+        let targets: Vec<_> = program
+            .operations()
+            .iter()
+            .enumerate()
+            .filter(|(_, op)| op.operator.name() == "Tj")
+            .map(|(index, _)| index)
+            .collect();
         let probe = OperationBudget::new(2 * 1024 * 1024);
-        for (target, name, size) in [(targets[0], "Helvetica", 17.0), (targets[1], "Courier", 12.0)] {
-            let owned = page.text_metrics_for_operation_with_budget(&program, target, &probe).unwrap();
+        for (target, name, size) in [
+            (targets[0], "Helvetica", 17.0),
+            (targets[1], "Courier", 12.0),
+        ] {
+            let owned = page
+                .text_metrics_for_operation_with_budget(&program, target, &probe)
+                .unwrap();
             assert_eq!(owned.font.name(), name);
-            assert_eq!(owned.metrics, TextMetrics { font_size: size, char_space: 2.0, word_space: 3.0, horizontal_scale: 0.5 });
+            assert_eq!(
+                owned.metrics,
+                TextMetrics {
+                    font_size: size,
+                    char_space: 2.0,
+                    word_space: 3.0,
+                    horizontal_scale: 0.5
+                }
+            );
             drop(owned);
             assert_eq!(probe.live_bytes(), 0);
         }
         let pool = OperationBudget::new(probe.peak_bytes() + 6);
         let neighbor = pool.reserve(7).unwrap();
-        assert!(page.text_metrics_for_operation_with_budget(&program, targets[0], &pool).is_err());
+        assert!(
+            page.text_metrics_for_operation_with_budget(&program, targets[0], &pool)
+                .is_err()
+        );
         assert_eq!(pool.live_bytes(), 7);
         drop(neighbor);
-        let owned = page.text_metrics_for_operation_with_budget(&program, targets[0], &pool).unwrap();
+        let owned = page
+            .text_metrics_for_operation_with_budget(&program, targets[0], &pool)
+            .unwrap();
         assert_eq!(owned.metrics.font_size, 17.0);
         drop(owned);
         assert_eq!(pool.live_bytes(), 0);
@@ -1009,25 +1392,41 @@ mod tests {
         let replacement = ContentProgram::from_decoded_bytes(
             format!("BT /{second} 12 Tf (A) Tj ET").into_bytes(),
             Default::default(),
-        ).unwrap();
-        let local = page.font_before_operation_in_scope_with_budget(
-            &replacement, 2, &scope, None, &pool,
-        ).unwrap().unwrap();
+        )
+        .unwrap();
+        let local = page
+            .font_before_operation_in_scope_with_budget(&replacement, 2, &scope, None, &pool)
+            .unwrap()
+            .unwrap();
         let local_retained = pool.live_bytes();
         assert_eq!(local.name(), "Helvetica");
         drop(local);
-        let replaced = page.font_before_operation_in_scope_with_budget(
-            &replacement, 2, &scope, Some(construct()), &pool,
-        ).unwrap().unwrap();
+        let replaced = page
+            .font_before_operation_in_scope_with_budget(
+                &replacement,
+                2,
+                &scope,
+                Some(construct()),
+                &pool,
+            )
+            .unwrap()
+            .unwrap();
         assert_eq!(replaced.name(), "Helvetica");
         assert_eq!(pool.live_bytes(), local_retained);
         drop(replaced);
         assert_eq!(pool.live_bytes(), 0);
-        let replaced_state = page.text_state_before_operation_in_scope_with_budget(
-            &replacement, 2, &scope,
-            BudgetedTextState { font: Some(construct()), metrics: TextMetrics::default() },
-            &pool,
-        ).unwrap();
+        let replaced_state = page
+            .text_state_before_operation_in_scope_with_budget(
+                &replacement,
+                2,
+                &scope,
+                BudgetedTextState {
+                    font: Some(construct()),
+                    metrics: TextMetrics::default(),
+                },
+                &pool,
+            )
+            .unwrap();
         assert_eq!(replaced_state.font.as_ref().unwrap().name(), "Helvetica");
         assert_eq!(pool.live_bytes(), local_retained);
         drop(replaced_state);
@@ -1039,15 +1438,24 @@ mod tests {
         let mut initial_measurement = None;
         for count in [2, 3, 32] {
             let mut source = String::from("BT ");
-            for _ in 0..count { source.push_str(&format!("/{second} 12 Tf ")); }
+            for _ in 0..count {
+                source.push_str(&format!("/{second} 12 Tf "));
+            }
             source.push_str("(A) Tj ET");
-            let repeated = ContentProgram::from_decoded_bytes(
-                source.into_bytes(), Default::default(),
-            ).unwrap();
+            let repeated =
+                ContentProgram::from_decoded_bytes(source.into_bytes(), Default::default())
+                    .unwrap();
             let repeated_pool = OperationBudget::new(2 * 1024 * 1024);
-            let owned = page.font_before_operation_in_scope_with_budget(
-                &repeated, count + 1, &scope, None, &repeated_pool,
-            ).unwrap().unwrap();
+            let owned = page
+                .font_before_operation_in_scope_with_budget(
+                    &repeated,
+                    count + 1,
+                    &scope,
+                    None,
+                    &repeated_pool,
+                )
+                .unwrap()
+                .unwrap();
             assert_eq!(owned.name(), "Helvetica");
             let measurement = (repeated_pool.peak_bytes(), repeated_pool.live_bytes());
             assert!(measurement.1 > 0);
@@ -1067,26 +1475,28 @@ mod tests {
         let invalid =
             ContentProgram::from_decoded_bytes(b"BT bogus (A) Tj ET".to_vec(), Default::default())
                 .unwrap();
-        assert!(page
-            .font_before_operation_in_scope_with_budget(
+        assert!(
+            page.font_before_operation_in_scope_with_budget(
                 &invalid,
                 2,
                 &scope,
                 Some(construct()),
                 &pool
             )
-            .is_err());
+            .is_err()
+        );
         assert_eq!(pool.live_bytes(), 0);
         let foreign = OperationBudget::new(2 * 1024 * 1024);
-        assert!(page
-            .font_before_operation_in_scope_with_budget(
+        assert!(
+            page.font_before_operation_in_scope_with_budget(
                 &leaf,
                 4,
                 &scope,
                 Some(construct()),
                 &foreign
             )
-            .is_err());
+            .is_err()
+        );
         assert_eq!(pool.live_bytes(), 0);
         assert_eq!(foreign.live_bytes(), 0);
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1147,14 +1557,24 @@ mod tests {
         use crate::budget::OperationBudget;
         let doc = Document::new().unwrap();
         let mut dict = PdfDict::default();
-        dict.insert("Subtype".into(), PdfObject::PdfName(crate::objects::pdf_name::PdfName::new("Type1".into())));
-        dict.insert("BaseFont".into(), PdfObject::PdfName(crate::objects::pdf_name::PdfName::new("Courier".into())));
+        dict.insert(
+            "Subtype".into(),
+            PdfObject::PdfName(crate::objects::pdf_name::PdfName::new("Type1".into())),
+        );
+        dict.insert(
+            "BaseFont".into(),
+            PdfObject::PdfName(crate::objects::pdf_name::PdfName::new("Courier".into())),
+        );
         let construct = |pool: &OperationBudget| -> PdfResult<Rc<SelectedFont>> {
             let (font, lease) = Font::try_new_with_budget(&dict, doc.ctx(), pool)?;
-            Ok(Rc::new(SelectedFont { font, lease: Some(lease) }))
+            Ok(Rc::new(SelectedFont {
+                font,
+                lease: Some(lease),
+            }))
         };
         let probe = OperationBudget::new(1024 * 1024);
         let mut selection = construct(&probe).unwrap();
+        assert_eq!(selection.font.name(), "Courier");
         let retained = probe.live_bytes();
         assert!(retained > 0);
         selection = construct(&probe).unwrap();
@@ -1199,11 +1619,20 @@ mod tests {
         use crate::budget::OperationBudget;
         let doc = Document::new().unwrap();
         let mut dict = PdfDict::default();
-        dict.insert("Subtype".into(), PdfObject::PdfName(crate::objects::pdf_name::PdfName::new("Type1".into())));
-        dict.insert("BaseFont".into(), PdfObject::PdfName(crate::objects::pdf_name::PdfName::new("Courier".into())));
+        dict.insert(
+            "Subtype".into(),
+            PdfObject::PdfName(crate::objects::pdf_name::PdfName::new("Type1".into())),
+        );
+        dict.insert(
+            "BaseFont".into(),
+            PdfObject::PdfName(crate::objects::pdf_name::PdfName::new("Courier".into())),
+        );
         // This test isolates control storage. Derived font allocation is tested
         // separately with budget constructors and real prefix interpretation.
-        let font = || SelectedFont { font: Font::try_new(&dict, doc.ctx()).unwrap(), lease: None };
+        let font = || SelectedFont {
+            font: Font::try_new(&dict, doc.ctx()).unwrap(),
+            lease: None,
+        };
         let probe = OperationBudget::new(1024 * 1024);
         let mut arena = FontSelections::new(Some(&probe));
         let first = arena.insert(font()).unwrap();
@@ -1221,10 +1650,15 @@ mod tests {
             arena.release(index);
             assert_eq!(probe.live_bytes(), initial);
         }
-        for _ in 0..capacity { arena.insert(font()).unwrap(); }
+        for _ in 0..capacity {
+            arena.insert(font()).unwrap();
+        }
         arena.insert(font()).unwrap();
         let grown = probe.live_bytes();
-        assert_eq!(grown, arena.slots.capacity() * std::mem::size_of::<Option<FontSlot>>());
+        assert_eq!(
+            grown,
+            arena.slots.capacity() * std::mem::size_of::<Option<FontSlot>>()
+        );
         assert_eq!(probe.peak_bytes(), initial + grown);
         drop(arena);
         assert_eq!(probe.live_bytes(), 0);
@@ -1232,8 +1666,13 @@ mod tests {
         let pool = OperationBudget::new(initial + grown);
         let neighbor = pool.reserve(1).unwrap();
         let mut arena = FontSelections::new(Some(&pool));
-        for _ in 0..capacity { arena.insert(font()).unwrap(); }
-        assert!(matches!(arena.insert(font()), Err(PdfError::ResourceLimit(_))));
+        for _ in 0..capacity {
+            arena.insert(font()).unwrap();
+        }
+        assert!(matches!(
+            arena.insert(font()),
+            Err(PdfError::ResourceLimit(_))
+        ));
         assert_eq!(arena.slots.len(), capacity);
         assert_eq!(arena.slots.capacity(), capacity);
         assert_eq!(pool.live_bytes(), initial + 1);
@@ -1266,19 +1705,20 @@ mod tests {
         let size = std::mem::size_of::<(Option<usize>, TextMetrics)>();
         let pool = OperationBudget::new(6 * size);
         let neighbor = pool.reserve(1).unwrap();
-        assert!(page
-            .font_before_operation_in_scope_inner(
+        assert!(
+            page.font_before_operation_in_scope_inner(
                 &program,
                 7,
                 &PdfDict::default(),
                 None,
                 Some(&pool)
             )
-            .is_err());
+            .is_err()
+        );
         assert_eq!(pool.live_bytes(), 1);
         drop(neighbor);
-        assert!(page
-            .font_before_operation_in_scope_inner(
+        assert!(
+            page.font_before_operation_in_scope_inner(
                 &program,
                 7,
                 &PdfDict::default(),
@@ -1286,21 +1726,23 @@ mod tests {
                 Some(&pool)
             )
             .unwrap()
-            .is_none());
+            .is_none()
+        );
         assert_eq!(pool.peak_bytes(), 6 * size);
         assert_eq!(pool.live_bytes(), 0);
         let invalid =
             ContentProgram::from_decoded_bytes(b"q Q Q BT (A) Tj ET".to_vec(), doc.ctx().options())
                 .unwrap();
-        assert!(page
-            .font_before_operation_in_scope_inner(
+        assert!(
+            page.font_before_operation_in_scope_inner(
                 &invalid,
                 4,
                 &PdfDict::default(),
                 None,
                 Some(&pool)
             )
-            .is_err());
+            .is_err()
+        );
         assert_eq!(pool.live_bytes(), 0);
     }
     use crate::{
@@ -1367,9 +1809,11 @@ mod tests {
         let first = pages[0]
             .font_for_text_operation_with_budget(&programs[0], 2, &pool)
             .unwrap();
-        assert!(pages[1]
-            .font_for_text_operation_with_budget(&programs[1], 2, &pool)
-            .is_err());
+        assert!(
+            pages[1]
+                .font_for_text_operation_with_budget(&programs[1], 2, &pool)
+                .is_err()
+        );
         assert_eq!(pool.live_bytes(), retained);
         assert_eq!(first.name(), "Courier");
         drop(first);
@@ -1440,9 +1884,10 @@ mod tests {
         assert_eq!(probe.live_bytes(), 0);
         let pool = OperationBudget::new(peak);
         let neighbor = pool.reserve(1).unwrap();
-        assert!(page
-            .font_for_text_operation_with_budget(&program, 2, &pool)
-            .is_err());
+        assert!(
+            page.font_for_text_operation_with_budget(&program, 2, &pool)
+                .is_err()
+        );
         assert_eq!(pool.live_bytes(), 1);
         drop(neighbor);
         assert_eq!(
@@ -1452,9 +1897,10 @@ mod tests {
             "Helvetica"
         );
         assert_eq!(pool.live_bytes(), 0);
-        assert!(page
-            .font_for_text_operation_with_budget(&program, 0, &pool)
-            .is_err());
+        assert!(
+            page.font_for_text_operation_with_budget(&program, 0, &pool)
+                .is_err()
+        );
         assert_eq!(pool.live_bytes(), 0);
     }
 
@@ -1487,15 +1933,17 @@ mod tests {
                 .name(),
             "Courier"
         );
-        assert!(page
-            .font_for_text_operation_in_scope(&program, 2, &PdfDict::default())
-            .is_err());
+        assert!(
+            page.font_for_text_operation_in_scope(&program, 2, &PdfDict::default())
+                .is_err()
+        );
         let unbound =
             ContentProgram::from_decoded_bytes(b"BT (A) Tj ET".to_vec(), doc.ctx().options())
                 .unwrap();
-        assert!(page
-            .font_for_text_operation_in_scope(&unbound, 1, &scope)
-            .is_err());
+        assert!(
+            page.font_for_text_operation_in_scope(&unbound, 1, &scope)
+                .is_err()
+        );
         let inherited = page.font_for_text_operation(&program, 2).unwrap();
         for bytes in [b"BT () Tj ET".as_slice(), b"BT <> Tj ET".as_slice()] {
             let empty =
@@ -1517,10 +1965,11 @@ mod tests {
             }
             .unwrap();
             assert_eq!(encoded, [0xe9, 0x80]);
-            assert!(page
-                .font_before_operation_in_scope(&empty, 1, &PdfDict::default(), None)
-                .unwrap()
-                .is_none());
+            assert!(
+                page.font_before_operation_in_scope(&empty, 1, &PdfDict::default(), None)
+                    .unwrap()
+                    .is_none()
+            );
         }
         assert_eq!(
             page.font_before_operation_in_scope(&unbound, 1, &scope, Some(inherited.clone()))
@@ -1641,10 +2090,12 @@ mod tests {
                     .collect::<String>(),
                 "BC"
             );
-            assert!(report
-                .characters
-                .iter()
-                .all(|character| character.font_size == 12.0));
+            assert!(
+                report
+                    .characters
+                    .iter()
+                    .all(|character| character.font_size == 12.0)
+            );
         }
     }
 }

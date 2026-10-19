@@ -81,7 +81,7 @@ impl ColorSpace {
                 "RGB conversion for {self}"
             ))),
         }?;
-        context.from_srgb(color)
+        context.convert_srgb(color)
     }
     pub fn default_value(&self) -> PdfResult<ColorValue> {
         Ok(match self {
@@ -130,12 +130,10 @@ impl ColorSpace {
                 "RGB" | "DeviceRGB" => Ok(ColorSpace::DeviceRgb(DeviceRgb::new())),
                 "CMYK" | "DeviceCMYK" => Ok(ColorSpace::DeviceCmyk(DeviceCmyk::new())),
                 "Pattern" => Ok(ColorSpace::Pattern(PatternColorSpace::default())),
-                _ => {
-                    return Err(PdfError::ColorError(format!(
-                        "Color name is error:{:?}",
-                        name
-                    )));
-                }
+                _ => Err(PdfError::ColorError(format!(
+                    "Color name is error:{:?}",
+                    name
+                ))),
             },
             PdfObject::PdfArray(array) => {
                 let cn = array
@@ -167,12 +165,10 @@ impl ColorSpace {
                     ))),
                 }
             }
-            _ => {
-                return Err(PdfError::ColorError(format!(
-                    "Parse ColorSpace need an PdfArray or PdfName got :{:?}",
-                    obj
-                )));
-            }
+            _ => Err(PdfError::ColorError(format!(
+                "Parse ColorSpace need an PdfArray or PdfName got :{:?}",
+                obj
+            ))),
         }
     }
 }

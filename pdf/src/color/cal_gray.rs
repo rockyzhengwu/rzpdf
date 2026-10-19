@@ -25,56 +25,6 @@ impl Default for CalGray {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        document::cross_ref_table::CrossRefTable,
-        io::stream_reader::StreamReader,
-        objects::pdf_dict::PdfDict,
-        parser::{parser::PdfParser, syntax::SyntaxParser},
-    };
-    use std::{collections::HashMap, io::Cursor};
-
-    #[test]
-    fn calgray_rejects_bad_parameters_and_component_values() {
-        let parser = PdfParser::new(SyntaxParser::new(
-            StreamReader::try_new(Cursor::new(Vec::<u8>::new())).unwrap(),
-        ));
-        let ctx = PDFContext::try_new(
-            parser,
-            CrossRefTable::new(HashMap::new(), PdfDict::default()),
-        )
-        .unwrap();
-        let parse = |source: &str| {
-            let obj = SyntaxParser::new(
-                StreamReader::try_new(Cursor::new(source.as_bytes().to_vec())).unwrap(),
-            )
-            .get_object()
-            .unwrap();
-            CalGray::try_new(&obj, &ctx)
-        };
-        let color = parse("[/CalGray << /WhitePoint [0.95 1 1.09] /Gamma 2 >>]").unwrap();
-        assert!(color.rgb(&color.default_value()).is_ok());
-        assert!(color.rgb(&ColorValue::new(vec![])).is_err());
-        assert!(color.rgb(&ColorValue::new(vec![f32::NAN])).is_err());
-        assert!(color.rgb(&ColorValue::new(vec![0.0, 1.0])).is_err());
-        for source in [
-            "null",
-            "[/CalGray]",
-            "[/CalGray 1]",
-            "<< >>",
-            "<< /WhitePoint [1 /bad 1] >>",
-            "<< /WhitePoint [1 2 1] >>",
-            "<< /WhitePoint [1 1 1] /Gamma 0 >>",
-            "<< /WhitePoint [1 1 1] /Gamma /bad >>",
-            "<< /WhitePoint [1 1 1] /BlackPoint [-1 0 0] >>",
-        ] {
-            assert!(parse(source).is_err(), "{source}");
-        }
-    }
-}
-
 impl CalGray {
     pub fn try_new<R: Seek + Read>(obj: &PdfObject, ctx: &PDFContext<R>) -> PdfResult<Self> {
         let obj = ctx.resolve(obj)?;
@@ -94,9 +44,11 @@ impl CalGray {
         let dict = parameters.as_dict().ok_or_else(|| {
             PdfError::ColorError("CalGray parameters must be a dictionary".into())
         })?;
-        let mut color = CalGray::default();
-        color.white_point = super::cal_rgb::read_parameter::<R, 3>(dict, "WhitePoint", ctx)?
-            .ok_or_else(|| PdfError::ColorError("CalGray requires WhitePoint".into()))?;
+        let mut color = CalGray {
+            white_point: super::cal_rgb::read_parameter::<R, 3>(dict, "WhitePoint", ctx)?
+                .ok_or_else(|| PdfError::ColorError("CalGray requires WhitePoint".into()))?,
+            ..Default::default()
+        };
         if let Some(value) = super::cal_rgb::read_parameter::<R, 3>(dict, "BlackPoint", ctx)? {
             color.black_point = value;
         }
@@ -145,5 +97,55 @@ impl CalGray {
             return Err(PdfError::ColorError("CalGray conversion overflow".into()));
         }
         Ok(ColorRgb::new(r, g, b))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        document::cross_ref_table::CrossRefTable,
+        io::stream_reader::StreamReader,
+        objects::pdf_dict::PdfDict,
+        parser::{parser::PdfParser, syntax::SyntaxParser},
+    };
+    use std::{collections::HashMap, io::Cursor};
+
+    #[test]
+    fn calgray_rejects_bad_parameters_and_component_values() {
+        let parser = PdfParser::new(SyntaxParser::new(
+            StreamReader::try_new(Cursor::new(Vec::<u8>::new())).unwrap(),
+        ));
+        let ctx = PDFContext::try_new(
+            parser,
+            CrossRefTable::new(HashMap::new(), PdfDict::default()),
+        )
+        .unwrap();
+        let parse = |source: &str| {
+            let obj = SyntaxParser::new(
+                StreamReader::try_new(Cursor::new(source.as_bytes().to_vec())).unwrap(),
+            )
+            .get_object()
+            .unwrap();
+            CalGray::try_new(&obj, &ctx)
+        };
+        let color = parse("[/CalGray << /WhitePoint [0.95 1 1.09] /Gamma 2 >>]").unwrap();
+        assert!(color.rgb(&color.default_value()).is_ok());
+        assert!(color.rgb(&ColorValue::new(vec![])).is_err());
+        assert!(color.rgb(&ColorValue::new(vec![f32::NAN])).is_err());
+        assert!(color.rgb(&ColorValue::new(vec![0.0, 1.0])).is_err());
+        for source in [
+            "null",
+            "[/CalGray]",
+            "[/CalGray 1]",
+            "<< >>",
+            "<< /WhitePoint [1 /bad 1] >>",
+            "<< /WhitePoint [1 2 1] >>",
+            "<< /WhitePoint [1 1 1] /Gamma 0 >>",
+            "<< /WhitePoint [1 1 1] /Gamma /bad >>",
+            "<< /WhitePoint [1 1 1] /BlackPoint [-1 0 0] >>",
+        ] {
+            assert!(parse(source).is_err(), "{source}");
+        }
     }
 }

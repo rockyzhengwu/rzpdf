@@ -245,14 +245,13 @@ impl<R: Read + Seek> PdfDocument<R> {
             project(source, graph, selected, all, false)?;
             if !same_document {
                 let source_tree = source.structure_tree()?.unwrap();
-                if let Some(tree) = self.structure_tree()? {
-                    if source_tree
+                if let Some(tree) = self.structure_tree()?
+                    && source_tree
                         .namespaces
                         .iter()
                         .any(|n| tree.namespaces.iter().any(|other| other.uri == n.uri))
-                    {
-                        return Err(PdfError::UnsupportedFeature("import namespace URI conflict; explicit definition reconciliation required".into()));
-                    }
+                {
+                    return Err(PdfError::UnsupportedFeature("import namespace URI conflict; explicit definition reconciliation required".into()));
                 }
             }
         }

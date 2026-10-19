@@ -1,6 +1,6 @@
 use std::{fs::File, io::BufReader};
 
-use pdf::{device::trace::TraceDevice, document::PdfDocument, objects};
+use pdf::{device::trace::TraceDevice, document::PdfDocument};
 
 fn main() {
     let docpath = "tests/path-test.pdf";

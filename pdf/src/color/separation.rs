@@ -18,6 +18,112 @@ pub struct Separation {
     tint_transform: Function,
 }
 
+impl Separation {
+    pub(crate) fn retained_profile_bytes(&self) -> PdfResult<usize> {
+        self.alternate_space.retained_profile_bytes()
+    }
+    pub fn is_nonpainting(&self) -> bool {
+        self.name == "None"
+    }
+    pub fn try_new<R: Seek + Read>(arr: &PdfArray, ctx: &PDFContext<R>) -> PdfResult<Self> {
+        if arr.len() != 4 {
+            return Err(PdfError::ColorError(
+                "Separation requires four array entries".into(),
+            ));
+        }
+        let family = ctx.resolve(
+            arr.get(0)
+                .ok_or_else(|| PdfError::ColorError("missing Separation family".into()))?,
+        )?;
+        if family
+            .as_name()
+            .is_none_or(|name| name.name() != "Separation")
+        {
+            return Err(PdfError::ColorError(
+                "Separation array must start with /Separation".into(),
+            ));
+        }
+        let name_obj = ctx.resolve(arr.get(1).ok_or(PdfError::ColorError(
+            "Separation Colorspace name is Nonne".to_string(),
+        ))?)?;
+        let name = name_obj
+            .as_name()
+            .ok_or(PdfError::ColorError(
+                "Separation colorspace Name is not a pdfName object".to_string(),
+            ))?
+            .name();
+        let alternate_space = arr.get(2).ok_or(PdfError::ColorError(
+            "Separation ColorSpace alternate_space is None".to_string(),
+        ))?;
+        let alternate = ColorSpace::try_new(alternate_space, ctx)?;
+        if matches!(
+            alternate,
+            ColorSpace::Pattern(_)
+                | ColorSpace::Indexed(_)
+                | ColorSpace::Separation(_)
+                | ColorSpace::DeviceN(_)
+        ) {
+            return Err(PdfError::ColorError(
+                "Invalid Separation alternate space".into(),
+            ));
+        }
+        let tint_transform = arr.get(3).ok_or(PdfError::ColorError(
+            "Separation colorspace initransform is None".to_string(),
+        ))?;
+        let ts = ctx.resolve(tint_transform)?;
+        let tint_transform = create_function(&ts, ctx)?;
+        if tint_transform.dimensions() != (1, alternate.number_of_components()?) {
+            return Err(PdfError::ColorError(
+                "Separation tint-transform dimensions do not match".into(),
+            ));
+        }
+        Ok(Self {
+            name: name.to_string(),
+            alternate_space: Box::new(alternate),
+            tint_transform,
+        })
+    }
+
+    pub fn default_value(&self) -> ColorValue {
+        ColorValue::new(vec![1.0])
+    }
+
+    pub fn rgb(&self, value: &ColorValue) -> PdfResult<ColorRgb> {
+        self.rgb_with_context(value, &super::conversion::ColorConversionContext::default())
+    }
+    pub fn rgb_with_context(
+        &self,
+        value: &ColorValue,
+        context: &super::conversion::ColorConversionContext,
+    ) -> PdfResult<ColorRgb> {
+        if value.value_size() != 1 || !value.values()[0].is_finite() {
+            return Err(PdfError::ColorError(
+                "Separation requires one finite tint".into(),
+            ));
+        }
+        let tint = value.values()[0].clamp(0.0, 1.0);
+        match self.name.as_str() {
+            "All" => {
+                let gray = 1.0 - tint;
+                return context.convert_srgb(ColorRgb::new(gray, gray, gray));
+            }
+            "None" => {
+                return Err(PdfError::UnsupportedFeature(
+                    "None Separation requires paint suppression, not an RGB color".into(),
+                ));
+            }
+            _ => {}
+        }
+        let values = self.tint_transform.eval(&[tint])?;
+        self.alternate_space
+            .rgb_with_context(&ColorValue::new(values), context)
+    }
+
+    pub fn number_of_components(&self) -> usize {
+        1
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,111 +224,5 @@ mod tests {
             ));
         }
         assert!(ColorSpace::try_new(&good, &ctx).is_ok());
-    }
-}
-
-impl Separation {
-    pub(crate) fn retained_profile_bytes(&self) -> PdfResult<usize> {
-        self.alternate_space.retained_profile_bytes()
-    }
-    pub fn is_nonpainting(&self) -> bool {
-        self.name == "None"
-    }
-    pub fn try_new<R: Seek + Read>(arr: &PdfArray, ctx: &PDFContext<R>) -> PdfResult<Self> {
-        if arr.len() != 4 {
-            return Err(PdfError::ColorError(
-                "Separation requires four array entries".into(),
-            ));
-        }
-        let family = ctx.resolve(
-            arr.get(0)
-                .ok_or_else(|| PdfError::ColorError("missing Separation family".into()))?,
-        )?;
-        if family
-            .as_name()
-            .is_none_or(|name| name.name() != "Separation")
-        {
-            return Err(PdfError::ColorError(
-                "Separation array must start with /Separation".into(),
-            ));
-        }
-        let name_obj = ctx.resolve(arr.get(1).ok_or(PdfError::ColorError(
-            "Separation Colorspace name is Nonne".to_string(),
-        ))?)?;
-        let name = name_obj
-            .as_name()
-            .ok_or(PdfError::ColorError(
-                "Separation colorspace Name is not a pdfName object".to_string(),
-            ))?
-            .name();
-        let alternate_space = arr.get(2).ok_or(PdfError::ColorError(
-            "Separation ColorSpace alternate_space is None".to_string(),
-        ))?;
-        let alternate = ColorSpace::try_new(alternate_space, ctx)?;
-        if matches!(
-            alternate,
-            ColorSpace::Pattern(_)
-                | ColorSpace::Indexed(_)
-                | ColorSpace::Separation(_)
-                | ColorSpace::DeviceN(_)
-        ) {
-            return Err(PdfError::ColorError(
-                "Invalid Separation alternate space".into(),
-            ));
-        }
-        let tint_transform = arr.get(3).ok_or(PdfError::ColorError(
-            "Separation colorspace initransform is None".to_string(),
-        ))?;
-        let ts = ctx.resolve(tint_transform)?;
-        let tint_transform = create_function(&ts, ctx)?;
-        if tint_transform.dimensions() != (1, alternate.number_of_components()?) {
-            return Err(PdfError::ColorError(
-                "Separation tint-transform dimensions do not match".into(),
-            ));
-        }
-        Ok(Self {
-            name: name.to_string(),
-            alternate_space: Box::new(alternate),
-            tint_transform,
-        })
-    }
-
-    pub fn default_value(&self) -> ColorValue {
-        return ColorValue::new(vec![1.0]);
-    }
-
-    pub fn rgb(&self, value: &ColorValue) -> PdfResult<ColorRgb> {
-        self.rgb_with_context(value, &super::conversion::ColorConversionContext::default())
-    }
-    pub fn rgb_with_context(
-        &self,
-        value: &ColorValue,
-        context: &super::conversion::ColorConversionContext,
-    ) -> PdfResult<ColorRgb> {
-        if value.value_size() != 1 || !value.values()[0].is_finite() {
-            return Err(PdfError::ColorError(
-                "Separation requires one finite tint".into(),
-            ));
-        }
-        let tint = value.values()[0].clamp(0.0, 1.0);
-        match self.name.as_str() {
-            "All" => {
-                let gray = 1.0 - tint;
-                return context.from_srgb(ColorRgb::new(gray, gray, gray));
-            }
-            "None" => {
-                return Err(PdfError::UnsupportedFeature(
-                    "None Separation requires paint suppression, not an RGB color".into(),
-                ));
-            }
-            _ => {}
-        }
-        let values = self.tint_transform.eval(&[tint])?;
-        self.alternate_space
-            .rgb_with_context(&ColorValue::new(values), context)
-    }
-
-    pub fn number_of_components(&self) -> usize {
-        1
     }
 }

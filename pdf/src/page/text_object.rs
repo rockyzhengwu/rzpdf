@@ -1,5 +1,5 @@
 use crate::{
-    font::{CharCode, pdf_font::Font},
+    font::CharCode,
     geom::{matrix::Matrix, point::Point},
     page::graphic_state::GraphicState,
 };
@@ -74,7 +74,10 @@ pub struct TextObject {
 }
 
 impl TextObject {
-    pub(crate) fn clear_edit_source(&mut self) {self.source=None;self.nested_source=None;}
+    pub(crate) fn clear_edit_source(&mut self) {
+        self.source = None;
+        self.nested_source = None;
+    }
     /// Type3 glyph graphics were emitted separately. Keep this event for
     /// extraction/provenance only; painting it again would duplicate the glyph.
     pub fn is_type3_metadata(&self) -> bool {

@@ -154,10 +154,10 @@ impl<R: Read + Seek> PdfDocument<R> {
         if !matches!(definition.kind, FormFieldKind::Text { .. }) && definition.max_len.is_some() {
             return Err(invalid("MaxLen on a non-Text field"));
         }
-        if let Some(exports) = &definition.button_exports {
-            if exports.len() != widgets.len() {
-                return Err(invalid("button Opt/widget count mismatch"));
-            }
+        if let Some(exports) = &definition.button_exports
+            && exports.len() != widgets.len()
+        {
+            return Err(invalid("button Opt/widget count mismatch"));
         }
         self.edit_transaction(|doc| {
             let graph = doc.field_graph()?;
@@ -518,10 +518,10 @@ impl<R: Read + Seek> PdfDocument<R> {
                             if top > options.len() || !options.is_empty() && top == options.len() {
                                 return Err(invalid("Choice TI outside Opt"));
                             }
-                            if let Some(&first) = choice_indices.first() {
-                                if first < top || first >= top.saturating_add(rows) {
-                                    top = first;
-                                }
+                            if let Some(&first) = choice_indices.first()
+                                && (first < top || first >= top.saturating_add(rows))
+                            {
+                                top = first;
                             }
                             field.try_insert(
                                 "TI".into(),

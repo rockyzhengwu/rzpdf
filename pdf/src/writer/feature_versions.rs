@@ -43,6 +43,7 @@ impl<R: Read + Seek> FeatureDocument<'_, R> {
 }
 
 /// Targeted known feature checks, not a full feature/conformance validator.
+#[cfg(test)]
 pub(super) fn validate_feature_versions<R: Read + Seek>(
     doc: &PdfDocument<R>,
     root: &PdfObject,
@@ -83,52 +84,104 @@ pub(super) fn validate_feature_versions_with_budget<R: Read + Seek>(
             _ => None,
         };
         if let Some((dict, stream)) = dict {
-            let optional_group = name(doc,dict,"Type","OCG")?;
-            let optional_membership = name(doc,dict,"Type","OCMD")?;
-            if version < PdfVersion::V1_5 && (optional_group || optional_membership || dict.contains_key("OCProperties")
-                || dict.contains_key("OC") && (stream || name(doc,dict,"Type","Annot")?)) {
+            let optional_group = name(doc, dict, "Type", "OCG")?;
+            let optional_membership = name(doc, dict, "Type", "OCMD")?;
+            if version < PdfVersion::V1_5
+                && (optional_group
+                    || optional_membership
+                    || dict.contains_key("OCProperties")
+                    || dict.contains_key("OC") && (stream || name(doc, dict, "Type", "Annot")?))
+            {
                 return Err(PdfError::UnsupportedFeature("optional content requires PDF 1.5 or later; select an explicit version upgrade".into()));
             }
             if version < PdfVersion::V1_6 && optional_membership && dict.contains_key("VE") {
                 return Err(PdfError::UnsupportedFeature("optional-content VE requires PDF 1.6 or later; select an explicit version upgrade".into()));
             }
-            if !stream && name(doc, dict, "Type", "Catalog")? && dict.contains_key("AcroForm") && version < PdfVersion::V1_2 {
-                return Err(PdfError::UnsupportedFeature("AcroForm requires PDF 1.2 or later; select an explicit version upgrade".into()));
+            if !stream
+                && name(doc, dict, "Type", "Catalog")?
+                && dict.contains_key("AcroForm")
+                && version < PdfVersion::V1_2
+            {
+                return Err(PdfError::UnsupportedFeature(
+                    "AcroForm requires PDF 1.2 or later; select an explicit version upgrade".into(),
+                ));
             }
-            if !stream && (dict.contains_key("FT") || dict.contains_key("T") && dict.contains_key("Ff")) {
+            if !stream
+                && (dict.contains_key("FT") || dict.contains_key("T") && dict.contains_key("Ff"))
+            {
                 let flags = match dict.get("Ff") {
-                    Some(value) => doc.resolve(value)?.as_number().ok_or_else(|| PdfError::DocumentError("field flags integer".into()))?.as_u32_checked()?,
+                    Some(value) => doc
+                        .resolve(value)?
+                        .as_number()
+                        .ok_or_else(|| PdfError::DocumentError("field flags integer".into()))?
+                        .as_u32_checked()?,
                     None => 0,
                 };
-                let minimum = if flags & ((1 << 25) | (1 << 26)) != 0 { PdfVersion::V1_5 }
-                    else if flags & ((1 << 20) | (1 << 21) | (1 << 22) | (1 << 23)) != 0
-                        || name(doc, dict, "FT", "Btn")? && dict.contains_key("Opt")
-                        || name(doc, dict, "FT", "Ch")? && dict.contains_key("I") { PdfVersion::V1_4 }
-                    else if name(doc, dict, "FT", "Sig")? { PdfVersion::V1_3 }
-                    else { PdfVersion::V1_2 };
-                if version < minimum { return Err(PdfError::UnsupportedFeature(format!("form field requires PDF {} or later; select an explicit version upgrade", minimum.as_str()))); }
-            }
-            if !stream && (name(doc,dict,"Type","Annot")? || dict.contains_key("Rect") && dict.contains_key("Subtype")) {
-                let flags=match dict.get("F") {
-                    Some(v)=>doc.resolve(v)?.as_number().ok_or_else(||PdfError::DocumentError("annotation flags must be integer".into()))?.as_u32_checked()?,
-                    None=>0,
+                let minimum = if flags & ((1 << 25) | (1 << 26)) != 0 {
+                    PdfVersion::V1_5
+                } else if flags & ((1 << 20) | (1 << 21) | (1 << 22) | (1 << 23)) != 0
+                    || name(doc, dict, "FT", "Btn")? && dict.contains_key("Opt")
+                    || name(doc, dict, "FT", "Ch")? && dict.contains_key("I")
+                {
+                    PdfVersion::V1_4
+                } else if name(doc, dict, "FT", "Sig")? {
+                    PdfVersion::V1_3
+                } else {
+                    PdfVersion::V1_2
                 };
-                let minimum=if flags&512!=0 {PdfVersion::V1_7}
-                    else if dict.contains_key("RT") {PdfVersion::V1_6}
-                    else if flags&256!=0 || dict.contains_key("IRT") || name(doc,dict,"Subtype","Polygon")? || name(doc,dict,"Subtype","PolyLine")? {PdfVersion::V1_5}
-                    else if dict.contains_key("CA") {PdfVersion::V1_4}else{PdfVersion::V1_0};
-                if version<minimum {return Err(PdfError::UnsupportedFeature(format!("annotation requires PDF {} or later; select an explicit version upgrade",minimum.as_str())));}
+                if version < minimum {
+                    return Err(PdfError::UnsupportedFeature(format!(
+                        "form field requires PDF {} or later; select an explicit version upgrade",
+                        minimum.as_str()
+                    )));
+                }
             }
-            if version < PdfVersion::V1_3 {
-                if let Some(value) = dict.get("ColorSpace") {
-                    let value = doc.resolve(value)?;
-                    if let PdfObject::PdfDict(resources) = &*value {
-                        for (_, space) in resources {
-                            check_color_space_version(doc, space, version)?;
-                        }
-                    } else {
-                        check_color_space_version(doc, &value, version)?;
+            if !stream
+                && (name(doc, dict, "Type", "Annot")?
+                    || dict.contains_key("Rect") && dict.contains_key("Subtype"))
+            {
+                let flags = match dict.get("F") {
+                    Some(v) => doc
+                        .resolve(v)?
+                        .as_number()
+                        .ok_or_else(|| {
+                            PdfError::DocumentError("annotation flags must be integer".into())
+                        })?
+                        .as_u32_checked()?,
+                    None => 0,
+                };
+                let minimum = if flags & 512 != 0 {
+                    PdfVersion::V1_7
+                } else if dict.contains_key("RT") {
+                    PdfVersion::V1_6
+                } else if flags & 256 != 0
+                    || dict.contains_key("IRT")
+                    || name(doc, dict, "Subtype", "Polygon")?
+                    || name(doc, dict, "Subtype", "PolyLine")?
+                {
+                    PdfVersion::V1_5
+                } else if dict.contains_key("CA") {
+                    PdfVersion::V1_4
+                } else {
+                    PdfVersion::V1_0
+                };
+                if version < minimum {
+                    return Err(PdfError::UnsupportedFeature(format!(
+                        "annotation requires PDF {} or later; select an explicit version upgrade",
+                        minimum.as_str()
+                    )));
+                }
+            }
+            if version < PdfVersion::V1_3
+                && let Some(value) = dict.get("ColorSpace")
+            {
+                let value = doc.resolve(value)?;
+                if let PdfObject::PdfDict(resources) = &*value {
+                    for (_, space) in resources {
+                        check_color_space_version(doc, space, version)?;
                     }
+                } else {
+                    check_color_space_version(doc, &value, version)?;
                 }
             }
             if version < PdfVersion::V1_3 {
@@ -153,25 +206,29 @@ pub(super) fn validate_feature_versions_with_budget<R: Read + Seek>(
                         .and_then(|number| number.as_u64_checked().ok())
                     {
                         Some(0) => Some(PdfVersion::V1_2),
-                        Some(2 | 3 | 4) => Some(PdfVersion::V1_3),
+                        Some(2..=4) => Some(PdfVersion::V1_3),
                         _ => None,
                     };
-                    if let Some(minimum) = minimum {
-                        if version < minimum {
-                            return Err(PdfError::UnsupportedFeature(format!(
-                                "PDF function requires PDF {} or later; select an explicit version upgrade",
-                                minimum.as_str()
-                            )));
-                        }
+                    if let Some(minimum) = minimum
+                        && version < minimum
+                    {
+                        return Err(PdfError::UnsupportedFeature(format!(
+                            "PDF function requires PDF {} or later; select an explicit version upgrade",
+                            minimum.as_str()
+                        )));
                     }
                 }
             }
-            if version < PdfVersion::V1_6 && !stream && name(doc, dict, "Type", "Page")? {
-                if let Some(value) = dict.get("UserUnit") {
-                    if !matches!(&*doc.resolve(value)?, PdfObject::PdfNull) {
-                        return Err(PdfError::UnsupportedFeature("page UserUnit requires PDF 1.6 or later; select an explicit version upgrade".into()));
-                    }
-                }
+            if version < PdfVersion::V1_6
+                && !stream
+                && name(doc, dict, "Type", "Page")?
+                && let Some(value) = dict.get("UserUnit")
+                && !matches!(&*doc.resolve(value)?, PdfObject::PdfNull)
+            {
+                return Err(PdfError::UnsupportedFeature(
+                    "page UserUnit requires PDF 1.6 or later; select an explicit version upgrade"
+                        .into(),
+                ));
             }
             if stream {
                 check_filters(doc, dict, version)?;
@@ -182,17 +239,18 @@ pub(super) fn validate_feature_versions_with_budget<R: Read + Seek>(
                         "object/xref stream requires PDF 1.5 or later; select an explicit version upgrade".into(),
                     ));
                 }
-                if version < PdfVersion::V1_5 && name(doc, dict, "Subtype", "Image")? {
-                    if let Some(bits) = dict.get("BitsPerComponent") {
-                        let bits = doc.resolve(bits)?;
-                        if bits
-                            .as_number()
-                            .is_some_and(|number| number.as_u64_checked().ok() == Some(16))
-                        {
-                            return Err(PdfError::UnsupportedFeature(
+                if version < PdfVersion::V1_5
+                    && name(doc, dict, "Subtype", "Image")?
+                    && let Some(bits) = dict.get("BitsPerComponent")
+                {
+                    let bits = doc.resolve(bits)?;
+                    if bits
+                        .as_number()
+                        .is_some_and(|number| number.as_u64_checked().ok() == Some(16))
+                    {
+                        return Err(PdfError::UnsupportedFeature(
                                 "16-bit image requires PDF 1.5 or later; select an explicit version upgrade".into(),
                             ));
-                        }
                     }
                 }
                 if version < PdfVersion::V1_4 && name(doc, dict, "Type", "Metadata")? {
@@ -259,14 +317,14 @@ fn check_color_space_version<R: Read + Seek>(
             "ICCBased" | "DeviceN" => Some(PdfVersion::V1_3),
             _ => None,
         };
-        if let Some(minimum) = minimum {
-            if version < minimum {
-                return Err(PdfError::UnsupportedFeature(format!(
-                    "{} color space requires PDF {} or later; select an explicit version upgrade",
-                    family.name(),
-                    minimum.as_str()
-                )));
-            }
+        if let Some(minimum) = minimum
+            && version < minimum
+        {
+            return Err(PdfError::UnsupportedFeature(format!(
+                "{} color space requires PDF {} or later; select an explicit version upgrade",
+                family.name(),
+                minimum.as_str()
+            )));
         }
         let base_index = match family.name() {
             "Indexed" | "I" | "Pattern" => 1,
@@ -291,12 +349,12 @@ fn check_filters<R: Read + Seek>(
 ) -> PdfResult<()> {
     if version < PdfVersion::V1_2 {
         for key in ["F", "FFilter", "FDecodeParms"] {
-            if let Some(value) = dict.get(key) {
-                if !matches!(&*doc.resolve(value)?, PdfObject::PdfNull) {
-                    return Err(PdfError::UnsupportedFeature(
+            if let Some(value) = dict.get(key)
+                && !matches!(&*doc.resolve(value)?, PdfObject::PdfNull)
+            {
+                return Err(PdfError::UnsupportedFeature(
                         "external stream settings require PDF 1.2 or later; select an explicit version upgrade".into(),
                     ));
-                }
             }
         }
     }
@@ -334,7 +392,7 @@ fn check_filters<R: Read + Seek>(
                     check(&value)?;
                 }
             }
-            value => check(&value)?,
+            value => check(value)?,
         }
     }
     Ok(())
@@ -402,43 +460,39 @@ fn check_dictionary<R: Read + Seek>(
     if page || form {
         if let Some(group) = dict.get("Group") {
             let group = doc.resolve(group)?;
-            if let Some(group) = group.as_dict() {
-                if name(doc, group, "S", "Transparency")? {
-                    return Err(reject());
-                }
+            if let Some(group) = group.as_dict()
+                && name(doc, group, "S", "Transparency")?
+            {
+                return Err(reject());
             }
         }
         if let Some(resources) = dict.get("Resources") {
             let resources = doc.resolve(resources)?;
-            if let Some(resources) = resources.as_dict() {
-                if let Some(states) = resources.get("ExtGState") {
-                    let states = doc.resolve(states)?;
-                    if matches!(&*states, PdfObject::PdfNull) {
-                        return Ok(());
+            if let Some(resources) = resources.as_dict()
+                && let Some(states) = resources.get("ExtGState")
+            {
+                let states = doc.resolve(states)?;
+                if matches!(&*states, PdfObject::PdfNull) {
+                    return Ok(());
+                }
+                let states = states.as_dict().ok_or_else(|| {
+                    PdfError::PageResourceError("ExtGState resource map must be dictionary".into())
+                })?;
+                if states.into_iter().len() > doc.ctx().limits().max_objects {
+                    return Err(PdfError::ResourceLimit(
+                        "ExtGState feature map entries".into(),
+                    ));
+                }
+                for (_, state) in states {
+                    let state = doc.resolve(state)?;
+                    if matches!(&*state, PdfObject::PdfNull) {
+                        continue;
                     }
-                    let states = states.as_dict().ok_or_else(|| {
-                        PdfError::PageResourceError(
-                            "ExtGState resource map must be dictionary".into(),
-                        )
+                    let state = state.as_dict().ok_or_else(|| {
+                        PdfError::PageResourceError("ExtGState resource must be dictionary".into())
                     })?;
-                    if states.into_iter().len() > doc.ctx().limits().max_objects {
-                        return Err(PdfError::ResourceLimit(
-                            "ExtGState feature map entries".into(),
-                        ));
-                    }
-                    for (_, state) in states {
-                        let state = doc.resolve(state)?;
-                        if matches!(&*state, PdfObject::PdfNull) {
-                            continue;
-                        }
-                        let state = state.as_dict().ok_or_else(|| {
-                            PdfError::PageResourceError(
-                                "ExtGState resource must be dictionary".into(),
-                            )
-                        })?;
-                        if transparent_state(state) {
-                            return Err(reject());
-                        }
+                    if transparent_state(state) {
+                        return Err(reject());
                     }
                 }
             }

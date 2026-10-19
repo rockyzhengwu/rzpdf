@@ -33,7 +33,9 @@ fn main() -> PdfResult<()> {
     for page in 0..3 {
         doc.add_page(page)?;
     }
-    let original = doc.resources().embed_truetype_font(0, FONT.to_vec(), "你", options())?;
+    let original = doc
+        .resources()
+        .embed_truetype_font(0, FONT.to_vec(), "你", options())?;
     for page in 0..2 {
         let name = original.register_on_page(&doc, page)?;
         let mut content = ContentBuilder::new();
@@ -67,14 +69,7 @@ fn main() -> PdfResult<()> {
         ));
     }
     let fresh = doc.get_page(0)?.content_program()?;
-    doc.replace_page_text_string_with_subset(
-        0,
-        &fresh,
-        3,
-        0..2,
-        "你新",
-        make_edit(*b"NEWGLY"),
-    )?;
+    doc.replace_page_text_string_with_subset(0, &fresh, 3, 0..2, "你新", make_edit(*b"NEWGLY"))?;
     let latin = doc.resources().embed_truetype_font(
         2,
         LATIN.to_vec(),

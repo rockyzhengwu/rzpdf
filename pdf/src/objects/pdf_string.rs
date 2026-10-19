@@ -119,7 +119,9 @@ impl PdfString {
                 ));
             }
             let units = data
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|b| u16::from_be_bytes([b[0], b[1]]));
             for ch in char::decode_utf16(units) {
                 append(ch.map_err(|_| {
@@ -157,7 +159,10 @@ impl PdfString {
     }
 
     pub(crate) fn with_bytes(&self, bytes: Vec<u8>) -> Self {
-        Self { bytes, is_hex: self.is_hex }
+        Self {
+            bytes,
+            is_hex: self.is_hex,
+        }
     }
     pub fn raw_bytes(&self) -> Vec<u8> {
         self.bytes.clone()
@@ -245,26 +250,32 @@ mod tests {
                 .unwrap(),
             "🙂"
         );
-        assert!(PdfString::from_text_with_limits(
-            "🙂",
-            &Limits {
-                max_token_bytes: 5,
-                ..limits
-            }
-        )
-        .is_err());
-        assert!(value
-            .text_content_with_limits(&Limits {
-                max_decoded_bytes: 3,
-                ..limits
-            })
-            .is_err());
-        assert!(value
-            .text_content_with_limits(&Limits {
-                max_text_chars: 0,
-                ..limits
-            })
-            .is_err());
+        assert!(
+            PdfString::from_text_with_limits(
+                "🙂",
+                &Limits {
+                    max_token_bytes: 5,
+                    ..limits
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            value
+                .text_content_with_limits(&Limits {
+                    max_decoded_bytes: 3,
+                    ..limits
+                })
+                .is_err()
+        );
+        assert!(
+            value
+                .text_content_with_limits(&Limits {
+                    max_text_chars: 0,
+                    ..limits
+                })
+                .is_err()
+        );
     }
 
     #[test]
@@ -282,8 +293,10 @@ mod tests {
         assert!(error.contains("42"));
         assert!(!error.contains("xxxx"));
         assert_eq!(string.bytes(), payload);
-        assert!(PdfString::new(vec![0xe2, 0x82], false)
-            .get_content()
-            .is_err());
+        assert!(
+            PdfString::new(vec![0xe2, 0x82], false)
+                .get_content()
+                .is_err()
+        );
     }
 }

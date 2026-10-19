@@ -68,91 +68,14 @@ impl AsRef<ContentProgram> for PreparedSubsetEdit {
     }
 }
 
-#[cfg(test)]
-mod metric_lifecycle_tests {
-    use super::*;
-    use crate::budget::{MemoryLease, OperationBudget};
-
-    struct SaturatedEdit {
-        prepared: PreparedSubsetEdit,
-        _remaining: MemoryLease,
-    }
-    impl AsRef<ContentProgram> for SaturatedEdit {
-        fn as_ref(&self) -> &ContentProgram { self.prepared.as_ref() }
-    }
-
-    #[test]
-    fn prepared_subset_metric_lease_coexists_with_failed_content_publication() {
-        let source = crate::font::truetype::subset::tests::fixture();
-        let metadata = || TrueTypeEmbeddingOptions {
-            postscript_name: "Demo".into(), cap_height: 60.0, stem_v: 80.0, serif: false,
-        };
-        let doc = PdfDocument::new().unwrap();
-        doc.add_page(0).unwrap();
-        let original_pool = OperationBudget::new(16 * 1024 * 1024);
-        let original = doc.resources().embed_truetype_subset_font(
-            0, &source, "A", metadata(), *b"BASEAA", false, &original_pool,
-        ).unwrap();
-        doc.replace_page_contents(0, format!(
-            "BT /{} 24 Tf 48 760 Td <0001> Tj ET", original.font.resource_name,
-        ).into_bytes()).unwrap();
-        let before = doc.save_to_bytes().unwrap();
-        let snapshot = doc.get_page(0).unwrap().content_program().unwrap();
-        let pool = OperationBudget::new(16 * 1024 * 1024);
-        let neighbor = pool.reserve(7).unwrap();
-        let prepared_seen = std::cell::Cell::new(false);
-        let result = doc.edit_transaction(|doc| {
-            doc.commit_page_content_edit_with_budget(0, &snapshot, &pool, || {
-                let page = doc.get_page_with_budget(0, &pool)?;
-                let state = page.text_metrics_for_operation_with_budget(&snapshot, 3, &pool)?;
-                let fragment = doc.build_subset_text_fragment(
-                    0, &snapshot, 3, None, None, 0..2, "B",
-                    SubsetTextEditOptions { source: &source, embedding: metadata(),
-                        subset_tag: *b"FAILAA", omit_layout_and_auxiliary: false,
-                        preserve_advance: true }, state, &pool,
-                )?;
-                let program = snapshot.with_replaced_operation_sequences_with_budget(
-                    &[OperationReplacement { index: fragment.index,
-                        source: fragment.fragment.as_slice(), operation_count: fragment.operation_count }],
-                    doc.ctx.options(), &pool,
-                )?;
-                let prepared = PreparedSubsetEdit { program, _fragment: fragment.fragment,
-                    _font: fragment._font, _binding: fragment._binding };
-                assert!(prepared._font.font.metric_bytes() > 0);
-                assert!(pool.live_bytes() >= 7 + prepared._font.font.metric_bytes());
-                let remaining = pool.reserve(pool.maximum_bytes() - pool.live_bytes())?;
-                prepared_seen.set(true);
-                Ok(SaturatedEdit { prepared, _remaining: remaining })
-            })
-        });
-        assert!(prepared_seen.get(), "must reach publication, not fail in preparation");
-        assert!(matches!(result, Err(PdfError::ResourceLimit(_))));
-        assert_eq!(pool.live_bytes(), 7);
-        assert_eq!(doc.save_to_bytes().unwrap(), before);
-        // The rollback invalidated the old snapshot. Retry with a fresh one.
-        let snapshot = doc.get_page(0).unwrap().content_program().unwrap();
-        doc.replace_page_text_string_with_subset_and_budget(
-            0, &snapshot, 3, 0..2, "B", SubsetTextEditOptions {
-                source: &source, embedding: metadata(), subset_tag: *b"GOODAA",
-                omit_layout_and_auxiliary: false, preserve_advance: true,
-            }, &pool,
-        ).unwrap();
-        assert_eq!(pool.live_bytes(), 7);
-        drop(neighbor);
-        drop(original);
-        assert_eq!(pool.live_bytes(), 0);
-        assert_eq!(original_pool.live_bytes(), 0);
-        let reopened = PdfDocument::from_bytes_with_mode(
-            doc.save_to_bytes().unwrap(), crate::parser::syntax::ParseMode::Strict,
-        ).unwrap();
-        assert_eq!(reopened.get_page(0).unwrap().extract_characters_paint_order().unwrap()[0].unicode.as_deref(), Some("B"));
-    }
-}
-
 impl<R: Read + Seek> PdfDocument<R> {
     /// Replace original text-show events within one selected leaf Form.
     /// The source anchors the start event; intervening child Form calls are
     /// preserved, not included in this leaf-local selection.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "keep source identity, text geometry and operation budget explicit"
+    )]
     pub fn replace_nested_text_event_range_with_subset_and_budget(
         &self,
         page: u32,
@@ -241,6 +164,10 @@ impl<R: Read + Seek> PdfDocument<R> {
     /// Replace a range in one nested text-show event (including multiple TJ
     /// strings), copying only the selected invocation chain. Source anchors
     /// the event; byte-code endpoints refer to the original leaf program.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "keep source identity, text geometry and operation budget explicit"
+    )]
     pub fn replace_nested_text_show_range_with_subset_and_budget(
         &self,
         page: u32,
@@ -370,6 +297,10 @@ impl<R: Read + Seek> PdfDocument<R> {
 
     /// Authenticated callers supply original-scope metrics and keep the outer
     /// transaction open. This planner does not publish content or refresh indices.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "keep source identity, text geometry and operation budget explicit"
+    )]
     fn build_scoped_subset_event_range<F>(
         &self,
         page: u32,
@@ -502,6 +433,10 @@ impl<R: Read + Seek> PdfDocument<R> {
 
     /// Same edit with a caller-owned pool for allocation coexistence and retries.
     /// Borrowed snapshots/source and existing parser allocations are not charged.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "keep source identity, text geometry and operation budget explicit"
+    )]
     pub fn replace_page_text_string_with_subset_and_budget(
         &self,
         page: u32,
@@ -520,6 +455,10 @@ impl<R: Read + Seek> PdfDocument<R> {
     /// Replace a decoded byte-code range in one TJ string. Original numeric
     /// adjustments, other strings and shared font objects remain unchanged.
     /// This is the single-item entry; cross-item selections are planned separately.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "keep source identity, text geometry and operation budget explicit"
+    )]
     pub fn replace_page_text_array_item_with_subset_and_budget(
         &self,
         page: u32,
@@ -546,6 +485,10 @@ impl<R: Read + Seek> PdfDocument<R> {
 
     /// Replace a range across string items of one TJ, retaining every original
     /// numeric adjustment. Endpoints include numeric slots in their item index.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "keep source identity, text geometry and operation budget explicit"
+    )]
     pub fn replace_page_text_array_range_with_subset_and_budget(
         &self,
         page: u32,
@@ -569,6 +512,10 @@ impl<R: Read + Seek> PdfDocument<R> {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "keep source identity, text geometry and operation budget explicit"
+    )]
     fn replace_subset_string_inner(
         &self,
         page: u32,
@@ -582,7 +529,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         budget: &crate::budget::OperationBudget,
     ) -> PdfResult<()> {
         self.edit_transaction(|doc| {
-            doc.commit_page_content_edit_with_budget(page, expected, &budget, || {
+            doc.commit_page_content_edit_with_budget(page, expected, budget, || {
                 let current_page = doc.get_page_with_budget(page, budget)?;
                 let state = current_page
                     .text_metrics_for_operation_with_budget(expected, operation, budget)?;
@@ -611,6 +558,10 @@ impl<R: Read + Seek> PdfDocument<R> {
 
     /// Does not commit content or refresh snapshots. Effective metrics must come
     /// from the authenticated original program, before resource registration.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "keep source identity, text geometry and operation budget explicit"
+    )]
     pub(super) fn build_subset_text_fragment(
         &self,
         page: u32,
@@ -630,6 +581,10 @@ impl<R: Read + Seek> PdfDocument<R> {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "keep source identity, text geometry and operation budget explicit"
+    )]
     pub(super) fn build_scoped_subset_text_fragment(
         &self,
         page: u32,
@@ -694,7 +649,7 @@ impl<R: Read + Seek> PdfDocument<R> {
                 range.clone(),
                 text,
                 limits,
-                &budget,
+                budget,
             )?
         };
         let planned_text = std::str::from_utf8(planned.as_slice())
@@ -723,20 +678,22 @@ impl<R: Read + Seek> PdfDocument<R> {
         let output_chars = planned_text.chars().count();
         // Snapshot validation above precedes registration. Both this
         // nested registration and content publication roll back together.
-        let registered = doc.resources().embed_truetype_subset_font_objects_with_mode(
-            if scope.is_some() { None } else { Some(page) },
-            options.source,
-            planned_text,
-            options.embedding,
-            options.subset_tag,
-            options.omit_layout_and_auxiliary,
-            &budget,
-            vertical,
-        )?;
+        let registered = doc
+            .resources()
+            .embed_truetype_subset_font_objects_with_mode(
+                if scope.is_some() { None } else { Some(page) },
+                options.source,
+                planned_text,
+                options.embedding,
+                options.subset_tag,
+                options.omit_layout_and_auxiliary,
+                budget,
+                vertical,
+            )?;
         let codes = registered
             .font
             .encoding()
-            .encode_text_with_budget(text, &budget)?;
+            .encode_text_with_budget(text, budget)?;
         let binding = scope
             .map(|scope| {
                 doc.bind_local_font_with_budget(
@@ -754,7 +711,7 @@ impl<R: Read + Seek> PdfDocument<R> {
                 .ok_or_else(|| PdfError::PageResourceError("Subset font binding absent".into()))?,
             state.metrics.font_size,
             limits,
-            &budget,
+            budget,
         )?;
         let mut quote = std::io::Cursor::new([0u8; 128]);
         let extra_operations = match target.name() {
@@ -784,13 +741,13 @@ impl<R: Read + Seek> PdfDocument<R> {
                     registered.font.object_handle().object_id(),
                 ),
             );
-            let (object, _object_lease) = doc.ctx.resolve_owned_with_budget(&reference, &budget)?;
+            let (object, _object_lease) = doc.ctx.resolve_owned_with_budget(&reference, budget)?;
             let (font, lease) = crate::font::pdf_font::Font::try_new_with_budget(
                 object.as_dict().ok_or_else(|| {
                     PdfError::FontError("Registered font is not a dictionary".into())
                 })?,
                 &doc.ctx,
-                &budget,
+                budget,
             )?;
             Some(state.with_replacement_font(font, lease))
         } else {
@@ -875,11 +832,10 @@ impl<R: Read + Seek> PdfDocument<R> {
                 )?,
             )
         };
-        let show = if array_range.is_none() && replacement_state.is_some() {
-            let replacement = replacement_state.as_ref().unwrap();
+        let show = if let (None, Some(replacement)) = (&array_range, &replacement_state) {
             let adjustment = state.replacement_adjustment_to(
                 &original_codes[range.clone()],
-                &replacement,
+                replacement,
                 codes.as_slice(),
                 limits,
             )?;
@@ -887,10 +843,10 @@ impl<R: Read + Seek> PdfDocument<R> {
                 codes.as_slice(),
                 adjustment,
                 limits,
-                &budget,
+                budget,
             )?
         } else {
-            ContentBuilder::encoded_text_with_budget(codes.as_slice(), limits, &budget)?
+            ContentBuilder::encoded_text_with_budget(codes.as_slice(), limits, budget)?
         };
         let length = font_selection
             .as_slice()
@@ -927,5 +883,153 @@ impl<R: Read + Seek> PdfDocument<R> {
             _font: registered,
             _binding: binding.map(|(_, lease)| lease),
         })
+    }
+}
+
+#[cfg(test)]
+mod metric_lifecycle_tests {
+    use super::*;
+    use crate::budget::{MemoryLease, OperationBudget};
+
+    struct SaturatedEdit {
+        prepared: PreparedSubsetEdit,
+        _remaining: MemoryLease,
+    }
+    impl AsRef<ContentProgram> for SaturatedEdit {
+        fn as_ref(&self) -> &ContentProgram {
+            self.prepared.as_ref()
+        }
+    }
+
+    #[test]
+    fn prepared_subset_metric_lease_coexists_with_failed_content_publication() {
+        let source = crate::font::truetype::subset::tests::fixture();
+        let metadata = || TrueTypeEmbeddingOptions {
+            postscript_name: "Demo".into(),
+            cap_height: 60.0,
+            stem_v: 80.0,
+            serif: false,
+        };
+        let doc = PdfDocument::new().unwrap();
+        doc.add_page(0).unwrap();
+        let original_pool = OperationBudget::new(16 * 1024 * 1024);
+        let original = doc
+            .resources()
+            .embed_truetype_subset_font(
+                0,
+                &source,
+                "A",
+                metadata(),
+                *b"BASEAA",
+                false,
+                &original_pool,
+            )
+            .unwrap();
+        doc.replace_page_contents(
+            0,
+            format!(
+                "BT /{} 24 Tf 48 760 Td <0001> Tj ET",
+                original.font.resource_name,
+            )
+            .into_bytes(),
+        )
+        .unwrap();
+        let before = doc.save_to_bytes().unwrap();
+        let snapshot = doc.get_page(0).unwrap().content_program().unwrap();
+        let pool = OperationBudget::new(16 * 1024 * 1024);
+        let neighbor = pool.reserve(7).unwrap();
+        let prepared_seen = std::cell::Cell::new(false);
+        let result = doc.edit_transaction(|doc| {
+            doc.commit_page_content_edit_with_budget(0, &snapshot, &pool, || {
+                let page = doc.get_page_with_budget(0, &pool)?;
+                let state = page.text_metrics_for_operation_with_budget(&snapshot, 3, &pool)?;
+                let fragment = doc.build_subset_text_fragment(
+                    0,
+                    &snapshot,
+                    3,
+                    None,
+                    None,
+                    0..2,
+                    "B",
+                    SubsetTextEditOptions {
+                        source: &source,
+                        embedding: metadata(),
+                        subset_tag: *b"FAILAA",
+                        omit_layout_and_auxiliary: false,
+                        preserve_advance: true,
+                    },
+                    state,
+                    &pool,
+                )?;
+                let program = snapshot.with_replaced_operation_sequences_with_budget(
+                    &[OperationReplacement {
+                        index: fragment.index,
+                        source: fragment.fragment.as_slice(),
+                        operation_count: fragment.operation_count,
+                    }],
+                    doc.ctx.options(),
+                    &pool,
+                )?;
+                let prepared = PreparedSubsetEdit {
+                    program,
+                    _fragment: fragment.fragment,
+                    _font: fragment._font,
+                    _binding: fragment._binding,
+                };
+                assert!(prepared._font.font.metric_bytes() > 0);
+                assert!(pool.live_bytes() >= 7 + prepared._font.font.metric_bytes());
+                let remaining = pool.reserve(pool.maximum_bytes() - pool.live_bytes())?;
+                prepared_seen.set(true);
+                Ok(SaturatedEdit {
+                    prepared,
+                    _remaining: remaining,
+                })
+            })
+        });
+        assert!(
+            prepared_seen.get(),
+            "must reach publication, not fail in preparation"
+        );
+        assert!(matches!(result, Err(PdfError::ResourceLimit(_))));
+        assert_eq!(pool.live_bytes(), 7);
+        assert_eq!(doc.save_to_bytes().unwrap(), before);
+        // The rollback invalidated the old snapshot. Retry with a fresh one.
+        let snapshot = doc.get_page(0).unwrap().content_program().unwrap();
+        doc.replace_page_text_string_with_subset_and_budget(
+            0,
+            &snapshot,
+            3,
+            0..2,
+            "B",
+            SubsetTextEditOptions {
+                source: &source,
+                embedding: metadata(),
+                subset_tag: *b"GOODAA",
+                omit_layout_and_auxiliary: false,
+                preserve_advance: true,
+            },
+            &pool,
+        )
+        .unwrap();
+        assert_eq!(pool.live_bytes(), 7);
+        drop(neighbor);
+        drop(original);
+        assert_eq!(pool.live_bytes(), 0);
+        assert_eq!(original_pool.live_bytes(), 0);
+        let reopened = PdfDocument::from_bytes_with_mode(
+            doc.save_to_bytes().unwrap(),
+            crate::parser::syntax::ParseMode::Strict,
+        )
+        .unwrap();
+        assert_eq!(
+            reopened
+                .get_page(0)
+                .unwrap()
+                .extract_characters_paint_order()
+                .unwrap()[0]
+                .unicode
+                .as_deref(),
+            Some("B")
+        );
     }
 }

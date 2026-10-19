@@ -31,6 +31,7 @@ pub(crate) struct MeshEncoding<'a> {
 
 impl TriangleMesh {
     /// The caller derives encoded component count from ColorSpace/Function.
+    #[cfg(test)]
     pub(crate) fn from_stream<R: std::io::Read + std::io::Seek>(
         stream: &PdfStream,
         components: usize,
@@ -220,7 +221,7 @@ impl TriangleMesh {
         // The borrowed decoded stream is still alive while allocating topology.
         // Reserve it from the aggregate allowance instead of checking each
         // retained allocation independently against the full limit.
-        let mut retained_limits = limits.clone();
+        let mut retained_limits = *limits;
         retained_limits.max_decoded_bytes = limits
             .max_decoded_bytes
             .checked_sub(data.len())
@@ -486,7 +487,7 @@ pub(crate) fn assemble_lattice(
     per_row: usize,
     limits: &Limits,
 ) -> PdfResult<Vec<[usize; 3]>> {
-    if per_row < 2 || vertices.len() % per_row != 0 || vertices.len() / per_row < 2 {
+    if per_row < 2 || !vertices.len().is_multiple_of(per_row) || vertices.len() / per_row < 2 {
         return Err(invalid("lattice requires at least two complete rows"));
     }
     let rows = vertices.len() / per_row;
@@ -583,7 +584,7 @@ fn decode_vertex_records(
         .checked_add(7)
         .map(|n| n / 8)
         .ok_or_else(|| PdfError::ResourceLimit("mesh record size overflow".into()))?;
-    if data.len() % stride != 0 {
+    if !data.len().is_multiple_of(stride) {
         return Err(invalid("truncated vertex record"));
     }
     let count = data.len() / stride;
@@ -629,7 +630,7 @@ fn decode_vertex_records(
         values
             .try_reserve_exact(components)
             .map_err(|_| PdfError::ResourceLimit("mesh component allocation".into()))?;
-        for pair in decode[4..].chunks_exact(2) {
+        for pair in decode[4..].as_chunks::<2>().0 {
             values.push(interpolate(read(component_bits), component_bits, pair) as f32);
         }
         vertices.push(Vertex {
@@ -845,7 +846,7 @@ mod tests {
         use crate::{
             document::PdfDocument, io::stream_reader::StreamReader, parser::syntax::SyntaxParser,
         };
-        let mut doc = PdfDocument::new().unwrap();
+        let doc = PdfDocument::new().unwrap();
         let make = |source: &str, data: Vec<u8>| {
             let object = SyntaxParser::new(
                 StreamReader::try_new(std::io::Cursor::new(source.as_bytes().to_vec())).unwrap(),
@@ -922,7 +923,7 @@ mod tests {
         let retained = mesh.retained_payload_bytes().unwrap();
         let exact = Limits {
             max_decoded_bytes: retained + data.len(),
-            ..limits.clone()
+            ..limits
         };
         assert!(TriangleMesh::decode(&data, encoding(), &exact).is_ok());
         let tight = Limits {
@@ -1074,7 +1075,7 @@ mod tests {
         }
         let tight = Limits {
             max_objects: 11,
-            ..limits.clone()
+            ..limits
         };
         assert!(matches!(
             assemble_triangles(&vertices, &tight),
@@ -1132,7 +1133,7 @@ mod tests {
         );
         let tight = Limits {
             max_objects: 0,
-            ..limits.clone()
+            ..limits
         };
         assert!(matches!(
             decode_vertices(

@@ -51,7 +51,13 @@ impl<R: Read + Seek> Interpreter<'_, R> {
                 self.compile_shading_pattern(pattern)?
             }
         };
-        space.paint = Some(Arc::new(paint));
+        // Sharing immutable paint snapshots does not promise Send or Sync.
+        #[expect(
+            clippy::arc_with_non_send_sync,
+            reason = "shared public paint snapshots retain thread-affine font resources"
+        )]
+        let paint = Arc::new(paint);
+        space.paint = Some(paint);
         let colors = &mut self.current_state.graphic_state.color_state;
         if stroke {
             colors.stroke_color_space = ColorSpace::Pattern(space);

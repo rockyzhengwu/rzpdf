@@ -266,7 +266,7 @@ mod tests {
     #[test]
     fn budgeted_builder_rejects_foreign_leases_before_insert_or_replacement() {
         use crate::{
-            budget::{copy_string, OperationBudget},
+            budget::{OperationBudget, copy_string},
             objects::pdf_string::PdfString,
         };
         let pool = OperationBudget::new(65536);
@@ -302,14 +302,16 @@ mod tests {
             }
         }
         let (key, key_lease) = copy_string("A", &pool).unwrap();
-        assert!(builder
-            .insert(
-                key,
-                PdfObject::PdfNull,
-                key_lease,
-                foreign.reserve(0).unwrap()
-            )
-            .is_err());
+        assert!(
+            builder
+                .insert(
+                    key,
+                    PdfObject::PdfNull,
+                    key_lease,
+                    foreign.reserve(0).unwrap()
+                )
+                .is_err()
+        );
         assert_eq!(pool.live_bytes(), live);
         let shared = pool.clone();
         let (key, key_lease) = copy_string("B", &shared).unwrap();
@@ -382,17 +384,19 @@ mod tests {
         drop((replacement, lease));
         assert_eq!(pool.live_bytes(), 0);
         original.insert("Long".into(), PdfObject::PdfNull);
-        assert!(original
-            .with_replaced_entry_with_budget(
-                "B",
-                &PdfObject::PdfNull,
-                &pool,
-                Limits {
-                    max_token_bytes: 1,
-                    ..Default::default()
-                }
-            )
-            .is_err());
+        assert!(
+            original
+                .with_replaced_entry_with_budget(
+                    "B",
+                    &PdfObject::PdfNull,
+                    &pool,
+                    Limits {
+                        max_token_bytes: 1,
+                        ..Default::default()
+                    }
+                )
+                .is_err()
+        );
         assert_eq!(pool.live_bytes(), 0);
     }
 
@@ -418,9 +422,10 @@ mod tests {
                     b"true"
                 )))
             );
-            assert!(dict
-                .replace_existing("Missing", PdfObject::PdfNull)
-                .is_err());
+            assert!(
+                dict.replace_existing("Missing", PdfObject::PdfNull)
+                    .is_err()
+            );
             assert!(!dict.contains_key("Missing"));
             assert_eq!(
                 capacity,

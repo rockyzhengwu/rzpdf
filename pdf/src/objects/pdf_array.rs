@@ -44,31 +44,15 @@ impl PdfArray {
         self.items.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
     pub fn remove(&mut self, index: usize) -> Option<PdfObject> {
         if index < self.items.len() {
             return Some(self.items.remove(index));
         }
         None
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn insertion_checks_bounds_and_preserves_array_on_error() {
-        let mut array = PdfArray::default();
-        assert!(array.insert(1, PdfObject::PdfNull).is_err());
-        assert_eq!(array.len(), 0);
-        array.insert(0, PdfObject::PdfNull).unwrap();
-        array.insert(1, PdfObject::PdfNull).unwrap();
-        array.insert(0, PdfObject::PdfNull).unwrap();
-        let before = array.clone();
-        assert!(array.insert(usize::MAX, PdfObject::PdfNull).is_err());
-        assert_eq!(array, before);
-        array.try_add_obj(PdfObject::PdfNull).unwrap();
-        assert_eq!(array.len(), before.len() + 1);
     }
 }
 
@@ -98,5 +82,25 @@ impl<'a> Iterator for PdfArrayIterator<'a> {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn insertion_checks_bounds_and_preserves_array_on_error() {
+        let mut array = PdfArray::default();
+        assert!(array.insert(1, PdfObject::PdfNull).is_err());
+        assert_eq!(array.len(), 0);
+        array.insert(0, PdfObject::PdfNull).unwrap();
+        array.insert(1, PdfObject::PdfNull).unwrap();
+        array.insert(0, PdfObject::PdfNull).unwrap();
+        let before = array.clone();
+        assert!(array.insert(usize::MAX, PdfObject::PdfNull).is_err());
+        assert_eq!(array, before);
+        array.try_add_obj(PdfObject::PdfNull).unwrap();
+        assert_eq!(array.len(), before.len() + 1);
     }
 }

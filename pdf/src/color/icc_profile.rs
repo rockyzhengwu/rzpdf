@@ -137,9 +137,19 @@ impl ICCProfile {
                 ));
             }
         };
-        let id = NEXT_PROFILE
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_add(1))
-            .map_err(|_| PdfError::ResourceLimit("ICC profile identity".into()))?;
+        // Keep the checked allocation compatible with the declared Rust 1.92
+        // minimum without relying on a newly renamed atomic method.
+        let mut id = NEXT_PROFILE.load(Ordering::Relaxed);
+        loop {
+            let next = id
+                .checked_add(1)
+                .ok_or_else(|| PdfError::ResourceLimit("ICC profile identity".into()))?;
+            match NEXT_PROFILE.compare_exchange_weak(id, next, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => break,
+                Err(current) => id = current,
+            }
+        }
         let mut raw = Vec::new();
         raw.try_reserve_exact(size)
             .map_err(|_| PdfError::ResourceLimit("ICC encoded profile allocation".into()))?;

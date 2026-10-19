@@ -17,356 +17,6 @@ pub struct Type0 {
     descent_font: CidFont,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        document::cross_ref_table::CrossRefTable,
-        io::stream_reader::StreamReader,
-        parser::{parser::PdfParser, syntax::SyntaxParser},
-    };
-    use std::{collections::HashMap, io::Cursor};
-
-    #[test]
-    fn budget_construction_tracks_named_and_stream_cmaps_until_font_release() {
-        use crate::{
-            budget::OperationBudget,
-            document::owned::Document,
-            font::pdf_font::Font,
-            objects::{pdf_name::PdfName, pdf_stream::PdfStream},
-        };
-        let doc = Document::new().unwrap();
-        let source = b"<< /Subtype /Type0 /BaseFont /BudgetType0 /DescendantFonts [<< /Subtype /CIDFontType2 /BaseFont /Test /DW 500 >>] >>";
-        let object =
-            SyntaxParser::new(StreamReader::try_new(Cursor::new(source.to_vec())).unwrap())
-                .get_object()
-                .unwrap();
-        let mut dict = object.as_dict().unwrap().clone();
-        dict.insert(
-            "ToUnicode".into(),
-            PdfObject::PdfStream(PdfStream::new(
-                PdfDict::default(),
-                b"2 beginbfchar <41> <0041> <0041> <0041> endbfchar".to_vec(),
-            )),
-        );
-        for (encoding, bytes) in [
-            (PdfObject::PdfName(PdfName::new("Identity-H".into())), &b"\0A"[..]),
-            (PdfObject::PdfStream(PdfStream::new(PdfDict::default(), b"1 begincodespacerange <00> <FF> endcodespacerange 1 begincidchar <41> 7 endcidchar".to_vec())), &b"A"[..]),
-        ] {
-            dict.insert("Encoding".into(), encoding);
-            let probe = OperationBudget::new(2 * 1024 * 1024);
-            let (font, lease) = Font::try_new_with_budget(&dict, doc.ctx(), &probe).unwrap();
-            let Font::Type0(composite) = &font else { panic!("expected Type0"); };
-            let characters = composite.chars(bytes).unwrap();
-            assert_eq!(characters.len(), 1);
-            assert_eq!(characters[0].code(), 65);
-            assert_eq!(characters[0].width, 500.0);
-            assert_eq!(composite.unicode_mapping(&characters[0]), Some("A"));
-            assert!(lease.bytes() > composite.base_font.as_ref().unwrap().capacity());
-            assert_eq!(probe.live_bytes(), lease.bytes());
-            let peak = probe.peak_bytes();
-            drop((font, lease));
-            assert_eq!(probe.live_bytes(), 0);
-            let subtype = doc.try_insert_object(PdfObject::PdfName(PdfName::new("Type0".into()))).unwrap();
-            let mut indirect = dict.clone();
-            indirect.insert("Subtype".into(), PdfObject::PdfReference(crate::objects::pdf_reference::PdfReference::from_id(subtype)));
-            let (font, lease) = Font::try_new_with_budget(&indirect, doc.ctx(), &probe).unwrap();
-            assert!(matches!(font, Font::Type0(_)));
-            assert!(lease.bytes() > 0);
-            assert_eq!(probe.live_bytes(), lease.bytes());
-            drop((font, lease));
-            assert_eq!(probe.live_bytes(), 0);
-            assert!(matches!(Font::try_new(&indirect, doc.ctx()).unwrap(), Font::Type0(_)));
-            let pool = OperationBudget::new(peak);
-            let neighbor = pool.reserve(1).unwrap();
-            assert!(matches!(Font::try_new_with_budget(&dict, doc.ctx(), &pool), Err(PdfError::ResourceLimit(_))));
-            assert_eq!(pool.live_bytes(), 1);
-            drop(neighbor);
-            drop(Font::try_new_with_budget(&dict, doc.ctx(), &pool).unwrap());
-            assert_eq!(pool.live_bytes(), 0);
-            let mut invalid = dict.clone();
-            invalid.insert("ToUnicode".into(), PdfObject::PdfNull);
-            assert!(Font::try_new_with_budget(&invalid, doc.ctx(), &pool).is_err());
-            assert_eq!(pool.live_bytes(), 0);
-        }
-    }
-
-    #[test]
-    fn reverse_composite_encoding_preserves_one_to_four_byte_source_codes() {
-        let encoding = Cmap::try_new(b"4 begincodespacerange <21> <7F> <8000> <80FF> <810000> <81FFFF> <82000000> <82FFFFFF> endcodespacerange 5 begincidchar <21> 7 <22> 8 <8001> 9 <810001> 10 <82000001> 11 endcidchar".to_vec()).unwrap();
-        let unicode = Cmap::try_new(b"4 begincodespacerange <21> <7F> <8000> <80FF> <810000> <81FFFF> <82000000> <82FFFFFF> endcodespacerange 5 beginbfchar <21> <0061> <22> <0061> <8001> <00620063> <810001> <D83DDE00> <82000001> <4E2D> endbfchar".to_vec()).unwrap();
-        let font = Type0 {
-            encoding: Some(encoding),
-            to_unicode: Some(unicode),
-            ..Default::default()
-        };
-        let limits = crate::parser::options::Limits::default();
-        let maximum = 20
-            + ("abc😀中".len() + 1) * std::mem::size_of::<Option<(u32, u8, usize)>>()
-            + 8 * std::mem::size_of::<(u32, u8, &str)>();
-        let budget = crate::budget::OperationBudget::new(maximum);
-        let codes = font
-            .encode_text_with_budget("abc😀中", limits, &budget)
-            .unwrap();
-        assert_eq!(
-            codes.as_slice(),
-            &[0x21, 0x80, 1, 0x81, 0, 1, 0x82, 0, 0, 1]
-        );
-        assert_eq!(budget.live_bytes(), codes.capacity());
-        let neighbor = budget.reserve(maximum - budget.live_bytes()).unwrap();
-        assert!(font.encode_text_with_budget("a", limits, &budget).is_err());
-        drop(neighbor);
-        drop(codes);
-        assert_eq!(budget.live_bytes(), 0);
-        let small = crate::budget::OperationBudget::new(maximum - 1);
-        assert!(
-            font.encode_text_with_budget("abc😀中", limits, &small)
-                .is_err()
-        );
-        assert_eq!(small.live_bytes(), 0);
-        assert!(font.encode_text_with_budget("z", limits, &budget).is_err());
-        assert_eq!(budget.live_bytes(), 0);
-        assert_eq!(
-            font.encode_text_with_limits("abc😀中", limits).unwrap(),
-            vec![0x21, 0x80, 1, 0x81, 0, 1, 0x82, 0, 0, 1]
-        );
-        // A short input makes table growth overlap larger than the final
-        // output + eight candidate slots + two suffix slots.
-        let entry = std::mem::size_of::<(u32, u8, &str)>();
-        let suffix = std::mem::size_of::<Option<(u32, u8, usize)>>();
-        let final_bytes = 4 + 8 * entry + 2 * suffix;
-        let peak_bytes = 4 + (4 + 8) * entry;
-        assert!(peak_bytes > final_bytes);
-        let final_only = crate::budget::OperationBudget::new(final_bytes);
-        assert!(matches!(
-            font.encode_text_with_budget("a", limits, &final_only),
-            Err(PdfError::ResourceLimit(_))
-        ));
-        assert_eq!(final_only.live_bytes(), 0);
-        let peak = crate::budget::OperationBudget::new(peak_bytes);
-        let encoded = font.encode_text_with_budget("a", limits, &peak).unwrap();
-        assert_eq!(encoded.as_slice(), &[0x21]);
-        assert_eq!(peak.live_bytes(), encoded.capacity());
-        drop(encoded);
-        assert_eq!(peak.live_bytes(), 0);
-        assert!(font.encode_text_with_limits("z", limits).is_err());
-        assert_eq!(
-            font.encode_text_with_limits("", limits).unwrap(),
-            Vec::<u8>::new()
-        );
-        for limits in [
-            crate::parser::options::Limits {
-                max_objects: 4,
-                ..limits
-            },
-            crate::parser::options::Limits {
-                max_text_chars: 4,
-                ..limits
-            },
-            crate::parser::options::Limits {
-                max_decoded_bytes: 20,
-                ..limits
-            },
-        ] {
-            assert!(matches!(
-                font.encode_text_with_limits("abc😀中", limits),
-                Err(PdfError::ResourceLimit(_))
-            ));
-        }
-    }
-
-    #[test]
-    fn reverse_encoding_preserves_colliding_numeric_codes_with_distinct_lengths() {
-        let font = Type0 {
-            encoding: Some(Cmap::try_new(b"2 begincodespacerange <40> <7F> <0000> <00FF> endcodespacerange 2 begincidchar <41> 7 <0041> 19 endcidchar".to_vec()).unwrap()),
-            to_unicode: Some(Cmap::try_new(b"2 beginbfchar <41> <0041> <0041> <0042> endbfchar".to_vec()).unwrap()),
-            ..Default::default()
-        };
-        let budget = crate::budget::OperationBudget::new(65536);
-        let encoded = font.encode_text_with_budget("AB", Default::default(), &budget).unwrap();
-        assert_eq!(encoded.as_slice(), &[0x41, 0, 0x41]);
-        let chars = font.chars(encoded.as_slice()).unwrap();
-        assert_eq!(font.unicode_mapping(&chars[0]), Some("A"));
-        assert_eq!(font.unicode_mapping(&chars[1]), Some("B"));
-        drop(encoded);
-        assert_eq!(budget.live_bytes(), 0);
-    }
-
-    #[test]
-    fn reverse_composite_encoding_rejects_notdef_and_inconsistent_code_lengths() {
-        let mut font = Type0 {
-            encoding: Some(Cmap::try_new(b"1 begincodespacerange <00> <FF> endcodespacerange 1 begincidchar <21> 7 endcidchar".to_vec()).unwrap()),
-            to_unicode: Some(Cmap::try_new(b"1 begincodespacerange <0000> <FFFF> endcodespacerange 1 beginbfchar <0021> <0041> endbfchar".to_vec()).unwrap()),
-            ..Default::default()
-        };
-        let limits = crate::parser::options::Limits::default();
-        assert!(font.encode_text_with_limits("A", limits).is_err());
-        font.to_unicode = Some(
-            Cmap::try_new(b"2 beginbfchar <21> <0041> <22> <0042> endbfchar".to_vec()).unwrap(),
-        );
-        assert_eq!(
-            font.encode_text_with_limits("A", limits).unwrap(),
-            vec![0x21]
-        );
-        assert!(font.encode_text_with_limits("B", limits).is_err());
-        font.to_unicode = None;
-        assert!(font.encode_text_with_limits("A", limits).is_err());
-    }
-
-    #[test]
-    fn reverse_composite_encoding_avoids_longest_match_dead_end() {
-        let font = Type0 {
-            encoding: Some(Cmap::try_new(b"1 begincodespacerange <00> <FF> endcodespacerange 3 begincidchar <01> 7 <02> 8 <03> 9 endcidchar".to_vec()).unwrap()),
-            to_unicode: Some(Cmap::try_new(b"3 beginbfchar <01> <0061> <02> <00610062> <03> <00620063> endbfchar".to_vec()).unwrap()),
-            ..Default::default()
-        };
-        let limits = crate::parser::options::Limits::default();
-        assert_eq!(
-            font.encode_text_with_limits("abc", limits).unwrap(),
-            vec![1, 3]
-        );
-        assert_eq!(font.encode_text_with_limits("ab", limits).unwrap(), vec![2]);
-    }
-
-    #[test]
-    fn non_identity_encoding_uses_cid_metrics_but_preserves_source_unicode() {
-        let syntax =
-            SyntaxParser::new(StreamReader::try_new(Cursor::new(Vec::<u8>::new())).unwrap());
-        let ctx = PDFContext::try_new(
-            PdfParser::new(syntax),
-            CrossRefTable::new(HashMap::new(), PdfDict::default()),
-        )
-        .unwrap();
-        let mut parser = SyntaxParser::new(StreamReader::try_new(Cursor::new(
-            b"<< /Subtype /CIDFontType2 /BaseFont /Test /DW 100 /W [7 [700]] /DW2 [880 -1000] /W2 [7 [-1200 350 900]] >>".to_vec(),
-        )).unwrap());
-        let descendant = parser.get_object().unwrap();
-        let mut font = Type0 {
-            encoding: Some(Cmap::try_new(
-                b"1 begincodespacerange <00> <FF> endcodespacerange 1 begincidchar <41> 7 endcidchar".to_vec(),
-            ).unwrap()),
-            to_unicode: Some(Cmap::try_new(
-                b"1 beginbfchar <41> <0041> endbfchar".to_vec(),
-            ).unwrap()),
-            descent_font: CidFont::try_new(descendant.as_dict().unwrap(), &ctx).unwrap(),
-            ..Type0::default()
-        };
-        let chars = font.chars(b"AB").unwrap();
-        assert_eq!(chars[0].code(), 65);
-        assert_eq!(chars[0].width, 700.0);
-        assert_eq!(chars[1].width, 100.0);
-        assert_eq!(font.text_widths(&chars).unwrap(), 800.0);
-        assert_eq!(font.unicode_mapping(&chars[0]), Some("A"));
-        assert!(matches!(font.get_glyph(&chars[0]), Some(GlyphDesc::Gid(7))));
-        assert!(matches!(font.get_glyph(&chars[1]), Some(GlyphDesc::Gid(0))));
-        font.encoding = Some(Cmap::try_new(
-            b"/WMode 1 def 1 begincodespacerange <00> <FF> endcodespacerange 1 begincidchar <41> 7 endcidchar".to_vec(),
-        ).unwrap());
-        assert_eq!(font.chars(b"A").unwrap()[0].width, -1200.0);
-        let mut visited = Vec::new();
-        assert_eq!(
-            font.visit_chars_limited(b"AB", 2, |character| {
-                visited.push((
-                    character.code(),
-                    character.length(),
-                    character.width(),
-                    character.origin_x(),
-                    character.origin_y(),
-                ));
-                Ok(())
-            })
-            .unwrap(),
-            2
-        );
-        assert_eq!(
-            visited,
-            vec![(65, 1, -1200., 350., 900.), (66, 1, -1000., 50., 880.)]
-        );
-        let collected = font.chars_limited(b"AB", 2).unwrap();
-        assert_eq!(
-            collected
-                .iter()
-                .map(|character| (
-                    character.code(),
-                    character.length(),
-                    character.width(),
-                    character.origin_x(),
-                    character.origin_y()
-                ))
-                .collect::<Vec<_>>(),
-            visited
-        );
-        let mut calls = 0;
-        assert!(matches!(
-            font.visit_chars_limited(b"AB", 1, |_| {
-                calls += 1;
-                Ok(())
-            }),
-            Err(PdfError::ResourceLimit(_))
-        ));
-        assert_eq!(calls, 1);
-        calls = 0;
-        assert!(matches!(
-            font.visit_chars_limited(b"AB", 2, |_| {
-                calls += 1;
-                Err(PdfError::ObjectError("visitor stopped".into()))
-            }),
-            Err(PdfError::ObjectError(_))
-        ));
-        assert_eq!(calls, 1);
-    }
-
-    #[test]
-    fn optional_unicode_mapping_distinguishes_missing_and_replacement() {
-        let ch = CharCode::new(1, 1, 500.0);
-        let mut font = Type0::default();
-        assert_eq!(font.unicode_mapping(&ch), None);
-        font.to_unicode = Some(
-            Cmap::try_new_with_limits(
-                b"1 beginbfchar <01> <FFFD> endbfchar".to_vec(),
-                &crate::parser::options::Limits::default(),
-            )
-            .unwrap(),
-        );
-        assert_eq!(font.unicode_mapping(&ch), Some("\u{fffd}"));
-        assert_eq!(font.unicode_mapping(&CharCode::new(2, 1, 500.0)), None);
-    }
-
-    #[test]
-    fn malformed_type0_and_descendant_dictionaries_return_errors() {
-        let syntax =
-            SyntaxParser::new(StreamReader::try_new(Cursor::new(Vec::<u8>::new())).unwrap());
-        let ctx = PDFContext::try_new(
-            PdfParser::new(syntax),
-            CrossRefTable::new(HashMap::new(), PdfDict::default()),
-        )
-        .unwrap();
-        for input in [
-            "<< /BaseFont 1 >>",
-            "<< /Encoding /Identity-H /DescendantFonts 1 >>",
-            "<< /Encoding /Identity-H /DescendantFonts [] >>",
-            "<< /Encoding /Identity-H /DescendantFonts [1] >>",
-            "<< /Encoding /Identity-H /DescendantFonts [<< /Subtype 1 /BaseFont /Test >>] >>",
-            "<< /Encoding /Identity-H /DescendantFonts [<< /Subtype /CIDFontType2 /BaseFont 1 >>] >>",
-            "<< /Encoding /Identity-H /DescendantFonts [<< /Subtype /CIDFontType2 /BaseFont /Test /DW /bad >>] >>",
-            "<< /Encoding /Identity-H /DescendantFonts [<< /Subtype /CIDFontType2 /BaseFont /Test /DW2 [0 /bad] >>] >>",
-            "<< /Encoding /Identity-H /DescendantFonts [<< /Subtype /CIDFontType2 /BaseFont /Test /W 1 >>] >>",
-            "<< /Encoding /Identity-H /DescendantFonts [<< /Subtype /CIDFontType2 /BaseFont /Test /W2 1 >>] >>",
-            "<< /Encoding /Identity-H /DescendantFonts [<< /Subtype /CIDFontType2 /BaseFont /Test /FontDescriptor 1 >>] >>",
-            "<< /Encoding /Identity-H /DescendantFonts [<< /Subtype /CIDFontType2 /BaseFont /Test >>] /ToUnicode 1 >>",
-        ] {
-            let mut parser = SyntaxParser::new(
-                StreamReader::try_new(Cursor::new(input.as_bytes().to_vec())).unwrap(),
-            );
-            let object = parser.get_object().unwrap();
-            assert!(
-                Type0::try_new(object.as_dict().unwrap(), &ctx).is_err(),
-                "{input}"
-            );
-        }
-    }
-}
-
 impl Type0 {
     /// Reserve output capacity before encoding; internal tables are untracked.
     pub(crate) fn encode_text_with_budget(
@@ -438,8 +88,12 @@ impl Type0 {
             }
             let bytes = code.to_be_bytes();
             for length in 1..=4u8 {
-                if source_length != 0 && source_length != length { continue; }
-                if encoding.cid_for_char(&CharCode::new(code, length, 0.0)) == 0 { continue; }
+                if source_length != 0 && source_length != length {
+                    continue;
+                }
+                if encoding.cid_for_char(&CharCode::new(code, length, 0.0)) == 0 {
+                    continue;
+                }
                 if length < 4 && code >= (1u32 << (length as u32 * 8)) {
                     continue;
                 }
@@ -727,17 +381,17 @@ impl Type0 {
         match &self.to_unicode {
             Some(cmap) => {
                 if let Some(u) = cmap.unicode(ch) {
-                    return Ok(u.to_string());
+                    Ok(u.to_string())
                 } else {
                     let mut s = String::new();
                     s.push(char::REPLACEMENT_CHARACTER);
-                    return Ok(s);
+                    Ok(s)
                 }
             }
             None => {
                 let mut s = String::new();
                 s.push(char::REPLACEMENT_CHARACTER);
-                return Ok(s);
+                Ok(s)
                 //return Err(PdfError::Font("Type0 Font to_unicode is None".to_string()));
             }
         }
@@ -811,9 +465,7 @@ impl Type0 {
                 }
                 visitor(character)
             }),
-            None => {
-                return Err(PdfError::FontError("ENcoding is None in type0".to_string()));
-            }
+            None => Err(PdfError::FontError("ENcoding is None in type0".to_string())),
         }
     }
     pub fn base_font(&self) -> &str {
@@ -830,5 +482,357 @@ impl Type0 {
     }
     pub fn fontfile(&self) -> Option<&[u8]> {
         self.descent_font.fontfile()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        document::cross_ref_table::CrossRefTable,
+        io::stream_reader::StreamReader,
+        parser::{parser::PdfParser, syntax::SyntaxParser},
+    };
+    use std::{collections::HashMap, io::Cursor};
+
+    #[test]
+    fn budget_construction_tracks_named_and_stream_cmaps_until_font_release() {
+        use crate::{
+            budget::OperationBudget,
+            document::owned::Document,
+            font::pdf_font::Font,
+            objects::{pdf_name::PdfName, pdf_stream::PdfStream},
+        };
+        let doc = Document::new().unwrap();
+        let source = b"<< /Subtype /Type0 /BaseFont /BudgetType0 /DescendantFonts [<< /Subtype /CIDFontType2 /BaseFont /Test /DW 500 >>] >>";
+        let object =
+            SyntaxParser::new(StreamReader::try_new(Cursor::new(source.to_vec())).unwrap())
+                .get_object()
+                .unwrap();
+        let mut dict = object.as_dict().unwrap().clone();
+        dict.insert(
+            "ToUnicode".into(),
+            PdfObject::PdfStream(PdfStream::new(
+                PdfDict::default(),
+                b"2 beginbfchar <41> <0041> <0041> <0041> endbfchar".to_vec(),
+            )),
+        );
+        for (encoding, bytes) in [
+            (PdfObject::PdfName(PdfName::new("Identity-H".into())), &b"\0A"[..]),
+            (PdfObject::PdfStream(PdfStream::new(PdfDict::default(), b"1 begincodespacerange <00> <FF> endcodespacerange 1 begincidchar <41> 7 endcidchar".to_vec())), &b"A"[..]),
+        ] {
+            dict.insert("Encoding".into(), encoding);
+            let probe = OperationBudget::new(2 * 1024 * 1024);
+            let (font, lease) = Font::try_new_with_budget(&dict, doc.ctx(), &probe).unwrap();
+            let Font::Type0(composite) = &font else { panic!("expected Type0"); };
+            let characters = composite.chars(bytes).unwrap();
+            assert_eq!(characters.len(), 1);
+            assert_eq!(characters[0].code(), 65);
+            assert_eq!(characters[0].width, 500.0);
+            assert_eq!(composite.unicode_mapping(&characters[0]), Some("A"));
+            assert!(lease.bytes() > composite.base_font.as_ref().unwrap().capacity());
+            assert_eq!(probe.live_bytes(), lease.bytes());
+            let peak = probe.peak_bytes();
+            drop((font, lease));
+            assert_eq!(probe.live_bytes(), 0);
+            let subtype = doc.try_insert_object(PdfObject::PdfName(PdfName::new("Type0".into()))).unwrap();
+            let mut indirect = dict.clone();
+            indirect.insert("Subtype".into(), PdfObject::PdfReference(crate::objects::pdf_reference::PdfReference::from_id(subtype)));
+            let (font, lease) = Font::try_new_with_budget(&indirect, doc.ctx(), &probe).unwrap();
+            assert!(matches!(font, Font::Type0(_)));
+            assert!(lease.bytes() > 0);
+            assert_eq!(probe.live_bytes(), lease.bytes());
+            drop((font, lease));
+            assert_eq!(probe.live_bytes(), 0);
+            assert!(matches!(Font::try_new(&indirect, doc.ctx()).unwrap(), Font::Type0(_)));
+            let pool = OperationBudget::new(peak);
+            let neighbor = pool.reserve(1).unwrap();
+            assert!(matches!(Font::try_new_with_budget(&dict, doc.ctx(), &pool), Err(PdfError::ResourceLimit(_))));
+            assert_eq!(pool.live_bytes(), 1);
+            drop(neighbor);
+            drop(Font::try_new_with_budget(&dict, doc.ctx(), &pool).unwrap());
+            assert_eq!(pool.live_bytes(), 0);
+            let mut invalid = dict.clone();
+            invalid.insert("ToUnicode".into(), PdfObject::PdfNull);
+            assert!(Font::try_new_with_budget(&invalid, doc.ctx(), &pool).is_err());
+            assert_eq!(pool.live_bytes(), 0);
+        }
+    }
+
+    #[test]
+    fn reverse_composite_encoding_preserves_one_to_four_byte_source_codes() {
+        let encoding = Cmap::try_new(b"4 begincodespacerange <21> <7F> <8000> <80FF> <810000> <81FFFF> <82000000> <82FFFFFF> endcodespacerange 5 begincidchar <21> 7 <22> 8 <8001> 9 <810001> 10 <82000001> 11 endcidchar".to_vec()).unwrap();
+        let unicode = Cmap::try_new(b"4 begincodespacerange <21> <7F> <8000> <80FF> <810000> <81FFFF> <82000000> <82FFFFFF> endcodespacerange 5 beginbfchar <21> <0061> <22> <0061> <8001> <00620063> <810001> <D83DDE00> <82000001> <4E2D> endbfchar".to_vec()).unwrap();
+        let font = Type0 {
+            encoding: Some(encoding),
+            to_unicode: Some(unicode),
+            ..Default::default()
+        };
+        let limits = crate::parser::options::Limits::default();
+        let maximum = 20
+            + ("abc😀中".len() + 1) * std::mem::size_of::<Option<(u32, u8, usize)>>()
+            + 8 * std::mem::size_of::<(u32, u8, &str)>();
+        let budget = crate::budget::OperationBudget::new(maximum);
+        let codes = font
+            .encode_text_with_budget("abc😀中", limits, &budget)
+            .unwrap();
+        assert_eq!(
+            codes.as_slice(),
+            &[0x21, 0x80, 1, 0x81, 0, 1, 0x82, 0, 0, 1]
+        );
+        assert_eq!(budget.live_bytes(), codes.capacity());
+        let neighbor = budget.reserve(maximum - budget.live_bytes()).unwrap();
+        assert!(font.encode_text_with_budget("a", limits, &budget).is_err());
+        drop(neighbor);
+        drop(codes);
+        assert_eq!(budget.live_bytes(), 0);
+        let small = crate::budget::OperationBudget::new(maximum - 1);
+        assert!(
+            font.encode_text_with_budget("abc😀中", limits, &small)
+                .is_err()
+        );
+        assert_eq!(small.live_bytes(), 0);
+        assert!(font.encode_text_with_budget("z", limits, &budget).is_err());
+        assert_eq!(budget.live_bytes(), 0);
+        assert_eq!(
+            font.encode_text_with_limits("abc😀中", limits).unwrap(),
+            vec![0x21, 0x80, 1, 0x81, 0, 1, 0x82, 0, 0, 1]
+        );
+        // A short input makes table growth overlap larger than the final
+        // output + eight candidate slots + two suffix slots.
+        let entry = std::mem::size_of::<(u32, u8, &str)>();
+        let suffix = std::mem::size_of::<Option<(u32, u8, usize)>>();
+        let final_bytes = 4 + 8 * entry + 2 * suffix;
+        let peak_bytes = 4 + (4 + 8) * entry;
+        assert!(peak_bytes > final_bytes);
+        let final_only = crate::budget::OperationBudget::new(final_bytes);
+        assert!(matches!(
+            font.encode_text_with_budget("a", limits, &final_only),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(final_only.live_bytes(), 0);
+        let peak = crate::budget::OperationBudget::new(peak_bytes);
+        let encoded = font.encode_text_with_budget("a", limits, &peak).unwrap();
+        assert_eq!(encoded.as_slice(), &[0x21]);
+        assert_eq!(peak.live_bytes(), encoded.capacity());
+        drop(encoded);
+        assert_eq!(peak.live_bytes(), 0);
+        assert!(font.encode_text_with_limits("z", limits).is_err());
+        assert_eq!(
+            font.encode_text_with_limits("", limits).unwrap(),
+            Vec::<u8>::new()
+        );
+        for limits in [
+            crate::parser::options::Limits {
+                max_objects: 4,
+                ..limits
+            },
+            crate::parser::options::Limits {
+                max_text_chars: 4,
+                ..limits
+            },
+            crate::parser::options::Limits {
+                max_decoded_bytes: 20,
+                ..limits
+            },
+        ] {
+            assert!(matches!(
+                font.encode_text_with_limits("abc😀中", limits),
+                Err(PdfError::ResourceLimit(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn reverse_encoding_preserves_colliding_numeric_codes_with_distinct_lengths() {
+        let font = Type0 {
+            encoding: Some(Cmap::try_new(b"2 begincodespacerange <40> <7F> <0000> <00FF> endcodespacerange 2 begincidchar <41> 7 <0041> 19 endcidchar".to_vec()).unwrap()),
+            to_unicode: Some(Cmap::try_new(b"2 beginbfchar <41> <0041> <0041> <0042> endbfchar".to_vec()).unwrap()),
+            ..Default::default()
+        };
+        let budget = crate::budget::OperationBudget::new(65536);
+        let encoded = font
+            .encode_text_with_budget("AB", Default::default(), &budget)
+            .unwrap();
+        assert_eq!(encoded.as_slice(), &[0x41, 0, 0x41]);
+        let chars = font.chars(encoded.as_slice()).unwrap();
+        assert_eq!(font.unicode_mapping(&chars[0]), Some("A"));
+        assert_eq!(font.unicode_mapping(&chars[1]), Some("B"));
+        drop(encoded);
+        assert_eq!(budget.live_bytes(), 0);
+    }
+
+    #[test]
+    fn reverse_composite_encoding_rejects_notdef_and_inconsistent_code_lengths() {
+        let mut font = Type0 {
+            encoding: Some(Cmap::try_new(b"1 begincodespacerange <00> <FF> endcodespacerange 1 begincidchar <21> 7 endcidchar".to_vec()).unwrap()),
+            to_unicode: Some(Cmap::try_new(b"1 begincodespacerange <0000> <FFFF> endcodespacerange 1 beginbfchar <0021> <0041> endbfchar".to_vec()).unwrap()),
+            ..Default::default()
+        };
+        let limits = crate::parser::options::Limits::default();
+        assert!(font.encode_text_with_limits("A", limits).is_err());
+        font.to_unicode = Some(
+            Cmap::try_new(b"2 beginbfchar <21> <0041> <22> <0042> endbfchar".to_vec()).unwrap(),
+        );
+        assert_eq!(
+            font.encode_text_with_limits("A", limits).unwrap(),
+            vec![0x21]
+        );
+        assert!(font.encode_text_with_limits("B", limits).is_err());
+        font.to_unicode = None;
+        assert!(font.encode_text_with_limits("A", limits).is_err());
+    }
+
+    #[test]
+    fn reverse_composite_encoding_avoids_longest_match_dead_end() {
+        let font = Type0 {
+            encoding: Some(Cmap::try_new(b"1 begincodespacerange <00> <FF> endcodespacerange 3 begincidchar <01> 7 <02> 8 <03> 9 endcidchar".to_vec()).unwrap()),
+            to_unicode: Some(Cmap::try_new(b"3 beginbfchar <01> <0061> <02> <00610062> <03> <00620063> endbfchar".to_vec()).unwrap()),
+            ..Default::default()
+        };
+        let limits = crate::parser::options::Limits::default();
+        assert_eq!(
+            font.encode_text_with_limits("abc", limits).unwrap(),
+            vec![1, 3]
+        );
+        assert_eq!(font.encode_text_with_limits("ab", limits).unwrap(), vec![2]);
+    }
+
+    #[test]
+    fn non_identity_encoding_uses_cid_metrics_but_preserves_source_unicode() {
+        let syntax =
+            SyntaxParser::new(StreamReader::try_new(Cursor::new(Vec::<u8>::new())).unwrap());
+        let ctx = PDFContext::try_new(
+            PdfParser::new(syntax),
+            CrossRefTable::new(HashMap::new(), PdfDict::default()),
+        )
+        .unwrap();
+        let mut parser = SyntaxParser::new(StreamReader::try_new(Cursor::new(
+            b"<< /Subtype /CIDFontType2 /BaseFont /Test /DW 100 /W [7 [700]] /DW2 [880 -1000] /W2 [7 [-1200 350 900]] >>".to_vec(),
+        )).unwrap());
+        let descendant = parser.get_object().unwrap();
+        let mut font = Type0 {
+            encoding: Some(Cmap::try_new(
+                b"1 begincodespacerange <00> <FF> endcodespacerange 1 begincidchar <41> 7 endcidchar".to_vec(),
+            ).unwrap()),
+            to_unicode: Some(Cmap::try_new(
+                b"1 beginbfchar <41> <0041> endbfchar".to_vec(),
+            ).unwrap()),
+            descent_font: CidFont::try_new(descendant.as_dict().unwrap(), &ctx).unwrap(),
+            ..Type0::default()
+        };
+        let chars = font.chars(b"AB").unwrap();
+        assert_eq!(chars[0].code(), 65);
+        assert_eq!(chars[0].width, 700.0);
+        assert_eq!(chars[1].width, 100.0);
+        assert_eq!(font.text_widths(&chars).unwrap(), 800.0);
+        assert_eq!(font.unicode_mapping(&chars[0]), Some("A"));
+        assert!(matches!(font.get_glyph(&chars[0]), Some(GlyphDesc::Gid(7))));
+        assert!(matches!(font.get_glyph(&chars[1]), Some(GlyphDesc::Gid(0))));
+        font.encoding = Some(Cmap::try_new(
+            b"/WMode 1 def 1 begincodespacerange <00> <FF> endcodespacerange 1 begincidchar <41> 7 endcidchar".to_vec(),
+        ).unwrap());
+        assert_eq!(font.chars(b"A").unwrap()[0].width, -1200.0);
+        let mut visited = Vec::new();
+        assert_eq!(
+            font.visit_chars_limited(b"AB", 2, |character| {
+                visited.push((
+                    character.code(),
+                    character.length(),
+                    character.width(),
+                    character.origin_x(),
+                    character.origin_y(),
+                ));
+                Ok(())
+            })
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            visited,
+            vec![(65, 1, -1200., 350., 900.), (66, 1, -1000., 50., 880.)]
+        );
+        let collected = font.chars_limited(b"AB", 2).unwrap();
+        assert_eq!(
+            collected
+                .iter()
+                .map(|character| (
+                    character.code(),
+                    character.length(),
+                    character.width(),
+                    character.origin_x(),
+                    character.origin_y()
+                ))
+                .collect::<Vec<_>>(),
+            visited
+        );
+        let mut calls = 0;
+        assert!(matches!(
+            font.visit_chars_limited(b"AB", 1, |_| {
+                calls += 1;
+                Ok(())
+            }),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(calls, 1);
+        calls = 0;
+        assert!(matches!(
+            font.visit_chars_limited(b"AB", 2, |_| {
+                calls += 1;
+                Err(PdfError::ObjectError("visitor stopped".into()))
+            }),
+            Err(PdfError::ObjectError(_))
+        ));
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn optional_unicode_mapping_distinguishes_missing_and_replacement() {
+        let ch = CharCode::new(1, 1, 500.0);
+        let mut font = Type0::default();
+        assert_eq!(font.unicode_mapping(&ch), None);
+        font.to_unicode = Some(
+            Cmap::try_new_with_limits(
+                b"1 beginbfchar <01> <FFFD> endbfchar".to_vec(),
+                &crate::parser::options::Limits::default(),
+            )
+            .unwrap(),
+        );
+        assert_eq!(font.unicode_mapping(&ch), Some("\u{fffd}"));
+        assert_eq!(font.unicode_mapping(&CharCode::new(2, 1, 500.0)), None);
+    }
+
+    #[test]
+    fn malformed_type0_and_descendant_dictionaries_return_errors() {
+        let syntax =
+            SyntaxParser::new(StreamReader::try_new(Cursor::new(Vec::<u8>::new())).unwrap());
+        let ctx = PDFContext::try_new(
+            PdfParser::new(syntax),
+            CrossRefTable::new(HashMap::new(), PdfDict::default()),
+        )
+        .unwrap();
+        for input in [
+            "<< /BaseFont 1 >>",
+            "<< /Encoding /Identity-H /DescendantFonts 1 >>",
+            "<< /Encoding /Identity-H /DescendantFonts [] >>",
+            "<< /Encoding /Identity-H /DescendantFonts [1] >>",
+            "<< /Encoding /Identity-H /DescendantFonts [<< /Subtype 1 /BaseFont /Test >>] >>",
+            "<< /Encoding /Identity-H /DescendantFonts [<< /Subtype /CIDFontType2 /BaseFont 1 >>] >>",
+            "<< /Encoding /Identity-H /DescendantFonts [<< /Subtype /CIDFontType2 /BaseFont /Test /DW /bad >>] >>",
+            "<< /Encoding /Identity-H /DescendantFonts [<< /Subtype /CIDFontType2 /BaseFont /Test /DW2 [0 /bad] >>] >>",
+            "<< /Encoding /Identity-H /DescendantFonts [<< /Subtype /CIDFontType2 /BaseFont /Test /W 1 >>] >>",
+            "<< /Encoding /Identity-H /DescendantFonts [<< /Subtype /CIDFontType2 /BaseFont /Test /W2 1 >>] >>",
+            "<< /Encoding /Identity-H /DescendantFonts [<< /Subtype /CIDFontType2 /BaseFont /Test /FontDescriptor 1 >>] >>",
+            "<< /Encoding /Identity-H /DescendantFonts [<< /Subtype /CIDFontType2 /BaseFont /Test >>] /ToUnicode 1 >>",
+        ] {
+            let mut parser = SyntaxParser::new(
+                StreamReader::try_new(Cursor::new(input.as_bytes().to_vec())).unwrap(),
+            );
+            let object = parser.get_object().unwrap();
+            assert!(
+                Type0::try_new(object.as_dict().unwrap(), &ctx).is_err(),
+                "{input}"
+            );
+        }
     }
 }

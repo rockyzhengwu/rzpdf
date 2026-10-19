@@ -13,8 +13,8 @@ impl Rc4 {
             return Err(PdfError::ParserError("Invalid RC4 key length".into()));
         }
         let mut s = [0u8; 256];
-        for i in 0..256 {
-            s[i] = i as u8;
+        for (index, entry) in s.iter_mut().enumerate() {
+            *entry = index as u8;
         }
 
         let mut j = 0u8;
@@ -76,7 +76,7 @@ pub fn aes256_decrypt(key: &[u8], data: &[u8]) -> PdfResult<Vec<u8>> {
 }
 
 fn split_encrypted_data(data: &[u8]) -> PdfResult<(&[u8], &[u8])> {
-    if data.len() < 32 || (data.len() - 16) % 16 != 0 {
+    if data.len() < 32 || !(data.len() - 16).is_multiple_of(16) {
         return Err(PdfError::ParserError(
             "Invalid IV-prefixed AES ciphertext length".into(),
         ));

@@ -53,7 +53,7 @@ fn validate_identity(params: Option<&PdfDict>) -> PdfResult<()> {
 mod tests {
     use std::collections::HashMap;
 
-    use crate::objects::{pdf_dict::PdfDict, pdf_name::PdfName, PdfObject};
+    use crate::objects::{PdfObject, pdf_dict::PdfDict, pdf_name::PdfName};
 
     use super::crypt_decode;
 
@@ -62,7 +62,7 @@ mod tests {
         use crate::{
             budget::OperationBudget,
             error::PdfError,
-            filter::{apply_filter_with_budget, FilterContext},
+            filter::{FilterContext, apply_filter_with_budget},
         };
         let budget = OperationBudget::new(3);
         let neighbor = budget.reserve(1).unwrap();

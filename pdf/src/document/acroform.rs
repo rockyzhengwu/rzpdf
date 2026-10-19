@@ -3,17 +3,17 @@
 mod edit;
 mod graph;
 mod model;
+mod signature;
 mod text;
+mod transfer;
 mod types;
 mod write;
-mod transfer;
-mod signature;
 pub use graph::{FormFieldNode, FormWidget};
-pub(crate) use text::AppearanceWork;
 pub use model::{
     ChoiceOption, FormFieldDefinition, FormFieldDetails, FormFieldKind, FormTextStyle,
     FormWidgetSpec,
 };
+pub(crate) use text::AppearanceWork;
 
 use std::io::{Read, Seek};
 

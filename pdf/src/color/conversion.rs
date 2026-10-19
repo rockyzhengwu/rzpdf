@@ -74,7 +74,7 @@ impl ColorConversionContext {
             ..self.clone()
         }
     }
-    pub(crate) fn from_srgb(&self, color: ColorRgb) -> PdfResult<ColorRgb> {
+    pub(crate) fn convert_srgb(&self, color: ColorRgb) -> PdfResult<ColorRgb> {
         if self.output.is_builtin_srgb() {
             return Ok(color);
         }

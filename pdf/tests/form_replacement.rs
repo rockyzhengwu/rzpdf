@@ -1,7 +1,7 @@
 use pdf::{
     document::{owned::Document, resource_manager::ResourceKind},
     io::stream_reader::StreamReader,
-    objects::{pdf_stream::PdfStream, PdfObject},
+    objects::{PdfObject, pdf_stream::PdfStream},
     page::page_object::PageObject,
     parser::syntax::{ParseMode, SyntaxParser},
 };
@@ -82,17 +82,15 @@ fn imported_form_keeps_private_font_and_image_scope_after_source_release() {
                     .collect::<String>(),
                 "ABAB"
             );
-            assert!(text
-                .characters
-                .iter()
-                .all(|ch| ch.font_name.as_deref() == Some("Helvetica")));
-            assert!(text.characters.iter().all(|ch| ch
-                .nested_source
-                .as_ref()
-                .unwrap()
-                .invocations[0]
-                .form_id
-                == Some(imported.object_id())));
+            assert!(
+                text.characters
+                    .iter()
+                    .all(|ch| ch.font_name.as_deref() == Some("Helvetica"))
+            );
+            assert!(text.characters.iter().all(|ch| {
+                ch.nested_source.as_ref().unwrap().invocations[0].form_id
+                    == Some(imported.object_id())
+            }));
             let images = page.extract_images_paint_order().unwrap();
             assert_eq!(images.len(), 2);
             for image in images {
@@ -158,7 +156,14 @@ fn imported_nested_form_replaces_one_call_after_source_is_released() {
             "<< /Subtype /Form /BBox [0 0 50 50] /Matrix [1 0 0 1 2 3] /Resources << >> >>",
             b"0 0 3 3 re f",
         );
-        let outer = insert_form(&source, &format!("<< /Subtype /Form /BBox [0 0 50 50] /Matrix [1 0 0 1 7 8] /Resources << /XObject << /Child {} 0 R >> >> >>", leaf.obj_num()), b"/Child Do");
+        let outer = insert_form(
+            &source,
+            &format!(
+                "<< /Subtype /Form /BBox [0 0 50 50] /Matrix [1 0 0 1 7 8] /Resources << /XObject << /Child {} 0 R >> >> >>",
+                leaf.obj_num()
+            ),
+            b"/Child Do",
+        );
         target
             .import_resource_from(
                 &source,
@@ -279,19 +284,22 @@ fn form_replacement_isolates_one_call_and_rolls_back_resource_registration() {
     let leaf = page
         .nested_content_program(&original, path.nested_source().unwrap())
         .unwrap();
-    assert!(doc
-        .replace_page_form_draw(0, &other_page, 2, &handle)
-        .is_err());
+    assert!(
+        doc.replace_page_form_draw(0, &other_page, 2, &handle)
+            .is_err()
+    );
     assert!(doc.replace_page_form_draw(0, &leaf, 1, &handle).is_err());
     for index in [0, 3, usize::MAX] {
-        assert!(doc
-            .replace_page_form_draw(0, &original, index, &handle)
-            .is_err());
+        assert!(
+            doc.replace_page_form_draw(0, &original, index, &handle)
+                .is_err()
+        );
     }
     for id in [non_stream, malformed] {
-        assert!(doc
-            .replace_page_form_draw(0, &original, 2, &doc.object_handle(id).unwrap())
-            .is_err());
+        assert!(
+            doc.replace_page_form_draw(0, &original, 2, &doc.object_handle(id).unwrap())
+                .is_err()
+        );
     }
     assert_eq!(doc.revision(), revision);
     assert_eq!(doc.get_page(0).unwrap().resource().unwrap(), resources);
@@ -324,15 +332,17 @@ fn form_replacement_isolates_one_call_and_rolls_back_resource_registration() {
         Document::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict).unwrap();
     let foreign_handle = foreign.object_handle(new).unwrap();
     let revision = doc.revision();
-    assert!(doc
-        .replace_page_form_draw(0, &snapshot, 2, &foreign_handle)
-        .is_err());
+    assert!(
+        doc.replace_page_form_draw(0, &snapshot, 2, &foreign_handle)
+            .is_err()
+    );
     assert_eq!(doc.revision(), revision);
     doc.replace_page_form_draw(0, &snapshot, 2, &handle)
         .unwrap();
-    assert!(doc
-        .replace_page_form_draw(0, &snapshot, 2, &handle)
-        .is_err());
+    assert!(
+        doc.replace_page_form_draw(0, &snapshot, 2, &handle)
+            .is_err()
+    );
     let reopened =
         Document::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict).unwrap();
     for document in [&doc, &reopened] {

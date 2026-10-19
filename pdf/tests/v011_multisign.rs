@@ -13,7 +13,9 @@ fn hex(input: &str) -> Vec<u8> {
     let digits: Vec<_> = input.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
     assert_eq!(digits.len() % 2, 0);
     digits
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|p| u8::from_str_radix(std::str::from_utf8(p).unwrap(), 16).unwrap())
         .collect()
 }
@@ -55,8 +57,13 @@ fn append_preserves_prefix_all_signatures_and_source_state() {
     assert_eq!(doc.commit_revision(), 0);
     assert_eq!(doc.verify_signatures().unwrap().len(), 1);
     let reopened = open(output);
-    assert!(reopened.signature_modifications().unwrap().iter().all(|r|
-        r.authorization == pdf::signatures::ModificationAuthorization::Allowed));
+    assert!(
+        reopened
+            .signature_modifications()
+            .unwrap()
+            .iter()
+            .all(|r| r.authorization == pdf::signatures::ModificationAuthorization::Allowed)
+    );
     let reports = reopened.verify_signatures().unwrap();
     assert_eq!(reports.len(), 2);
     for report in &reports {

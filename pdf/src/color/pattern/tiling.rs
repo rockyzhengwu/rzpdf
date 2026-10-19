@@ -30,10 +30,10 @@ impl TilingPattern {
                     .ok_or_else(|| invalid(&format!("missing {key}")))?,
             )
         };
-        if let Some(kind) = stream.dict().get("Type") {
-            if ctx.resolve(kind)?.as_name().map(|n| n.name()) != Some("Pattern") {
-                return Err(invalid("Type must be Pattern"));
-            }
+        if let Some(kind) = stream.dict().get("Type")
+            && ctx.resolve(kind)?.as_name().map(|n| n.name()) != Some("Pattern")
+        {
+            return Err(invalid("Type must be Pattern"));
         }
         if required("PatternType")?.as_u8() != Some(1) {
             return Err(invalid("PatternType must be 1"));

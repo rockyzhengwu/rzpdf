@@ -323,6 +323,10 @@ fn ownership_slot<R: Read + Seek>(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "PDF revision/signature invariants stay explicit; retain existing call contracts"
+)]
 fn scan(
     object: &PdfObject,
     owner: ObjectId,
@@ -344,10 +348,10 @@ fn scan(
         ));
     }
     *work += 1;
-    if let Some(id) = object.as_object_id().filter(|id| protected.contains(id)) {
-        if !edges.contains(&(owner, id, path.to_owned())) {
-            return Err(invalid("shared or unknown field/AcroForm reference owner"));
-        }
+    if let Some(id) = object.as_object_id().filter(|id| protected.contains(id))
+        && !edges.contains(&(owner, id, path.to_owned()))
+    {
+        return Err(invalid("shared or unknown field/AcroForm reference owner"));
     }
     if let Some(dict) = object
         .as_dict()

@@ -32,15 +32,14 @@ impl<R: Read + Seek> PdfDocument<R> {
         if insertion_index as usize > self.try_page_count()? {
             return Err(PdfError::PageNotExist);
         }
-        for key in ["B"] {
-            if source.page_dict.contains_key(key) {
-                return Err(PdfError::UnsupportedFeature(format!(
-                    "Page copy with {key} ownership"
-                )));
-            }
+        if source.page_dict.contains_key("B") {
+            return Err(PdfError::UnsupportedFeature(
+                "Page copy with B ownership".into(),
+            ));
         }
         self.page_relationship_guard()?;
-        let structure_plan=self.plan_structure_transfer(self,&std::collections::HashSet::from([source.page_id]))?;
+        let structure_plan =
+            self.plan_structure_transfer(self, &std::collections::HashSet::from([source.page_id]))?;
         let insertion = self.page_insertion_point(insertion_index)?;
         let mut page = source.page_dict;
         let node = PdfObject::PdfReference(PdfReference::from_id(source.page_id));
@@ -95,9 +94,17 @@ impl<R: Read + Seek> PdfDocument<R> {
                 let mut page = doc.resolve_object(id)?.into_dict().unwrap();
                 let parent = page.remove("Parent");
                 page.remove("Type");
-                let mut page = importer.object(PdfObject::PdfDict(page), 0)?.into_dict().unwrap();
-                page.try_insert("Type".into(), PdfObject::PdfName(crate::objects::pdf_name::PdfName::new("Page".into())))?;
-                if let Some(parent) = parent { page.try_insert("Parent".into(), parent)?; }
+                let mut page = importer
+                    .object(PdfObject::PdfDict(page), 0)?
+                    .into_dict()
+                    .unwrap();
+                page.try_insert(
+                    "Type".into(),
+                    PdfObject::PdfName(crate::objects::pdf_name::PdfName::new("Page".into())),
+                )?;
+                if let Some(parent) = parent {
+                    page.try_insert("Parent".into(), parent)?;
+                }
                 doc.update_object(id, PdfObject::PdfDict(page))?;
             }
             if let Some(annotations) = annotations {
@@ -118,7 +125,7 @@ impl<R: Read + Seek> PdfDocument<R> {
             doc.attach_page_fields(roots, resources)?;
             doc.transfer_navigation(&mut importer, options)?;
             doc.validate_annotation_ownership()?;
-            doc.apply_structure_transfer(&mut importer,structure_plan)?;
+            doc.apply_structure_transfer(&mut importer, structure_plan)?;
             if let Some(labels) = labels {
                 doc.set_page_label_ranges(&labels)?;
             }

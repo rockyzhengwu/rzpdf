@@ -20,12 +20,12 @@ impl ShadingPattern {
         let dict = obj
             .as_dict()
             .ok_or_else(|| PdfError::ColorError("shading pattern must be a dictionary".into()))?;
-        if let Some(kind) = dict.get("Type") {
-            if ctx.resolve(kind)?.as_name().map(|n| n.name()) != Some("Pattern") {
-                return Err(PdfError::ColorError(
-                    "shading pattern Type must be Pattern".into(),
-                ));
-            }
+        if let Some(kind) = dict.get("Type")
+            && ctx.resolve(kind)?.as_name().map(|n| n.name()) != Some("Pattern")
+        {
+            return Err(PdfError::ColorError(
+                "shading pattern Type must be Pattern".into(),
+            ));
         }
         let kind = dict
             .get("PatternType")

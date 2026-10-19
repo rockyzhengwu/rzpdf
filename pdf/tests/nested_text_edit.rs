@@ -4,7 +4,7 @@ use pdf::{
         resource_manager::{ResourceKind, StandardFont},
     },
     io::stream_reader::StreamReader,
-    objects::{pdf_stream::PdfStream, PdfObject},
+    objects::{PdfObject, pdf_stream::PdfStream},
     parser::syntax::{ParseMode, SyntaxParser},
 };
 use std::io::Cursor;
@@ -181,9 +181,10 @@ fn cross_item_unicode_range_preserves_adjustments_and_shared_forms() {
     let initial_resources = doc.get_page(0).unwrap().resource().unwrap();
     let initial_revision = doc.revision();
     for range in [(1, 0)..(4, 1), (0, 5)..(4, 1), (4, 1)..(0, 1)] {
-        assert!(doc
-            .replace_page_text_array_range(0, &root, 2, range, "X")
-            .is_err());
+        assert!(
+            doc.replace_page_text_array_range(0, &root, 2, range, "X")
+                .is_err()
+        );
         assert_eq!(doc.revision(), initial_revision);
         assert_eq!(
             doc.get_page(0).unwrap().resource().unwrap(),
@@ -226,17 +227,20 @@ fn cross_item_unicode_range_preserves_adjustments_and_shared_forms() {
             .collect::<String>(),
         "ABCDEFGH"
     );
-    assert!(doc
-        .replace_page_text_array_range(0, &root, 2, (0, 1)..(4, 1), "é€")
-        .is_err());
+    assert!(
+        doc.replace_page_text_array_range(0, &root, 2, (0, 1)..(4, 1), "é€")
+            .is_err()
+    );
     let root = refreshed;
     doc.replace_page_text_array_range(0, &root, 2, (0, 1)..(4, 1), "é€")
         .unwrap();
     let edited = doc.get_page(0).unwrap().content_program().unwrap();
     let bytes = edited.source_bytes();
-    assert!(bytes
-        .windows(b"-12.00 %keep\n<> +3 <48>".len())
-        .any(|part| part == b"-12.00 %keep\n<> +3 <48>"));
+    assert!(
+        bytes
+            .windows(b"-12.00 %keep\n<> +3 <48>".len())
+            .any(|part| part == b"-12.00 %keep\n<> +3 <48>")
+    );
     // Preserve the top-level edited page for strict-save verification below.
     doc.copy_page(0, 2).unwrap();
     let mut dictionary = SyntaxParser::new(
@@ -275,9 +279,10 @@ fn cross_item_unicode_range_preserves_adjustments_and_shared_forms() {
     let resources = doc.get_page(0).unwrap().resource().unwrap();
     let revision = doc.revision();
     for range in [(1, 0)..(4, 1), (0, 5)..(4, 1), (4, 1)..(0, 1)] {
-        assert!(doc
-            .replace_nested_text_array_range(0, &root, source, range, "X")
-            .is_err());
+        assert!(
+            doc.replace_nested_text_array_range(0, &root, source, range, "X")
+                .is_err()
+        );
         assert_eq!(doc.revision(), revision);
         assert_eq!(doc.get_page(0).unwrap().resource().unwrap(), resources);
     }
@@ -314,9 +319,10 @@ fn cross_item_unicode_range_preserves_adjustments_and_shared_forms() {
             .collect::<String>(),
         "ABCDEFGHABCDEFGH"
     );
-    assert!(doc
-        .replace_nested_text_array_range(0, &root, source, (0, 1)..(4, 1), "é€")
-        .is_err());
+    assert!(
+        doc.replace_nested_text_array_range(0, &root, source, (0, 1)..(4, 1), "é€")
+            .is_err()
+    );
     let root = refreshed;
     let report = doc
         .get_page(0)
@@ -604,13 +610,14 @@ fn empty_nested_text_can_be_populated_without_character_event() {
         )
         .unwrap();
         doc.copy_page(0, 1).unwrap();
-        assert!(doc
-            .get_page(0)
-            .unwrap()
-            .extract_characters_paint_order_report()
-            .unwrap()
-            .characters
-            .is_empty());
+        assert!(
+            doc.get_page(0)
+                .unwrap()
+                .extract_characters_paint_order_report()
+                .unwrap()
+                .characters
+                .is_empty()
+        );
         let root = doc.get_page(0).unwrap().content_program().unwrap();
         let leaf = ContentProgram::from_decoded_bytes(body.to_vec(), Default::default()).unwrap();
         let source = NestedDrawSource {
@@ -632,9 +639,10 @@ fn empty_nested_text_can_be_populated_without_character_event() {
             .unwrap();
         let source = report.characters[0].nested_source.as_ref().unwrap();
         let revision = doc.revision();
-        assert!(doc
-            .replace_nested_text_range(0, &root, source, None, 2..3, "A")
-            .is_err());
+        assert!(
+            doc.replace_nested_text_range(0, &root, source, None, 2..3, "A")
+                .is_err()
+        );
         assert_eq!(doc.revision(), revision);
         let resources = doc.get_page(0).unwrap().resource().unwrap();
         let rollback: pdf::error::PdfResult<()> = doc.edit_transaction(|editing| {
@@ -669,9 +677,10 @@ fn empty_nested_text_can_be_populated_without_character_event() {
                 .collect::<String>(),
             "é€"
         );
-        assert!(doc
-            .replace_nested_text_range(0, &root, source, None, 1..2, "A")
-            .is_err());
+        assert!(
+            doc.replace_nested_text_range(0, &root, source, None, 1..2, "A")
+                .is_err()
+        );
         doc.replace_nested_text_range(0, &refreshed, source, None, 1..2, "A")
             .unwrap();
         let reopened =
@@ -699,17 +708,21 @@ fn empty_nested_text_can_be_populated_without_character_event() {
                     .collect::<Vec<_>>(),
                 [0xe9, 0x41]
             );
-            assert!(report
-                .characters
-                .iter()
-                .all(|ch| ch.font_name.as_deref() == Some("Helvetica")));
-            assert!(document
-                .get_page(1)
-                .unwrap()
-                .extract_characters_paint_order_report()
-                .unwrap()
-                .characters
-                .is_empty());
+            assert!(
+                report
+                    .characters
+                    .iter()
+                    .all(|ch| ch.font_name.as_deref() == Some("Helvetica"))
+            );
+            assert!(
+                document
+                    .get_page(1)
+                    .unwrap()
+                    .extract_characters_paint_order_report()
+                    .unwrap()
+                    .characters
+                    .is_empty()
+            );
             assert_eq!(
                 document
                     .resolve_object(form)
@@ -789,10 +802,12 @@ fn nested_unicode_replacement_inherits_caller_font_across_scoped_q_restore() {
         .unwrap()
         .extract_characters_paint_order_report()
         .unwrap();
-    assert!(report
-        .characters
-        .iter()
-        .all(|ch| ch.font_name.as_deref() == Some("Helvetica")));
+    assert!(
+        report
+            .characters
+            .iter()
+            .all(|ch| ch.font_name.as_deref() == Some("Helvetica"))
+    );
     let source = report.characters[0].nested_source.as_ref().unwrap();
     let revision = doc.revision();
     assert!(doc.replace_nested_text(0, &root, source, "中").is_err());
@@ -849,10 +864,12 @@ fn nested_unicode_replacement_inherits_caller_font_across_scoped_q_restore() {
                     .collect::<String>(),
                 expected
             );
-            assert!(report
-                .characters
-                .iter()
-                .all(|ch| ch.font_name.as_deref() == Some("Helvetica")));
+            assert!(
+                report
+                    .characters
+                    .iter()
+                    .all(|ch| ch.font_name.as_deref() == Some("Helvetica"))
+            );
             if page == 0 {
                 assert_eq!(report.characters[0].charcode, 0xe9);
                 assert_eq!(report.characters[1].charcode, 0x80);
@@ -914,10 +931,12 @@ fn nested_unicode_replacement_inherits_caller_font_across_scoped_q_restore() {
                     .collect::<String>(),
                 expected
             );
-            assert!(report
-                .characters
-                .iter()
-                .all(|ch| ch.font_name.as_deref() == Some("Helvetica")));
+            assert!(
+                report
+                    .characters
+                    .iter()
+                    .all(|ch| ch.font_name.as_deref() == Some("Helvetica"))
+            );
         }
         assert_eq!(
             document
@@ -1062,33 +1081,41 @@ fn nested_tj_and_quotes_clear_one_event_preserving_operator_state_and_other_call
                 let array = edited.get_as_array(0).unwrap();
                 assert_eq!(array.get(1).unwrap().as_f32(), Some(25.));
                 assert_eq!(array.get(3).unwrap().as_f32(), Some(-10.));
-                assert!(array
-                    .get(0)
-                    .unwrap()
-                    .as_string()
-                    .unwrap()
-                    .bytes()
-                    .is_empty());
-                assert!(array
-                    .get(2)
-                    .unwrap()
-                    .as_string()
-                    .unwrap()
-                    .bytes()
-                    .is_empty());
-                assert!(std::str::from_utf8(copied.source_bytes())
-                    .unwrap()
-                    .contains("% keep\n"));
+                assert!(
+                    array
+                        .get(0)
+                        .unwrap()
+                        .as_string()
+                        .unwrap()
+                        .bytes()
+                        .is_empty()
+                );
+                assert!(
+                    array
+                        .get(2)
+                        .unwrap()
+                        .as_string()
+                        .unwrap()
+                        .bytes()
+                        .is_empty()
+                );
+                assert!(
+                    std::str::from_utf8(copied.source_bytes())
+                        .unwrap()
+                        .contains("% keep\n")
+                );
             } else {
                 if operator == "\"" {
                     assert_eq!(edited.operand(0).unwrap().as_f32(), Some(2.));
                     assert_eq!(edited.operand(1).unwrap().as_f32(), Some(1.));
                 }
-                assert!(edited
-                    .get_as_string(if operator == "\"" { 2 } else { 0 })
-                    .unwrap()
-                    .bytes()
-                    .is_empty());
+                assert!(
+                    edited
+                        .get_as_string(if operator == "\"" { 2 } else { 0 })
+                        .unwrap()
+                        .bytes()
+                        .is_empty()
+                );
             }
             assert_eq!(
                 document
@@ -1152,9 +1179,10 @@ fn nested_tj_and_quotes_clear_one_event_preserving_operator_state_and_other_call
                 .collect::<String>(),
             "CABC"
         );
-        assert!(doc
-            .replace_nested_text_codes(0, &root, source, b"D")
-            .is_err());
+        assert!(
+            doc.replace_nested_text_codes(0, &root, source, b"D")
+                .is_err()
+        );
         doc.replace_nested_text_codes(0, &restored, source, b"D")
             .unwrap();
         let root = doc.get_page(0).unwrap().content_program().unwrap();
@@ -1180,9 +1208,10 @@ fn nested_tj_and_quotes_clear_one_event_preserving_operator_state_and_other_call
                 ));
                 assert_eq!(doc.revision(), revision);
             }
-            assert!(doc
-                .replace_nested_text_array_item_codes(0, &root, &source, 1, b"Z")
-                .is_err());
+            assert!(
+                doc.replace_nested_text_array_item_codes(0, &root, &source, 1, b"Z")
+                    .is_err()
+            );
             assert_eq!(doc.revision(), revision);
             doc.replace_nested_text_array_item(0, &root, &source, 0, "Z")
                 .unwrap();

@@ -1,6 +1,5 @@
 use pdf::{
     color::{
-        colorspace::ColorSpace,
         conversion::{ColorConversionContext, IccFallback, RenderingIntent},
         icc_based::IccBased,
         icc_profile::ICCProfile,

@@ -14,12 +14,13 @@ fn budgeted_transaction_snapshot_rejects_and_rolls_back_public_edits() {
     let revision = doc.revision();
     let tiny = OperationBudget::new(1);
     let mut called = false;
-    assert!(doc
-        .edit_transaction_with_budget(&tiny, |_| {
+    assert!(
+        doc.edit_transaction_with_budget(&tiny, |_| {
             called = true;
             Ok(())
         })
-        .is_err());
+        .is_err()
+    );
     assert!(!called);
     assert_eq!(doc.revision(), revision);
     assert_eq!(tiny.live_bytes(), 0);
@@ -110,7 +111,10 @@ fn mixed_content_edits_commit_without_changing_shared_page_after_reopen() {
         assert!(edited.extract_images_paint_order().unwrap().is_empty());
         assert_eq!(edited.display_list().unwrap().objects().len(), 1);
         // Logical removal preserves the resource, rather than deleting a shared image.
-        assert_eq!(edited.image_resource_names().unwrap(), [image.clone()]);
+        assert_eq!(
+            edited.image_resource_names().unwrap().as_slice(),
+            std::slice::from_ref(&image)
+        );
         let mut untouched = document.get_page(1).unwrap();
         assert_eq!(
             untouched.content_program().unwrap().source_bytes(),
@@ -208,7 +212,10 @@ fn mixed_content_edits_rollback_errors_and_panics_after_nested_commits() {
                     page.content_program().unwrap().source_bytes(),
                     original.source_bytes()
                 );
-                assert_eq!(page.image_resource_names().unwrap(), [image.clone()]);
+                assert_eq!(
+                    page.image_resource_names().unwrap().as_slice(),
+                    std::slice::from_ref(&image)
+                );
                 assert_eq!(page.extract_images_paint_order().unwrap().len(), 1);
                 assert_eq!(page.display_list().unwrap().objects().len(), 3);
             }

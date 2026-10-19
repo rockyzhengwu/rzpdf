@@ -1,5 +1,36 @@
 # 解析回归与异常输入验证
 
+## 代码质量门禁
+
+从仓库根目录运行，使用锁定依赖；检查范围包含三个 crate、单元测试、集成测试和示例：
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+git diff --check
+```
+
+清理时优先删除无用导入／私有空壳，简化转换、条件和重复查找，用命名类型说明复杂返回值；只供单元测试使用的内部参考入口放在 `cfg(test)`，测试模块放在生产实现之后。公共记录、预算所有者与返回值存活期不可为了消除警告而改写语义。反向范围等故意非法输入用明确的 `Range { start, end }` 构造，不改成合法迭代器，不删除原有负例或放宽断言。
+
+禁止 crate／workspace 级别一揽子 `allow(warnings)`。现有宽参数签名、按控制点索引表达的几何公式、公开枚举的内联布局、带线程亲和资源的共享快照，以及待 API 审查的少量不透明记录，可以使用局部 `#[expect(..., reason = "...")]`：必须说明保留原因，后续条件消失时让 unfulfilled expectation 暴露出来。新增代码不应照抄这些例外；参数确实属于一个概念时应优先用命名结构体，而不是隐藏身份／权限／预算。
+
+编译器／Clippy 的项目诊断与用户环境或依赖的原生链接警告分开登记。`~/.cargo/config` 的弃用提示和 mozjpeg 汇编对象的 macOS load-command 警告不通过全局屏蔽、修改用户配置或更换系统库来隐藏；它们不构成项目 Rust 源码零警告的反例，也不能因此宣传构建过程完全没有任何 warning。清理不自动升级 MSRV、依赖、公开 API 或 PDF 支持范围。
+
+### 2026 年 10 月 19 日维护验证
+
+基线 `613044b`，使用本地 Rust 1.99.1、Clippy 0.1.99、macOS x86_64。全仓格式检查、严格全目标 Clippy 和 `git diff --check` 均退出 0；严格 Clippy 的 JSON 中无 compiler-message。Cargo 包版本、锁文件及原生依赖未改，原先的源码差距审计文档保留。本轮不扩大 MSRV 或平台承诺。
+
+整理包括统一 Rust 格式、移到文件尾部的测试模块、命名复杂返回类型、补 `Default`／`is_empty`、简化转换／条件／查表和明确所有权释放。删除未使用的私有 CCITT `group4.rs`／`fax_table.rs` 及私有空壳／包装函数；实际 CCITT 仍走原 fax 后端，测试参考辅助入口仅在测试构建中启用。两个已删除文件可从基线 Git 提交恢复，未删除字体、CMap、fixture、负例或既有测试函数。
+
+最终测试覆盖完整工作区的 90 个测试程序及三个 crate 的文档测试：先 `cargo test --workspace --locked --no-run --message-format=json` 构建，再按 Cargo metadata 中各 package 的工作目录，以最多四个进程执行所有测试程序，命令不加过滤参数；文档执行 `cargo test --workspace --locked --doc`。共 93 组／1633 passed，0 failed／ignored／filtered；PDF 单元 776、font-data 1、render 57、集成 793、文档 6。这里不是宣称另行执行了单条 `cargo test --workspace --locked`，而是登记同一完整目标清单的并发执行证据。
+
+证据目录为 `/tmp/rzpdf-quality.2JgRv2/`：`clippy-receipt.json`、`format-receipt.json`、`diff-receipt.json` 及 `final-build-receipt.json`；最终测试仅取 `correct-cwd/` 下的各目标日志／receipt 和 `summary.json`，runner 已收取退出 0。早期调度误用工作区根目录，PDF 单元出现 50 项 fixture 路径失败，已终止该轮（143）并保留原始日志；修正 cwd 后，未改源码重新执行全部目标，776 项 PDF 单元及整轮均通过，不沿用错误调度轮的通过计数。
+
+652 项非 Markdown 输入重新枚举前后一致（较 v0.14 减少两个未使用的私有源码文件），90 个测试程序前后 hash 一致。`correct-cwd/sources-before.json` SHA-256 为 `fc58ced87de83b4a372d5b97968c611df4adf2ae558011019169d840976d6157`，`test-binaries.json` 为 `489d68355f42802327da6e0688908436d553770f0cd9d1e8b54ef731d95d79f0`，`summary.json` 为 `6d2d73842ee760ef96c5311bdc45d3c61f6dfb2928319adfadb12ce677677df1`。原有测试身份清单未减少；没有新增通过数、重跑十二组外部发布门禁、性能基线或目视页数，维护结果不替代原始版本验收。
+
+局部保留 51 处带原因的 `expect`：25 个宽参数签名、13 个控制点索引公式／参考检查、3 个公开大枚举、3 个线程亲和共享快照、6 个旧不透明记录字段及 1 个公开模块路径。它们是明确的兼容与计费约束，不是全局压制告警；稳定 API 审查时再决定是否合并参数或废弃旧记录。
+
 ## v0.14 关联文件整版门禁
 
 V14-00～09／三个阶段已完成限定验收：完整工作区 93 组／1633 项、十五目标联合 189 项、十二组独立门禁、162 页目视及 30 条性能／预算基线通过；654 项非 Markdown 输入和十四驱动一致。见[验收记录](releases/v0.14-acceptance.md)、[边界](releases/v0.14-boundaries.md)和[指南](associated-files.md)。本版仅 macOS x86_64 验证。

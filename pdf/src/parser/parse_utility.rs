@@ -39,9 +39,5 @@ pub fn real_from_buffer(buf: &[u8]) -> f32 {
 
 pub fn hex_to_u8(c: u8) -> u8 {
     let uc = c.to_ascii_uppercase();
-    if uc > b'9' {
-        return uc - b'A' + 10;
-    } else {
-        return uc - b'0';
-    }
+    if uc > b'9' { uc - b'A' + 10 } else { uc - b'0' }
 }

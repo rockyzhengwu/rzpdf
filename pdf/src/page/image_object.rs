@@ -22,7 +22,10 @@ pub struct ImageObject {
 }
 
 impl ImageObject {
-    pub(crate) fn clear_edit_source(&mut self) {self.source=None;self.nested_source=None;}
+    pub(crate) fn clear_edit_source(&mut self) {
+        self.source = None;
+        self.nested_source = None;
+    }
     pub fn nested_source(&self) -> Option<&super::source_provenance::NestedDrawSource> {
         self.nested_source.as_ref()
     }

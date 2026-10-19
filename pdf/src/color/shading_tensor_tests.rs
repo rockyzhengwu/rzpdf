@@ -63,6 +63,10 @@ fn tensor_stream_layout_and_interpolation_use_sixteen_controls() {
     );
 }
 #[test]
+#[expect(
+    clippy::needless_range_loop,
+    reason = "explicit control-net indices preserve PDF geometry formulas and reference checks"
+)]
 fn tensor_interior_is_not_replaced_by_coons_boundary() {
     let mut points = rectangle();
     points[12][0] += 64;

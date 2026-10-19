@@ -52,35 +52,49 @@ impl<'a> CompositeGlyph<'a> {
             count += 1;
             Ok(())
         })?;
-        let bytes = count.checked_mul(std::mem::size_of::<GlyphComponent>())
+        let bytes = count
+            .checked_mul(std::mem::size_of::<GlyphComponent>())
             .ok_or_else(|| PdfError::ResourceLimit("Composite capacity overflow".into()))?;
         let mut lease = budget.reserve(bytes)?;
         let mut components = Vec::new();
-        components.try_reserve_exact(count)
+        components
+            .try_reserve_exact(count)
             .map_err(|_| PdfError::ResourceLimit("Composite allocation".into()))?;
-        let capacity_bytes = components.capacity().checked_mul(std::mem::size_of::<GlyphComponent>())
+        let capacity_bytes = components
+            .capacity()
+            .checked_mul(std::mem::size_of::<GlyphComponent>())
             .ok_or_else(|| PdfError::ResourceLimit("Composite capacity overflow".into()))?;
         lease.resize(capacity_bytes)?;
-        let (header, instructions) = Self::visit_components(data, glyph_count, limits, |component| {
-            components.push(component);
-            Ok(())
-        })?;
+        let (header, instructions) =
+            Self::visit_components(data, glyph_count, limits, |component| {
+                components.push(component);
+                Ok(())
+            })?;
         Ok(BudgetedCompositeGlyph {
-            glyph: Self { header, components, instructions },
+            glyph: Self {
+                header,
+                components,
+                instructions,
+            },
             _lease: lease,
         })
     }
 
     pub fn try_new(data: &'a [u8], glyph_count: u16, limits: &Limits) -> PdfResult<Self> {
         let mut components = Vec::new();
-        let (header, instructions) = Self::visit_components(data, glyph_count, limits, |component| {
-            components
-                .try_reserve(1)
-                .map_err(|_| PdfError::ResourceLimit("Composite allocation".into()))?;
-            components.push(component);
-            Ok(())
-        })?;
-        Ok(Self { header, components, instructions })
+        let (header, instructions) =
+            Self::visit_components(data, glyph_count, limits, |component| {
+                components
+                    .try_reserve(1)
+                    .map_err(|_| PdfError::ResourceLimit("Composite allocation".into()))?;
+                components.push(component);
+                Ok(())
+            })?;
+        Ok(Self {
+            header,
+            components,
+            instructions,
+        })
     }
 
     /// Parse records without allocating a component collection. Callbacks may
@@ -211,13 +225,18 @@ mod tests {
         let glyph = CompositeGlyph::try_new_with_budget(&data, 2, &limits, &probe).unwrap();
         assert_eq!(glyph.glyph().components[0].glyph_id, 1);
         let bytes = probe.live_bytes();
-        assert_eq!(bytes, glyph.glyph().components.capacity() * std::mem::size_of::<GlyphComponent>());
+        assert_eq!(
+            bytes,
+            glyph.glyph().components.capacity() * std::mem::size_of::<GlyphComponent>()
+        );
         drop(glyph);
         assert_eq!(probe.live_bytes(), 0);
         let pool = crate::budget::OperationBudget::new(bytes);
         let neighbor = pool.reserve(1).unwrap();
-        assert!(matches!(CompositeGlyph::try_new_with_budget(&data, 2, &limits, &pool),
-            Err(PdfError::ResourceLimit(message)) if message == "operation live bytes"));
+        assert!(
+            matches!(CompositeGlyph::try_new_with_budget(&data, 2, &limits, &pool),
+            Err(PdfError::ResourceLimit(message)) if message == "operation live bytes")
+        );
         assert_eq!(pool.live_bytes(), 1);
         drop(neighbor);
         let glyph = CompositeGlyph::try_new_with_budget(&data, 2, &limits, &pool).unwrap();
@@ -238,12 +257,12 @@ mod tests {
         let limits = Limits::default();
         let collected = CompositeGlyph::try_new(&data, 3, &limits).unwrap();
         let mut visited = Vec::new();
-        let (header, instructions) = CompositeGlyph::visit_components(
-            &data, 3, &limits, |component| {
+        let (header, instructions) =
+            CompositeGlyph::visit_components(&data, 3, &limits, |component| {
                 visited.push(component);
                 Ok(())
-            },
-        ).unwrap();
+            })
+            .unwrap();
         assert_eq!(header, collected.header);
         assert_eq!(visited, collected.components);
         assert_eq!(instructions, &[0xaa]);
@@ -251,10 +270,14 @@ mod tests {
         let error = CompositeGlyph::visit_components(&data, 3, &limits, |_| {
             calls += 1;
             Err(PdfError::ResourceLimit("visitor quota".into()))
-        }).unwrap_err();
+        })
+        .unwrap_err();
         assert!(matches!(error, PdfError::ResourceLimit(message) if message == "visitor quota"));
         assert_eq!(calls, 1);
-        assert!(CompositeGlyph::visit_components(&data[..data.len() - 1], 3, &limits, |_| Ok(())).is_err());
+        assert!(
+            CompositeGlyph::visit_components(&data[..data.len() - 1], 3, &limits, |_| Ok(()))
+                .is_err()
+        );
     }
 
     #[test]
@@ -303,23 +326,34 @@ mod tests {
             let glyph = CompositeGlyph::try_new(&data, 2, &Limits::default()).unwrap();
             assert_eq!(glyph.components.len(), 1);
             assert_eq!(glyph.components[0].glyph_id, 1);
-            assert_eq!(glyph.components[0].arguments, ComponentArguments::Offset([0, 0]));
+            assert_eq!(
+                glyph.components[0].arguments,
+                ComponentArguments::Offset([0, 0])
+            );
             assert!(glyph.instructions.is_empty());
         }
-        for flags in [0x0012u16, 0x2002, 0x4002, 0x8002, 0x004a, 0x008a, 0x00c2, 0x1802] {
+        for flags in [
+            0x0012u16, 0x2002, 0x4002, 0x8002, 0x004a, 0x008a, 0x00c2, 0x1802,
+        ] {
             data[10..12].copy_from_slice(&flags.to_be_bytes());
-            assert!(matches!(CompositeGlyph::try_new(&data, 2, &Limits::default()),
+            assert!(
+                matches!(CompositeGlyph::try_new(&data, 2, &Limits::default()),
                 Err(PdfError::FontError(message)) if message == "Invalid composite flags or glyph ID"),
-                "flags {flags:#06x}");
+                "flags {flags:#06x}"
+            );
         }
         data[10..12].copy_from_slice(&0u16.to_be_bytes());
-        assert!(matches!(CompositeGlyph::try_new(&data, 2, &Limits::default()),
-            Err(PdfError::FontError(message)) if message == "First composite component needs XY offsets"));
+        assert!(
+            matches!(CompositeGlyph::try_new(&data, 2, &Limits::default()),
+            Err(PdfError::FontError(message)) if message == "First composite component needs XY offsets")
+        );
         data[10..12].copy_from_slice(&2u16.to_be_bytes());
         for contours in [0i16, 1, i16::MAX] {
             data[..2].copy_from_slice(&contours.to_be_bytes());
-            assert!(matches!(CompositeGlyph::try_new(&data, 2, &Limits::default()),
-                Err(PdfError::FontError(message)) if message == "Expected composite glyph"));
+            assert!(
+                matches!(CompositeGlyph::try_new(&data, 2, &Limits::default()),
+                Err(PdfError::FontError(message)) if message == "Expected composite glyph")
+            );
         }
     }
 

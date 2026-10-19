@@ -118,10 +118,10 @@ impl StructureElement {
         if self.attributes_use_array_order {
             // Opaque streams remain conservative even if a later dictionary
             // supplies a value: their owner-specific merge rules are unknown.
-            if !candidates.iter().any(|b| b.attribute.stream.is_some()) {
-                if let Some(last) = candidates.pop() {
-                    candidates = vec![last];
-                }
+            if !candidates.iter().any(|b| b.attribute.stream.is_some())
+                && let Some(last) = candidates.pop()
+            {
+                candidates = vec![last];
             }
         }
         if candidates.iter().any(|b| b.attribute.stream.is_some()) {
@@ -578,7 +578,7 @@ impl SemanticReader {
         let Some(array) = value.as_array() else {
             return Ok(vec![(self.attribute(doc, raw, state)?, 0)]);
         };
-        if revisions && array.len() == 0 {
+        if revisions && array.is_empty() {
             return Err(invalid("attribute array must not be empty"));
         }
         self.entries(doc, state, array.len())?;

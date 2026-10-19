@@ -203,7 +203,8 @@ fn blend_modes_parse_preferences_restore_and_strictly_round_trip() {
                 .is_err()
         );
     }
-    for value in ["/Unknown"] {
+    {
+        let value = "/Unknown";
         let doc = document(
             &format!("<< /LW 99 /BM {value} >>"),
             b"/G gs 0 0 10 10 re S",

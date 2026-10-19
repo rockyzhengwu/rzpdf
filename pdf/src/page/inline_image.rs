@@ -271,7 +271,7 @@ pub(crate) fn read<R: Read + Seek>(
         let valid = filter.as_name().is_some()
             || filter
                 .as_array()
-                .is_some_and(|a| a.len() > 0 && a.into_iter().all(|v| v.as_name().is_some()));
+                .is_some_and(|a| !a.is_empty() && a.into_iter().all(|v| v.as_name().is_some()));
         if !valid {
             return Err(invalid(
                 "inline Filter must be a name or nonempty name array",

@@ -6,7 +6,6 @@ use crate::error::{PdfError, PdfResult};
 use crate::font::CharCode;
 use crate::font::cmap::MappingTable;
 use crate::font::descriptor::Descriptor;
-use crate::font::font_program::FontProgram;
 use crate::objects::{PdfObject, pdf_array::PdfArray, pdf_dict::PdfDict};
 use crate::pdf_context::PDFContext;
 
@@ -19,7 +18,6 @@ pub struct CidFont {
     dw: Option<f32>,
     dw2: Option<(f32, f32)>,
     descriptor: Option<Descriptor>,
-    program: Option<FontProgram>,
     cid_to_gid: Option<Vec<u8>>,
 }
 
@@ -230,15 +228,15 @@ impl CidFont {
                 return Ok(w.to_owned());
             }
             if let Some(w) = self.dw {
-                return Ok(w as f32);
+                return Ok(w);
             }
-            return Ok(1000.0);
+            Ok(1000.0)
         } else {
             // TODO
             if let Some(w) = self.dw {
-                return Ok(w as f32);
+                Ok(w)
             } else {
-                return Ok(1000.0);
+                Ok(1000.0)
             }
         }
     }
@@ -267,6 +265,7 @@ fn width_cid(obj: &PdfObject) -> PdfResult<u32> {
         .map_err(|_| PdfError::FontError("Width CID must be a nonnegative u32 integer".to_string()))
 }
 
+#[cfg(test)]
 fn load_metrics<R: Seek + Read, T, const N: usize>(
     w: &PdfArray,
     ctx: &PDFContext<R>,
@@ -361,10 +360,10 @@ fn load_metrics_inner<R: Seek + Read, T, const N: usize>(
                 constant.ok_or_else(|| PdfError::FontError("Missing width values".to_string()))?
             };
             let code = start + offset as u32;
-            if let Some(pool) = budget {
-                if result.get(&code).is_none() {
-                    result.reserve_with_budget(1, pool, &mut table_lease)?;
-                }
+            if let Some(pool) = budget
+                && result.get(&code).is_none()
+            {
+                result.reserve_with_budget(1, pool, &mut table_lease)?;
             }
             result.insert(code, convert(values));
         }
@@ -373,6 +372,7 @@ fn load_metrics_inner<R: Seek + Read, T, const N: usize>(
     Ok((result, table_lease))
 }
 
+#[cfg(test)]
 fn load_widths_vertical<R: Seek + Read>(
     w: &PdfArray,
     ctx: &PDFContext<R>,
@@ -380,6 +380,7 @@ fn load_widths_vertical<R: Seek + Read>(
     load_metrics(w, ctx, |v: [f32; 3]| (v[0], v[1], v[2]))
 }
 
+#[cfg(test)]
 fn load_widths<R: Seek + Read>(w: &PdfArray, ctx: &PDFContext<R>) -> PdfResult<MappingTable<f32>> {
     load_metrics(w, ctx, |v: [f32; 1]| v[0])
 }
@@ -741,8 +742,10 @@ mod tests {
 
     #[test]
     fn text_widths_use_pdf_default_and_explicit_fallback() {
-        let mut font = CidFont::default();
-        font.w = Some(HashMap::from([(1, 500.0)]).into());
+        let mut font = CidFont {
+            w: Some(HashMap::from([(1, 500.0)]).into()),
+            ..Default::default()
+        };
         let chars = [CharCode::new(1, 1, 0.0), CharCode::new(2, 1, 0.0)];
         assert_eq!(font.text_widths(&chars).unwrap(), 1500.0);
         font.dw = Some(600.0);

@@ -71,7 +71,7 @@ fn decode_tiff_predictor(
     if row_size == 0 {
         return Ok(data);
     }
-    if data.len() % row_size != 0 {
+    if !data.len().is_multiple_of(row_size) {
         return Err(PdfError::FilterError(format!(
             "{filter_name} TIFF predictor data length {} is not a multiple of row size {}",
             data.len(),
@@ -123,7 +123,7 @@ fn decode_png_predictor(
     let stride = row_size
         .checked_add(1)
         .ok_or_else(|| PdfError::FilterError(format!("{filter_name} PNG row stride overflow")))?;
-    if data.len() % stride != 0 {
+    if !data.len().is_multiple_of(stride) {
         return Err(PdfError::FilterError(format!(
             "{filter_name} PNG predictor row is truncated"
         )));
@@ -198,7 +198,7 @@ fn paeth_predictor(a: u8, b: u8, c: u8) -> u8 {
 mod tests {
     use std::collections::HashMap;
 
-    use crate::objects::{pdf_dict::PdfDict, pdf_number::PdfNumber, PdfObject};
+    use crate::objects::{PdfObject, pdf_dict::PdfDict, pdf_number::PdfNumber};
 
     use super::apply_predictor;
 

@@ -136,19 +136,27 @@ impl TrueTypeProgram {
         match (sfnt.get_table("vhea"), sfnt.get_table("vmtx")) {
             (None, None) => Ok(None),
             (Some(header), Some(metrics)) => {
-                let table = |record: &crate::font::truetype::sfnt::TableRecord| -> PdfResult<&[u8]> {
-                    let start = record.offset() as usize;
-                    let end = start.checked_add(record.length() as usize)
-                        .ok_or_else(|| PdfError::FontError("Vertical table range overflow".into()))?;
-                    data.get(start..end)
-                        .ok_or_else(|| PdfError::FontError("Vertical table exceeds font data".into()))
-                };
+                let table =
+                    |record: &crate::font::truetype::sfnt::TableRecord| -> PdfResult<&[u8]> {
+                        let start = record.offset() as usize;
+                        let end = start.checked_add(record.length() as usize).ok_or_else(|| {
+                            PdfError::FontError("Vertical table range overflow".into())
+                        })?;
+                        data.get(start..end).ok_or_else(|| {
+                            PdfError::FontError("Vertical table exceeds font data".into())
+                        })
+                    };
                 let program = Self::try_new_with_limits(data, limits)?;
-                let glyphs = program.num_glyphs
+                let glyphs = program
+                    .num_glyphs
                     .ok_or_else(|| PdfError::FontError("Vertical metrics require maxp".into()))?;
-                Ok(Some(crate::font::truetype::tables::vertical::VerticalMetrics::try_new(
-                    table(header)?, table(metrics)?, glyphs,
-                )?))
+                Ok(Some(
+                    crate::font::truetype::tables::vertical::VerticalMetrics::try_new(
+                        table(header)?,
+                        table(metrics)?,
+                        glyphs,
+                    )?,
+                ))
             }
             _ => Err(PdfError::FontError("Incomplete vhea/vmtx pair".into())),
         }
@@ -358,23 +366,23 @@ impl TrueTypeProgram {
                 ));
             }
 
-            return Ok(TrueTypeProgram {
+            Ok(TrueTypeProgram {
                 post_metrics,
                 horizontal_metrics,
                 embedding_rights,
                 num_glyphs,
                 cmaps,
                 current: None,
-            });
+            })
         } else {
-            return Ok(TrueTypeProgram {
+            Ok(TrueTypeProgram {
                 post_metrics,
                 horizontal_metrics,
                 embedding_rights,
                 num_glyphs,
                 cmaps: Vec::new(),
                 current: None,
-            });
+            })
         }
     }
     pub fn num_cmap(&self) -> usize {
@@ -435,12 +443,10 @@ impl TrueTypeProgram {
         Ok(Some(gid as u16))
     }
     pub fn get_cmap(&self, platform_id: u16, encoding_id: u16) -> Option<&TCmap> {
-        for cmap in self.cmaps.iter() {
-            if cmap.platform_id() == platform_id && cmap.encoding_id() == encoding_id {
-                return Some(cmap);
-            }
-        }
-        None
+        self.cmaps
+            .iter()
+            .find(|&cmap| cmap.platform_id() == platform_id && cmap.encoding_id() == encoding_id)
+            .map(|v| v as _)
     }
     pub fn first_cmap(&self) -> Option<&TCmap> {
         self.cmaps.first()
@@ -482,7 +488,7 @@ impl TrueTypeProgram {
                 return;
             }
         }
-        if self.cmaps.len() > 0 {
+        if !self.cmaps.is_empty() {
             self.current = Some(0);
         }
     }

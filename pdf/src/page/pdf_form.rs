@@ -477,9 +477,11 @@ mod tests {
             group: None,
         };
         let limits = crate::parser::options::Limits::default();
-        let mut parent = crate::page::all_state::AllState::default();
-        parent.ctm = Matrix::new(2., 0., 0., 2., 10., 20.);
-        parent.text_rise = 7.;
+        let parent = crate::page::all_state::AllState {
+            ctm: Matrix::new(2., 0., 0., 2., 10., 20.),
+            text_rise: 7.,
+            ..Default::default()
+        };
         let mut child = form
             .invocation_state(&parent, &Matrix::identity(), &limits)
             .unwrap();

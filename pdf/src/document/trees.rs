@@ -12,6 +12,9 @@ use std::{
     io::{Read, Seek},
 };
 
+/// Catalog names dictionary, selected tree root, and its ordered entries.
+pub(super) type NameTreeSnapshot = (PdfDict, PdfDict, Vec<(PdfString, PdfObject)>);
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum TreeKey {
     Name(Vec<u8>),
@@ -222,12 +225,10 @@ impl<R: Read + Seek> PdfDocument<R> {
                     if depth >= limits.max_depth || nodes > limits.max_objects {
                         return Err(PdfError::ResourceLimit("tree depth or node count".into()));
                     }
-                    if let Some(id) = value.as_reference().map(PdfReference::id) {
-                        if !seen.insert(id) {
-                            return Err(PdfError::DocumentError(
-                                "tree cycle or shared child".into(),
-                            ));
-                        }
+                    if let Some(id) = value.as_reference().map(PdfReference::id)
+                        && !seen.insert(id)
+                    {
+                        return Err(PdfError::DocumentError("tree cycle or shared child".into()));
                     }
                     let dict = self.ctx().resolve(&value)?.into_dict().ok_or_else(|| {
                         PdfError::DocumentError("tree node must be a dictionary".into())
@@ -260,7 +261,7 @@ impl<R: Read + Seek> PdfDocument<R> {
                         let kids = self.ctx().resolve(kids)?.into_array().ok_or_else(|| {
                             PdfError::DocumentError("tree Kids must be an array".into())
                         })?;
-                        if kids.len() == 0
+                        if kids.is_empty()
                             || kids.len() > limits.max_objects.saturating_sub(nodes)
                             || stack.len().saturating_add(kids.len()) > limits.max_objects
                         {

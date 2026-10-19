@@ -3,11 +3,13 @@ use std::io::Write;
 use std::path::Path;
 mod feature_versions;
 mod incremental;
-mod protection;
 mod layout;
 mod object_stream;
+mod protection;
 mod xref;
-pub(crate) use incremental::{write_incremental_with_layout, write_signature_incremental, write_signed_revision_incremental};
+pub(crate) use incremental::{
+    write_incremental_with_layout, write_signature_incremental, write_signed_revision_incremental,
+};
 
 use crate::document::PdfDocument;
 use crate::document::preservation::retained_trailer_key;
@@ -17,12 +19,15 @@ use crate::objects::{
     pdf_stream::PdfStream, pdf_string::PdfString,
 };
 
+type AllocatedXrefEntries = (Vec<(u64, u32, u8)>, Option<crate::budget::MemoryLease>);
+
 pub fn save_document<R: std::io::Read + std::io::Seek>(
     document: &PdfDocument<R>,
 ) -> PdfResult<Vec<u8>> {
     document.save_to_bytes()
 }
 
+#[cfg(test)]
 pub(crate) fn write_document_with_budget<R: std::io::Read + std::io::Seek>(
     document: &PdfDocument<R>,
     options: crate::document::save_options::SaveOptions,
@@ -100,8 +105,11 @@ fn write_document_output_with_security<R: std::io::Read + std::io::Seek>(
     output: &mut impl OutputBuffer,
 ) -> PdfResult<()> {
     write_document_output_with_layout(
-        document, options, policy,
-        crate::document::save_options::SaveLayout::Classic, output,
+        document,
+        options,
+        policy,
+        crate::document::save_options::SaveLayout::Classic,
+        output,
     )
 }
 
@@ -172,14 +180,13 @@ fn write_document_output_with_layout<R: std::io::Read + std::io::Seek>(
         Some(budget) => document.effective_version_with_budget(budget)?,
         None => document.effective_version()?,
     };
-    if layout != crate::document::save_options::SaveLayout::Classic {
-        if effective.max(options.version.unwrap_or(effective))
+    if layout != crate::document::save_options::SaveLayout::Classic
+        && effective.max(options.version.unwrap_or(effective))
             < crate::document::save_options::PdfVersion::V1_5
-        {
-            return Err(PdfError::UnsupportedFeature(
-                "xref-stream output requires PDF 1.5 or an explicit upgrade".into(),
-            ));
-        }
+    {
+        return Err(PdfError::UnsupportedFeature(
+            "xref-stream output requires PDF 1.5 or an explicit upgrade".into(),
+        ));
     }
     let version = match options.version {
         Some(version) => {
@@ -242,25 +249,29 @@ fn write_document_output_with_layout<R: std::io::Read + std::io::Seek>(
         (None, document.ctx().serializable_object_ids())
     };
     let max_obj_num = object_ids.iter().map(|id| id.obj_num()).max().unwrap_or(0);
-    let encryption_id = if security.is_some()
-        && layout == crate::document::save_options::SaveLayout::Classic {
-        Some(ObjectId::new(
-            max_obj_num
-                .checked_add(1)
-                .ok_or_else(|| PdfError::ResourceLimit("Encrypt object number overflow".into()))?,
-            0,
-        ))
-    } else {
-        None
-    };
+    let encryption_id =
+        if security.is_some() && layout == crate::document::save_options::SaveLayout::Classic {
+            Some(ObjectId::new(
+                max_obj_num.checked_add(1).ok_or_else(|| {
+                    PdfError::ResourceLimit("Encrypt object number overflow".into())
+                })?,
+                0,
+            ))
+        } else {
+            None
+        };
     let classic_size = encryption_id
         .map(|id| id.obj_num())
         .unwrap_or(max_obj_num)
         .checked_add(1)
         .ok_or_else(|| PdfError::ResourceLimit("xref output Size overflow".into()))?;
     let mut plan = layout::FullLayoutPlan::new(
-        layout, classic_size, &document.ctx().trailer(),
-        document.ctx().source_xref(), document.ctx().limits(), budget.as_ref(),
+        layout,
+        classic_size,
+        &document.ctx().trailer(),
+        document.ctx().source_xref(),
+        document.ctx().limits(),
+        budget.as_ref(),
     )?;
     // Preserve an existing indirect Encrypt identity in the new layouts.
     // Direct/new Encrypt dictionaries need an ephemeral ID above source Size.
@@ -269,21 +280,41 @@ fn write_document_output_with_layout<R: std::io::Read + std::io::Seek>(
             Some(id) => id,
             None => plan.allocate_container(document.ctx().limits(), &crypto_budget)?,
         })
-    } else { encryption_id };
+    } else {
+        encryption_id
+    };
     let size = plan.size();
     let packing = layout == crate::document::save_options::SaveLayout::XrefStreamWithObjectStreams;
     let selection = if packing {
-        Some(object_stream::Selection::inspect(document, &object_ids, classic_size, &crypto_budget)?)
-    } else { None };
+        Some(object_stream::Selection::inspect(
+            document,
+            &object_ids,
+            classic_size,
+            &crypto_budget,
+        )?)
+    } else {
+        None
+    };
     let mut packer = if packing {
-        Some(object_stream::Packer::new(document.ctx().limits(), &crypto_budget,
-            matches!(options.compression, crate::document::save_options::StreamCompression::FlateUnencoded), security)?)
-    } else { None };
+        Some(object_stream::Packer::new(
+            document.ctx().limits(),
+            &crypto_budget,
+            matches!(
+                options.compression,
+                crate::document::save_options::StreamCompression::FlateUnencoded
+            ),
+            security,
+        )?)
+    } else {
+        None
+    };
 
     for &object_id in &object_ids {
         // The active Encrypt dictionary is emitted below, in plaintext and
         // outside ObjStm, from the authenticated/generated handler, not overlay.
-        if plan.is_stream() && Some(object_id) == encryption_id { continue; }
+        if plan.is_stream() && Some(object_id) == encryption_id {
+            continue;
+        }
         if selection.as_ref().is_some_and(|s| s.removed(object_id)) {
             plan.record_deleted(object_id)?;
             continue;
@@ -333,11 +364,17 @@ fn write_document_output_with_layout<R: std::io::Read + std::io::Seek>(
                 effective.max(options.version.unwrap_or(effective)),
                 budget.as_ref(),
             )?;
-            if let (Some(selection), Some(packer)) = (&selection, &mut packer) {
-                if selection.eligible(object_id, &obj)
-                    && packer.try_pack(object_id, &obj, &mut plan, &mut output, options.max_output_bytes)? {
-                    continue;
-                }
+            if let (Some(selection), Some(packer)) = (&selection, &mut packer)
+                && selection.eligible(object_id, &obj)
+                && packer.try_pack(
+                    object_id,
+                    &obj,
+                    &mut plan,
+                    &mut output,
+                    options.max_output_bytes,
+                )?
+            {
+                continue;
             }
             let mut _encoded_lease = None;
             let obj = if let Some(handler) = security {
@@ -371,8 +408,12 @@ fn write_document_output_with_layout<R: std::io::Read + std::io::Seek>(
         // Containers were allocated as groups were flushed. Check the final
         // generated range too, before any host writer/file receives bytes.
         for &id in &object_ids {
-            if selection.as_ref().is_some_and(|s| s.removed(id)) { continue; }
-            let loaded = document.ctx().object_for_write_with_budget(id, &crypto_budget)?;
+            if selection.as_ref().is_some_and(|s| s.removed(id)) {
+                continue;
+            }
+            let loaded = document
+                .ctx()
+                .object_for_write_with_budget(id, &crypto_budget)?;
             if let Some((object, _)) = loaded.as_ref() {
                 plan.validate_references(object, document.ctx().limits().max_depth, 0)?;
             }
@@ -380,7 +421,11 @@ fn write_document_output_with_layout<R: std::io::Read + std::io::Seek>(
     }
 
     if let (Some(id), Some(handler)) = (encryption_id, security) {
-        plan.validate_trailer_references(&handler.dictionary, document.ctx().limits().max_depth, None)?;
+        plan.validate_trailer_references(
+            &handler.dictionary,
+            document.ctx().limits().max_depth,
+            None,
+        )?;
         validate_serialization_nodes_with_budget(
             handler.dictionary.into_iter().map(|(_, value)| (value, 2)),
             1,
@@ -419,10 +464,17 @@ fn write_document_output_with_layout<R: std::io::Read + std::io::Seek>(
     plan.validate_trailer_references(trailer, document.ctx().limits().max_depth, encryption_id)?;
     if plan.is_stream() {
         plan.write_stream(
-            &mut output, trailer, document.ctx().limits(), options.max_output_bytes,
+            &mut output,
+            trailer,
+            document.ctx().limits(),
+            options.max_output_bytes,
         )?;
     } else {
-        write_xref_table(&mut output, plan.classic_entries()?, options.max_output_bytes)?;
+        write_xref_table(
+            &mut output,
+            plan.classic_entries()?,
+            options.max_output_bytes,
+        )?;
         write_trailer_limited(
             &mut output,
             trailer,
@@ -847,6 +899,7 @@ fn prepare_output_object_with_limits(
     Ok(PdfObject::PdfStream(PdfStream::new(dict, bytes)))
 }
 
+#[cfg(test)]
 fn validate_serialization_graph(
     root: &PdfObject,
     limits: crate::parser::options::Limits,
@@ -854,6 +907,7 @@ fn validate_serialization_graph(
     validate_serialization_nodes(std::iter::once((root, 1)), 0, limits)
 }
 
+#[cfg(test)]
 fn validate_serialization_nodes<'a>(
     roots: impl Iterator<Item = (&'a PdfObject, usize)>,
     nodes: usize,
@@ -974,6 +1028,7 @@ fn validate_serialization_nodes_with_budget<'a>(
     Ok(())
 }
 
+#[cfg(test)]
 fn allocate_xref_entries(size: u32, limit: usize) -> PdfResult<Vec<(u64, u32, u8)>> {
     allocate_xref_entries_inner(size, limit, None).map(|(entries, _)| entries)
 }
@@ -982,7 +1037,7 @@ fn allocate_xref_entries_inner(
     size: u32,
     limit: usize,
     budget: Option<&crate::budget::OperationBudget>,
-) -> PdfResult<(Vec<(u64, u32, u8)>, Option<crate::budget::MemoryLease>)> {
+) -> PdfResult<AllocatedXrefEntries> {
     let size = usize::try_from(size)
         .map_err(|_| PdfError::ResourceLimit("xref output size overflow".into()))?;
     crate::filter::check_output_size(0, size, limit, "xref output entries")?;
@@ -1008,21 +1063,6 @@ fn allocate_xref_entries_inner(
     }
     entries.resize(size, (0, 0, b'f'));
     Ok((entries, lease))
-}
-
-fn write_indirect_object(
-    output: &mut Vec<u8>,
-    object_id: ObjectId,
-    obj: &PdfObject,
-) -> PdfResult<()> {
-    append_formatted_output(
-        output,
-        format_args!("{} {} obj\n", object_id.obj_num(), object_id.gen_num()),
-        usize::MAX,
-    )?;
-    write_object(output, obj)?;
-    output.extend_from_slice(b"\nendobj\n");
-    Ok(())
 }
 
 struct StackFormat {
@@ -1341,7 +1381,7 @@ fn write_dict_limited(
         )?;
     }
     entries.extend(dict);
-    entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+    entries.sort_unstable_by_key(|(left, _)| *left);
     append_output(output, b"<<", limit)?;
     for (key, value) in entries {
         append_output(output, b"\n", limit)?;
@@ -1514,7 +1554,8 @@ impl<R: std::io::Read + std::io::Seek> PdfDocument<R> {
         let budget = self.ctx().limits().operation_budget();
         Ok(self
             .save_with_layout_and_budget(options, layout, &budget)?
-            .into_reserved_parts().0)
+            .into_reserved_parts()
+            .0)
     }
 
     /// Returned bytes retain their reservation in the supplied operation pool.
@@ -1525,7 +1566,10 @@ impl<R: std::io::Read + std::io::Seek> PdfDocument<R> {
         budget: &crate::budget::OperationBudget,
     ) -> PdfResult<crate::budget::BudgetedBytes> {
         self.save_with_layout_and_security_and_budget(
-            options, layout, crate::security::SaveSecurity::Preserve, budget,
+            options,
+            layout,
+            crate::security::SaveSecurity::Preserve,
+            budget,
         )
     }
 
@@ -1539,8 +1583,10 @@ impl<R: std::io::Read + std::io::Seek> PdfDocument<R> {
         policy: crate::security::SaveSecurity<'_>,
     ) -> PdfResult<Vec<u8>> {
         let budget = self.ctx().limits().operation_budget();
-        Ok(self.save_with_layout_and_security_and_budget(options, layout, policy, &budget)?
-            .into_reserved_parts().0)
+        Ok(self
+            .save_with_layout_and_security_and_budget(options, layout, policy, &budget)?
+            .into_reserved_parts()
+            .0)
     }
 
     /// Combined layout/protection operation with caller-owned live-byte quota.
@@ -1556,9 +1602,7 @@ impl<R: std::io::Read + std::io::Seek> PdfDocument<R> {
             limits: self.ctx().limits(),
             capacity_limit: options.max_output_bytes,
         };
-        write_document_output_with_layout(
-            self, options, policy, layout, &mut output,
-        )?;
+        write_document_output_with_layout(self, options, policy, layout, &mut output)?;
         Ok(output.bytes)
     }
 
@@ -1581,7 +1625,8 @@ impl<R: std::io::Read + std::io::Seek> PdfDocument<R> {
         layout: crate::document::save_options::SaveLayout,
     ) -> PdfResult<()> {
         save_bytes_atomically(
-            path.as_ref(), &self.save_to_bytes_with_layout(options, layout)?,
+            path.as_ref(),
+            &self.save_to_bytes_with_layout(options, layout)?,
         )
     }
 
@@ -1606,8 +1651,10 @@ impl<R: std::io::Read + std::io::Seek> PdfDocument<R> {
         layout: crate::document::save_options::SaveLayout,
         policy: crate::security::SaveSecurity<'_>,
     ) -> PdfResult<()> {
-        save_bytes_atomically(path.as_ref(),
-            &self.save_to_bytes_with_layout_and_security(options, layout, policy)?)
+        save_bytes_atomically(
+            path.as_ref(),
+            &self.save_to_bytes_with_layout_and_security(options, layout, policy)?,
+        )
     }
 
     pub fn save_to_bytes_with_security(
@@ -2767,7 +2814,7 @@ mod tests {
             super::write_xref_table(&mut limited, &entries, size - 1),
             Err(crate::error::PdfError::ResourceLimit(_))
         ));
-        assert!(limited.len() <= size - 1);
+        assert!(limited.len() < size);
         for entry in [(10_000_000_000, 0, b'n'), (0, 65536, b'f'), (0, 0, b'x')] {
             let mut output = b"existing".to_vec();
             assert!(super::write_xref_table(&mut output, &[entry], usize::MAX).is_err());

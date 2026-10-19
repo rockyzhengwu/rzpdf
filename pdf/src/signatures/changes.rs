@@ -2,7 +2,7 @@
 use super::*;
 use crate::document::{PdfDocument, acroform::FormFieldNode};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     io::{Read, Seek},
 };
 

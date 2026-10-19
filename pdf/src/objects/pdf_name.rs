@@ -223,10 +223,13 @@ mod tests {
         }
         let name = PdfName::new_from_buffer(&source).unwrap();
         assert_eq!(name.bytes().len(), 4096 * 3);
-        assert!(name
-            .bytes()
-            .chunks_exact(3)
-            .all(|chunk| chunk == [b'A', 255, 128]));
+        assert!(
+            name.bytes()
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .all(|chunk| *chunk == [b'A', 255, 128])
+        );
     }
 
     #[test]

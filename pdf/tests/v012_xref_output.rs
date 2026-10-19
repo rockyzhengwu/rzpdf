@@ -356,7 +356,9 @@ fn authenticated_r6_preserves_protection_and_signed_inputs_remain_locked() {
         .filter(|b| !b.is_ascii_whitespace())
         .collect();
     let bytes = hex
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|p| u8::from_str_radix(std::str::from_utf8(p).unwrap(), 16).unwrap())
         .collect();
     let doc = open(bytes);

@@ -40,6 +40,8 @@ impl CryptFilter {
     }
 }
 
+pub use crate::security::SecurityHandler;
+
 #[cfg(test)]
 mod safety_tests {
     use super::*;
@@ -71,5 +73,3 @@ mod safety_tests {
         assert_eq!(filter.length, 32);
     }
 }
-
-pub use crate::security::SecurityHandler;

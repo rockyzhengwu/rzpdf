@@ -133,7 +133,7 @@ impl Shading {
         let colorspace = ColorSpace::try_new(&color_object, ctx)?;
         if matches!(colorspace, ColorSpace::Pattern(_))
             || matches!(colorspace, ColorSpace::Indexed(_))
-                && (!matches!(kind, 4 | 5 | 6 | 7) || dict.get("Function").is_some())
+                && (!matches!(kind, 4..=7) || dict.get("Function").is_some())
         {
             return Err(invalid(
                 "axial/radial ColorSpace must not be Pattern or Indexed",
@@ -181,7 +181,7 @@ impl Shading {
                 .ok_or_else(|| invalid("AntiAlias must be boolean"))?
                 .value(),
         };
-        let function = if matches!(kind, 4 | 5 | 6 | 7) && dict.get("Function").is_none() {
+        let function = if matches!(kind, 4..=7) && dict.get("Function").is_none() {
             None
         } else {
             Some(ctx.resolve(required("Function")?)?)

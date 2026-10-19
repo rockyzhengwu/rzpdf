@@ -21,17 +21,25 @@ pub struct ShadingObject {
 }
 
 impl ShadingObject {
-    pub(crate) fn clear_edit_source(&mut self) {self.source=None;self.nested_source=None;}
+    pub(crate) fn clear_edit_source(&mut self) {
+        self.source = None;
+        self.nested_source = None;
+    }
     pub fn new(
         resource_name: String,
         matrix: Matrix,
         shading: Shading,
         graphic_state: GraphicState,
     ) -> Self {
+        #[expect(
+            clippy::arc_with_non_send_sync,
+            reason = "preserve public shared shading snapshots; no cross-thread guarantee"
+        )]
+        let shading = Arc::new(shading);
         Self {
             resource_name,
             matrix,
-            shading: Arc::new(shading),
+            shading,
             graphic_state,
             source: None,
             nested_source: None,

@@ -85,7 +85,11 @@ fn recursive_mask_is_rejected_and_knockout_mask_keeps_explicit_boundaries() {
         let mask = p.graphic_state().general_state.soft_mask.as_ref().unwrap();
         assert!(matches!(mask.list.objects()[0],PageObject::GroupBegin(ref g) if g.knockout));
     }
-    let dict=parse(&format!("<< /Subtype /Form /BBox [0 0 20 20] /Group << /S /Transparency /I true /CS /DeviceRGB >> /Resources {} >>",format!("<< /ExtGState << /M << /SMask << /S /Alpha /G {} 0 R >> >> >> >>",gid.obj_num()))).into_dict().unwrap();
+    let resources = format!(
+        "<< /ExtGState << /M << /SMask << /S /Alpha /G {} 0 R >> >> >> >>",
+        gid.obj_num()
+    );
+    let dict = parse(&format!("<< /Subtype /Form /BBox [0 0 20 20] /Group << /S /Transparency /I true /CS /DeviceRGB >> /Resources {resources} >>")).into_dict().unwrap();
     doc.update_object(
         gid,
         PdfObject::PdfStream(

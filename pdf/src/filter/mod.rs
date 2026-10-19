@@ -57,6 +57,233 @@ pub(crate) fn check_output_size(
     Ok(())
 }
 
+pub fn apply_filter_with_context(
+    name: &str,
+    input: &[u8],
+    params: Option<&PdfDict>,
+    context: FilterContext<'_>,
+) -> PdfResult<Vec<u8>> {
+    match name {
+        "AHx" | "ASCIIHexDecode" => {
+            ascii_hex::ascii_hex_decode_limited(input, context.max_decoded_bytes)
+        }
+        "A85" | "ASCII85Decode" => {
+            ascii_85::ascii_85_decode_limited(input, context.max_decoded_bytes)
+        }
+        "LZW" | "LZWDecode" => lzw::lzw_decode_limited(input, params, context.max_decoded_bytes),
+        "Fl" | "FlateDecode" => {
+            flate::flate_decode_limited(input, params, context.max_decoded_bytes)
+        }
+        "RL" | "RunLengthDecode" => {
+            run_length::run_length_decode_limited(input, context.max_decoded_bytes)
+        }
+        "DCT" | "DCTDecode" => dct::dct_decode_limited(input, context),
+        "CCF" | "CCITTFaxDecode" => {
+            ccittfax::ccittfax_decode_limited(input, params, context.max_decoded_bytes)
+        }
+        "Crypt" => {
+            check_output_size(0, input.len(), context.max_decoded_bytes, "Crypt")?;
+            crypt::crypt_decode(
+                input,
+                if context.crypt_already_processed {
+                    None
+                } else {
+                    params
+                },
+            )
+        }
+        "JPXDecode" => jpx::jpx_decode(input, params, context),
+        "JBIG2Decode" => jbig2::jbig2_decode(input, params, context),
+        _ => Err(PdfError::FilterError(format!("unsupported filter: {name}"))),
+    }
+}
+
+pub fn apply_filters(
+    filter: &PdfObject,
+    params: Option<&PdfObject>,
+    input: &[u8],
+    context: FilterContext<'_>,
+) -> PdfResult<Vec<u8>> {
+    apply_filter_chain(
+        filter,
+        params,
+        input,
+        context,
+        apply_filter_with_context,
+        |input| {
+            let mut copied = Vec::new();
+            copied
+                .try_reserve_exact(input.len())
+                .map_err(|_| PdfError::ResourceLimit("identity filter allocation".into()))?;
+            copied.extend_from_slice(input);
+            Ok(copied)
+        },
+    )
+}
+
+/// Budget-aware dispatch. Decoders not yet migrated fail explicitly rather
+/// than silently allocating outside this operation's pool.
+pub fn apply_filter_with_budget(
+    name: &str,
+    input: &[u8],
+    params: Option<&PdfDict>,
+    context: FilterContext<'_>,
+    budget: &crate::budget::OperationBudget,
+) -> PdfResult<crate::budget::BudgetedBytes> {
+    match name {
+        "AHx" | "ASCIIHexDecode" => {
+            ascii_hex::ascii_hex_decode_with_budget(input, context.max_decoded_bytes, budget)
+        }
+        "A85" | "ASCII85Decode" => {
+            ascii_85::ascii_85_decode_with_budget(input, context.max_decoded_bytes, budget)
+        }
+        "RL" | "RunLengthDecode" => {
+            run_length::run_length_decode_with_budget(input, context.max_decoded_bytes, budget)
+        }
+        "Fl" | "FlateDecode" => {
+            flate::flate_decode_with_budget(input, params, context.max_decoded_bytes, budget)
+        }
+        "LZW" | "LZWDecode" => {
+            lzw::lzw_decode_with_budget(input, params, context.max_decoded_bytes, budget)
+        }
+        "Crypt" => crypt::crypt_decode_with_budget(
+            input,
+            if context.crypt_already_processed {
+                None
+            } else {
+                params
+            },
+            context.max_decoded_bytes,
+            budget,
+        ),
+        "DCT" | "DCTDecode" => dct::dct_decode_with_budget(input, context, budget),
+        "JPXDecode" => jpx::decode_with_budget(input, context, budget).map(|(_, bytes)| bytes),
+        "JBIG2Decode" => jbig2::decode_with_budget(input, context, budget),
+        "CCF" | "CCITTFaxDecode" => {
+            ccittfax::ccittfax_decode_with_budget(input, params, context.max_decoded_bytes, budget)
+        }
+        _ => Err(PdfError::FilterError(format!(
+            "filter has no budget-aware decoder: {name}"
+        ))),
+    }
+}
+
+/// Intermediate owners remain charged while the next stage is decoding.
+/// Borrowed input must be charged by its owner if it belongs to this pool.
+pub fn apply_filters_with_budget(
+    filter: &PdfObject,
+    params: Option<&PdfObject>,
+    input: &[u8],
+    context: FilterContext<'_>,
+    budget: &crate::budget::OperationBudget,
+) -> PdfResult<crate::budget::BudgetedBytes> {
+    apply_filter_chain(
+        filter,
+        params,
+        input,
+        context,
+        |name, input, params, context| {
+            apply_filter_with_budget(name, input, params, context, budget)
+        },
+        |input| crate::budget::BudgetedBytes::copy_from_slice(budget, input),
+    )
+}
+
+fn apply_filter_chain<'a, T: AsRef<[u8]>>(
+    filter: &PdfObject,
+    params: Option<&PdfObject>,
+    input: &[u8],
+    context: FilterContext<'a>,
+    decode: impl Fn(&str, &[u8], Option<&PdfDict>, FilterContext<'a>) -> PdfResult<T>,
+    copy: impl Fn(&[u8]) -> PdfResult<T>,
+) -> PdfResult<T> {
+    match filter {
+        PdfObject::PdfName(name) => {
+            let params = match params {
+                Some(PdfObject::PdfDict(dict)) => Some(dict),
+                None | Some(PdfObject::PdfNull) => None,
+                Some(_) => {
+                    return Err(PdfError::FilterError(
+                        "single filter DecodeParms must be a dictionary".to_string(),
+                    ));
+                }
+            };
+            decode(name.name(), input, params, context)
+        }
+        PdfObject::PdfArray(filters) => {
+            let params_array = match params {
+                Some(PdfObject::PdfArray(arr)) => Some(arr),
+                None | Some(PdfObject::PdfNull) => None,
+                Some(_) => {
+                    return Err(PdfError::FilterError(
+                        "filter array DecodeParms must be an array".to_string(),
+                    ));
+                }
+            };
+
+            if let Some(arr) = params_array
+                && arr.len() != filters.len()
+            {
+                return Err(PdfError::FilterError(format!(
+                    "filter count ({}) does not match DecodeParms count ({})",
+                    filters.len(),
+                    arr.len()
+                )));
+            }
+
+            let stage = |index| {
+                let filter_name = filters.get(index).and_then(PdfObject::as_name).ok_or(
+                    PdfError::FilterError("filter array must contain only names".to_string()),
+                )?;
+                let params = params_array
+                    .and_then(|arr| arr.get(index))
+                    .map(|param| {
+                        if matches!(param, PdfObject::PdfNull) {
+                            Ok(None)
+                        } else {
+                            param.as_dict().map(Some).ok_or(PdfError::FilterError(
+                                "filter array DecodeParms items must be dictionaries".to_string(),
+                            ))
+                        }
+                    })
+                    .transpose()?
+                    .flatten();
+                Ok::<_, PdfError>((filter_name.name(), params))
+            };
+            // Validate the entire chain before any decoder allocates output.
+            // Borrow its entries instead of building another metadata table.
+            for index in 0..filters.len() {
+                stage(index)?;
+            }
+            let mut data: Option<T> = None;
+            for index in 0..filters.len() {
+                let (name, params) = stage(index)?;
+                data = Some(decode(
+                    name,
+                    data.as_ref().map(AsRef::as_ref).unwrap_or(input),
+                    params,
+                    context,
+                )?);
+            }
+            match data {
+                Some(data) => Ok(data),
+                None => {
+                    check_output_size(
+                        0,
+                        input.len(),
+                        context.max_decoded_bytes,
+                        "identity filter",
+                    )?;
+                    copy(input)
+                }
+            }
+        }
+        _ => Err(PdfError::FilterError(
+            "Filter must be a name or array".to_string(),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod limit_tests {
     use super::*;
@@ -295,232 +522,5 @@ mod limit_tests {
             apply_filter_with_context("CCITTFaxDecode", &[], None, context),
             Err(PdfError::ResourceLimit(_))
         ));
-    }
-}
-
-pub fn apply_filter_with_context(
-    name: &str,
-    input: &[u8],
-    params: Option<&PdfDict>,
-    context: FilterContext<'_>,
-) -> PdfResult<Vec<u8>> {
-    match name {
-        "AHx" | "ASCIIHexDecode" => {
-            ascii_hex::ascii_hex_decode_limited(input, context.max_decoded_bytes)
-        }
-        "A85" | "ASCII85Decode" => {
-            ascii_85::ascii_85_decode_limited(input, context.max_decoded_bytes)
-        }
-        "LZW" | "LZWDecode" => lzw::lzw_decode_limited(input, params, context.max_decoded_bytes),
-        "Fl" | "FlateDecode" => {
-            flate::flate_decode_limited(input, params, context.max_decoded_bytes)
-        }
-        "RL" | "RunLengthDecode" => {
-            run_length::run_length_decode_limited(input, context.max_decoded_bytes)
-        }
-        "DCT" | "DCTDecode" => dct::dct_decode_limited(input, context),
-        "CCF" | "CCITTFaxDecode" => {
-            ccittfax::ccittfax_decode_limited(input, params, context.max_decoded_bytes)
-        }
-        "Crypt" => {
-            check_output_size(0, input.len(), context.max_decoded_bytes, "Crypt")?;
-            crypt::crypt_decode(
-                input,
-                if context.crypt_already_processed {
-                    None
-                } else {
-                    params
-                },
-            )
-        }
-        "JPXDecode" => jpx::jpx_decode(input, params, context),
-        "JBIG2Decode" => jbig2::jbig2_decode(input, params, context),
-        _ => Err(PdfError::FilterError(format!("unsupported filter: {name}"))),
-    }
-}
-
-pub fn apply_filters(
-    filter: &PdfObject,
-    params: Option<&PdfObject>,
-    input: &[u8],
-    context: FilterContext<'_>,
-) -> PdfResult<Vec<u8>> {
-    apply_filter_chain(
-        filter,
-        params,
-        input,
-        context,
-        apply_filter_with_context,
-        |input| {
-            let mut copied = Vec::new();
-            copied
-                .try_reserve_exact(input.len())
-                .map_err(|_| PdfError::ResourceLimit("identity filter allocation".into()))?;
-            copied.extend_from_slice(input);
-            Ok(copied)
-        },
-    )
-}
-
-/// Budget-aware dispatch. Decoders not yet migrated fail explicitly rather
-/// than silently allocating outside this operation's pool.
-pub fn apply_filter_with_budget(
-    name: &str,
-    input: &[u8],
-    params: Option<&PdfDict>,
-    context: FilterContext<'_>,
-    budget: &crate::budget::OperationBudget,
-) -> PdfResult<crate::budget::BudgetedBytes> {
-    match name {
-        "AHx" | "ASCIIHexDecode" => {
-            ascii_hex::ascii_hex_decode_with_budget(input, context.max_decoded_bytes, budget)
-        }
-        "A85" | "ASCII85Decode" => {
-            ascii_85::ascii_85_decode_with_budget(input, context.max_decoded_bytes, budget)
-        }
-        "RL" | "RunLengthDecode" => {
-            run_length::run_length_decode_with_budget(input, context.max_decoded_bytes, budget)
-        }
-        "Fl" | "FlateDecode" => {
-            flate::flate_decode_with_budget(input, params, context.max_decoded_bytes, budget)
-        }
-        "LZW" | "LZWDecode" => {
-            lzw::lzw_decode_with_budget(input, params, context.max_decoded_bytes, budget)
-        }
-        "Crypt" => crypt::crypt_decode_with_budget(
-            input,
-            if context.crypt_already_processed {
-                None
-            } else {
-                params
-            },
-            context.max_decoded_bytes,
-            budget,
-        ),
-        "DCT" | "DCTDecode" => dct::dct_decode_with_budget(input, context, budget),
-        "JPXDecode" => jpx::decode_with_budget(input, context, budget).map(|(_, bytes)| bytes),
-        "JBIG2Decode" => jbig2::decode_with_budget(input, context, budget),
-        "CCF" | "CCITTFaxDecode" => {
-            ccittfax::ccittfax_decode_with_budget(input, params, context.max_decoded_bytes, budget)
-        }
-        _ => Err(PdfError::FilterError(format!(
-            "filter has no budget-aware decoder: {name}"
-        ))),
-    }
-}
-
-/// Intermediate owners remain charged while the next stage is decoding.
-/// Borrowed input must be charged by its owner if it belongs to this pool.
-pub fn apply_filters_with_budget(
-    filter: &PdfObject,
-    params: Option<&PdfObject>,
-    input: &[u8],
-    context: FilterContext<'_>,
-    budget: &crate::budget::OperationBudget,
-) -> PdfResult<crate::budget::BudgetedBytes> {
-    apply_filter_chain(
-        filter,
-        params,
-        input,
-        context,
-        |name, input, params, context| {
-            apply_filter_with_budget(name, input, params, context, budget)
-        },
-        |input| crate::budget::BudgetedBytes::copy_from_slice(budget, input),
-    )
-}
-
-fn apply_filter_chain<'a, T: AsRef<[u8]>>(
-    filter: &PdfObject,
-    params: Option<&PdfObject>,
-    input: &[u8],
-    context: FilterContext<'a>,
-    decode: impl Fn(&str, &[u8], Option<&PdfDict>, FilterContext<'a>) -> PdfResult<T>,
-    copy: impl Fn(&[u8]) -> PdfResult<T>,
-) -> PdfResult<T> {
-    match filter {
-        PdfObject::PdfName(name) => {
-            let params = match params {
-                Some(PdfObject::PdfDict(dict)) => Some(dict),
-                None | Some(PdfObject::PdfNull) => None,
-                Some(_) => {
-                    return Err(PdfError::FilterError(
-                        "single filter DecodeParms must be a dictionary".to_string(),
-                    ));
-                }
-            };
-            decode(name.name(), input, params, context)
-        }
-        PdfObject::PdfArray(filters) => {
-            let params_array = match params {
-                Some(PdfObject::PdfArray(arr)) => Some(arr),
-                None | Some(PdfObject::PdfNull) => None,
-                Some(_) => {
-                    return Err(PdfError::FilterError(
-                        "filter array DecodeParms must be an array".to_string(),
-                    ));
-                }
-            };
-
-            if let Some(arr) = params_array {
-                if arr.len() != filters.len() {
-                    return Err(PdfError::FilterError(format!(
-                        "filter count ({}) does not match DecodeParms count ({})",
-                        filters.len(),
-                        arr.len()
-                    )));
-                }
-            }
-
-            let stage = |index| {
-                let filter_name = filters.get(index).and_then(PdfObject::as_name).ok_or(
-                    PdfError::FilterError("filter array must contain only names".to_string()),
-                )?;
-                let params = params_array
-                    .and_then(|arr| arr.get(index))
-                    .map(|param| {
-                        if matches!(param, PdfObject::PdfNull) {
-                            Ok(None)
-                        } else {
-                            param.as_dict().map(Some).ok_or(PdfError::FilterError(
-                                "filter array DecodeParms items must be dictionaries".to_string(),
-                            ))
-                        }
-                    })
-                    .transpose()?
-                    .flatten();
-                Ok::<_, PdfError>((filter_name.name(), params))
-            };
-            // Validate the entire chain before any decoder allocates output.
-            // Borrow its entries instead of building another metadata table.
-            for index in 0..filters.len() {
-                stage(index)?;
-            }
-            let mut data: Option<T> = None;
-            for index in 0..filters.len() {
-                let (name, params) = stage(index)?;
-                data = Some(decode(
-                    name,
-                    data.as_ref().map(AsRef::as_ref).unwrap_or(input),
-                    params,
-                    context,
-                )?);
-            }
-            match data {
-                Some(data) => Ok(data),
-                None => {
-                    check_output_size(
-                        0,
-                        input.len(),
-                        context.max_decoded_bytes,
-                        "identity filter",
-                    )?;
-                    copy(input)
-                }
-            }
-        }
-        _ => Err(PdfError::FilterError(
-            "Filter must be a name or array".to_string(),
-        )),
     }
 }

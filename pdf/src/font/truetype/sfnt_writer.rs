@@ -16,7 +16,7 @@ pub(crate) fn write_sfnt(
     if count == 0 || count > 4095 || count > limits.max_objects {
         return Err(PdfError::ResourceLimit("SFNT output table count".into()));
     }
-    let mut sorted_lease = budget.reserve(count * std::mem::size_of::<([u8; 4], &[u8])>())?;
+    let mut sorted_lease = budget.reserve(std::mem::size_of_val(tables))?;
     let mut sorted = Vec::new();
     sorted
         .try_reserve_exact(count)

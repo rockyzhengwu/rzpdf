@@ -3,7 +3,7 @@ use std::io::{Read, Seek};
 
 use crate::document::cross_ref_table::{CrossRefTable, ObjectInfo, ObjectState};
 
-use crate::filter::{apply_filters, FilterContext};
+use crate::filter::{FilterContext, apply_filters};
 use crate::objects::PdfObject;
 use crate::{
     error::{PdfError, PdfResult},
@@ -23,7 +23,11 @@ pub(crate) fn parse_xref_with_offset<R: Seek + Read>(
     if syntax.mode() == crate::parser::syntax::ParseMode::Strict {
         validate_strict_xref_table(&xref)?;
     } else if validate_strict_xref_table(&xref).is_err() {
-        syntax.report(last_xref_offset, None, super::diagnostic::StructureReason::CompatibleXrefTable)?;
+        syntax.report(
+            last_xref_offset,
+            None,
+            super::diagnostic::StructureReason::CompatibleXrefTable,
+        )?;
     }
     Ok((xref, last_xref_offset))
 }
@@ -62,26 +66,30 @@ fn load_xref_chain<R: Seek + Read>(
             })
             .transpose()?
             .filter(|offset| *offset != 0);
-        if is_table {
-            if let Some(stream_offset) = revision.trailer().get("XRefStm") {
-                let stream_offset = stream_offset
-                    .as_number()
-                    .ok_or_else(|| PdfError::ParserError("XRefStm must be an integer".into()))?
-                    .as_u64_checked()?;
-                if !visited.insert(stream_offset) {
-                    return Err(PdfError::InvalidReference("cycle in hybrid xref".into()));
-                }
-                // Supplemental stream overrides table entries in the same revision.
-                revision.merge(parse_xref_stream(syntax, stream_offset)?);
+        if is_table && let Some(stream_offset) = revision.trailer().get("XRefStm") {
+            let stream_offset = stream_offset
+                .as_number()
+                .ok_or_else(|| PdfError::ParserError("XRefStm must be an integer".into()))?
+                .as_u64_checked()?;
+            if !visited.insert(stream_offset) {
+                return Err(PdfError::InvalidReference("cycle in hybrid xref".into()));
             }
+            // Supplemental stream overrides table entries in the same revision.
+            revision.merge(parse_xref_stream(syntax, stream_offset)?);
         }
         if let Some(current) = &mut result {
             current.merge_older(revision);
         } else {
             result = Some(revision);
         }
-        if result.as_ref().unwrap().objects().len()
-            .saturating_add(result.as_ref().unwrap().historical_objects().len()) > syntax.limits().max_objects {
+        if result
+            .as_ref()
+            .unwrap()
+            .objects()
+            .len()
+            .saturating_add(result.as_ref().unwrap().historical_objects().len())
+            > syntax.limits().max_objects
+        {
             return Err(PdfError::ResourceLimit("xref object count".into()));
         }
     }
@@ -99,8 +107,16 @@ pub fn parse_xref_stream<R: Seek + Read>(
     ))?;
     let dict = stream.dict();
     if syntax.mode() == crate::parser::syntax::ParseMode::Compatible
-        && dict.get("Type").and_then(PdfObject::as_name).is_none_or(|name| name.name() != "XRef") {
-        syntax.report(pos, Some(indirect.id()), super::diagnostic::StructureReason::CompatibleXrefStreamType)?;
+        && dict
+            .get("Type")
+            .and_then(PdfObject::as_name)
+            .is_none_or(|name| name.name() != "XRef")
+    {
+        syntax.report(
+            pos,
+            Some(indirect.id()),
+            super::diagnostic::StructureReason::CompatibleXrefStreamType,
+        )?;
     }
     if syntax.mode() == crate::parser::syntax::ParseMode::Strict {
         let ty = dict
@@ -176,7 +192,7 @@ pub fn parse_xref_stream<R: Seek + Read>(
         ));
     }
     let mut entry_count = 0usize;
-    for pair in index.chunks_exact(2) {
+    for pair in index.as_chunks::<2>().0 {
         let end = pair[0]
             .checked_add(pair[1])
             .ok_or_else(|| PdfError::ParserError("xref Index range overflow".into()))?;
@@ -263,21 +279,18 @@ pub fn parse_xref_stream<R: Seek + Read>(
                     } else {
                         gennum
                     };
-                    entries.insert(
-                        num as u32,
-                        ObjectInfo::new(num, offset as u64, gennum, ObjectState::Free),
-                    );
+                    entries.insert(num, ObjectInfo::new(num, offset, gennum, ObjectState::Free));
                 }
                 1 => {
                     entries.insert(
-                        num as u32,
-                        ObjectInfo::new(num, offset as u64, gennum, ObjectState::Normal),
+                        num,
+                        ObjectInfo::new(num, offset, gennum, ObjectState::Normal),
                     );
                 }
                 2 => {
                     entries.insert(
-                        num as u32,
-                        ObjectInfo::new(num, offset as u64, gennum, ObjectState::Compressed),
+                        num,
+                        ObjectInfo::new(num, offset, gennum, ObjectState::Compressed),
                     );
                 }
                 _ => {
@@ -295,7 +308,11 @@ pub fn parse_xref_stream<R: Seek + Read>(
         ));
     }
     if syntax.mode() == crate::parser::syntax::ParseMode::Compatible && bptr != buffer.len() {
-        syntax.report(pos, Some(indirect.id()), super::diagnostic::StructureReason::CompatibleXrefTrailingBytes)?;
+        syntax.report(
+            pos,
+            Some(indirect.id()),
+            super::diagnostic::StructureReason::CompatibleXrefTrailingBytes,
+        )?;
     }
     let trailer = dict.to_owned();
     let cross_ref_table = CrossRefTable::new(entries, trailer);
@@ -335,8 +352,14 @@ pub(crate) fn parse_xref_section<R: Seek + Read>(
             ));
         }
         let objs = parse_xref_sub_section(syntax, start_objnum, obj_count)?;
-        if syntax.mode() == crate::parser::syntax::ParseMode::Compatible && (obj_count == 0 || objs.keys().any(|id| objects.contains_key(id))) {
-            syntax.report(pos, None, super::diagnostic::StructureReason::CompatibleXrefTable)?;
+        if syntax.mode() == crate::parser::syntax::ParseMode::Compatible
+            && (obj_count == 0 || objs.keys().any(|id| objects.contains_key(id)))
+        {
+            syntax.report(
+                pos,
+                None,
+                super::diagnostic::StructureReason::CompatibleXrefTable,
+            )?;
         }
         if syntax.mode() == crate::parser::syntax::ParseMode::Strict {
             for objnum in objs.keys() {
@@ -397,16 +420,27 @@ fn parse_xref_sub_section<R: Seek + Read>(
             let mut length = 0;
             while length < line.len() && !syntax.is_eof() {
                 let byte = syntax.get_next_char()?;
-                if matches!(byte,b'\r'|b'\n') { break; }
-                line[length] = byte; length += 1;
+                if matches!(byte, b'\r' | b'\n') {
+                    break;
+                }
+                line[length] = byte;
+                length += 1;
             }
             let strict_shape = (length == 18 || (length == 19 && line[18] == b' '))
-                && line[10] == b' ' && line[16] == b' '
+                && line[10] == b' '
+                && line[16] == b' '
                 && line[..10].iter().all(u8::is_ascii_digit)
                 && line[11..16].iter().all(u8::is_ascii_digit);
             syntax.set_pos(end)?;
             if !strict_shape {
-                syntax.report(entry_offset, Some(crate::objects::object_id::ObjectId::new(start_objnum + i, gennum)), super::diagnostic::StructureReason::CompatibleXrefEntry)?;
+                syntax.report(
+                    entry_offset,
+                    Some(crate::objects::object_id::ObjectId::new(
+                        start_objnum + i,
+                        gennum,
+                    )),
+                    super::diagnostic::StructureReason::CompatibleXrefEntry,
+                )?;
             }
             let state = if t.is_equal(b"n") {
                 ObjectState::Normal
@@ -476,7 +510,11 @@ fn find_start_xref<R: Seek + Read>(syntax: &mut SyntaxParser<R>) -> PdfResult<u6
     if syntax.mode() == crate::parser::syntax::ParseMode::Strict {
         validate_final_eof_marker(&window)?;
     } else if validate_final_eof_marker(&window).is_err() {
-        syntax.report(syntax.file_size(), None, super::diagnostic::StructureReason::CompatibleEof)?;
+        syntax.report(
+            syntax.file_size(),
+            None,
+            super::diagnostic::StructureReason::CompatibleEof,
+        )?;
     }
     let Some(rel) = window.windows(tag.len()).rposition(|slice| slice == tag) else {
         return Err(PdfError::ParserError(
@@ -551,10 +589,15 @@ fn validate_strict_xref_table(xref: &CrossRefTable) -> PdfResult<()> {
             return Err(PdfError::InvalidReference("cycle in xref free list".into()));
         }
         traversed += 1;
-        let number = u32::try_from(next).map_err(|_| PdfError::InvalidReference("xref free-list number overflow".into()))?;
-        let info = xref.lookup(&number).ok_or_else(|| PdfError::InvalidReference("missing xref free-list entry".into()))?;
+        let number = u32::try_from(next)
+            .map_err(|_| PdfError::InvalidReference("xref free-list number overflow".into()))?;
+        let info = xref
+            .lookup(&number)
+            .ok_or_else(|| PdfError::InvalidReference("missing xref free-list entry".into()))?;
         if !matches!(info.state(), ObjectState::Free) || info.gennum() > 65535 {
-            return Err(PdfError::InvalidReference("invalid xref free-list entry".into()));
+            return Err(PdfError::InvalidReference(
+                "invalid xref free-list entry".into(),
+            ));
         }
         next = info.offset();
     }
@@ -567,7 +610,9 @@ pub struct PdfParser<R: Seek + Read> {
 }
 
 impl<R: Seek + Read> PdfParser<R> {
-    pub(crate) fn diagnostic_log(&self) -> super::diagnostic::DiagnosticLog { self.syntax.diagnostics.clone() }
+    pub(crate) fn diagnostic_log(&self) -> super::diagnostic::DiagnosticLog {
+        self.syntax.diagnostics.clone()
+    }
     pub fn mode(&self) -> super::syntax::ParseMode {
         self.syntax.mode()
     }
@@ -581,7 +626,7 @@ impl<R: Seek + Read> PdfParser<R> {
     pub fn parse_indirect_obj(&mut self, pos: u64) -> PdfResult<PdfObject> {
         self.syntax.set_pos(pos)?;
         let indirect = self.syntax.get_indirect_object()?;
-        return Ok(indirect.to_obj());
+        Ok(indirect.to_obj())
     }
 
     pub fn parse_indirect_obj_checked(
@@ -621,10 +666,13 @@ impl<R: Seek + Read> PdfParser<R> {
     }
 
     pub(crate) fn indirect_object_end_with_budget(
-        &mut self, offset: u64, expected: crate::objects::object_id::ObjectId,
+        &mut self,
+        offset: u64,
+        expected: crate::objects::object_id::ObjectId,
         budget: &crate::budget::OperationBudget,
     ) -> PdfResult<u64> {
-        let (object, lease) = self.parse_indirect_obj_checked_with_budget(offset, expected, budget)?;
+        let (object, lease) =
+            self.parse_indirect_obj_checked_with_budget(offset, expected, budget)?;
         let end = self.syntax.position();
         drop(object);
         drop(lease);
@@ -637,17 +685,10 @@ mod tests {
     use super::{find_start_xref, parse_xref, parse_xref_stream};
     use crate::document::cross_ref_table::ObjectState;
     use crate::io::stream_reader::StreamReader;
-    use crate::parser::parser::PdfParser;
+
     use crate::parser::syntax::{ParseMode, SyntaxParser};
 
     use std::io::{BufReader, Cursor};
-    fn new_parser(buffer: &str) -> PdfParser<Cursor<&str>> {
-        let inner = Cursor::new(buffer);
-        let reader = StreamReader::try_new(inner).unwrap();
-        let syntax = SyntaxParser::new(reader);
-        let parser = PdfParser::new(syntax);
-        return parser;
-    }
 
     #[test]
     fn test_find_start_xref() {
@@ -777,22 +818,30 @@ mod tests {
             (1, "0000000010 00008 n ", false),
             (3, "0000000000 00008 f ", false),
         ] {
-            let bytes = format!("%PDF-1.7\nxref\n0 2\n{target:010} 65535 f \n{entry}\ntrailer\n<< /Size 2 >>\nstartxref\n9\n%%EOF\n");
+            let bytes = format!(
+                "%PDF-1.7\nxref\n0 2\n{target:010} 65535 f \n{entry}\ntrailer\n<< /Size 2 >>\nstartxref\n9\n%%EOF\n"
+            );
             let reader = StreamReader::try_new(Cursor::new(bytes.into_bytes())).unwrap();
-            assert_eq!(parse_xref(&mut SyntaxParser::with_mode(reader, ParseMode::Strict)).is_ok(), accepts);
+            assert_eq!(
+                parse_xref(&mut SyntaxParser::with_mode(reader, ParseMode::Strict)).is_ok(),
+                accepts
+            );
         }
     }
 
     #[test]
     fn compact_xref_stream_reserved_zero_is_normalized_but_other_generations_are_not() {
         for (generation, accepts) in [(0u8, true), (1, false)] {
-            let mut bytes = b"1 0 obj\n<< /Type /XRef /Size 1 /W [1 1 1] /Length 3 >>\nstream\n".to_vec();
+            let mut bytes =
+                b"1 0 obj\n<< /Type /XRef /Size 1 /W [1 1 1] /Length 3 >>\nstream\n".to_vec();
             bytes.extend_from_slice(&[0, 0, generation]);
             bytes.extend_from_slice(b"\nendstream\nendobj\nstartxref\n0\n%%EOF\n");
             let reader = StreamReader::try_new(Cursor::new(bytes)).unwrap();
             let result = parse_xref(&mut SyntaxParser::with_mode(reader, ParseMode::Strict));
             assert_eq!(result.is_ok(), accepts);
-            if let Ok(table) = result { assert_eq!(table.lookup(&0).unwrap().gennum(), 65535); }
+            if let Ok(table) = result {
+                assert_eq!(table.lookup(&0).unwrap().gennum(), 65535);
+            }
         }
     }
 

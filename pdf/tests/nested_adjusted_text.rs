@@ -109,10 +109,14 @@ fn cross_invocation_span_outer_error_and_unwind_restore_publication() {
                 let root = doc.get_page(0)?.content_program()?;
                 let chars = doc.get_page(0)?.extract_characters_paint_order()?;
                 let start = NestedTextCodePosition {
-                    source: chars[0].nested_source.as_ref().unwrap(), array_item: None, offset: 1,
+                    source: chars[0].nested_source.as_ref().unwrap(),
+                    array_item: None,
+                    offset: 1,
                 };
                 let end = NestedTextCodePosition {
-                    source: chars[28].nested_source.as_ref().unwrap(), array_item: Some(2), offset: 1,
+                    source: chars[28].nested_source.as_ref().unwrap(),
+                    array_item: Some(2),
+                    offset: 1,
                 };
                 if preserve {
                     doc.replace_nested_text_span_preserving_advance(0, &root, start..end, "X")
@@ -127,13 +131,20 @@ fn cross_invocation_span_outer_error_and_unwind_restore_publication() {
                         panic!("cross invocation outer unwind");
                     });
                 }));
-                assert_eq!(caught.unwrap_err().downcast_ref::<&str>().copied(), Some("cross invocation outer unwind"));
+                assert_eq!(
+                    caught.unwrap_err().downcast_ref::<&str>().copied(),
+                    Some("cross invocation outer unwind")
+                );
             } else {
                 let failed: PdfResult<()> = doc.edit_transaction(|doc| {
                     edit(doc)?;
-                    Err(PdfError::DocumentError("cross invocation outer error".into()))
+                    Err(PdfError::DocumentError(
+                        "cross invocation outer error".into(),
+                    ))
                 });
-                assert!(matches!(failed, Err(PdfError::DocumentError(ref message)) if message == "cross invocation outer error"));
+                assert!(
+                    matches!(failed, Err(PdfError::DocumentError(ref message)) if message == "cross invocation outer error")
+                );
             }
             assert_eq!(doc.resolve_object(leaf).unwrap(), leaf_before);
             assert_eq!(doc.resolve_object(outer).unwrap(), outer_before);
@@ -161,12 +172,20 @@ fn cross_invocation_span_quota_rejection_keeps_original_endpoints() {
     for preserve in [false, true] {
         let (doc, leaf, outer, _) = fixture_with_options("events", options);
         let root = doc.get_page(0).unwrap().content_program().unwrap();
-        let chars = doc.get_page(0).unwrap().extract_characters_paint_order().unwrap();
+        let chars = doc
+            .get_page(0)
+            .unwrap()
+            .extract_characters_paint_order()
+            .unwrap();
         let start = NestedTextCodePosition {
-            source: chars[0].nested_source.as_ref().unwrap(), array_item: None, offset: 1,
+            source: chars[0].nested_source.as_ref().unwrap(),
+            array_item: None,
+            offset: 1,
         };
         let end = NestedTextCodePosition {
-            source: chars[28].nested_source.as_ref().unwrap(), array_item: Some(2), offset: 1,
+            source: chars[28].nested_source.as_ref().unwrap(),
+            array_item: Some(2),
+            offset: 1,
         };
         let stamp = doc.stamp();
         let saved = doc.save_to_bytes().unwrap();
@@ -209,18 +228,29 @@ fn complex_four_call_span_fixed_budget_ladder() {
             };
             let (doc, leaf, outer, _) = fixture_with_options("events", options);
             let root = doc.get_page(0).unwrap().content_program().unwrap();
-            let before = doc.get_page(0).unwrap().extract_characters_paint_order().unwrap();
-            let original = before.iter().filter_map(|ch| ch.unicode.as_deref()).collect::<String>();
+            let before = doc
+                .get_page(0)
+                .unwrap()
+                .extract_characters_paint_order()
+                .unwrap();
+            let original = before
+                .iter()
+                .filter_map(|ch| ch.unicode.as_deref())
+                .collect::<String>();
             let saved = doc.save_to_bytes().unwrap();
             let stamp = doc.stamp();
             let leaf_before = doc.resolve_object(leaf).unwrap();
             let outer_before = doc.resolve_object(outer).unwrap();
             let resources = doc.get_page(0).unwrap().resource().unwrap();
             let start = NestedTextCodePosition {
-                source: before[0].nested_source.as_ref().unwrap(), array_item: None, offset: 1,
+                source: before[0].nested_source.as_ref().unwrap(),
+                array_item: None,
+                offset: 1,
             };
             let end = NestedTextCodePosition {
-                source: before[28].nested_source.as_ref().unwrap(), array_item: Some(2), offset: 1,
+                source: before[28].nested_source.as_ref().unwrap(),
+                array_item: Some(2),
+                offset: 1,
             };
             let result = if preserve {
                 doc.replace_nested_text_span_preserving_advance(0, &root, start..end, "X")
@@ -238,15 +268,40 @@ fn complex_four_call_span_fixed_budget_ladder() {
                 Ok(()) => {
                     successes += 1;
                     println!("complex four-call preserve={preserve} ceiling={ceiling}: passed");
-                    let reopened = Doc::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict).unwrap();
-                    let after = reopened.get_page(0).unwrap().extract_characters_paint_order().unwrap();
-                    assert_eq!(after.iter().filter_map(|ch| ch.unicode.as_deref()).collect::<String>(), "AXHCD");
-                    assert_eq!(reopened.get_page(1).unwrap().extract_characters_paint_order().unwrap()
-                        .iter().filter_map(|ch| ch.unicode.as_deref()).collect::<String>(), original);
+                    let reopened =
+                        Doc::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict)
+                            .unwrap();
+                    let after = reopened
+                        .get_page(0)
+                        .unwrap()
+                        .extract_characters_paint_order()
+                        .unwrap();
+                    assert_eq!(
+                        after
+                            .iter()
+                            .filter_map(|ch| ch.unicode.as_deref())
+                            .collect::<String>(),
+                        "AXHCD"
+                    );
+                    assert_eq!(
+                        reopened
+                            .get_page(1)
+                            .unwrap()
+                            .extract_characters_paint_order()
+                            .unwrap()
+                            .iter()
+                            .filter_map(|ch| ch.unicode.as_deref())
+                            .collect::<String>(),
+                        original
+                    );
                     if preserve {
                         for (old, new) in [(0, 0), (29, 2), (30, 3), (31, 4)] {
-                            assert!((before[old].position.x() - after[new].position.x()).abs() < 0.002);
-                            assert!((before[old].position.y() - after[new].position.y()).abs() < 0.002);
+                            assert!(
+                                (before[old].position.x() - after[new].position.x()).abs() < 0.002
+                            );
+                            assert!(
+                                (before[old].position.y() - after[new].position.y()).abs() < 0.002
+                            );
                         }
                     }
                 }
@@ -265,8 +320,15 @@ fn source_qualified_span_across_shared_ancestors_preserves_other_page() {
     for preserve in [false, true] {
         let (doc, _, _, _) = fixture("events");
         let root = doc.get_page(0).unwrap().content_program().unwrap();
-        let before = doc.get_page(0).unwrap().extract_characters_paint_order().unwrap();
-        let original: String = before.iter().filter_map(|ch| ch.unicode.as_deref()).collect();
+        let before = doc
+            .get_page(0)
+            .unwrap()
+            .extract_characters_paint_order()
+            .unwrap();
+        let original: String = before
+            .iter()
+            .filter_map(|ch| ch.unicode.as_deref())
+            .collect();
         let start = NestedTextCodePosition {
             source: before[0].nested_source.as_ref().unwrap(),
             array_item: None,
@@ -282,7 +344,12 @@ fn source_qualified_span_across_shared_ancestors_preserves_other_page() {
         let invalid_end = NestedTextCodePosition { offset: 3, ..end };
         for (finish, replacement) in [(invalid_end, "X"), (end, "😀")] {
             let result = if preserve {
-                doc.replace_nested_text_span_preserving_advance(0, &root, start..finish, replacement)
+                doc.replace_nested_text_span_preserving_advance(
+                    0,
+                    &root,
+                    start..finish,
+                    replacement,
+                )
             } else {
                 doc.replace_nested_text_span(0, &root, start..finish, replacement)
             };
@@ -291,15 +358,37 @@ fn source_qualified_span_across_shared_ancestors_preserves_other_page() {
             assert_eq!(doc.save_to_bytes().unwrap(), saved);
         }
         if preserve {
-            doc.replace_nested_text_span_preserving_advance(0, &root, start..end, "X").unwrap();
+            doc.replace_nested_text_span_preserving_advance(0, &root, start..end, "X")
+                .unwrap();
         } else {
-            doc.replace_nested_text_span(0, &root, start..end, "X").unwrap();
+            doc.replace_nested_text_span(0, &root, start..end, "X")
+                .unwrap();
         }
-        let reopened = Doc::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict).unwrap();
-        let after = reopened.get_page(0).unwrap().extract_characters_paint_order().unwrap();
-        assert_eq!(after.iter().filter_map(|ch| ch.unicode.as_deref()).collect::<String>(), "AXHCD");
-        assert_eq!(reopened.get_page(1).unwrap().extract_characters_paint_order().unwrap()
-            .iter().filter_map(|ch| ch.unicode.as_deref()).collect::<String>(), original);
+        let reopened =
+            Doc::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict).unwrap();
+        let after = reopened
+            .get_page(0)
+            .unwrap()
+            .extract_characters_paint_order()
+            .unwrap();
+        assert_eq!(
+            after
+                .iter()
+                .filter_map(|ch| ch.unicode.as_deref())
+                .collect::<String>(),
+            "AXHCD"
+        );
+        assert_eq!(
+            reopened
+                .get_page(1)
+                .unwrap()
+                .extract_characters_paint_order()
+                .unwrap()
+                .iter()
+                .filter_map(|ch| ch.unicode.as_deref())
+                .collect::<String>(),
+            original
+        );
         if preserve {
             for (old, new) in [(0, 0), (29, 2), (30, 3), (31, 4)] {
                 assert!((before[old].position.x() - after[new].position.x()).abs() < 0.002);
@@ -914,14 +1003,25 @@ fn cross_invocation_mixed_cid_span_checks_boundaries_and_signed_advance() {
             for text in ["B", "", "B "] {
                 let (doc, leaf, body) = cid_fixture(vertical, "events");
                 let root = doc.get_page(0).unwrap().content_program().unwrap();
-                let before = doc.get_page(0).unwrap().extract_characters_paint_order().unwrap();
+                let before = doc
+                    .get_page(0)
+                    .unwrap()
+                    .extract_characters_paint_order()
+                    .unwrap();
                 assert_eq!(before.len(), 32);
-                let original: String = before.iter().filter_map(|ch| ch.unicode.as_deref()).collect();
+                let original: String = before
+                    .iter()
+                    .filter_map(|ch| ch.unicode.as_deref())
+                    .collect();
                 let start = NestedTextCodePosition {
-                    source: before[0].nested_source.as_ref().unwrap(), array_item: None, offset: 1,
+                    source: before[0].nested_source.as_ref().unwrap(),
+                    array_item: None,
+                    offset: 1,
                 };
                 let end = NestedTextCodePosition {
-                    source: before[28].nested_source.as_ref().unwrap(), array_item: None, offset: 2,
+                    source: before[28].nested_source.as_ref().unwrap(),
+                    array_item: None,
+                    offset: 2,
                 };
                 let replace = |start, end| {
                     if preserve {
@@ -932,19 +1032,52 @@ fn cross_invocation_mixed_cid_span_checks_boundaries_and_signed_advance() {
                 };
                 let stamp = doc.stamp();
                 let saved = doc.save_to_bytes().unwrap();
-                for (first, last) in [(NestedTextCodePosition { offset: 2, ..start }, end),
-                    (start, NestedTextCodePosition { offset: 1, ..end })] {
-                    assert!(matches!(replace(first, last), Err(PdfError::ObjectError(ref message)) if message == "text range splits a character code"));
+                for (first, last) in [
+                    (NestedTextCodePosition { offset: 2, ..start }, end),
+                    (start, NestedTextCodePosition { offset: 1, ..end }),
+                ] {
+                    assert!(
+                        matches!(replace(first, last), Err(PdfError::ObjectError(ref message)) if message == "text range splits a character code")
+                    );
                     assert!(doc.is_stamp_current(&stamp));
                     assert_eq!(doc.save_to_bytes().unwrap(), saved);
                 }
                 replace(start, end).unwrap();
-                let reopened = Doc::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict).unwrap();
-                assert_eq!(reopened.resolve_object(leaf).unwrap().into_stream().unwrap().raw_data(), body.as_bytes());
-                let after = reopened.get_page(0).unwrap().extract_characters_paint_order().unwrap();
-                assert_eq!(after.iter().filter_map(|ch| ch.unicode.as_deref()).collect::<String>(), format!("A{text}CCC"));
-                assert_eq!(reopened.get_page(1).unwrap().extract_characters_paint_order().unwrap()
-                    .iter().filter_map(|ch| ch.unicode.as_deref()).collect::<String>(), original);
+                let reopened =
+                    Doc::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict)
+                        .unwrap();
+                assert_eq!(
+                    reopened
+                        .resolve_object(leaf)
+                        .unwrap()
+                        .into_stream()
+                        .unwrap()
+                        .raw_data(),
+                    body.as_bytes()
+                );
+                let after = reopened
+                    .get_page(0)
+                    .unwrap()
+                    .extract_characters_paint_order()
+                    .unwrap();
+                assert_eq!(
+                    after
+                        .iter()
+                        .filter_map(|ch| ch.unicode.as_deref())
+                        .collect::<String>(),
+                    format!("A{text}CCC")
+                );
+                assert_eq!(
+                    reopened
+                        .get_page(1)
+                        .unwrap()
+                        .extract_characters_paint_order()
+                        .unwrap()
+                        .iter()
+                        .filter_map(|ch| ch.unicode.as_deref())
+                        .collect::<String>(),
+                    original
+                );
                 if preserve {
                     let suffix = 1 + text.chars().count();
                     for (old, new) in [(0, 0), (29, suffix), (30, suffix + 1), (31, suffix + 2)] {

@@ -3,34 +3,56 @@
 //! The allocator's own inline control storage and Rc budget state are excluded.
 use super::{MemoryLease, OperationBudget};
 use allocator_api2::alloc::{AllocError, Allocator, Global, Layout};
-use std::{cell::{Cell, RefCell}, ptr::NonNull};
+use std::{
+    cell::{Cell, RefCell},
+    ptr::NonNull,
+};
+
+type AllocationSlot = Option<(NonNull<u8>, Option<MemoryLease>)>;
 
 #[derive(Debug)]
 pub(crate) struct TableAllocator {
     budget: RefCell<Option<OperationBudget>>,
     depth: Cell<usize>,
-    allocations: RefCell<[Option<(NonNull<u8>, Option<MemoryLease>)>; 2]>,
+    allocations: RefCell<[AllocationSlot; 2]>,
 }
 
 impl TableAllocator {
     pub(crate) fn new(budget: &OperationBudget) -> Self {
-        Self { budget: RefCell::new(Some(budget.clone())), depth: Cell::new(1), allocations: RefCell::new([None, None]) }
+        Self {
+            budget: RefCell::new(Some(budget.clone())),
+            depth: Cell::new(1),
+            allocations: RefCell::new([None, None]),
+        }
     }
 
     pub(crate) fn persistent() -> Self {
-        Self { budget: RefCell::new(None), depth: Cell::new(0), allocations: RefCell::new([None, None]) }
+        Self {
+            budget: RefCell::new(None),
+            depth: Cell::new(0),
+            allocations: RefCell::new([None, None]),
+        }
     }
 
     /// Existing persistent allocations are not retroactively charged. New
     /// allocations remain charged through all same-pool nested scopes.
     pub(crate) fn enter(&self, budget: &OperationBudget) -> crate::error::PdfResult<()> {
-        let next = self.depth.get().checked_add(1)
-            .ok_or_else(|| crate::error::PdfError::ResourceLimit("table budget depth".into()))?;
+        let next =
+            self.depth.get().checked_add(1).ok_or_else(|| {
+                crate::error::PdfError::ResourceLimit("table budget depth".into())
+            })?;
         let mut current = self.budget.borrow_mut();
-        if current.as_ref().is_some_and(|current| !current.shares_pool(budget)) {
-            return Err(crate::error::PdfError::ResourceLimit("table budget pool mismatch".into()));
+        if current
+            .as_ref()
+            .is_some_and(|current| !current.shares_pool(budget))
+        {
+            return Err(crate::error::PdfError::ResourceLimit(
+                "table budget pool mismatch".into(),
+            ));
         }
-        if current.is_none() { *current = Some(budget.clone()); }
+        if current.is_none() {
+            *current = Some(budget.clone());
+        }
         self.depth.set(next);
         Ok(())
     }
@@ -38,7 +60,11 @@ impl TableAllocator {
     /// Call after transaction snapshots have been restored/discarded. Outermost
     /// exit transfers retained table storage to persistent document memory.
     pub(crate) fn leave(&self) {
-        let depth = self.depth.get().checked_sub(1).expect("active table budget scope");
+        let depth = self
+            .depth
+            .get()
+            .checked_sub(1)
+            .expect("active table budget scope");
         self.depth.set(depth);
         if depth == 0 {
             for (_, lease) in self.allocations.borrow_mut().iter_mut().flatten() {
@@ -63,10 +89,18 @@ impl Clone for TableAllocator {
 // requests use Global's normal dangling allocation without consuming a slot.
 unsafe impl Allocator for TableAllocator {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-        if layout.size() == 0 { return Global.allocate(layout); }
+        if layout.size() == 0 {
+            return Global.allocate(layout);
+        }
         let mut allocations = self.allocations.borrow_mut();
-        let slot = allocations.iter_mut().find(|slot| slot.is_none()).ok_or(AllocError)?;
-        let lease = self.budget.borrow().as_ref()
+        let slot = allocations
+            .iter_mut()
+            .find(|slot| slot.is_none())
+            .ok_or(AllocError)?;
+        let lease = self
+            .budget
+            .borrow()
+            .as_ref()
             .map(|budget| budget.reserve(layout.size()).map_err(|_| AllocError))
             .transpose()?;
         let allocation = Global.allocate(layout)?;
@@ -77,10 +111,13 @@ unsafe impl Allocator for TableAllocator {
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
         // SAFETY: Allocator callers must supply a live allocation from this
         // allocator with its original layout; Global owns its backing storage.
-        unsafe { Global.deallocate(ptr, layout); }
+        unsafe {
+            Global.deallocate(ptr, layout);
+        }
         if layout.size() != 0 {
             let mut allocations = self.allocations.borrow_mut();
-            let slot = allocations.iter_mut()
+            let slot = allocations
+                .iter_mut()
                 .find(|slot| slot.as_ref().is_some_and(|(address, _)| *address == ptr))
                 .expect("table allocation must retain its lease");
             // Return quota only after the allocation has actually been freed.
@@ -93,7 +130,12 @@ unsafe impl Allocator for TableAllocator {
 mod tests {
     use super::*;
     use std::hash::BuildHasherDefault;
-    type Table = hashbrown::HashMap<u32, u32, BuildHasherDefault<std::collections::hash_map::DefaultHasher>, TableAllocator>;
+    type Table = hashbrown::HashMap<
+        u32,
+        u32,
+        BuildHasherDefault<std::collections::hash_map::DefaultHasher>,
+        TableAllocator,
+    >;
 
     #[test]
     fn table_allocator_charges_real_layout_and_growth_overlap() {
@@ -102,7 +144,9 @@ mod tests {
         table.try_reserve(3).unwrap();
         let first = probe.live_bytes();
         assert!(first > table.capacity() * std::mem::size_of::<(u32, u32)>());
-        for key in 0..3 { table.insert(key, key); }
+        for key in 0..3 {
+            table.insert(key, key);
+        }
         table.try_reserve(100).unwrap();
         let second = probe.live_bytes();
         assert_eq!(probe.peak_bytes(), first + second);
@@ -112,7 +156,9 @@ mod tests {
         let pool = OperationBudget::new(first + second - 1);
         let mut table = Table::with_hasher_in(Default::default(), TableAllocator::new(&pool));
         table.try_reserve(3).unwrap();
-        for key in 0..3 { table.insert(key, key); }
+        for key in 0..3 {
+            table.insert(key, key);
+        }
         let capacity = table.capacity();
         assert!(table.try_reserve(100).is_err());
         assert_eq!(table.capacity(), capacity);

@@ -204,15 +204,19 @@ fn child_failure_discards_group_and_restores_canvas_and_limits() {
     );
     assert!(list.replay(&mut render).is_err());
     let actual = pixels(&mut render);
-    let histogram =
-        actual
-            .chunks_exact(4)
-            .fold(std::collections::BTreeMap::new(), |mut map, pixel| {
-                *map.entry(pixel.to_vec()).or_insert(0usize) += 1;
-                map
-            });
+    let histogram = actual.as_chunks::<4>().0.iter().fold(
+        std::collections::BTreeMap::new(),
+        |mut map, pixel| {
+            *map.entry(pixel.to_vec()).or_insert(0usize) += 1;
+            map
+        },
+    );
     assert!(
-        actual.chunks_exact(4).all(|p| p == [0, 255, 0, 255]),
+        actual
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| *p == [0, 255, 0, 255]),
         "{histogram:?}"
     );
     assert!(render.group_stack.is_empty());

@@ -13,21 +13,30 @@ impl ContentBuilder {
     ) -> crate::error::PdfResult<&mut Self> {
         use crate::error::PdfError;
         if limits.max_depth == 0 {
-            return Err(PdfError::ResourceLimit("inline builder graphics depth".into()));
+            return Err(PdfError::ResourceLimit(
+                "inline builder graphics depth".into(),
+            ));
         }
         if !matrix.into_iter().all(f32::is_finite) {
-            return Err(PdfError::ObjectError("inline image transform must be finite".into()));
+            return Err(PdfError::ObjectError(
+                "inline image transform must be finite".into(),
+            ));
         }
         let mut block = format!(
             "q\n{} {} {} {} {} {} cm\n",
             matrix[0], matrix[1], matrix[2], matrix[3], matrix[4], matrix[5]
-        ).into_bytes();
+        )
+        .into_bytes();
         block.extend_from_slice(&image.to_content_bytes(limits)?);
         block.extend_from_slice(b"Q\n");
         crate::filter::check_output_size(
-            self.bytes.len(), block.len(), limits.max_raw_stream_bytes, "inline content builder bytes",
+            self.bytes.len(),
+            block.len(),
+            limits.max_raw_stream_bytes,
+            "inline content builder bytes",
         )?;
-        self.bytes.try_reserve_exact(block.len())
+        self.bytes
+            .try_reserve_exact(block.len())
             .map_err(|_| PdfError::ResourceLimit("inline content builder allocation".into()))?;
         self.bytes.extend_from_slice(&block);
         Ok(self)
@@ -43,27 +52,46 @@ impl ContentBuilder {
         use crate::error::PdfError;
         use std::io::Write;
         if !size.is_finite() || name.is_empty() || name.as_bytes().contains(&0) {
-            return Err(PdfError::ObjectError("Invalid budgeted font selection".into()));
+            return Err(PdfError::ObjectError(
+                "Invalid budgeted font selection".into(),
+            ));
         }
         let escaped = |byte: u8| byte <= 32 || byte >= 127 || b"()<>[]{}/%#".contains(&byte);
-        let token_length = name.bytes().try_fold(1usize, |length, byte| length.checked_add(if escaped(byte) { 3 } else { 1 }))
+        let token_length = name
+            .bytes()
+            .try_fold(1usize, |length, byte| {
+                length.checked_add(if escaped(byte) { 3 } else { 1 })
+            })
             .filter(|&length| length <= limits.max_token_bytes)
             .ok_or_else(|| PdfError::ResourceLimit("font resource name bytes".into()))?;
         let mut suffix = std::io::Cursor::new([0u8; 64]);
-        write!(&mut suffix, " {} Tf\n", size).map_err(|_| PdfError::ObjectError("Font size serialization overflow".into()))?;
+        writeln!(&mut suffix, " {} Tf", size)
+            .map_err(|_| PdfError::ObjectError("Font size serialization overflow".into()))?;
         let suffix_length = suffix.position() as usize;
-        let length = token_length.checked_add(suffix_length)
-            .filter(|&length| length <= limits.max_raw_stream_bytes && length <= limits.max_decoded_bytes)
+        let length = token_length
+            .checked_add(suffix_length)
+            .filter(|&length| {
+                length <= limits.max_raw_stream_bytes && length <= limits.max_decoded_bytes
+            })
             .ok_or_else(|| PdfError::ResourceLimit("font selection bytes".into()))?;
         let mut lease = budget.reserve(length)?;
         let mut output = Vec::new();
-        output.try_reserve_exact(length).map_err(|_| PdfError::ResourceLimit("font selection allocation".into()))?;
+        output
+            .try_reserve_exact(length)
+            .map_err(|_| PdfError::ResourceLimit("font selection allocation".into()))?;
         lease.resize(output.capacity())?;
         output.push(b'/');
         let hex = b"0123456789ABCDEF";
         for byte in name.bytes() {
-            if escaped(byte) { output.extend_from_slice(&[b'#', hex[(byte >> 4) as usize], hex[(byte & 15) as usize]]); }
-            else { output.push(byte); }
+            if escaped(byte) {
+                output.extend_from_slice(&[
+                    b'#',
+                    hex[(byte >> 4) as usize],
+                    hex[(byte & 15) as usize],
+                ]);
+            } else {
+                output.push(byte);
+            }
         }
         output.extend_from_slice(&suffix.get_ref()[..suffix_length]);
         crate::budget::BudgetedBytes::from_reserved_vec(output, lease)
@@ -316,7 +344,9 @@ impl ContentBuilder {
         adjustment: f32,
     ) -> crate::error::PdfResult<&mut Self> {
         self.show_adjusted_encoded_text_with_limits(
-            codes, adjustment, crate::parser::options::Limits::default(),
+            codes,
+            adjustment,
+            crate::parser::options::Limits::default(),
         )
     }
 
@@ -328,10 +358,14 @@ impl ContentBuilder {
     ) -> crate::error::PdfResult<&mut Self> {
         let (number, number_len, length) = adjusted_text_layout(codes, adjustment, limits)?;
         crate::filter::check_output_size(
-            self.bytes.len(), length, limits.max_raw_stream_bytes, "content builder bytes",
+            self.bytes.len(),
+            length,
+            limits.max_raw_stream_bytes,
+            "content builder bytes",
         )?;
-        self.bytes.try_reserve_exact(length)
-            .map_err(|_| crate::error::PdfError::ResourceLimit("adjusted text allocation".into()))?;
+        self.bytes.try_reserve_exact(length).map_err(|_| {
+            crate::error::PdfError::ResourceLimit("adjusted text allocation".into())
+        })?;
         write_adjusted_text(&mut self.bytes, codes, &number[..number_len]);
         Ok(self)
     }
@@ -345,11 +379,17 @@ impl ContentBuilder {
         budget: &crate::budget::OperationBudget,
     ) -> crate::error::PdfResult<crate::budget::BudgetedBytes> {
         let (number, number_len, length) = adjusted_text_layout(codes, adjustment, limits)?;
-        crate::filter::check_output_size(0, length, limits.max_raw_stream_bytes, "content builder bytes")?;
+        crate::filter::check_output_size(
+            0,
+            length,
+            limits.max_raw_stream_bytes,
+            "content builder bytes",
+        )?;
         let mut lease = budget.reserve(length)?;
         let mut bytes = Vec::new();
-        bytes.try_reserve_exact(length)
-            .map_err(|_| crate::error::PdfError::ResourceLimit("adjusted text allocation".into()))?;
+        bytes.try_reserve_exact(length).map_err(|_| {
+            crate::error::PdfError::ResourceLimit("adjusted text allocation".into())
+        })?;
         lease.resize(bytes.capacity())?;
         write_adjusted_text(&mut bytes, codes, &number[..number_len]);
         crate::budget::BudgetedBytes::from_reserved_vec(bytes, lease)
@@ -760,7 +800,7 @@ fn validate_operand_ranges(
                     return Err(invalid());
                 }
             }
-            if (values.len() > 0 && sum == 0.0) || operator.get_as_f32(1)? < 0.0 {
+            if (!values.is_empty() && sum == 0.0) || operator.get_as_f32(1)? < 0.0 {
                 return Err(invalid());
             }
             if values.len() % 2 != 0 && !(sum * 2.0).is_finite() {
@@ -818,7 +858,8 @@ fn adjusted_text_layout(
     if number_len > limits.max_token_bytes {
         return Err(PdfError::ResourceLimit("TJ number token bytes".into()));
     }
-    let length = encoded_text_length(codes, limits)?.checked_add(number_len)
+    let length = encoded_text_length(codes, limits)?
+        .checked_add(number_len)
         .and_then(|size| size.checked_add(3))
         .ok_or_else(|| PdfError::ResourceLimit("adjusted text size overflow".into()))?;
     Ok((number, number_len, length))
@@ -926,19 +967,23 @@ mod image_tests {
         exact.try_set_font_with_limits("F1", 12.0, limits).unwrap();
         assert_eq!(exact.build(), b"/F1 12 Tf\n");
         let mut rejected = ContentBuilder::new();
-        assert!(rejected
-            .try_set_font_with_limits(
-                "F1",
-                12.0,
-                Limits {
-                    max_raw_stream_bytes: 9,
-                    ..limits
-                }
-            )
-            .is_err());
-        assert!(rejected
-            .try_set_font_with_limits("F ", 12.0, limits)
-            .is_err());
+        assert!(
+            rejected
+                .try_set_font_with_limits(
+                    "F1",
+                    12.0,
+                    Limits {
+                        max_raw_stream_bytes: 9,
+                        ..limits
+                    }
+                )
+                .is_err()
+        );
+        assert!(
+            rejected
+                .try_set_font_with_limits("F ", 12.0, limits)
+                .is_err()
+        );
         assert!(rejected.build().is_empty());
     }
 
@@ -951,19 +996,27 @@ mod image_tests {
             builder.try_set_font(name, size).unwrap();
             let pool = OperationBudget::new(4096);
             let neighbor = pool.reserve(7).unwrap();
-            let output = ContentBuilder::font_selection_with_budget(name, size, limits, &pool).unwrap();
+            let output =
+                ContentBuilder::font_selection_with_budget(name, size, limits, &pool).unwrap();
             assert_eq!(output.as_slice(), builder.as_bytes());
             let peak = pool.peak_bytes();
             drop(output);
             assert_eq!(pool.live_bytes(), 7);
             let short = OperationBudget::new(peak - 8);
-            assert!(ContentBuilder::font_selection_with_budget(name, size, limits, &short).is_err());
+            assert!(
+                ContentBuilder::font_selection_with_budget(name, size, limits, &short).is_err()
+            );
             assert_eq!(short.live_bytes(), 0);
             drop(neighbor);
             assert_eq!(pool.live_bytes(), 0);
         }
         let pool = OperationBudget::new(4096);
-        for (name, size) in [("", 12.0), ("F\0", 12.0), ("F1", f32::NAN), ("F1", f32::INFINITY)] {
+        for (name, size) in [
+            ("", 12.0),
+            ("F\0", 12.0),
+            ("F1", f32::NAN),
+            ("F1", f32::INFINITY),
+        ] {
             assert!(ContentBuilder::font_selection_with_budget(name, size, limits, &pool).is_err());
             assert_eq!(pool.live_bytes(), 0);
         }
@@ -1005,15 +1058,17 @@ mod image_tests {
         assert!(builder.show_encoded_text_with_limits(&[], limits).is_err());
         assert_eq!(builder.build(), original);
         let mut other = ContentBuilder::new();
-        assert!(other
-            .show_encoded_text_with_limits(
-                &[0, 255],
-                Limits {
-                    max_token_bytes: 5,
-                    ..limits
-                }
-            )
-            .is_err());
+        assert!(
+            other
+                .show_encoded_text_with_limits(
+                    &[0, 255],
+                    Limits {
+                        max_token_bytes: 5,
+                        ..limits
+                    }
+                )
+                .is_err()
+        );
         assert!(other.build().is_empty());
     }
 
@@ -1157,25 +1212,31 @@ mod image_tests {
             .end_text()
             .restore_state();
         assert_eq!(builder.try_build().unwrap(), builder.build());
-        assert!(builder
-            .try_build_with_limits(Limits {
-                max_content_operations: 6,
-                ..Default::default()
-            })
-            .is_err());
-        assert!(builder
-            .try_build_with_limits(Limits {
-                max_content_operations: 7,
-                max_depth: 1,
-                ..Default::default()
-            })
-            .is_ok());
+        assert!(
+            builder
+                .try_build_with_limits(Limits {
+                    max_content_operations: 6,
+                    ..Default::default()
+                })
+                .is_err()
+        );
+        assert!(
+            builder
+                .try_build_with_limits(Limits {
+                    max_content_operations: 7,
+                    max_depth: 1,
+                    ..Default::default()
+                })
+                .is_ok()
+        );
         let mut huge = ContentBuilder::new();
         huge.rectangle(1e20, 0.0, 1.0, 1.0).fill();
         assert!(huge.try_build().is_ok());
-        assert!(String::from_utf8(huge.build())
-            .unwrap()
-            .contains("100000000000000000000"));
+        assert!(
+            String::from_utf8(huge.build())
+                .unwrap()
+                .contains("100000000000000000000")
+        );
     }
 
     #[test]
@@ -1201,19 +1262,23 @@ mod image_tests {
             assert!(builder.draw_image(name, matrix).is_err());
             assert_eq!(builder.build(), original);
         }
-        assert!(builder
-            .draw_image("Im1", [f32::NAN, 0.0, 0.0, 1.0, 0.0, 0.0])
-            .is_err());
-        assert!(builder
-            .draw_image_with_limits(
-                "Im1",
-                matrix,
-                Limits {
-                    max_raw_stream_bytes: original.len(),
-                    ..Default::default()
-                }
-            )
-            .is_err());
+        assert!(
+            builder
+                .draw_image("Im1", [f32::NAN, 0.0, 0.0, 1.0, 0.0, 0.0])
+                .is_err()
+        );
+        assert!(
+            builder
+                .draw_image_with_limits(
+                    "Im1",
+                    matrix,
+                    Limits {
+                        max_raw_stream_bytes: original.len(),
+                        ..Default::default()
+                    }
+                )
+                .is_err()
+        );
         assert_eq!(builder.build(), original);
         let mut exact = ContentBuilder::new();
         exact.draw_image("Im1", matrix).unwrap();

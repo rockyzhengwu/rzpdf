@@ -22,118 +22,6 @@ pub struct Descriptor {
     is_embed: bool,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        document::cross_ref_table::CrossRefTable,
-        io::stream_reader::StreamReader,
-        parser::{parser::PdfParser, syntax::SyntaxParser},
-    };
-    use std::{collections::HashMap, io::Cursor};
-
-    #[test]
-    fn budget_font_program_owns_decoded_capacity_and_recovers_after_failure() {
-        use crate::{
-            budget::OperationBudget,
-            document::owned::Document,
-            objects::{
-                PdfObject, pdf_name::PdfName, pdf_reference::PdfReference, pdf_stream::PdfStream,
-            },
-        };
-        let doc = Document::new().unwrap();
-        let mut stream_dict = PdfDict::default();
-        stream_dict.insert(
-            "Filter".into(),
-            PdfObject::PdfName(PdfName::new("ASCIIHexDecode".into())),
-        );
-        let stream = PdfStream::new(stream_dict, b"414243>".to_vec());
-        let id = doc.try_insert_object(PdfObject::PdfStream(stream)).unwrap();
-        let mut dict = PdfDict::default();
-        dict.insert(
-            "FontFile2".into(),
-            PdfObject::PdfReference(PdfReference::from_id(id)),
-        );
-        let probe = OperationBudget::new(65536);
-        let (descriptor, lease) =
-            Descriptor::try_new_with_budget(&dict, doc.ctx(), &probe).unwrap();
-        assert_eq!(descriptor.fontfile(), Some(&b"ABC"[..]));
-        assert!(descriptor.is_embed());
-        assert_eq!(
-            lease.bytes(),
-            descriptor.fontfile.as_ref().unwrap().capacity()
-        );
-        assert_eq!(probe.live_bytes(), lease.bytes());
-        let peak = probe.peak_bytes();
-        drop((descriptor, lease));
-        assert_eq!(probe.live_bytes(), 0);
-        let pool = OperationBudget::new(peak);
-        let neighbor = pool.reserve(1).unwrap();
-        assert!(matches!(
-            Descriptor::try_new_with_budget(&dict, doc.ctx(), &pool),
-            Err(PdfError::ResourceLimit(_))
-        ));
-        assert_eq!(pool.live_bytes(), 1);
-        drop(neighbor);
-        let result = Descriptor::try_new_with_budget(&dict, doc.ctx(), &pool).unwrap();
-        drop(result);
-        assert_eq!(pool.live_bytes(), 0);
-        doc.update_object(id, PdfObject::PdfNull).unwrap();
-        assert!(Descriptor::try_new_with_budget(&dict, doc.ctx(), &pool).is_err());
-        assert_eq!(pool.live_bytes(), 0);
-    }
-
-    #[test]
-    fn descriptor_rejects_invalid_fields_and_preserves_flag_bits() {
-        let parser = PdfParser::new(SyntaxParser::new(
-            StreamReader::try_new(Cursor::new(Vec::<u8>::new())).unwrap(),
-        ));
-        let ctx = PDFContext::try_new(
-            parser,
-            CrossRefTable::new(HashMap::new(), PdfDict::default()),
-        )
-        .unwrap();
-        let parse = |input: &str| {
-            let mut syntax = SyntaxParser::new(
-                StreamReader::try_new(Cursor::new(input.as_bytes().to_vec())).unwrap(),
-            );
-            let obj = syntax.get_object().unwrap();
-            Descriptor::try_new(obj.as_dict().unwrap(), &ctx)
-        };
-        for field in [
-            "ItalicAngle",
-            "Ascent",
-            "Descent",
-            "Leading",
-            "CapHeight",
-            "XHeight",
-            "StemV",
-            "StemH",
-            "AvgWidth",
-            "MissingWidth",
-            "MaxWidth",
-        ] {
-            assert!(parse(&format!("<< /{field} /bad >>")).is_err());
-        }
-        for input in [
-            "<< /Flags /bad >>",
-            "<< /Flags -1 >>",
-            "<< /Flags 1.5 >>",
-            "<< /FontFile 1 >>",
-            "<< /FontFile2 1 >>",
-            "<< /FontFile3 1 >>",
-            "<< /FontFile 1 /FontFile2 2 >>",
-        ] {
-            assert!(parse(input).is_err(), "{input}");
-        }
-        let symbolic = parse("<< /Flags 262148 /Ascent 900 >>").unwrap();
-        assert_eq!(symbolic.flags(), Some(&262148));
-        assert!(symbolic.is_symbolic());
-        assert_eq!(symbolic.ascent, 900.0);
-        assert!(!parse("<< /Flags 32 >>").unwrap().is_symbolic());
-    }
-}
-
 impl Descriptor {
     pub fn try_new<R: Seek + Read>(dict: &PdfDict, ctx: &PDFContext<R>) -> PdfResult<Self> {
         Self::try_new_inner(dict, ctx, None).map(|(descriptor, _)| descriptor)
@@ -308,5 +196,117 @@ impl Descriptor {
 
     pub fn is_embed(&self) -> bool {
         self.is_embed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        document::cross_ref_table::CrossRefTable,
+        io::stream_reader::StreamReader,
+        parser::{parser::PdfParser, syntax::SyntaxParser},
+    };
+    use std::{collections::HashMap, io::Cursor};
+
+    #[test]
+    fn budget_font_program_owns_decoded_capacity_and_recovers_after_failure() {
+        use crate::{
+            budget::OperationBudget,
+            document::owned::Document,
+            objects::{
+                PdfObject, pdf_name::PdfName, pdf_reference::PdfReference, pdf_stream::PdfStream,
+            },
+        };
+        let doc = Document::new().unwrap();
+        let mut stream_dict = PdfDict::default();
+        stream_dict.insert(
+            "Filter".into(),
+            PdfObject::PdfName(PdfName::new("ASCIIHexDecode".into())),
+        );
+        let stream = PdfStream::new(stream_dict, b"414243>".to_vec());
+        let id = doc.try_insert_object(PdfObject::PdfStream(stream)).unwrap();
+        let mut dict = PdfDict::default();
+        dict.insert(
+            "FontFile2".into(),
+            PdfObject::PdfReference(PdfReference::from_id(id)),
+        );
+        let probe = OperationBudget::new(65536);
+        let (descriptor, lease) =
+            Descriptor::try_new_with_budget(&dict, doc.ctx(), &probe).unwrap();
+        assert_eq!(descriptor.fontfile(), Some(&b"ABC"[..]));
+        assert!(descriptor.is_embed());
+        assert_eq!(
+            lease.bytes(),
+            descriptor.fontfile.as_ref().unwrap().capacity()
+        );
+        assert_eq!(probe.live_bytes(), lease.bytes());
+        let peak = probe.peak_bytes();
+        drop((descriptor, lease));
+        assert_eq!(probe.live_bytes(), 0);
+        let pool = OperationBudget::new(peak);
+        let neighbor = pool.reserve(1).unwrap();
+        assert!(matches!(
+            Descriptor::try_new_with_budget(&dict, doc.ctx(), &pool),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(pool.live_bytes(), 1);
+        drop(neighbor);
+        let result = Descriptor::try_new_with_budget(&dict, doc.ctx(), &pool).unwrap();
+        drop(result);
+        assert_eq!(pool.live_bytes(), 0);
+        doc.update_object(id, PdfObject::PdfNull).unwrap();
+        assert!(Descriptor::try_new_with_budget(&dict, doc.ctx(), &pool).is_err());
+        assert_eq!(pool.live_bytes(), 0);
+    }
+
+    #[test]
+    fn descriptor_rejects_invalid_fields_and_preserves_flag_bits() {
+        let parser = PdfParser::new(SyntaxParser::new(
+            StreamReader::try_new(Cursor::new(Vec::<u8>::new())).unwrap(),
+        ));
+        let ctx = PDFContext::try_new(
+            parser,
+            CrossRefTable::new(HashMap::new(), PdfDict::default()),
+        )
+        .unwrap();
+        let parse = |input: &str| {
+            let mut syntax = SyntaxParser::new(
+                StreamReader::try_new(Cursor::new(input.as_bytes().to_vec())).unwrap(),
+            );
+            let obj = syntax.get_object().unwrap();
+            Descriptor::try_new(obj.as_dict().unwrap(), &ctx)
+        };
+        for field in [
+            "ItalicAngle",
+            "Ascent",
+            "Descent",
+            "Leading",
+            "CapHeight",
+            "XHeight",
+            "StemV",
+            "StemH",
+            "AvgWidth",
+            "MissingWidth",
+            "MaxWidth",
+        ] {
+            assert!(parse(&format!("<< /{field} /bad >>")).is_err());
+        }
+        for input in [
+            "<< /Flags /bad >>",
+            "<< /Flags -1 >>",
+            "<< /Flags 1.5 >>",
+            "<< /FontFile 1 >>",
+            "<< /FontFile2 1 >>",
+            "<< /FontFile3 1 >>",
+            "<< /FontFile 1 /FontFile2 2 >>",
+        ] {
+            assert!(parse(input).is_err(), "{input}");
+        }
+        let symbolic = parse("<< /Flags 262148 /Ascent 900 >>").unwrap();
+        assert_eq!(symbolic.flags(), Some(&262148));
+        assert!(symbolic.is_symbolic());
+        assert_eq!(symbolic.ascent, 900.0);
+        assert!(!parse("<< /Flags 32 >>").unwrap().is_symbolic());
     }
 }

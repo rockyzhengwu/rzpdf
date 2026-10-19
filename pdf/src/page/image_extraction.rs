@@ -52,10 +52,15 @@ impl<R: Read + Seek> PdfPage<'_, R> {
         operation: usize,
     ) -> PdfResult<super::inline_image::InlineImage> {
         if !self.source_provenance().matches_program(program) {
-            return Err(PdfError::ObjectError("inline image source is foreign or stale".into()));
+            return Err(PdfError::ObjectError(
+                "inline image source is foreign or stale".into(),
+            ));
         }
-        program.operations().get(operation)
-            .and_then(|o| o.operator.inline_image()).cloned()
+        program
+            .operations()
+            .get(operation)
+            .and_then(|o| o.operator.inline_image())
+            .cloned()
             .ok_or_else(|| PdfError::ObjectError("source operation is not an inline image".into()))
     }
 

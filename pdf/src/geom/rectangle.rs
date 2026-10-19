@@ -85,17 +85,16 @@ impl TryFrom<&PdfObject> for Rectangle {
         match value {
             PdfObject::PdfArray(array) => {
                 if array.len() != 4 {
-                    Err(PdfError::RectangleFromPdfObjectError(format!(
-                        "Pdfarray length is not 4"
-                    )))
+                    Err(PdfError::RectangleFromPdfObjectError(
+                        "Pdfarray length is not 4".to_string(),
+                    ))
                 } else {
                     let fvalues: PdfResult<Vec<f32>> = array
                         .into_iter()
                         .map(|v| {
-                            v.as_f32()
-                                .ok_or(PdfError::RectangleFromPdfObjectError(format!(
-                                    "PdfArray element is not number"
-                                )))
+                            v.as_f32().ok_or(PdfError::RectangleFromPdfObjectError(
+                                "PdfArray element is not number".to_string(),
+                            ))
                         })
                         .collect();
                     let fvalues = fvalues?;

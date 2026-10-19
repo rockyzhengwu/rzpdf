@@ -62,7 +62,10 @@ impl<S: Read + Seek, T: Read + Seek> Importer<'_, S, T> {
                 "reference to an unselected page/field/annotation owner".into(),
             ));
         }
-        if self.source.identity() == self.target.identity() && !self.prepared.contains_key(&id) && !self.isolate_structure {
+        if self.source.identity() == self.target.identity()
+            && !self.prepared.contains_key(&id)
+            && !self.isolate_structure
+        {
             return Ok(id);
         }
         self.mapped
@@ -83,21 +86,34 @@ impl<S: Read + Seek, T: Read + Seek> Importer<'_, S, T> {
             .get("Type")
             .map(|value| self.source.ctx.resolve_owned(value))
             .transpose()?;
-        let optional = kind.as_ref().and_then(PdfObject::as_name)
+        let optional = kind
+            .as_ref()
+            .and_then(PdfObject::as_name)
             .is_some_and(|name| matches!(name.name(), "OCG" | "OCMD"));
         let scoped_oc = if dict.contains_key("OC") {
-            dict.get("Subtype").map(|v| self.source.ctx.resolve_owned(v)).transpose()?
-                .as_ref().and_then(PdfObject::as_name)
+            dict.get("Subtype")
+                .map(|v| self.source.ctx.resolve_owned(v))
+                .transpose()?
+                .as_ref()
+                .and_then(PdfObject::as_name)
                 .is_some_and(|name| matches!(name.name(), "Form" | "Image"))
-        } else { false };
+        } else {
+            false
+        };
         if optional || scoped_oc {
             return Err(PdfError::UnsupportedFeature(
-                "page/resource import of optional content requires configuration support".into()));
+                "page/resource import of optional content requires configuration support".into(),
+            ));
         }
         if kind
             .as_ref()
             .and_then(PdfObject::as_name)
-            .is_some_and(|name| matches!(name.name(), "Page" | "Pages" | "Catalog" | "XRef" | "ObjStm"))
+            .is_some_and(|name| {
+                matches!(
+                    name.name(),
+                    "Page" | "Pages" | "Catalog" | "XRef" | "ObjStm"
+                )
+            })
         {
             return Err(PdfError::UnsupportedFeature(
                 "Resource graph refers to document/page ownership or structural containers".into(),
@@ -266,12 +282,10 @@ impl<T: Read + Seek> PdfDocument<T> {
                     "Duplicate page in import selection".into(),
                 ));
             }
-            for key in ["B"] {
-                if location.page_dict.contains_key(key) {
-                    return Err(PdfError::UnsupportedFeature(format!(
-                        "Page import with {key} ownership"
-                    )));
-                }
+            if location.page_dict.contains_key("B") {
+                return Err(PdfError::UnsupportedFeature(
+                    "Page import with B ownership".into(),
+                ));
             }
             let mut page = location.page_dict.clone();
             let node = PdfObject::PdfReference(PdfReference::from_id(location.page_id));
@@ -306,7 +320,7 @@ impl<T: Read + Seek> PdfDocument<T> {
         // Invalid source ownership is a preflight failure, not a target edit:
         // preserve the existing no-revision-change contract for malformed input.
         source.page_relationship_guard()?;
-        let structure_plan=self.plan_structure_transfer(source,&selected)?;
+        let structure_plan = self.plan_structure_transfer(source, &selected)?;
         self.edit_transaction(|target| {
             let count = u32::try_from(target.try_page_count()?)
                 .map_err(|_| PdfError::ResourceLimit("page count".into()))?;
@@ -369,7 +383,7 @@ impl<T: Read + Seek> PdfDocument<T> {
             target.attach_page_fields(roots, resources)?;
             target.transfer_navigation(&mut importer, options)?;
             target.validate_annotation_ownership()?;
-            target.apply_structure_transfer(&mut importer,structure_plan)?;
+            target.apply_structure_transfer(&mut importer, structure_plan)?;
             if let Some(labels) = labels {
                 target.set_page_label_ranges(&labels)?;
             }

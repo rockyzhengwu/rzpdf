@@ -1,6 +1,10 @@
 use crate::page::{image_object::ImageObject, path_object::PathObject, text_object::TextObject};
 
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "preserve public display-list variants and retained-size accounting"
+)]
 pub enum PageObject {
     Image(ImageObject),
     Text(TextObject),

@@ -1,8 +1,6 @@
 use crate::{
-    error::PdfResult,
-    geom::{matrix::Matrix, point::Point},
-    objects::pdf_dict::PdfDict,
-    page::{clip_path::ClipPath, graphic_state::GraphicState},
+    error::PdfResult, geom::matrix::Matrix, objects::pdf_dict::PdfDict,
+    page::graphic_state::GraphicState,
 };
 
 pub(crate) fn supported_ext_gs_keys(state: &PdfDict) -> bool {

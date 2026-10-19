@@ -17,12 +17,20 @@ pub(crate) struct DocumentState {
     pub(crate) commit_revision: Cell<u64>,
     dirty: Cell<bool>,
     pub(crate) transaction_depth: Cell<u64>,
-    active_table_budget: RefCell<Option<(crate::budget::OperationBudget, crate::parser::options::Limits)>>,
+    active_table_budget: RefCell<
+        Option<(
+            crate::budget::OperationBudget,
+            crate::parser::options::Limits,
+        )>,
+    >,
 }
 
 impl DocumentState {
     pub(crate) fn active_operation_budget(&self) -> Option<crate::budget::OperationBudget> {
-        self.active_table_budget.borrow().as_ref().map(|(budget, _)| budget.clone())
+        self.active_table_budget
+            .borrow()
+            .as_ref()
+            .map(|(budget, _)| budget.clone())
     }
     pub(crate) fn new(trailer: PdfDict, next_object_number: u32, source_version: String) -> Self {
         Self {
@@ -61,8 +69,13 @@ impl DocumentState {
         let inherited = self.active_table_budget.borrow().clone();
         let effective = match budget {
             Some((budget, limits)) => {
-                if inherited.as_ref().is_some_and(|(outer, _)| !outer.shares_pool(budget)) {
-                    return Err(PdfError::ResourceLimit("transaction budget pool mismatch".into()));
+                if inherited
+                    .as_ref()
+                    .is_some_and(|(outer, _)| !outer.shares_pool(budget))
+                {
+                    return Err(PdfError::ResourceLimit(
+                        "transaction budget pool mismatch".into(),
+                    ));
                 }
                 Some((budget.clone(), limits))
             }
@@ -108,8 +121,13 @@ impl DocumentState {
         let _table_scope = if let Some((budget, _)) = budget {
             self.store.borrow().enter_table_budget(budget)?;
             let previous = self.active_table_budget.replace(effective.clone());
-            Some(TableBudgetScope { state: self, previous })
-        } else { None };
+            Some(TableBudgetScope {
+                state: self,
+                previous,
+            })
+        } else {
+            None
+        };
         let mut rollback = StoreRollback {
             commit_revision: &self.commit_revision,
             dirty: &self.dirty,
@@ -161,7 +179,10 @@ impl DocumentState {
 
 struct TableBudgetScope<'a> {
     state: &'a DocumentState,
-    previous: Option<(crate::budget::OperationBudget, crate::parser::options::Limits)>,
+    previous: Option<(
+        crate::budget::OperationBudget,
+        crate::parser::options::Limits,
+    )>,
 }
 
 impl Drop for TableBudgetScope<'_> {
@@ -218,7 +239,7 @@ impl Drop for StoreRollback<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::objects::{object_id::ObjectId, PdfObject};
+    use crate::objects::{PdfObject, object_id::ObjectId};
 
     #[test]
     fn table_budget_inherits_plain_savepoints_rejects_foreign_pool_and_unwinds() {
@@ -229,7 +250,10 @@ mod tests {
         let foreign = OperationBudget::new(1024 * 1024);
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _: PdfResult<()> = state.transaction_with_budget(&pool, Limits::default(), || {
-                state.store.borrow_mut().try_insert_object(PdfObject::PdfNull)?;
+                state
+                    .store
+                    .borrow_mut()
+                    .try_insert_object(PdfObject::PdfNull)?;
                 let retained = pool.live_bytes();
                 assert!(retained > 7);
                 let revision = state.revision.get();
@@ -248,14 +272,23 @@ mod tests {
                     // to the enclosing pool, not silently clone a persistent map.
                     assert!(pool.live_bytes() > retained);
                     for _ in 0..32 {
-                        state.store.borrow_mut().try_insert_object(PdfObject::PdfNull)?;
+                        state
+                            .store
+                            .borrow_mut()
+                            .try_insert_object(PdfObject::PdfNull)?;
                     }
                     Err(PdfError::DocumentError("inner rollback".into()))
                 });
                 assert!(inner.is_err());
                 assert_eq!(state.store.borrow().entries().len(), 1);
                 assert!(pool.live_bytes() > retained);
-                assert_eq!(state.store.borrow_mut().try_insert_object(PdfObject::PdfNull)?, ObjectId::new(11, 0));
+                assert_eq!(
+                    state
+                        .store
+                        .borrow_mut()
+                        .try_insert_object(PdfObject::PdfNull)?,
+                    ObjectId::new(11, 0)
+                );
                 panic!("outer table budget unwind");
             });
         }));
@@ -264,10 +297,18 @@ mod tests {
         assert_eq!(state.transaction_depth.get(), 0);
         assert!(state.active_table_budget.borrow().is_none());
         assert!(state.store.borrow().entries().is_empty());
-        state.transaction_with_budget(&foreign, Limits::default(), || {
-            assert_eq!(state.store.borrow_mut().try_insert_object(PdfObject::PdfNull)?, ObjectId::new(10, 0));
-            Ok(())
-        }).unwrap();
+        state
+            .transaction_with_budget(&foreign, Limits::default(), || {
+                assert_eq!(
+                    state
+                        .store
+                        .borrow_mut()
+                        .try_insert_object(PdfObject::PdfNull)?,
+                    ObjectId::new(10, 0)
+                );
+                Ok(())
+            })
+            .unwrap();
         assert_eq!(foreign.live_bytes(), 0);
         assert_eq!(pool.live_bytes(), 7);
         drop(neighbor);
@@ -280,7 +321,11 @@ mod tests {
         fn seeded() -> DocumentState {
             let state = DocumentState::new(PdfDict::default(), 10, "1.7".into());
             for key in 1..=3 {
-                state.store.borrow_mut().update_object(ObjectId::new(key, 0), PdfObject::PdfNull).unwrap();
+                state
+                    .store
+                    .borrow_mut()
+                    .update_object(ObjectId::new(key, 0), PdfObject::PdfNull)
+                    .unwrap();
             }
             assert_eq!(state.store.borrow().entries().capacity(), 3);
             state
@@ -288,7 +333,12 @@ mod tests {
         fn append(state: &DocumentState, mode: usize, key: u32) -> PdfResult<()> {
             let mut store = state.store.borrow_mut();
             match mode {
-                0 => { assert_eq!(store.try_insert_object(PdfObject::PdfNull)?, ObjectId::new(key, 0)); }
+                0 => {
+                    assert_eq!(
+                        store.try_insert_object(PdfObject::PdfNull)?,
+                        ObjectId::new(key, 0)
+                    );
+                }
                 1 => store.update_object(ObjectId::new(key, 0), PdfObject::PdfNull)?,
                 _ => store.delete_object(ObjectId::new(key, 0))?,
             }
@@ -297,10 +347,14 @@ mod tests {
         for mode in 0..3 {
             let measured = seeded();
             let probe = OperationBudget::new(1024 * 1024);
-            measured.transaction_with_budget(&probe, Limits::default(), || {
-                for key in 10..15 { append(&measured, mode, key)?; }
-                Ok(())
-            }).unwrap();
+            measured
+                .transaction_with_budget(&probe, Limits::default(), || {
+                    for key in 10..15 {
+                        append(&measured, mode, key)?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
             assert_eq!(probe.live_bytes(), 0);
             let state = seeded();
             let pool = OperationBudget::new(probe.peak_bytes() - 1);
@@ -325,13 +379,22 @@ mod tests {
             assert_eq!(state.transaction_depth.get(), 0);
             assert_eq!(state.store.borrow().entries().len(), 3);
             for key in 1..=3 {
-                assert!(matches!(state.store.borrow().entry(ObjectId::new(key, 0)), Some(crate::document::store::StoreEntry::Upsert(PdfObject::PdfNull))));
+                assert!(matches!(
+                    state.store.borrow().entry(ObjectId::new(key, 0)),
+                    Some(crate::document::store::StoreEntry::Upsert(
+                        PdfObject::PdfNull
+                    ))
+                ));
             }
             let enough = OperationBudget::new(probe.peak_bytes());
-            state.transaction_with_budget(&enough, Limits::default(), || {
-                for key in 10..15 { append(&state, mode, key)?; }
-                Ok(())
-            }).unwrap();
+            state
+                .transaction_with_budget(&enough, Limits::default(), || {
+                    for key in 10..15 {
+                        append(&state, mode, key)?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
             assert_eq!(enough.live_bytes(), 0);
             assert_eq!(state.store.borrow().entries().len(), 8);
         }
@@ -489,12 +552,14 @@ mod tests {
         let pool = OperationBudget::new(snapshot_bytes);
         let neighbor = pool.reserve(1).unwrap();
         let mut called = false;
-        assert!(state
-            .transaction_with_budget(&pool, limits, || {
-                called = true;
-                Ok(())
-            })
-            .is_err());
+        assert!(
+            state
+                .transaction_with_budget(&pool, limits, || {
+                    called = true;
+                    Ok(())
+                })
+                .is_err()
+        );
         assert!(!called);
         assert_eq!(state.revision.get(), 0);
         assert_eq!(state.transaction_depth.get(), 0);
@@ -503,9 +568,11 @@ mod tests {
         state
             .transaction_with_budget(&pool, limits, || {
                 assert_eq!(pool.live_bytes(), snapshot_bytes);
-                assert!(state
-                    .transaction_with_budget(&pool, limits, || Ok(()))
-                    .is_err());
+                assert!(
+                    state
+                        .transaction_with_budget(&pool, limits, || Ok(()))
+                        .is_err()
+                );
                 assert_eq!(state.transaction_depth.get(), 1);
                 Ok(())
             })

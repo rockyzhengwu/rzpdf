@@ -31,72 +31,6 @@ impl Default for IccBased {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        document::cross_ref_table::CrossRefTable,
-        io::stream_reader::StreamReader,
-        objects::{pdf_dict::PdfDict, pdf_stream::PdfStream},
-        parser::{parser::PdfParser, syntax::SyntaxParser},
-    };
-    use std::{collections::HashMap, io::Cursor};
-
-    #[test]
-    fn icc_component_count_alternate_and_range_are_checked() {
-        let parser = PdfParser::new(SyntaxParser::new(
-            StreamReader::try_new(Cursor::new(Vec::<u8>::new())).unwrap(),
-        ));
-        let ctx = PDFContext::try_new(
-            parser,
-            CrossRefTable::new(HashMap::new(), PdfDict::default()),
-        )
-        .unwrap();
-        let parse = |source: &str| {
-            let dict = SyntaxParser::new(
-                StreamReader::try_new(Cursor::new(source.as_bytes().to_vec())).unwrap(),
-            )
-            .get_object()
-            .unwrap()
-            .into_dict()
-            .unwrap();
-            let n = dict
-                .get("N")
-                .map(|v| ctx.resolve(v).unwrap())
-                .and_then(|v| v.as_u32());
-            let profile = if n == Some(1) {
-                ICCProfile::gray_srgb().unwrap()
-            } else {
-                ICCProfile::srgb()
-            };
-            IccBased::try_new(
-                &PdfObject::PdfStream(PdfStream::new(dict, profile.to_bytes().unwrap())),
-                &ctx,
-            )
-        };
-        let color = parse("<< /N 3 /Range [0 1 0 1 0 1] >>").unwrap();
-        assert!(color.rgb(&color.default_value().unwrap()).is_ok());
-        assert!(color.rgb(&ColorValue::new(vec![])).is_err());
-        assert!(color.rgb(&ColorValue::new(vec![f32::NAN; 3])).is_err());
-        for source in [
-            "<< /N 1.5 >>",
-            "<< /N -1 >>",
-            "<< /N 2 >>",
-            "<< /N 3 /Alternate /DeviceGray >>",
-            "<< /N 1 /Alternate /Pattern >>",
-            "<< /N 1 /Range [1 0] >>",
-            "<< /N 1 /Range [0 /bad] >>",
-            "<< /N 1 /Range [0] >>",
-        ] {
-            assert!(parse(source).is_err(), "{source}");
-        }
-        let id = ctx.insert_object(PdfObject::PdfNumber(
-            crate::objects::pdf_number::PdfNumber::new_from_lexeme(b"1").unwrap(),
-        ));
-        assert!(parse(&format!("<< /N {} {} R >>", id.obj_num(), id.gen_num())).is_ok());
-    }
-}
-
 impl IccBased {
     pub(crate) fn retained_profile_bytes(&self) -> PdfResult<usize> {
         self.alternate
@@ -110,27 +44,27 @@ impl IccBased {
     }
     pub fn try_new<R: Seek + Read>(obj: &PdfObject, ctx: &PDFContext<R>) -> PdfResult<Self> {
         let resolved = ctx.resolve(obj)?;
-        let color_stream =
-            match &resolved {
-                PdfObject::PdfArray(array) => {
-                    if array.len() != 2 {
-                        return Err(PdfError::ColorError(
-                            "IccBased Color array need 2 param at least".to_string(),
-                        ));
-                    }
-                    let cd = ctx
-                        .resolve(array.get(1).ok_or_else(|| {
-                            PdfError::ColorError("Missing ICCBased stream".into())
-                        })?)?
-                        .into_stream()
-                        .ok_or(PdfError::ColorError(format!("IccBased need Streamgot",)))?;
-                    cd
+        let color_stream = match &resolved {
+            PdfObject::PdfArray(array) => {
+                if array.len() != 2 {
+                    return Err(PdfError::ColorError(
+                        "IccBased Color array need 2 param at least".to_string(),
+                    ));
                 }
-                PdfObject::PdfStream(s) => s.clone(),
-                _ => {
-                    return Err(PdfError::ColorError("Bad IccBased Color".to_string()));
-                }
-            };
+
+                ctx.resolve(
+                    array
+                        .get(1)
+                        .ok_or_else(|| PdfError::ColorError("Missing ICCBased stream".into()))?,
+                )?
+                .into_stream()
+                .ok_or(PdfError::ColorError("IccBased need Streamgot".to_string()))?
+            }
+            PdfObject::PdfStream(s) => s.clone(),
+            _ => {
+                return Err(PdfError::ColorError("Bad IccBased Color".to_string()));
+            }
+        };
 
         let mut color = IccBased::default();
         if let Some(n) = color_stream.dict().get("N") {
@@ -150,9 +84,9 @@ impl IccBased {
             }
             color.n = nv as u8;
         } else {
-            return Err(PdfError::ColorError(format!(
-                "IccBased color need a N parameter "
-            )));
+            return Err(PdfError::ColorError(
+                "IccBased color need a N parameter ".to_string(),
+            ));
         }
         if let Some(alt) = color_stream.dict().get("Alternate") {
             let altc = ColorSpace::try_new(alt, ctx)?;
@@ -220,7 +154,13 @@ impl IccBased {
             }
         }
 
-        if color.range.chunks_exact(2).any(|pair| pair[0] > pair[1]) {
+        if color
+            .range
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .any(|pair| pair[0] > pair[1])
+        {
             return Err(PdfError::ColorError(
                 "ICCBased Range pairs must be ordered".into(),
             ));
@@ -307,5 +247,71 @@ impl IccBased {
     }
     pub fn range(&self) -> &[f32] {
         self.range.as_slice()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        document::cross_ref_table::CrossRefTable,
+        io::stream_reader::StreamReader,
+        objects::{pdf_dict::PdfDict, pdf_stream::PdfStream},
+        parser::{parser::PdfParser, syntax::SyntaxParser},
+    };
+    use std::{collections::HashMap, io::Cursor};
+
+    #[test]
+    fn icc_component_count_alternate_and_range_are_checked() {
+        let parser = PdfParser::new(SyntaxParser::new(
+            StreamReader::try_new(Cursor::new(Vec::<u8>::new())).unwrap(),
+        ));
+        let ctx = PDFContext::try_new(
+            parser,
+            CrossRefTable::new(HashMap::new(), PdfDict::default()),
+        )
+        .unwrap();
+        let parse = |source: &str| {
+            let dict = SyntaxParser::new(
+                StreamReader::try_new(Cursor::new(source.as_bytes().to_vec())).unwrap(),
+            )
+            .get_object()
+            .unwrap()
+            .into_dict()
+            .unwrap();
+            let n = dict
+                .get("N")
+                .map(|v| ctx.resolve(v).unwrap())
+                .and_then(|v| v.as_u32());
+            let profile = if n == Some(1) {
+                ICCProfile::gray_srgb().unwrap()
+            } else {
+                ICCProfile::srgb()
+            };
+            IccBased::try_new(
+                &PdfObject::PdfStream(PdfStream::new(dict, profile.to_bytes().unwrap())),
+                &ctx,
+            )
+        };
+        let color = parse("<< /N 3 /Range [0 1 0 1 0 1] >>").unwrap();
+        assert!(color.rgb(&color.default_value().unwrap()).is_ok());
+        assert!(color.rgb(&ColorValue::new(vec![])).is_err());
+        assert!(color.rgb(&ColorValue::new(vec![f32::NAN; 3])).is_err());
+        for source in [
+            "<< /N 1.5 >>",
+            "<< /N -1 >>",
+            "<< /N 2 >>",
+            "<< /N 3 /Alternate /DeviceGray >>",
+            "<< /N 1 /Alternate /Pattern >>",
+            "<< /N 1 /Range [1 0] >>",
+            "<< /N 1 /Range [0 /bad] >>",
+            "<< /N 1 /Range [0] >>",
+        ] {
+            assert!(parse(source).is_err(), "{source}");
+        }
+        let id = ctx.insert_object(PdfObject::PdfNumber(
+            crate::objects::pdf_number::PdfNumber::new_from_lexeme(b"1").unwrap(),
+        ));
+        assert!(parse(&format!("<< /N {} {} R >>", id.obj_num(), id.gen_num())).is_ok());
     }
 }

@@ -1,7 +1,7 @@
 use pdf::{
     document::{owned::Document, resource_manager::ResourceKind},
     io::stream_reader::StreamReader,
-    objects::{pdf_stream::PdfStream, PdfObject},
+    objects::{PdfObject, pdf_stream::PdfStream},
     page::page_object::PageObject,
     parser::syntax::{ParseMode, SyntaxParser},
 };
@@ -296,12 +296,14 @@ fn removing_one_form_call_preserves_repeated_and_shared_draws_and_rejects_leaf_s
     let before = doc.get_page(0).unwrap().display_list().unwrap();
     let snapshot = doc.get_page(0).unwrap().content_program().unwrap();
     let revision = doc.revision();
-    assert!(doc
-        .transform_page_form_draw(0, &snapshot, 0, [f32::NAN, 0., 0., 1., 0., 0.])
-        .is_err());
-    assert!(doc
-        .transform_page_form_draw(0, &snapshot, 1, [1., 0., 0., 1., 3., 4.])
-        .is_err());
+    assert!(
+        doc.transform_page_form_draw(0, &snapshot, 0, [f32::NAN, 0., 0., 1., 0., 0.])
+            .is_err()
+    );
+    assert!(
+        doc.transform_page_form_draw(0, &snapshot, 1, [1., 0., 0., 1., 3., 4.])
+            .is_err()
+    );
     assert_eq!(doc.revision(), revision);
     doc.transform_page_form_draw(0, &snapshot, 0, [1., 0., 0., 1., 3., 4.])
         .unwrap();

@@ -104,10 +104,19 @@ fn packed_soft_masks_preserve_alpha_after_save_and_strict_reopen() {
             };
             let rgba = image.image.rgba_buffer().unwrap();
             assert_eq!(
-                rgba.chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>(),
+                rgba.as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|p| p[3])
+                    .collect::<Vec<_>>(),
                 expected
             );
-            assert!(rgba.chunks_exact(4).all(|p| p[..3] == [40, 40, 40]));
+            assert!(
+                rgba.as_chunks::<4>()
+                    .0
+                    .iter()
+                    .all(|p| p[..3] == [40, 40, 40])
+            );
             let mask = document.resolve_object(mask_id).unwrap();
             assert_eq!(mask.as_stream().unwrap().raw_data(), bytes);
         }
@@ -590,15 +599,14 @@ fn standard_font_encoding_preserves_unicode_or_returns_an_error() {
         if let Some(character) = FontEncoding::WinAnsi
             .unicode_from_charcode(code)
             .and_then(char::from_u32)
+            && !character.is_control()
         {
-            if !character.is_control() {
-                let encoded = font.encode_text(&character.to_string()).unwrap();
-                assert_eq!(encoded.len(), 1);
-                assert_eq!(
-                    FontEncoding::WinAnsi.unicode_from_charcode(encoded[0]),
-                    Some(character as u32)
-                );
-            }
+            let encoded = font.encode_text(&character.to_string()).unwrap();
+            assert_eq!(encoded.len(), 1);
+            assert_eq!(
+                FontEncoding::WinAnsi.unicode_from_charcode(encoded[0]),
+                Some(character as u32)
+            );
         }
     }
 }

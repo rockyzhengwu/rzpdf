@@ -1,5 +1,5 @@
-pub mod color;
 pub mod budget;
+pub mod color;
 pub mod device;
 pub mod document;
 pub mod error;
@@ -13,6 +13,6 @@ pub mod page;
 pub mod parser;
 pub mod path;
 pub mod pdf_context;
-pub mod writer;
 pub mod security;
 pub mod signatures;
+pub mod writer;

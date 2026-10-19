@@ -3,9 +3,11 @@ use std::io::Cursor;
 use crate::{
     error::{PdfError, PdfResult},
     io::stream_reader::StreamReader,
-    objects::{pdf_dict::PdfDict, PdfObject},
+    objects::{PdfObject, pdf_dict::PdfDict},
     parser::syntax::{ParseMode, SyntaxParser},
 };
+
+type ParsedObjects = (Vec<(u32, PdfObject)>, Option<crate::budget::MemoryLease>);
 
 pub struct ObjectStreams<'a> {
     dict: &'a PdfDict,
@@ -83,10 +85,8 @@ impl<'a> ObjectStreams<'a> {
             budget: budget.clone(),
         })
     }
-    pub fn try_new(dict: &'a PdfDict, data: Vec<u8>) -> PdfResult<Self> {
-        Self::try_new_with_mode(dict, data, ParseMode::Compatible)
-    }
 
+    #[cfg(test)]
     pub fn try_new_with_mode(dict: &'a PdfDict, data: Vec<u8>, mode: ParseMode) -> PdfResult<Self> {
         Self::try_new_with_options(
             dict,
@@ -123,7 +123,7 @@ impl<'a> ObjectStreams<'a> {
     fn parse_objects_inner(
         &mut self,
         budget: Option<&crate::budget::OperationBudget>,
-    ) -> PdfResult<(Vec<(u32, PdfObject)>, Option<crate::budget::MemoryLease>)> {
+    ) -> PdfResult<ParsedObjects> {
         let first = self
             .dict
             .get("First")
@@ -267,7 +267,7 @@ impl<'a> ObjectStreams<'a> {
 mod tests {
     use super::ObjectStreams;
     use crate::{
-        objects::{pdf_dict::PdfDict, pdf_number::PdfNumber, PdfObject},
+        objects::{PdfObject, pdf_dict::PdfDict, pdf_number::PdfNumber},
         parser::syntax::ParseMode,
     };
 

@@ -39,12 +39,12 @@ fn decode_inner(
     })) {
         Ok(result) => result,
         Err(payload) => {
-            if let Some(message) = payload.downcast_ref::<String>() {
-                if message.starts_with("libjpeg fatal error: ") {
-                    return Err(PdfError::FilterError(format!(
-                        "DCT decode failed: {message}"
-                    )));
-                }
+            if let Some(message) = payload.downcast_ref::<String>()
+                && message.starts_with("libjpeg fatal error: ")
+            {
+                return Err(PdfError::FilterError(format!(
+                    "DCT decode failed: {message}"
+                )));
             }
             std::panic::resume_unwind(payload)
         }
@@ -133,7 +133,7 @@ mod tests {
         use crate::{
             budget::OperationBudget,
             error::PdfError,
-            filter::{apply_filter_with_budget, FilterContext},
+            filter::{FilterContext, apply_filter_with_budget},
         };
         for (space, components) in [
             (mozjpeg::ColorSpace::JCS_RGB, 3),
@@ -168,15 +168,17 @@ mod tests {
             assert_eq!(budget.live_bytes(), result.capacity());
             drop(result);
             assert_eq!(budget.live_bytes(), 0);
-            assert!(super::dct_decode_with_budget(
-                &encoded,
-                FilterContext {
-                    max_decoded_bytes: source.len() - 1,
-                    ..Default::default()
-                },
-                &budget
-            )
-            .is_err());
+            assert!(
+                super::dct_decode_with_budget(
+                    &encoded,
+                    FilterContext {
+                        max_decoded_bytes: source.len() - 1,
+                        ..Default::default()
+                    },
+                    &budget
+                )
+                .is_err()
+            );
             assert_eq!(budget.live_bytes(), 0);
         }
     }

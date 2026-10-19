@@ -2,8 +2,8 @@ use std::io::{Read, Seek};
 
 use crate::{
     error::{PdfError, PdfResult},
-    filter::{apply_filters, FilterContext},
-    objects::{pdf_dict::PdfDict, PdfObject},
+    filter::{FilterContext, apply_filters},
+    objects::{PdfObject, pdf_dict::PdfDict},
     pdf_context::PDFContext,
 };
 
@@ -124,8 +124,12 @@ impl PdfStream {
         self.data.as_slice()
     }
 
-    pub(crate) fn crypt_processed(&self) -> bool { self.crypt_processed }
-    pub(crate) fn mark_crypt_processed(&mut self) { self.crypt_processed = true; }
+    pub(crate) fn crypt_processed(&self) -> bool {
+        self.crypt_processed
+    }
+    pub(crate) fn mark_crypt_processed(&mut self) {
+        self.crypt_processed = true;
+    }
 
     pub(crate) fn clone_with_budget(
         &self,
@@ -257,33 +261,50 @@ impl PdfStream {
             Some(obj) => Some(resolve(obj, true)?),
             None => None,
         };
-        let filter = self.dict.get("Filter").map(|obj| resolve(obj, false)).transpose()?;
+        let filter = self
+            .dict
+            .get("Filter")
+            .map(|obj| resolve(obj, false))
+            .transpose()?;
         let has_jbig2 = filter.as_ref().is_some_and(|filter| match filter {
-            PdfObject::PdfName(name) => name.name()=="JBIG2Decode",
-            PdfObject::PdfArray(array) => array.into_iter().any(|f| f.as_name().is_some_and(|n|n.name()=="JBIG2Decode")),
-            _=>false
+            PdfObject::PdfName(name) => name.name() == "JBIG2Decode",
+            PdfObject::PdfArray(array) => array
+                .into_iter()
+                .any(|f| f.as_name().is_some_and(|n| n.name() == "JBIG2Decode")),
+            _ => false,
         });
-        let globals_with_budget = if let Some(budget) = budget.filter(|_|has_jbig2) {
+        let globals_with_budget = if let Some(budget) = budget.filter(|_| has_jbig2) {
             resolve_jbig2_globals_with_budget(params.as_ref(), ctx, budget)?
-        } else { None };
+        } else {
+            None
+        };
         let jbig2_globals = if has_jbig2 && load_globals && budget.is_none() {
             resolve_jbig2_globals(params.as_ref(), ctx)?
         } else {
             None
         };
         let local = ctx.limits().operation_budget();
-        let normalized = if has_jbig2 && ["Width","Height","BitsPerComponent"].iter().any(|key|self.dict.get(key).is_some_and(|v|v.as_reference().is_some())) {
-            let pool=budget.unwrap_or(&local);
-            let (mut dict, mut lease)=crate::objects::clone_dict_with_budget(&self.dict,pool,ctx.limits(),0)?;
-            for key in ["Width","Height","BitsPerComponent"] {
-                if let Some(value)=dict.get(key) {
-                    let (resolved,mut value_lease)=resolve_setting_reference_with_budget(value,ctx,pool)?;
-                    dict.replace_existing(key,resolved)?;
+        let normalized = if has_jbig2
+            && ["Width", "Height", "BitsPerComponent"].iter().any(|key| {
+                self.dict
+                    .get(key)
+                    .is_some_and(|v| v.as_reference().is_some())
+            }) {
+            let pool = budget.unwrap_or(&local);
+            let (mut dict, mut lease) =
+                crate::objects::clone_dict_with_budget(&self.dict, pool, ctx.limits(), 0)?;
+            for key in ["Width", "Height", "BitsPerComponent"] {
+                if let Some(value) = dict.get(key) {
+                    let (resolved, mut value_lease) =
+                        resolve_setting_reference_with_budget(value, ctx, pool)?;
+                    dict.replace_existing(key, resolved)?;
                     lease.absorb(&mut value_lease)?;
                 }
             }
-            Some((dict,lease))
-        } else {None};
+            Some((dict, lease))
+        } else {
+            None
+        };
         if let Some(filter) = filter
             .as_ref()
             .filter(|obj| !matches!(obj, PdfObject::PdfNull))
@@ -293,8 +314,16 @@ impl PdfStream {
                 params.as_ref(),
                 self.data.as_slice(),
                 FilterContext {
-                    stream_dict: Some(normalized.as_ref().map(|(dict,_)|dict).unwrap_or(&self.dict)),
-                    jbig2_globals: globals_with_budget.as_ref().map(|bytes| bytes.as_slice()).or(jbig2_globals.as_deref()),
+                    stream_dict: Some(
+                        normalized
+                            .as_ref()
+                            .map(|(dict, _)| dict)
+                            .unwrap_or(&self.dict),
+                    ),
+                    jbig2_globals: globals_with_budget
+                        .as_ref()
+                        .map(|bytes| bytes.as_slice())
+                        .or(jbig2_globals.as_deref()),
                     max_decoded_bytes: ctx.limits().max_decoded_bytes,
                     max_image_pixels: ctx.limits().max_image_pixels,
                     crypt_already_processed: self.crypt_processed,
@@ -497,25 +526,37 @@ pub(crate) fn resolve_setting_reference<R: Seek + Read>(
     Ok(object)
 }
 
-fn resolve_jbig2_globals_with_budget<R: Seek + Read>(params: Option<&PdfObject>,ctx:&PDFContext<R>,budget:&crate::budget::OperationBudget)->PdfResult<Option<crate::budget::BudgetedBytes>> {
+fn resolve_jbig2_globals_with_budget<R: Seek + Read>(
+    params: Option<&PdfObject>,
+    ctx: &PDFContext<R>,
+    budget: &crate::budget::OperationBudget,
+) -> PdfResult<Option<crate::budget::BudgetedBytes>> {
     let globals = match params {
         Some(PdfObject::PdfDict(dict)) => dict.get("JBIG2Globals"),
         Some(PdfObject::PdfArray(array)) => {
-            let mut found=None;
+            let mut found = None;
             for item in array {
-                if let Some(value)=item.as_dict().and_then(|d|d.get("JBIG2Globals")) {
-                    if found.is_some() {return Err(PdfError::UnsupportedFeature("multiple JBIG2Globals stages".into()));}
-                    found=Some(value);
+                if let Some(value) = item.as_dict().and_then(|d| d.get("JBIG2Globals")) {
+                    if found.is_some() {
+                        return Err(PdfError::UnsupportedFeature(
+                            "multiple JBIG2Globals stages".into(),
+                        ));
+                    }
+                    found = Some(value);
                 }
             }
             found
         }
-        _ => None
+        _ => None,
     };
-    let Some(globals)=globals else {return Ok(None);};
-    let (object,_lease)=resolve_setting_reference_with_budget(globals,ctx,budget)?;
-    let stream=object.as_stream().ok_or_else(||PdfError::FilterError("JBIG2Globals must resolve to a stream".into()))?;
-    stream.decode_data_with_budget(ctx,budget).map(Some)
+    let Some(globals) = globals else {
+        return Ok(None);
+    };
+    let (object, _lease) = resolve_setting_reference_with_budget(globals, ctx, budget)?;
+    let stream = object
+        .as_stream()
+        .ok_or_else(|| PdfError::FilterError("JBIG2Globals must resolve to a stream".into()))?;
+    stream.decode_data_with_budget(ctx, budget).map(Some)
 }
 
 fn resolve_jbig2_globals<R: Seek + Read>(
@@ -542,23 +583,83 @@ fn resolve_jbig2_globals<R: Seek + Read>(
     }
 }
 
+fn resolve_jbig2_globals_from_dict<R: Seek + Read>(
+    dict: &PdfDict,
+    ctx: &PDFContext<R>,
+) -> PdfResult<Option<Vec<u8>>> {
+    let Some(globals) = dict.get("JBIG2Globals") else {
+        return Ok(None);
+    };
+    let resolved = resolve_setting_reference(globals, ctx)?;
+    let stream = resolved.as_stream().ok_or(PdfError::FilterError(
+        "JBIG2Globals must resolve to a stream".to_string(),
+    ))?;
+    stream.decode_data(ctx).map(Some)
+}
+
 #[cfg(test)]
 mod setting_tests {
     use super::*;
 
     #[test]
     fn budgeted_globals_stream_and_cycle_share_the_operation_pool() {
-        use crate::{document::Document, objects::{pdf_name::PdfName,pdf_reference::PdfReference}, parser::options::{ParseOptions,Limits}, budget::OperationBudget};
-        let globals=include_bytes!("../../tests/fixtures/v06/patterns-global.jb2");
-        let page=include_bytes!("../../tests/fixtures/v06/halftone-0.jb2");
-        let doc=Document::new_with_options(ParseOptions{limits:Limits{max_depth:8,..Default::default()},..Default::default()}).unwrap();
-        let id=doc.try_insert_object(PdfObject::PdfStream(PdfStream::new(Default::default(),globals.to_vec()))).unwrap();
-        let mut params=PdfDict::default();params.insert("JBIG2Globals".into(),PdfObject::PdfReference(PdfReference::from_id(id)));
-        let mut dict=PdfDict::default();dict.insert("Filter".into(),PdfObject::PdfName(PdfName::new("JBIG2Decode".into())));dict.insert("DecodeParms".into(),PdfObject::PdfDict(params));
-        let stream=PdfStream::new(dict,page.to_vec());let pool=OperationBudget::new(8*1024*1024);
-        let decoded=stream.decode_data_with_budget(doc.ctx(),&pool).unwrap();assert_eq!(decoded.as_slice(),crate::filter::jbig2::jbig2_decode(page,None,FilterContext{jbig2_globals:Some(globals),..Default::default()}).unwrap());drop(decoded);assert_eq!(pool.live_bytes(),0);
-        doc.update_object(id,PdfObject::PdfStream(stream.clone())).unwrap();
-        assert!(matches!(stream.decode_data_with_budget(doc.ctx(),&pool),Err(PdfError::ResourceLimit(_))));assert_eq!(pool.live_bytes(),0);
+        use crate::{
+            budget::OperationBudget,
+            document::Document,
+            objects::{pdf_name::PdfName, pdf_reference::PdfReference},
+            parser::options::{Limits, ParseOptions},
+        };
+        let globals = include_bytes!("../../tests/fixtures/v06/patterns-global.jb2");
+        let page = include_bytes!("../../tests/fixtures/v06/halftone-0.jb2");
+        let doc = Document::new_with_options(ParseOptions {
+            limits: Limits {
+                max_depth: 8,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap();
+        let id = doc
+            .try_insert_object(PdfObject::PdfStream(PdfStream::new(
+                Default::default(),
+                globals.to_vec(),
+            )))
+            .unwrap();
+        let mut params = PdfDict::default();
+        params.insert(
+            "JBIG2Globals".into(),
+            PdfObject::PdfReference(PdfReference::from_id(id)),
+        );
+        let mut dict = PdfDict::default();
+        dict.insert(
+            "Filter".into(),
+            PdfObject::PdfName(PdfName::new("JBIG2Decode".into())),
+        );
+        dict.insert("DecodeParms".into(), PdfObject::PdfDict(params));
+        let stream = PdfStream::new(dict, page.to_vec());
+        let pool = OperationBudget::new(8 * 1024 * 1024);
+        let decoded = stream.decode_data_with_budget(doc.ctx(), &pool).unwrap();
+        assert_eq!(
+            decoded.as_slice(),
+            crate::filter::jbig2::jbig2_decode(
+                page,
+                None,
+                FilterContext {
+                    jbig2_globals: Some(globals),
+                    ..Default::default()
+                }
+            )
+            .unwrap()
+        );
+        drop(decoded);
+        assert_eq!(pool.live_bytes(), 0);
+        doc.update_object(id, PdfObject::PdfStream(stream.clone()))
+            .unwrap();
+        assert!(matches!(
+            stream.decode_data_with_budget(doc.ctx(), &pool),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(pool.live_bytes(), 0);
     }
 
     #[test]
@@ -833,18 +934,4 @@ mod setting_tests {
             Err(PdfError::ResourceLimit(_))
         ));
     }
-}
-
-fn resolve_jbig2_globals_from_dict<R: Seek + Read>(
-    dict: &PdfDict,
-    ctx: &PDFContext<R>,
-) -> PdfResult<Option<Vec<u8>>> {
-    let Some(globals) = dict.get("JBIG2Globals") else {
-        return Ok(None);
-    };
-    let resolved = resolve_setting_reference(globals, ctx)?;
-    let stream = resolved.as_stream().ok_or(PdfError::FilterError(
-        "JBIG2Globals must resolve to a stream".to_string(),
-    ))?;
-    stream.decode_data(ctx).map(Some)
 }

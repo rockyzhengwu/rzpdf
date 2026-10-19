@@ -270,7 +270,7 @@ impl<R: Read + Seek> PdfDocument<R> {
             FormFieldKind::Choice { .. } => {
                 let raw = match node.effective.get("V") {
                     None | Some(PdfObject::PdfNull) => Vec::new(),
-                    Some(PdfObject::PdfArray(array)) => (&array)
+                    Some(PdfObject::PdfArray(array)) => array
                         .into_iter()
                         .map(|v| self.field_string(v))
                         .collect::<PdfResult<Vec<_>>>()?,

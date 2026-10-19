@@ -15,6 +15,8 @@ use crate::{
     },
 };
 
+type FlatBookmarkNodes = (Option<ObjectId>, Vec<(ObjectId, Bookmark)>);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bookmark {
     pub title: String,
@@ -47,7 +49,7 @@ impl<R: Read + Seek> PdfDocument<R> {
             .collect())
     }
 
-    fn flat_bookmark_nodes(&self) -> PdfResult<(Option<ObjectId>, Vec<(ObjectId, Bookmark)>)> {
+    fn flat_bookmark_nodes(&self) -> PdfResult<FlatBookmarkNodes> {
         let root = self.ctx().get_root_owned()?;
         let Some(outlines) = root.get("Outlines") else {
             return Ok((None, Vec::new()));

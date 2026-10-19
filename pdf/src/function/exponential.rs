@@ -17,6 +17,165 @@ pub struct Exponential {
     en: f32,
 }
 
+impl Exponential {
+    pub(crate) fn input_domain(&self) -> &[f32] {
+        &self.domain
+    }
+    pub(super) fn retained_own_bytes(&self) -> PdfResult<usize> {
+        super::retained_total(&[
+            super::retained_vector_bytes(&self.domain)?,
+            super::retained_vector_bytes(&self.range)?,
+            super::retained_vector_bytes(&self.c0)?,
+            super::retained_vector_bytes(&self.c1)?,
+        ])
+    }
+    pub(super) fn dimensions(&self) -> (usize, usize) {
+        (self.m, self.n)
+    }
+
+    pub fn try_new<R: Seek + Read>(obj: &PdfObject, ctx: &PDFContext<R>) -> PdfResult<Self> {
+        let obj = ctx.resolve(obj)?;
+        let dict = obj
+            .as_dict()
+            .ok_or_else(|| PdfError::FunctionError("Type2 requires a dictionary".to_string()))?;
+        let number_array = |key: &str| -> PdfResult<Option<Vec<f32>>> {
+            let Some(value) = dict.get(key) else {
+                return Ok(None);
+            };
+            let value = ctx.resolve(value)?;
+            let array = value
+                .as_array()
+                .ok_or_else(|| PdfError::FunctionError(format!("{key} requires an array")))?;
+            if key == "Domain" && array.len() != 2 {
+                return Err(PdfError::FunctionError(
+                    "Type2 requires one ordered Domain pair".into(),
+                ));
+            }
+            if array.len() > ctx.limits().max_objects
+                || array
+                    .len()
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .is_none_or(|bytes| bytes > ctx.limits().max_decoded_bytes)
+            {
+                return Err(PdfError::ResourceLimit(format!("Type2 {key} parameters")));
+            }
+            let mut result = Vec::new();
+            result
+                .try_reserve_exact(array.len())
+                .map_err(|_| PdfError::ResourceLimit(format!("Type2 {key} allocation")))?;
+            for value in array {
+                let value = ctx.resolve(value)?;
+                result.push(value.as_f32().filter(|v| v.is_finite()).ok_or_else(|| {
+                    PdfError::FunctionError(format!("{key} requires finite numbers"))
+                })?);
+            }
+            Ok(Some(result))
+        };
+        let exponent = ctx.resolve(
+            dict.get("N")
+                .ok_or_else(|| PdfError::FunctionError("Type2 requires N".to_string()))?,
+        )?;
+        let en = exponent
+            .as_f32()
+            .filter(|v| v.is_finite())
+            .ok_or_else(|| PdfError::FunctionError("N requires a finite number".to_string()))?;
+        let domain = number_array("Domain")?
+            .ok_or_else(|| PdfError::FunctionError("Type2 requires Domain".to_string()))?;
+        if domain.len() != 2 || domain[0] > domain[1] {
+            return Err(PdfError::FunctionError(
+                "Type2 requires one ordered Domain pair".to_string(),
+            ));
+        }
+        if (domain[0] < 0.0 && en.fract() != 0.0)
+            || (domain[0] <= 0.0 && domain[1] >= 0.0 && en < 0.0)
+        {
+            return Err(PdfError::FunctionError(
+                "Domain contains undefined exponentiation".to_string(),
+            ));
+        }
+        let c0 = number_array("C0")?.unwrap_or_else(|| vec![0.0]);
+        let c1 = number_array("C1")?.unwrap_or_else(|| vec![1.0]);
+        if c0.is_empty() || c0.len() != c1.len() {
+            return Err(PdfError::FunctionError(
+                "C0/C1 require equal nonempty lengths".to_string(),
+            ));
+        }
+        let range = number_array("Range")?.unwrap_or_default();
+        if dict.contains_key("Range")
+            && (range.len() != c0.len() * 2
+                || range
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .any(|pair| pair[0] > pair[1]))
+        {
+            return Err(PdfError::FunctionError(
+                "Range requires one ordered pair per output".to_string(),
+            ));
+        }
+        Ok(Self {
+            n: c0.len(),
+            m: 1,
+            domain,
+            range,
+            c0,
+            c1,
+            en,
+        })
+    }
+    pub fn eval(&self, inputs: &[f32]) -> PdfResult<Vec<f32>> {
+        if inputs.len() != 1
+            || !inputs[0].is_finite()
+            || self.domain.len() != 2
+            || self.n == 0
+            || self.c0.len() != self.n
+            || self.c1.len() != self.n
+            || (!self.range.is_empty() && self.range.len() != 2 * self.n)
+        {
+            return Err(PdfError::FunctionError(
+                "Invalid Type2 function or input dimensions".to_string(),
+            ));
+        }
+        let mut out = Vec::new();
+        out.try_reserve_exact(self.n)
+            .map_err(|_| PdfError::ResourceLimit("Type2 output allocation".into()))?;
+        let mut x = inputs[0];
+        if x < self.domain[0] {
+            x = self.domain[0]
+        } else if x > self.domain[1] {
+            x = self.domain[1];
+        }
+        let power = f64::from(x).powf(f64::from(self.en));
+        for i in 0..self.n {
+            let c0 = f64::from(self.c0[i]);
+            let c1 = f64::from(self.c1[i]);
+            // Finite f32 endpoints can overflow when subtracted in f32.
+            // Constant outputs do not depend on even an overflowing power.
+            let mut v = if c0 == c1 { c0 } else { c0 + power * (c1 - c0) };
+            if v.is_nan() {
+                return Err(PdfError::FunctionError(
+                    "Type2 result is non-finite".to_string(),
+                ));
+            }
+            if !self.range.is_empty() {
+                let l = f64::from(self.range[2 * i]);
+                let m = f64::from(self.range[2 * i + 1]);
+                if v > m {
+                    v = m;
+                } else if v < l {
+                    v = l;
+                }
+            }
+            let v = v as f32;
+            if !v.is_finite() {
+                return Err(PdfError::FunctionError("Type2 result is non-finite".into()));
+            }
+            out.push(v)
+        }
+        Ok(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,159 +325,5 @@ mod tests {
         let function =
             parse("<< /N 1 /Domain [0 1] /C0 [0 1] /C1 [1 0] /Range [0 0.5 0 1] >>").unwrap();
         assert_eq!(function.eval(&[1.0]).unwrap(), vec![0.5, 0.0]);
-    }
-}
-
-impl Exponential {
-    pub(crate) fn input_domain(&self) -> &[f32] {
-        &self.domain
-    }
-    pub(super) fn retained_own_bytes(&self) -> PdfResult<usize> {
-        super::retained_total(&[
-            super::retained_vector_bytes(&self.domain)?,
-            super::retained_vector_bytes(&self.range)?,
-            super::retained_vector_bytes(&self.c0)?,
-            super::retained_vector_bytes(&self.c1)?,
-        ])
-    }
-    pub(super) fn dimensions(&self) -> (usize, usize) {
-        (self.m, self.n)
-    }
-
-    pub fn try_new<R: Seek + Read>(obj: &PdfObject, ctx: &PDFContext<R>) -> PdfResult<Self> {
-        let obj = ctx.resolve(obj)?;
-        let dict = obj
-            .as_dict()
-            .ok_or_else(|| PdfError::FunctionError("Type2 requires a dictionary".to_string()))?;
-        let number_array = |key: &str| -> PdfResult<Option<Vec<f32>>> {
-            let Some(value) = dict.get(key) else {
-                return Ok(None);
-            };
-            let value = ctx.resolve(value)?;
-            let array = value
-                .as_array()
-                .ok_or_else(|| PdfError::FunctionError(format!("{key} requires an array")))?;
-            if key == "Domain" && array.len() != 2 {
-                return Err(PdfError::FunctionError(
-                    "Type2 requires one ordered Domain pair".into(),
-                ));
-            }
-            if array.len() > ctx.limits().max_objects
-                || array
-                    .len()
-                    .checked_mul(std::mem::size_of::<f32>())
-                    .is_none_or(|bytes| bytes > ctx.limits().max_decoded_bytes)
-            {
-                return Err(PdfError::ResourceLimit(format!("Type2 {key} parameters")));
-            }
-            let mut result = Vec::new();
-            result
-                .try_reserve_exact(array.len())
-                .map_err(|_| PdfError::ResourceLimit(format!("Type2 {key} allocation")))?;
-            for value in array {
-                let value = ctx.resolve(value)?;
-                result.push(value.as_f32().filter(|v| v.is_finite()).ok_or_else(|| {
-                    PdfError::FunctionError(format!("{key} requires finite numbers"))
-                })?);
-            }
-            Ok(Some(result))
-        };
-        let exponent = ctx.resolve(
-            dict.get("N")
-                .ok_or_else(|| PdfError::FunctionError("Type2 requires N".to_string()))?,
-        )?;
-        let en = exponent
-            .as_f32()
-            .filter(|v| v.is_finite())
-            .ok_or_else(|| PdfError::FunctionError("N requires a finite number".to_string()))?;
-        let domain = number_array("Domain")?
-            .ok_or_else(|| PdfError::FunctionError("Type2 requires Domain".to_string()))?;
-        if domain.len() != 2 || domain[0] > domain[1] {
-            return Err(PdfError::FunctionError(
-                "Type2 requires one ordered Domain pair".to_string(),
-            ));
-        }
-        if (domain[0] < 0.0 && en.fract() != 0.0)
-            || (domain[0] <= 0.0 && domain[1] >= 0.0 && en < 0.0)
-        {
-            return Err(PdfError::FunctionError(
-                "Domain contains undefined exponentiation".to_string(),
-            ));
-        }
-        let c0 = number_array("C0")?.unwrap_or_else(|| vec![0.0]);
-        let c1 = number_array("C1")?.unwrap_or_else(|| vec![1.0]);
-        if c0.is_empty() || c0.len() != c1.len() {
-            return Err(PdfError::FunctionError(
-                "C0/C1 require equal nonempty lengths".to_string(),
-            ));
-        }
-        let range = number_array("Range")?.unwrap_or_default();
-        if dict.contains_key("Range")
-            && (range.len() != c0.len() * 2 || range.chunks_exact(2).any(|pair| pair[0] > pair[1]))
-        {
-            return Err(PdfError::FunctionError(
-                "Range requires one ordered pair per output".to_string(),
-            ));
-        }
-        Ok(Self {
-            n: c0.len(),
-            m: 1,
-            domain,
-            range,
-            c0,
-            c1,
-            en,
-        })
-    }
-    pub fn eval(&self, inputs: &[f32]) -> PdfResult<Vec<f32>> {
-        if inputs.len() != 1
-            || !inputs[0].is_finite()
-            || self.domain.len() != 2
-            || self.n == 0
-            || self.c0.len() != self.n
-            || self.c1.len() != self.n
-            || (!self.range.is_empty() && self.range.len() != 2 * self.n)
-        {
-            return Err(PdfError::FunctionError(
-                "Invalid Type2 function or input dimensions".to_string(),
-            ));
-        }
-        let mut out = Vec::new();
-        out.try_reserve_exact(self.n)
-            .map_err(|_| PdfError::ResourceLimit("Type2 output allocation".into()))?;
-        let mut x = inputs[0];
-        if x < self.domain[0] {
-            x = self.domain[0]
-        } else if x > self.domain[1] {
-            x = self.domain[1];
-        }
-        let power = f64::from(x).powf(f64::from(self.en));
-        for i in 0..self.n {
-            let c0 = f64::from(self.c0[i]);
-            let c1 = f64::from(self.c1[i]);
-            // Finite f32 endpoints can overflow when subtracted in f32.
-            // Constant outputs do not depend on even an overflowing power.
-            let mut v = if c0 == c1 { c0 } else { c0 + power * (c1 - c0) };
-            if v.is_nan() {
-                return Err(PdfError::FunctionError(
-                    "Type2 result is non-finite".to_string(),
-                ));
-            }
-            if !self.range.is_empty() {
-                let l = f64::from(self.range[2 * i]);
-                let m = f64::from(self.range[2 * i + 1]);
-                if v > m {
-                    v = m;
-                } else if v < l {
-                    v = l;
-                }
-            }
-            let v = v as f32;
-            if !v.is_finite() {
-                return Err(PdfError::FunctionError("Type2 result is non-finite".into()));
-            }
-            out.push(v)
-        }
-        Ok(out)
     }
 }

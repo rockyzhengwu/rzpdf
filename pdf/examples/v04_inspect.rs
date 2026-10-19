@@ -26,7 +26,10 @@ fn main() -> PdfResult<()> {
             println!("page {page} link {:?}", link.target);
         }
         for square in doc.page_square_annotations(page)? {
-            println!("page {page} Square {:?} RGB {:?}",square.rect,square.color);
+            println!(
+                "page {page} Square {:?} RGB {:?}",
+                square.rect, square.color
+            );
         }
     }
     for name in doc.attachment_names()? {

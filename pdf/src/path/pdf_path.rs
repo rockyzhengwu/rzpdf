@@ -106,13 +106,10 @@ impl SubPath {
         if self.closed {
             return;
         }
-        if let Some(last) = self.segments.last() {
-            match last {
-                Segment::MoveTo(_) => {
-                    self.segments.pop();
-                }
-                _ => {}
-            }
+        if let Some(last) = self.segments.last()
+            && let Segment::MoveTo(_) = last
+        {
+            self.segments.pop();
         }
     }
     pub fn transform(&self, matrix: &Matrix) -> SubPath {

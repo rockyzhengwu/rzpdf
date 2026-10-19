@@ -27,8 +27,8 @@ pub(super) fn ids(
                 .is_some_and(|string| !string.bytes().is_empty())
         });
     for index in 0..2 {
-        let (value, mut child) = if index == 0 && first.is_some() {
-            crate::objects::clone_object_with_budget(first.unwrap(), budget, limits, 0)?
+        let (value, mut child) = if let (0, Some(first)) = (index, first) {
+            crate::objects::clone_object_with_budget(first, budget, limits, 0)?
         } else {
             let mut bytes = [0; 16];
             crate::security::r6_random(&mut bytes)?;

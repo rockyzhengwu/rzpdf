@@ -20,12 +20,12 @@ impl<R: Read + Seek> Interpreter<'_, R> {
         let dict = value.as_dict().ok_or_else(|| {
             PdfError::PageResourceError("SMask must be a dictionary or None".into())
         })?;
-        if let Some(kind) = dict.get("Type") {
-            if self.ctx.resolve(kind)?.as_name().map(|n| n.name()) != Some("Mask") {
-                return Err(PdfError::PageResourceError(
-                    "SMask Type must be Mask".into(),
-                ));
-            }
+        if let Some(kind) = dict.get("Type")
+            && self.ctx.resolve(kind)?.as_name().map(|n| n.name()) != Some("Mask")
+        {
+            return Err(PdfError::PageResourceError(
+                "SMask Type must be Mask".into(),
+            ));
         }
         let subtype = dict.get("S").map(|v| self.ctx.resolve(v)).transpose()?;
         let kind = match subtype
@@ -49,8 +49,15 @@ impl<R: Read + Seek> Interpreter<'_, R> {
             return Err(PdfError::PageResourceError("cyclic soft mask group".into()));
         }
         let object = self.ctx.resolve(g)?;
-        if self.optional_content.is_some() && object.as_stream().is_some_and(|s| s.dict().contains_key("OC")) {
-            return Err(PdfError::UnsupportedFeature("optional content on soft-mask G is outside the supported composition subset".into()));
+        if self.optional_content.is_some()
+            && object
+                .as_stream()
+                .is_some_and(|s| s.dict().contains_key("OC"))
+        {
+            return Err(PdfError::UnsupportedFeature(
+                "optional content on soft-mask G is outside the supported composition subset"
+                    .into(),
+            ));
         }
         let form = crate::page::pdf_form::PdfForm::try_new(&object, self.ctx)?;
         let group = form.group.as_ref().ok_or_else(|| {
@@ -168,13 +175,18 @@ impl<R: Read + Seek> Interpreter<'_, R> {
                 .filter(|v| *v <= limits.max_decoded_bytes)
                 .ok_or_else(|| PdfError::ResourceLimit("soft mask retained payload".into()))?;
         }
-        Ok(Some(Arc::new(SoftMaskPaint {
+        #[expect(
+            clippy::arc_with_non_send_sync,
+            reason = "shared public mask snapshots retain thread-affine font resources"
+        )]
+        let paint = Arc::new(SoftMaskPaint {
             list: trace.into_display_list(),
             kind,
             background,
             transfer,
             retained_bytes,
             retained_segments,
-        })))
+        });
+        Ok(Some(paint))
     }
 }

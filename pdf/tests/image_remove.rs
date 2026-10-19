@@ -35,7 +35,10 @@ fn remove_cross_stream_image_draw_preserves_path_neighbors_resources_and_shared_
         assert!(program.source_bytes().starts_with(b"% head\n0 0 m "));
         assert!(program.source_bytes().ends_with(b"\n% tail\n"));
         assert_eq!(page.extract_images_paint_order().unwrap().len(), 1);
-        assert_eq!(page.image_resource_names().unwrap(), [name.clone()]);
+        assert_eq!(
+            page.image_resource_names().unwrap().as_slice(),
+            std::slice::from_ref(&name)
+        );
         assert!(page.display_list().unwrap().diagnostics().is_empty());
         assert_eq!(
             document

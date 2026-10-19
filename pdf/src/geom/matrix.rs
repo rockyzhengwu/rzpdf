@@ -176,17 +176,17 @@ impl TryFrom<&PdfObject> for Matrix {
         match value {
             PdfObject::PdfArray(array) => {
                 if array.len() != 6 {
-                    Err(PdfError::MatrixFromPdfObjectError(format!(
-                        "Pdfarray length is not 6"
-                    )))
+                    Err(PdfError::MatrixFromPdfObjectError(
+                        "Pdfarray length is not 6".to_string(),
+                    ))
                 } else {
                     let fvalues: PdfResult<Vec<f32>> = array
                         .into_iter()
                         .map(|v| {
                             v.as_f32().filter(|v| v.is_finite()).ok_or(
-                                PdfError::MatrixFromPdfObjectError(format!(
-                                    "PdfArray element is not number"
-                                )),
+                                PdfError::MatrixFromPdfObjectError(
+                                    "PdfArray element is not number".to_string(),
+                                ),
                             )
                         })
                         .collect();

@@ -272,7 +272,10 @@ fn unknown_encoding_is_preserved_for_raw_extraction_but_cannot_decode() {
         Document::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict).unwrap();
     for document in [&doc, &reopened] {
         let page = document.get_page(0).unwrap();
-        assert_eq!(page.image_resource_names().unwrap(), [name.clone()]);
+        assert_eq!(
+            page.image_resource_names().unwrap().as_slice(),
+            std::slice::from_ref(&name)
+        );
         let source = page.extract_image_source(&name).unwrap();
         assert_eq!(source.stream.raw_data(), bytes);
         assert_eq!(
@@ -337,7 +340,10 @@ fn named_image_source_and_rgba_survive_save_without_painting() {
         Document::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict).unwrap();
     for document in [&doc, &reopened] {
         let page = document.get_page(0).unwrap();
-        assert_eq!(page.image_resource_names().unwrap(), [name.clone()]);
+        assert_eq!(
+            page.image_resource_names().unwrap().as_slice(),
+            std::slice::from_ref(&name)
+        );
         let image = page.extract_decoded_image(&name).unwrap();
         assert_eq!(image.pixel_dimensions(), (1, 1));
         assert_eq!(image.data(), &[10, 20, 30]);

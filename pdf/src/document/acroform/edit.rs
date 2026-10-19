@@ -24,15 +24,19 @@ impl<R: Read + Seek> PdfDocument<R> {
     }
 
     pub(super) fn form_node_guard(&self, node: &FieldNode) -> PdfResult<()> {
-        self.form_node_guard_with_structure(node,false)
+        self.form_node_guard_with_structure(node, false)
     }
 
     /// Page transactions validate and rebuild OBJR/ParentTree separately.
     pub(super) fn form_node_transfer_guard(&self, node: &FieldNode) -> PdfResult<()> {
-        self.form_node_guard_with_structure(node,true)
+        self.form_node_guard_with_structure(node, true)
     }
 
-    fn form_node_guard_with_structure(&self, node: &FieldNode, allow_structure:bool) -> PdfResult<()> {
+    fn form_node_guard_with_structure(
+        &self,
+        node: &FieldNode,
+        allow_structure: bool,
+    ) -> PdfResult<()> {
         if node
             .effective
             .get("FT")
@@ -54,23 +58,26 @@ impl<R: Read + Seek> PdfDocument<R> {
             }
         }
         for widget in &node.widgets {
-            self.form_widget_guard_with_structure(&self.form_dict(widget.handle.object_id())?,allow_structure)?;
+            self.form_widget_guard_with_structure(
+                &self.form_dict(widget.handle.object_id())?,
+                allow_structure,
+            )?;
         }
         Ok(())
     }
 
-    pub(super) fn form_widget_guard(&self, dict: &PdfDict) -> PdfResult<()> {
-        self.form_widget_guard_with_structure(dict,false)
-    }
-
-    fn form_widget_guard_with_structure(&self, dict:&PdfDict, allow_structure:bool) -> PdfResult<()> {
+    fn form_widget_guard_with_structure(
+        &self,
+        dict: &PdfDict,
+        allow_structure: bool,
+    ) -> PdfResult<()> {
         if self.form_flags(dict, "F")? & (64 | 128 | 512) != 0 {
             return Err(PdfError::UnsupportedFeature(
                 "read-only or locked widget".into(),
             ));
         }
         for key in ["A", "AA", "OC", "StructParent", "Popup", "IRT"] {
-            if dict.get(key).is_some() && !(allow_structure && key=="StructParent") {
+            if dict.get(key).is_some() && !(allow_structure && key == "StructParent") {
                 return Err(PdfError::UnsupportedFeature(format!(
                     "widget edit with {key}"
                 )));
@@ -133,17 +140,17 @@ impl<R: Read + Seek> PdfDocument<R> {
                     {
                         continue;
                     }
-                    if let Some(target) = dict.get(key).and_then(PdfObject::as_reference) {
-                        if graph.nodes.iter().any(|n| {
+                    if let Some(target) = dict.get(key).and_then(PdfObject::as_reference)
+                        && graph.nodes.iter().any(|n| {
                             n.id == target.id()
                                 || n.widgets
                                     .iter()
                                     .any(|w| w.handle.object_id() == target.id())
-                        }) {
-                            return Err(PdfError::UnsupportedFeature(
-                                "non-field annotation relationship to form".into(),
-                            ));
-                        }
+                        })
+                    {
+                        return Err(PdfError::UnsupportedFeature(
+                            "non-field annotation relationship to form".into(),
+                        ));
                     }
                 }
             }
@@ -507,10 +514,9 @@ impl<R: Read + Seek> PdfDocument<R> {
                         .get("AS")
                         .and_then(PdfObject::as_name)
                         .is_some_and(|s| s.name() != "Off")
+                        && widget.handle.object_id() != id
                     {
-                        if widget.handle.object_id() != id {
-                            selected_widget = Some(widget.handle.object_id());
-                        }
+                        selected_widget = Some(widget.handle.object_id());
                     }
                 }
                 if selected_widget.is_none() {

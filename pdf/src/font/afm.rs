@@ -29,6 +29,7 @@ impl Afm {
         }
         None
     }
+    #[cfg(test)]
     pub fn get_char_width_with_code(&self, code: u8) -> Option<f32> {
         if let Some(entries) = &self.budget_metrics {
             return entries
@@ -36,7 +37,7 @@ impl Afm {
                 .find(|(_, metric)| metric.code == i32::from(code))
                 .map(|(_, metric)| metric.wx);
         }
-        for (key, cm) in self.char_metrics.iter() {
+        for cm in self.char_metrics.values() {
             if cm.code == code as i32 {
                 return Some(cm.wx);
             }
@@ -54,7 +55,7 @@ fn parse_line(line: &str) -> Option<(&str, std::str::SplitAsciiWhitespace<'_>)> 
 fn parse_char_metric(line: &str) -> Option<(&str, CharMetrics)> {
     let line = line.trim();
     if line.is_empty() {
-        return None;
+        None
     } else {
         let items = line.split(';');
         let mut char_matrics = CharMetrics::default();
@@ -94,14 +95,16 @@ fn parse_char_metric(line: &str) -> Option<(&str, CharMetrics)> {
         if name.is_empty() {
             return None;
         }
-        return Some((name, char_matrics));
+        Some((name, char_matrics))
     }
 }
 
+#[cfg(test)]
 pub fn parse_afm(content: String) -> PdfResult<Afm> {
     parse_afm_with_limits(content, &crate::parser::options::Limits::default())
 }
 
+#[cfg(test)]
 pub fn parse_afm_with_limits(
     content: String,
     limits: &crate::parser::options::Limits,
@@ -134,8 +137,10 @@ fn parse_afm_str_inner(
         return Err(PdfError::ResourceLimit("AFM input bytes".into()));
     }
     let mut lines = content.split('\n');
-    let mut afm = Afm::default();
-    afm.budget_metrics = budget.map(|_| Vec::new());
+    let mut afm = Afm {
+        budget_metrics: budget.map(|_| Vec::new()),
+        ..Default::default()
+    };
     let mut table_lease = budget.map(|pool| pool.reserve(0)).transpose()?;
     let mut font_name_lease = budget.map(|pool| pool.reserve(0)).transpose()?;
     let mut family_name_lease = budget.map(|pool| pool.reserve(0)).transpose()?;
@@ -149,137 +154,114 @@ fn parse_afm_str_inner(
         }
     };
     let mut declared_metrics = 0usize;
-    loop {
-        match lines.next() {
-            Some(line) => {
-                if let Some((key, mut values)) = parse_line(line) {
-                    match key {
-                        "FontName" => {
-                            let fname = values.next().ok_or_else(|| {
-                                PdfError::FontError("missing AFM FontName".into())
-                            })?;
-                            let (fname, lease) = copy_name(fname)?;
-                            afm.font_name = fname;
-                            font_name_lease = lease;
-                        }
-                        "FamilyName" => {
-                            let fname = values.next().ok_or_else(|| {
-                                PdfError::FontError("missing AFM FamilyName".into())
-                            })?;
-                            let (fname, lease) = copy_name(fname)?;
-                            afm.family_name = fname;
-                            family_name_lease = lease;
-                        }
-                        "CharWidth" => {}
-                        "StartCharMetrics" => {
-                            let n = values
-                                .next()
-                                .ok_or(PdfError::FontError(
-                                    "Afm charactor metrics number is none".to_string(),
-                                ))?
-                                .parse::<u32>()
-                                .map_err(|_| {
-                                    PdfError::FontError("invalid AFM metric count".into())
-                                })?;
-                            declared_metrics = declared_metrics
-                                .checked_add(n as usize)
-                                .filter(|&count| count <= limits.max_objects)
-                                .ok_or_else(|| {
-                                    PdfError::ResourceLimit("AFM metric entries".into())
-                                })?;
-                            let mut i = 0;
-                            while i < n {
-                                if let Some(nl) = lines.next() {
-                                    if nl.trim().is_empty() {
-                                        continue;
-                                    }
-                                    if let Some((name, char_matrics)) = parse_char_metric(nl) {
-                                        let (name, name_lease) = copy_name(name)?;
-                                        if let Some(pool) = budget {
-                                            let entries = afm.budget_metrics.as_mut().unwrap();
-                                            match entries
-                                                .binary_search_by(|(key, _)| key.cmp(&name))
-                                            {
-                                                Ok(index) => entries[index].1 = char_matrics,
-                                                Err(index) => {
-                                                    if entries.len() == entries.capacity() {
-                                                        let capacity = entries
-                                                            .capacity()
-                                                            .checked_mul(2)
-                                                            .unwrap_or(limits.max_objects)
-                                                            .max(2)
-                                                            .min(limits.max_objects);
-                                                        let size = std::mem::size_of::<(
-                                                            String,
-                                                            CharMetrics,
-                                                        )>(
-                                                        );
-                                                        let mut lease = pool.reserve(
-                                                            capacity.checked_mul(size).ok_or_else(
-                                                                || {
-                                                                    PdfError::ResourceLimit(
-                                                                        "AFM table capacity".into(),
-                                                                    )
-                                                                },
-                                                            )?,
-                                                        )?;
-                                                        let mut next = Vec::new();
-                                                        next.try_reserve_exact(capacity).map_err(
-                                                            |_| {
-                                                                PdfError::ResourceLimit(
-                                                                    "AFM table allocation".into(),
-                                                                )
-                                                            },
-                                                        )?;
-                                                        lease.resize(
-                                                            next.capacity()
-                                                                .checked_mul(size)
-                                                                .ok_or_else(|| {
-                                                                    PdfError::ResourceLimit(
-                                                                        "AFM table capacity".into(),
-                                                                    )
-                                                                })?,
-                                                        )?;
-                                                        next.append(entries);
-                                                        *entries = next;
-                                                        table_lease = Some(lease);
-                                                    }
-                                                    entries.insert(index, (name, char_matrics));
-                                                }
+    while let Some(line) = lines.next() {
+        if let Some((key, mut values)) = parse_line(line) {
+            match key {
+                "FontName" => {
+                    let fname = values
+                        .next()
+                        .ok_or_else(|| PdfError::FontError("missing AFM FontName".into()))?;
+                    let (fname, lease) = copy_name(fname)?;
+                    afm.font_name = fname;
+                    font_name_lease = lease;
+                }
+                "FamilyName" => {
+                    let fname = values
+                        .next()
+                        .ok_or_else(|| PdfError::FontError("missing AFM FamilyName".into()))?;
+                    let (fname, lease) = copy_name(fname)?;
+                    afm.family_name = fname;
+                    family_name_lease = lease;
+                }
+                "CharWidth" => {}
+                "StartCharMetrics" => {
+                    let n = values
+                        .next()
+                        .ok_or(PdfError::FontError(
+                            "Afm charactor metrics number is none".to_string(),
+                        ))?
+                        .parse::<u32>()
+                        .map_err(|_| PdfError::FontError("invalid AFM metric count".into()))?;
+                    declared_metrics = declared_metrics
+                        .checked_add(n as usize)
+                        .filter(|&count| count <= limits.max_objects)
+                        .ok_or_else(|| PdfError::ResourceLimit("AFM metric entries".into()))?;
+                    let mut i = 0;
+                    while i < n {
+                        if let Some(nl) = lines.next() {
+                            if nl.trim().is_empty() {
+                                continue;
+                            }
+                            if let Some((name, char_matrics)) = parse_char_metric(nl) {
+                                let (name, name_lease) = copy_name(name)?;
+                                if let Some(pool) = budget {
+                                    let entries = afm.budget_metrics.as_mut().unwrap();
+                                    match entries.binary_search_by(|(key, _)| key.cmp(&name)) {
+                                        Ok(index) => entries[index].1 = char_matrics,
+                                        Err(index) => {
+                                            if entries.len() == entries.capacity() {
+                                                let capacity = entries
+                                                    .capacity()
+                                                    .checked_mul(2)
+                                                    .unwrap_or(limits.max_objects)
+                                                    .max(2)
+                                                    .min(limits.max_objects);
+                                                let size =
+                                                    std::mem::size_of::<(String, CharMetrics)>();
+                                                let mut lease = pool.reserve(
+                                                    capacity.checked_mul(size).ok_or_else(
+                                                        || {
+                                                            PdfError::ResourceLimit(
+                                                                "AFM table capacity".into(),
+                                                            )
+                                                        },
+                                                    )?,
+                                                )?;
+                                                let mut next = Vec::new();
+                                                next.try_reserve_exact(capacity).map_err(|_| {
+                                                    PdfError::ResourceLimit(
+                                                        "AFM table allocation".into(),
+                                                    )
+                                                })?;
+                                                lease.resize(
+                                                    next.capacity().checked_mul(size).ok_or_else(
+                                                        || {
+                                                            PdfError::ResourceLimit(
+                                                                "AFM table capacity".into(),
+                                                            )
+                                                        },
+                                                    )?,
+                                                )?;
+                                                next.append(entries);
+                                                *entries = next;
+                                                table_lease = Some(lease);
                                             }
-                                        } else {
-                                            afm.char_metrics.try_reserve(1).map_err(|_| {
-                                                PdfError::ResourceLimit(
-                                                    "AFM metric allocation".into(),
-                                                )
-                                            })?;
-                                            afm.char_metrics.insert(name, char_matrics);
+                                            entries.insert(index, (name, char_matrics));
                                         }
-                                        if let Some(mut lease) = name_lease {
-                                            metric_name_lease
-                                                .as_mut()
-                                                .unwrap()
-                                                .absorb(&mut lease)?;
-                                        }
-                                        i += 1;
-                                    } else {
-                                        return Err(PdfError::FontError(
-                                            "invalid AFM character metric".into(),
-                                        ));
                                     }
                                 } else {
-                                    return Err(PdfError::FontError(
-                                        "truncated AFM character metrics".into(),
-                                    ));
+                                    afm.char_metrics.try_reserve(1).map_err(|_| {
+                                        PdfError::ResourceLimit("AFM metric allocation".into())
+                                    })?;
+                                    afm.char_metrics.insert(name, char_matrics);
                                 }
+                                if let Some(mut lease) = name_lease {
+                                    metric_name_lease.as_mut().unwrap().absorb(&mut lease)?;
+                                }
+                                i += 1;
+                            } else {
+                                return Err(PdfError::FontError(
+                                    "invalid AFM character metric".into(),
+                                ));
                             }
+                        } else {
+                            return Err(PdfError::FontError(
+                                "truncated AFM character metrics".into(),
+                            ));
                         }
-                        _ => {}
                     }
                 }
-            }
-            None => {
-                break;
+                _ => {}
             }
         }
     }
@@ -342,12 +324,14 @@ mod tests {
         drop(afm);
         drop(lease);
         assert_eq!(pool.live_bytes(), 0);
-        assert!(super::parse_afm_str_with_budget(
-            "StartCharMetrics 2\nC 65 ; WX 500 ; N A ;\nC 66 ; WX NaN ; N B ;\n",
-            &Limits::default(),
-            &pool
-        )
-        .is_err());
+        assert!(
+            super::parse_afm_str_with_budget(
+                "StartCharMetrics 2\nC 65 ; WX 500 ; N A ;\nC 66 ; WX NaN ; N B ;\n",
+                &Limits::default(),
+                &pool
+            )
+            .is_err()
+        );
         assert_eq!(pool.live_bytes(), 0);
     }
 
@@ -369,12 +353,10 @@ mod tests {
         drop(afm);
         drop(lease);
         assert_eq!(pool.live_bytes(), 0);
-        assert!(super::parse_afm_str_with_budget(
-            "FontName A\nFamilyName\n",
-            &Limits::default(),
-            &pool
-        )
-        .is_err());
+        assert!(
+            super::parse_afm_str_with_budget("FontName A\nFamilyName\n", &Limits::default(), &pool)
+                .is_err()
+        );
         assert_eq!(pool.live_bytes(), 0);
     }
 

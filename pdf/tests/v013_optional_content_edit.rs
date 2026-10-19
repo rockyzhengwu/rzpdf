@@ -118,7 +118,7 @@ fn invalid_inputs_are_atomic_and_budget_can_retry() {
     );
     assert!(
         d.create_layer_membership(
-            &[a.clone()],
+            std::slice::from_ref(&a),
             LayerPolicy::AnyOn,
             Some(&LayerExpression::And(vec![])),
             &b
@@ -678,8 +678,13 @@ fn fixed_group_configuration_and_expression_caps_have_exact_boundaries() {
     let d = doc();
     let first = d.create_layer("one", LayerIntent::View, &b).unwrap();
     let good = LayerExpression::Or(vec![LayerExpression::Group(first.clone()); 4095]);
-    d.create_layer_membership(&[first.clone()], LayerPolicy::AllOff, Some(&good), &b)
-        .unwrap();
+    d.create_layer_membership(
+        std::slice::from_ref(&first),
+        LayerPolicy::AllOff,
+        Some(&good),
+        &b,
+    )
+    .unwrap();
     let bad = LayerExpression::Or(vec![LayerExpression::Group(first.clone()); 4096]);
     assert!(
         d.create_layer_membership(&[first], LayerPolicy::AllOff, Some(&bad), &b)

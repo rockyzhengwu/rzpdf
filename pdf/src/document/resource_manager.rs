@@ -425,7 +425,7 @@ impl<R: Read + Seek> ResourceManager<'_, R> {
             alpha
                 .try_reserve_exact(count)
                 .map_err(|_| PdfError::ResourceLimit("RGBA alpha allocation".into()))?;
-            for pixel in pixels.chunks_exact(4) {
+            for pixel in pixels.as_chunks::<4>().0 {
                 rgb.extend_from_slice(&pixel[..3]);
                 alpha.push(pixel[3]);
             }
@@ -815,7 +815,7 @@ fn validate_jpeg_precision(bytes: &[u8]) -> PdfResult<()> {
             if length < 8 {
                 return Err(invalid());
             }
-            if !matches!(marker, 0xc0 | 0xc1 | 0xc2) || bytes[position + 2] != 8 {
+            if !matches!(marker, 0xc0..=0xc2) || bytes[position + 2] != 8 {
                 return Err(PdfError::UnsupportedFeature(
                     "JPEG embedding requires 8-bit sequential/progressive samples".into(),
                 ));

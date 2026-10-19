@@ -250,7 +250,7 @@ impl<R: Read + Seek> PdfDocument<R> {
                 }
             }
             if (node.widgets.len() == departing.len() && !departing.is_empty())
-                || (!node.children.is_empty() && remaining.len() == 0)
+                || (!node.children.is_empty() && remaining.is_empty())
             {
                 removed.insert(node.id);
             } else {

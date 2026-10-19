@@ -2,11 +2,7 @@ use super::{
     Annotation, AnnotationKind as Kind, AnnotationRecord, AnnotationRemoval, TextAlignment,
 };
 use crate::{
-    document::{
-        PdfDocument,
-        appearance::reference,
-        identity::ObjectHandle,
-    },
+    document::{PdfDocument, appearance::reference, identity::ObjectHandle},
     error::{PdfError, PdfResult},
     objects::{
         PdfObject, object_id::ObjectId, pdf_array::PdfArray, pdf_dict::PdfDict,
@@ -76,12 +72,12 @@ impl<R: Read + Seek> PdfDocument<R> {
                 if result.len() >= self.ctx().limits().max_objects {
                     return Err(PdfError::ResourceLimit("annotation graph count".into()));
                 }
-                if let Some(id) = entry.id {
-                    if ids.insert(id, result.len()).is_some() {
-                        return Err(PdfError::UnsupportedFeature(
-                            "shared annotation page ownership".into(),
-                        ));
-                    }
+                if let Some(id) = entry.id
+                    && ids.insert(id, result.len()).is_some()
+                {
+                    return Err(PdfError::UnsupportedFeature(
+                        "shared annotation page ownership".into(),
+                    ));
                 }
                 result.push(entry);
             }
@@ -127,17 +123,16 @@ impl<R: Read + Seek> PdfDocument<R> {
                     {
                         return Err(invalid("nonreciprocal Popup relationship"));
                     }
-                } else if key == "Parent" {
-                    if self.annot_name(&target.dict, "Subtype")?.as_deref() == Some("Popup")
+                } else if key == "Parent"
+                    && (self.annot_name(&target.dict, "Subtype")?.as_deref() == Some("Popup")
                         || target
                             .dict
                             .get("Popup")
                             .and_then(PdfObject::as_reference)
                             .map(PdfReference::id)
-                            != Some(own)
-                    {
-                        return Err(invalid("nonreciprocal Popup Parent relationship"));
-                    }
+                            != Some(own))
+                {
+                    return Err(invalid("nonreciprocal Popup Parent relationship"));
                 }
             }
             let mut current = entry;
@@ -254,16 +249,14 @@ impl<R: Read + Seek> PdfDocument<R> {
             if n.len() % 2 != 0 {
                 return Err(invalid("odd Vertices"));
             }
-            Ok(n.chunks_exact(2).map(|p| [p[0], p[1]]).collect())
+            Ok(n.as_chunks::<2>().0.iter().map(|p| [p[0], p[1]]).collect())
         };
         let quads = || -> PdfResult<Vec<[f32; 8]>> {
             let n = self.annot_numbers(dict, "QuadPoints")?;
             if n.is_empty() || n.len() % 8 != 0 {
                 return Err(invalid("invalid QuadPoints"));
             }
-            Ok(n.chunks_exact(8)
-                .map(|p| p.try_into().expect("8 coordinates"))
-                .collect())
+            Ok(n.as_chunks::<8>().0.to_vec())
         };
         let kind = match subtype.as_str() {
             "Square" => Kind::Square,
@@ -340,7 +333,7 @@ impl<R: Read + Seek> PdfDocument<R> {
                     if n.len() % 2 != 0 || total > self.ctx().limits().max_path_segments {
                         return Err(PdfError::ResourceLimit("InkList coordinates".into()));
                     }
-                    strokes.push(n.chunks_exact(2).map(|p| [p[0], p[1]]).collect());
+                    strokes.push(n.as_chunks::<2>().0.iter().map(|p| [p[0], p[1]]).collect());
                 }
                 Kind::Ink { strokes }
             }
@@ -488,9 +481,9 @@ impl<R: Read + Seek> PdfDocument<R> {
             .ok_or_else(|| invalid("Filespec EF dictionary expected"))?;
         let stream = self
             .ctx()
-            .resolve(
-                crate::document::embedded_file::payload_reference(&ef, true)?,
-            )?
+            .resolve(crate::document::embedded_file::payload_reference(
+                &ef, true,
+            )?)?
             .into_stream()
             .ok_or_else(|| invalid("embedded payload must be stream"))?;
         stream.decode_data(self.ctx())

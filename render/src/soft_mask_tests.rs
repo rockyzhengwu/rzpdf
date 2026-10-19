@@ -156,8 +156,10 @@ fn soft_mask_surface_neighbor_budget_rejects_without_ink_and_recovers() {
             assert!(matches!(result, Err(PdfError::ResourceLimit(_))));
             assert!(
                 pixels(&mut render)
-                    .chunks_exact(4)
-                    .all(|p| p == [255, 255, 255, 255])
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .all(|p| *p == [255, 255, 255, 255])
             );
         } else {
             result.unwrap();

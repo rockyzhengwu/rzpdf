@@ -1,7 +1,7 @@
 use pdf::{
     document::{owned::Document, resource_manager::ResourceKind},
     io::stream_reader::StreamReader,
-    objects::{pdf_stream::PdfStream, PdfObject},
+    objects::{PdfObject, pdf_stream::PdfStream},
     parser::syntax::{ParseMode, SyntaxParser},
 };
 use std::io::Cursor;
@@ -75,9 +75,10 @@ fn nested_image_transform_is_relative_and_restores_neighbor_state() {
         let source = before[0].nested_source().unwrap();
         assert_eq!(source.invocations.len(), 2);
         let revision = doc.revision();
-        assert!(doc
-            .transform_nested_image_draw(0, &root, source, [1., 0., 0., 1., f32::NAN, 0.])
-            .is_err());
+        assert!(
+            doc.transform_nested_image_draw(0, &root, source, [1., 0., 0., 1., f32::NAN, 0.])
+                .is_err()
+        );
         assert_eq!(doc.revision(), revision);
         let resources = doc.get_page(0).unwrap().resource().unwrap();
         let rollback: pdf::error::PdfResult<()> = doc.edit_transaction(|editing| {
@@ -115,9 +116,10 @@ fn nested_image_transform_is_relative_and_restores_neighbor_state() {
                 [old.a(), old.b(), old.c(), old.d(), old.e(), old.f()]
             );
         }
-        assert!(doc
-            .transform_nested_image_draw(0, &root, source, [1., 0., 0., 1., 1., 2.])
-            .is_err());
+        assert!(
+            doc.transform_nested_image_draw(0, &root, source, [1., 0., 0., 1., 1., 2.])
+                .is_err()
+        );
         doc.transform_nested_image_draw(0, &refreshed, source, transform)
             .unwrap();
         let reopened =
@@ -209,15 +211,17 @@ fn nested_image_transform_is_relative_and_restores_neighbor_state() {
         let source = original[0].nested_source().unwrap();
         let wrong = doc.object_handle(form).unwrap();
         let revision = doc.revision();
-        assert!(doc
-            .replace_nested_image_draw(0, &root, source, &wrong)
-            .is_err());
+        assert!(
+            doc.replace_nested_image_draw(0, &root, source, &wrong)
+                .is_err()
+        );
         assert_eq!(doc.revision(), revision);
         let resources = doc.get_page(0).unwrap().resource().unwrap();
         for invalid in [&foreign_handle, &doc.object_handle(non_stream).unwrap()] {
-            assert!(doc
-                .replace_nested_image_draw(0, &root, source, invalid)
-                .is_err());
+            assert!(
+                doc.replace_nested_image_draw(0, &root, source, invalid)
+                    .is_err()
+            );
             assert_eq!(doc.revision(), revision);
             assert_eq!(doc.get_page(0).unwrap().resource().unwrap(), resources);
             let unchanged = doc.get_page(0).unwrap().content_program().unwrap();
@@ -228,9 +232,10 @@ fn nested_image_transform_is_relative_and_restores_neighbor_state() {
             .import_resource_from(&foreign, &foreign_handle, ResourceKind::Image)
             .unwrap();
         drop(foreign);
-        assert!(doc
-            .replace_nested_image_draw(0, &root, source, &imported)
-            .is_err());
+        assert!(
+            doc.replace_nested_image_draw(0, &root, source, &imported)
+                .is_err()
+        );
         let root = doc.get_page(0).unwrap().content_program().unwrap();
         let handle = imported;
         let rollback: pdf::error::PdfResult<()> = doc.edit_transaction(|editing| {
@@ -408,9 +413,10 @@ fn nested_image_removal_isolates_one_call_keeps_shared_pixels_and_rolls_back() {
         (1, &root, &source),
         (0, &leaf, &source),
     ] {
-        assert!(doc
-            .transform_nested_image_draw(page, snapshot, source, [1., 0., 0., 1., 1., 0.])
-            .is_err());
+        assert!(
+            doc.transform_nested_image_draw(page, snapshot, source, [1., 0., 0., 1., 1., 0.])
+                .is_err()
+        );
     }
     assert_eq!(doc.revision(), revision);
     assert_eq!(doc.get_page(0).unwrap().resource().unwrap(), resources);
@@ -463,9 +469,11 @@ fn nested_image_removal_isolates_one_call_keeps_shared_pixels_and_rolls_back() {
                     assert_eq!(chain[1].form_id, Some(id));
                 }
             }
-            assert!(images
-                .iter()
-                .all(|draw| draw.image.rgba_buffer().unwrap() == [255, 0, 0, 255]));
+            assert!(
+                images
+                    .iter()
+                    .all(|draw| draw.image.rgba_buffer().unwrap() == [255, 0, 0, 255])
+            );
             assert_eq!(
                 document
                     .get_page(page)

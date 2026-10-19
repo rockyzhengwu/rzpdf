@@ -108,10 +108,10 @@ impl Selection {
         }
         let trailer = doc.ctx().trailer();
         for key in ["Root", "Encrypt"] {
-            if let Some(reference) = trailer.get(key).and_then(PdfObject::as_reference) {
-                if let Some(flag) = result.flags.get_mut(reference.id().obj_num() as usize) {
-                    *flag |= STANDALONE;
-                }
+            if let Some(reference) = trailer.get(key).and_then(PdfObject::as_reference)
+                && let Some(flag) = result.flags.get_mut(reference.id().obj_num() as usize)
+            {
+                *flag |= STANDALONE;
             }
         }
         // Old offsets and compressed membership are rebuilt, not copied.

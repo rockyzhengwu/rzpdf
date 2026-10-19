@@ -99,6 +99,19 @@ pub struct GeneralState {
     pub rendering_intent: crate::color::conversion::RenderingIntent,
 }
 
+impl Default for GeneralState {
+    fn default() -> Self {
+        Self {
+            blend_mode: BlendMode::Normal,
+            stroke_alpha: 1.0,
+            fill_alpha: 1.0,
+            flat_ness: 0.0,
+            soft_mask: None,
+            rendering_intent: Default::default(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod budget_tests {
     use super::*;
@@ -157,18 +170,5 @@ mod budget_tests {
             Some(BlendMode::Normal)
         );
         assert_eq!(probe.live_bytes(), 0);
-    }
-}
-
-impl Default for GeneralState {
-    fn default() -> Self {
-        Self {
-            blend_mode: BlendMode::Normal,
-            stroke_alpha: 1.0,
-            fill_alpha: 1.0,
-            flat_ness: 0.0,
-            soft_mask: None,
-            rendering_intent: Default::default(),
-        }
     }
 }

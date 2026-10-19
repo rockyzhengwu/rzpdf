@@ -17,7 +17,7 @@ fn main() -> PdfResult<()> {
     let file = doc
         .attachment_filespec("note.txt")?
         .ok_or_else(|| PdfError::DocumentError("Filespec missing".into()))?;
-    let mut handles=Vec::new();
+    let mut handles = Vec::new();
     for i in 0..15 {
         let (x, y) = (20. + (i % 3) as f32 * 125., 20. + (i / 3) as f32 * 110.);
         let quad = vec![[
@@ -86,9 +86,9 @@ fn main() -> PdfResult<()> {
         }
         handles.push(doc.add_annotation(0, &a)?);
     }
-    doc.set_annotation_popup(&handles[2],Some(&handles[3]))?;
-    doc.set_annotation_reply(&handles[12],Some(&handles[2]))?;
-    doc.set_annotation_reply(&handles[13],Some(&handles[12]))?;
+    doc.set_annotation_popup(&handles[2], Some(&handles[3]))?;
+    doc.set_annotation_reply(&handles[12], Some(&handles[2]))?;
+    doc.set_annotation_reply(&handles[13], Some(&handles[12]))?;
     doc.add_page_with_builder(1, PageBuilder::new().size(200., 200.))?;
     doc.replace_page_contents(
         1,

@@ -16,11 +16,11 @@ use pdf::{
 };
 use std::{fs::File, io::Write};
 #[cfg(test)]
-#[path = "group_tests.rs"]
-mod group_tests;
-#[cfg(test)]
 #[path = "annotation_tests.rs"]
 mod annotation_tests;
+#[cfg(test)]
+#[path = "group_tests.rs"]
+mod group_tests;
 #[path = "knockout.rs"]
 mod knockout;
 #[cfg(test)]
@@ -1338,7 +1338,7 @@ impl Device for SkiaRender {
             )?
         };
         if self.shape_mode && !imageobject.image.is_mask() {
-            for pixel in rgba.chunks_exact_mut(4) {
+            for pixel in rgba.as_chunks_mut::<4>().0 {
                 pixel[3] = 255;
             }
         }
@@ -2643,7 +2643,7 @@ mod tests {
             let expected = raster(&doc, 2);
             assert_ne!(expected, original);
             for color in [[255, 0, 0, 255], [0, 0, 255, 255], [0, 255, 0, 255]] {
-                assert!(expected.chunks_exact(4).any(|pixel| pixel == color));
+                assert!(expected.as_chunks::<4>().0.contains(&color));
             }
             let reopened =
                 Document::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict)
@@ -2657,15 +2657,13 @@ mod tests {
             doc.replace_page_contents(2, neighbor.as_bytes().to_vec())
                 .unwrap();
             let removed = raster(&doc, 2);
-            assert!(
-                removed
-                    .chunks_exact(4)
-                    .any(|pixel| pixel == [0, 255, 0, 255])
-            );
+            assert!(removed.as_chunks::<4>().0.contains(&[0, 255, 0, 255]));
             assert!(
                 !removed
-                    .chunks_exact(4)
-                    .any(|pixel| pixel == [255, 0, 0, 255] || pixel == [0, 0, 255, 255])
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|pixel| *pixel == [255, 0, 0, 255] || *pixel == [0, 0, 255, 255])
             );
             let reopened =
                 Document::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict)
@@ -2797,7 +2795,7 @@ mod tests {
             assert_eq!(actual, raster(&doc, 1));
             for color in [[255, 0, 0, 255], [0, 0, 0, 255], [0, 255, 0, 255]] {
                 assert!(
-                    actual.chunks_exact(4).any(|p| p == color),
+                    actual.as_chunks::<4>().0.contains(&color),
                     "missing ink {color:?}"
                 );
             }
@@ -2842,11 +2840,7 @@ mod tests {
             .unwrap();
             let expected = raster(&doc, 1);
             assert_ne!(expected, actual);
-            assert!(
-                expected
-                    .chunks_exact(4)
-                    .any(|pixel| pixel == [0, 0, 0, 255])
-            );
+            assert!(expected.as_chunks::<4>().0.contains(&[0, 0, 0, 255]));
             let reopened =
                 Document::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict)
                     .unwrap();
@@ -2943,8 +2937,9 @@ mod tests {
                 assert_ne!(replacement_pixels, actual);
                 assert!(
                     replacement_pixels
-                        .chunks_exact(4)
-                        .any(|pixel| pixel == [0, 0, 0, 255])
+                        .as_chunks::<4>()
+                        .0
+                        .contains(&[0, 0, 0, 255])
                 );
                 let reopened =
                     Document::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict)
@@ -3045,7 +3040,7 @@ mod tests {
             assert_eq!(actual, expected, "Form pixels rotation={rotation}");
             for color in [[255, 0, 0, 255], [0, 0, 255, 255], [0, 255, 0, 255]] {
                 assert!(
-                    actual.2.chunks_exact(4).any(|p| p == color),
+                    actual.2.as_chunks::<4>().0.contains(&color),
                     "missing ink {color:?}"
                 );
             }
@@ -3370,7 +3365,7 @@ mod tests {
             [0, 0, 255, 255],
             [255, 255, 255, 255],
         ] {
-            assert!(originals[0].chunks_exact(4).any(|pixel| pixel == color));
+            assert!(originals[0].as_chunks::<4>().0.contains(&color));
         }
         let source_stamp = source.stamp();
         let target = PdfDocument::new().unwrap();
@@ -3559,7 +3554,7 @@ mod tests {
                         [0, 0, 0, 255],
                     ] {
                         assert!(
-                            actual.2.chunks_exact(4).any(|pixel| pixel == color),
+                            actual.2.as_chunks::<4>().0.contains(&color),
                             "missing color {color:?}, rotation={rotation}, unit={unit}, dpi={dpi:?}"
                         );
                     }
@@ -3621,7 +3616,7 @@ mod tests {
                 [0, 0, 255, 255],
                 [255, 255, 255, 255],
             ] {
-                assert!(original.chunks_exact(4).any(|pixel| pixel == color));
+                assert!(original.as_chunks::<4>().0.contains(&color));
             }
             doc.set_page_user_unit(0, Some(2.)).unwrap();
             let scaled = raster(&doc, 0, width * 2, height * 2);
@@ -4178,7 +4173,9 @@ mod tests {
                 );
                 assert!(
                     pixels
-                        .chunks_exact(4)
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
                         .any(|pixel| pixel[..3] != [255, 255, 255])
                 );
                 pages.push(pixels);
@@ -4302,8 +4299,10 @@ mod tests {
                 );
                 assert!(
                     pixels(&doc)
-                        .chunks_exact(4)
-                        .all(|pixel| pixel == [255, 255, 255, 255])
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .all(|pixel| *pixel == [255, 255, 255, 255])
                 );
             }
         }
@@ -4460,12 +4459,14 @@ mod tests {
                         .read_pixels(&info, &mut pixels, 40 * 4, (0, 0))
                 );
                 assert!(
-                    pixels.chunks_exact(4).all(|pixel| pixel[0] <= 1),
+                    pixels.as_chunks::<4>().0.iter().all(|pixel| pixel[0] <= 1),
                     "Multiply cannot introduce red over cyan"
                 );
                 assert!(
                     pixels
-                        .chunks_exact(4)
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
                         .any(|pixel| pixel[1] < 200 && pixel[2] < 200),
                     "fixture must paint foreground"
                 );
@@ -4549,12 +4550,16 @@ mod tests {
             let expected = pixels(&mut renderer);
             assert!(
                 expected
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .any(|p| p[0] > 240 && p[1] < 15 && p[2] < 15)
             );
             assert!(
                 expected
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .any(|p| p[0] < 15 && p[1] > 240 && p[2] < 15)
             );
             let center = &expected[(30 * 40 + 10) * 4..(30 * 40 + 10) * 4 + 4];

@@ -279,10 +279,10 @@ pub fn decode_with_budget(
             ("Height", height),
             ("BitsPerComponent", 1),
         ] {
-            if let Some(value) = dict.get(key) {
-                if value.as_u32() != Some(expected) {
-                    return Err(error("image dictionary/header mismatch"));
-                }
+            if let Some(value) = dict.get(key)
+                && value.as_u32() != Some(expected)
+            {
+                return Err(error("image dictionary/header mismatch"));
             }
         }
     }

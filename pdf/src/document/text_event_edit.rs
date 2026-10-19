@@ -30,28 +30,43 @@ mod fragment_owner_tests {
     fn invalid_fragment_parse_preserves_single_and_multiple_donors() {
         for count in [1, 2] {
             let doc = PdfDocument::new().unwrap();
-            let expected = ContentProgram::from_decoded_bytes(
-                b"(A) Tj (B) Tj".to_vec(), doc.ctx.options(),
-            ).unwrap();
+            let expected =
+                ContentProgram::from_decoded_bytes(b"(A) Tj (B) Tj".to_vec(), doc.ctx.options())
+                    .unwrap();
             let budget = OperationBudget::new(1024 * 1024);
             let mut donors = Vec::new();
             for index in 0..count {
                 let mut events = OwnedTable::new(&budget, 1).unwrap();
                 let bytes: &[u8] = if index == 0 { b"(" } else { b"(Y) Tj" };
-                events.items.push((index, BudgetedBytes::copy_from_slice(&budget, bytes).unwrap(), 1));
-                donors.push(Some(TextEventFragments { events, input_chars: 1, output_chars: 1 }));
+                events.items.push((
+                    index,
+                    BudgetedBytes::copy_from_slice(&budget, bytes).unwrap(),
+                    1,
+                ));
+                donors.push(Some(TextEventFragments {
+                    events,
+                    input_chars: 1,
+                    output_chars: 1,
+                }));
             }
             let retained = budget.live_bytes();
             let failure = doc.finish_text_event_fragments(&expected, &mut donors, &budget);
             assert!(failure.is_err());
-            assert!(!matches!(failure, Err(PdfError::ResourceLimit(_))),
-                "invalid syntax must reach fragment parsing, not fail on budget");
+            assert!(
+                !matches!(failure, Err(PdfError::ResourceLimit(_))),
+                "invalid syntax must reach fragment parsing, not fail on budget"
+            );
             assert!(donors.iter().all(Option::is_some));
             assert_eq!(budget.live_bytes(), retained);
-            assert_eq!(donors[0].as_ref().unwrap().events.items[0].1.as_slice(), b"(");
+            assert_eq!(
+                donors[0].as_ref().unwrap().events.items[0].1.as_slice(),
+                b"("
+            );
             donors[0].as_mut().unwrap().events.items[0].1 =
                 BudgetedBytes::copy_from_slice(&budget, b"(X) Tj").unwrap();
-            let result = doc.finish_text_event_fragments(&expected, &mut donors, &budget).unwrap();
+            let result = doc
+                .finish_text_event_fragments(&expected, &mut donors, &budget)
+                .unwrap();
             assert!(donors.iter().all(Option::is_none));
             assert_eq!(result.character_counts(), (count, count));
             assert_eq!(result.original_replacements().len(), count);
@@ -70,12 +85,20 @@ pub(super) struct TextEventFragments {
 
 impl TextEventFragments {
     pub(super) fn single(
-        index: usize, fragment: BudgetedBytes, operation_count: usize,
-        input_chars: usize, output_chars: usize, budget: &OperationBudget,
+        index: usize,
+        fragment: BudgetedBytes,
+        operation_count: usize,
+        input_chars: usize,
+        output_chars: usize,
+        budget: &OperationBudget,
     ) -> PdfResult<Self> {
         let mut events = OwnedTable::new(budget, 1)?;
         events.items.push((index, fragment, operation_count));
-        Ok(Self { events, input_chars, output_chars })
+        Ok(Self {
+            events,
+            input_chars,
+            output_chars,
+        })
     }
 }
 
@@ -150,8 +173,11 @@ pub(super) fn full_event_range(
     program: &ContentProgram,
     index: usize,
 ) -> PdfResult<Option<Range<TextCodePosition>>> {
-    let op = &program.operations().get(index)
-        .ok_or_else(|| PdfError::ObjectError("span event index out of range".into()))?.operator;
+    let op = &program
+        .operations()
+        .get(index)
+        .ok_or_else(|| PdfError::ObjectError("span event index out of range".into()))?
+        .operator;
     let (first, last, len) = match (op.name(), op.num_operands()) {
         ("Tj" | "'", 1) => (None, None, op.get_as_string(0)?.bytes().len()),
         ("\"", 3) => {
@@ -179,10 +205,23 @@ pub(super) fn full_event_range(
             }
             (first, last, len)
         }
-        _ => return Err(PdfError::ObjectError("span event operator/operand mismatch".into())),
+        _ => {
+            return Err(PdfError::ObjectError(
+                "span event operator/operand mismatch".into(),
+            ));
+        }
     };
-    Ok(Some(TextCodePosition { operation: index, array_item: first, offset: 0 }
-        ..TextCodePosition { operation: index, array_item: last, offset: len }))
+    Ok(Some(
+        TextCodePosition {
+            operation: index,
+            array_item: first,
+            offset: 0,
+        }..TextCodePosition {
+            operation: index,
+            array_item: last,
+            offset: len,
+        },
+    ))
 }
 
 pub(super) fn endpoint(program: &ContentProgram, position: TextCodePosition) -> PdfResult<()> {
@@ -227,10 +266,10 @@ mod span_range_tests {
     #[test]
     fn full_event_ranges_keep_tj_numeric_slots_and_quote_operands() {
         let program = ContentProgram::from_decoded_bytes(
-            b"[(A) 17 () -3 (BC) 9] TJ [] TJ [17 -3] TJ () Tj (D) ' 2 3 (EF) \""
-                .to_vec(),
+            b"[(A) 17 () -3 (BC) 9] TJ [] TJ [17 -3] TJ () Tj (D) ' 2 3 (EF) \"".to_vec(),
             Default::default(),
-        ).unwrap();
+        )
+        .unwrap();
         let range = full_event_range(&program, 0).unwrap().unwrap();
         assert_eq!((range.start.array_item, range.start.offset), (Some(0), 0));
         assert_eq!((range.end.array_item, range.end.offset), (Some(4), 2));
@@ -249,9 +288,16 @@ mod span_range_tests {
 
     #[test]
     fn full_event_ranges_reject_invalid_shows_without_fabricating_endpoints() {
-        for bytes in [b"[true] TJ".as_slice(), b"[17 (A) null] TJ", b"() () Tj",
-            b"2 (A) \"", b"2 true (A) \"", b"12 Tf"] {
-            let program = ContentProgram::from_decoded_bytes(bytes.to_vec(), Default::default()).unwrap();
+        for bytes in [
+            b"[true] TJ".as_slice(),
+            b"[17 (A) null] TJ",
+            b"() () Tj",
+            b"2 (A) \"",
+            b"2 true (A) \"",
+            b"12 Tf",
+        ] {
+            let program =
+                ContentProgram::from_decoded_bytes(bytes.to_vec(), Default::default()).unwrap();
             assert!(full_event_range(&program, 0).is_err(), "{bytes:?}");
         }
     }
@@ -326,7 +372,12 @@ impl<R: Read + Seek> PdfDocument<R> {
         F: FnMut(usize) -> PdfResult<BudgetedTextMetrics>,
     {
         let fragments = self.build_text_event_fragments(
-            expected, range, text, preserve_advance, budget, resolve_metrics,
+            expected,
+            range,
+            text,
+            preserve_advance,
+            budget,
+            resolve_metrics,
         )?;
         self.finish_text_event_fragments(expected, &mut [Some(fragments)], budget)
     }
@@ -356,7 +407,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         if count > limits.max_objects {
             return Err(PdfError::ResourceLimit("text event count".into()));
         }
-        let mut prepared = OwnedTable::new(&budget, count)?;
+        let mut prepared = OwnedTable::new(budget, count)?;
         let mut input_chars = 0usize;
         let mut output_chars = 0usize;
         for index in range.start.operation..=range.end.operation {
@@ -396,7 +447,7 @@ impl<R: Read + Seek> PdfDocument<R> {
                     ""
                 },
                 limits,
-                &budget,
+                budget,
             )?;
             let count_chars = |bytes: &[u8], total: &mut usize| -> PdfResult<()> {
                 *total = total
@@ -453,7 +504,7 @@ impl<R: Read + Seek> PdfDocument<R> {
                     return Err(PdfError::ResourceLimit("adjusted text array items".into()));
                 }
                 let replacements = content_edit::budgeted_text_array_range_replacements(
-                    &budget,
+                    budget,
                     &state.font,
                     array,
                     item_range.clone(),
@@ -461,10 +512,10 @@ impl<R: Read + Seek> PdfDocument<R> {
                     limits,
                 )?;
                 let borrowed =
-                    content_edit::BudgetedTextItems::new(&budget, replacements.as_slice())?;
+                    content_edit::BudgetedTextItems::new(budget, replacements.as_slice())?;
                 let adjustments = if preserve_advance {
                     Some(content_edit::budgeted_text_array_range_adjustments(
-                        &budget,
+                        budget,
                         array,
                         &item_range,
                         codes.as_slice(),
@@ -499,14 +550,14 @@ impl<R: Read + Seek> PdfDocument<R> {
                             borrowed.as_slice(),
                             adjustments.as_slice(),
                             self.ctx.options(),
-                            &budget,
+                            budget,
                         )?
                     } else {
                         expected.text_array_items_fragment_with_budget(
                             index,
                             borrowed.as_slice(),
                             self.ctx.options(),
-                            &budget,
+                            budget,
                         )?
                     },
                     1,
@@ -559,7 +610,7 @@ impl<R: Read + Seek> PdfDocument<R> {
                             .ok_or_else(|| PdfError::ResourceLimit("text suffix offset".into()))?,
                         adjustment,
                         self.ctx.options(),
-                        &budget,
+                        budget,
                     )?
                 } else {
                     (
@@ -567,7 +618,7 @@ impl<R: Read + Seek> PdfDocument<R> {
                             index,
                             replacement.as_slice(),
                             self.ctx.options(),
-                            &budget,
+                            budget,
                         )?,
                         1,
                     )
@@ -576,9 +627,7 @@ impl<R: Read + Seek> PdfDocument<R> {
             // The serialized fragment owns its bytes. Metrics and encoded codes
             // are no longer borrowed and can drop here, releasing their actual
             // allocations and leases before the next event/final reconstruction.
-            prepared
-                .items
-                .push((index, fragment, operation_count));
+            prepared.items.push((index, fragment, operation_count));
         }
         Ok(TextEventFragments {
             events: prepared,
@@ -598,18 +647,23 @@ impl<R: Read + Seek> PdfDocument<R> {
         let (mut count, mut input_chars, mut output_chars) = (0usize, 0usize, 0usize);
         let mut previous = None;
         for donor in donors.iter().flatten() {
-            count = count.checked_add(donor.events.items.len())
+            count = count
+                .checked_add(donor.events.items.len())
                 .filter(|&n| n <= limits.max_objects)
                 .ok_or_else(|| PdfError::ResourceLimit("merged text event count".into()))?;
-            input_chars = input_chars.checked_add(donor.input_chars)
+            input_chars = input_chars
+                .checked_add(donor.input_chars)
                 .filter(|&n| n <= limits.max_text_chars)
                 .ok_or_else(|| PdfError::ResourceLimit("merged input text characters".into()))?;
-            output_chars = output_chars.checked_add(donor.output_chars)
+            output_chars = output_chars
+                .checked_add(donor.output_chars)
                 .filter(|&n| n <= limits.max_text_chars)
                 .ok_or_else(|| PdfError::ResourceLimit("merged output text characters".into()))?;
             for (index, _, _) in &donor.events.items {
                 if previous.is_some_and(|previous| previous >= *index) {
-                    return Err(PdfError::ObjectError("merged events are not in original order".into()));
+                    return Err(PdfError::ObjectError(
+                        "merged events are not in original order".into(),
+                    ));
                 }
                 previous = Some(*index);
             }
@@ -617,17 +671,25 @@ impl<R: Read + Seek> PdfDocument<R> {
         let sole = donors.iter().flatten().count() == 1;
         // A sole table can transfer its existing allocation/lease after parsing.
         // For multiple donors reserve the destination before consuming any owner.
-        let mut events = if sole { None } else { Some(OwnedTable::new(budget, count)?) };
+        let mut events = if sole {
+            None
+        } else {
+            Some(OwnedTable::new(budget, count)?)
+        };
         let mut borrowed = OwnedTable::new(budget, count)?;
         for donor in donors.iter().flatten() {
             for (index, fragment, count) in &donor.events.items {
                 borrowed.items.push(OperationReplacement {
-                    index: *index, source: fragment.as_slice(), operation_count: *count,
+                    index: *index,
+                    source: fragment.as_slice(),
+                    operation_count: *count,
                 });
             }
         }
         let program = expected.with_replaced_operation_sequences_with_budget(
-            &borrowed.items, self.ctx.options(), budget,
+            &borrowed.items,
+            self.ctx.options(),
+            budget,
         )?;
         drop(borrowed);
         for donor in donors {
@@ -640,8 +702,10 @@ impl<R: Read + Seek> PdfDocument<R> {
             }
         }
         Ok(TextEventEditPlan {
-            program, _events: events.expect("destination allocated or sole donor transferred"),
-            input_chars, output_chars,
+            program,
+            _events: events.expect("destination allocated or sole donor transferred"),
+            input_chars,
+            output_chars,
         })
     }
 }

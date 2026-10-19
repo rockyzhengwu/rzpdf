@@ -27,9 +27,10 @@ fn main() -> PdfResult<()> {
     let mut original_events = Vec::new();
     println!("pages={pages}");
     for index in 0..pages {
-        let mut page = doc.get_page(u32::try_from(index).map_err(|_| {
-            PdfError::ResourceLimit("v0.3 probe page index".into())
-        })?)?;
+        let mut page = doc.get_page(
+            u32::try_from(index)
+                .map_err(|_| PdfError::ResourceLimit("v0.3 probe page index".into()))?,
+        )?;
         let display = page.display_list();
         let extraction = page.extract_characters_paint_order_report();
         match (display, extraction) {
@@ -57,14 +58,18 @@ fn main() -> PdfResult<()> {
                     )));
                 }
                 original_events.push(
-                    report.characters.into_iter().map(|item| {
-                        (
-                            item.unicode,
-                            item.charcode,
-                            item.position.x().to_bits(),
-                            item.position.y().to_bits(),
-                        )
-                    }).collect::<Vec<_>>()
+                    report
+                        .characters
+                        .into_iter()
+                        .map(|item| {
+                            (
+                                item.unicode,
+                                item.charcode,
+                                item.position.x().to_bits(),
+                                item.position.y().to_bits(),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
                 );
             }
             (display, extraction) => {
@@ -81,20 +86,28 @@ fn main() -> PdfResult<()> {
     doc.save_to_file(&args[1])?;
     let reopened = PdfDocument::open_with_mode(&args[1], ParseMode::Strict)?;
     if reopened.try_page_count()? != pages {
-        return Err(PdfError::DocumentError("round-trip page count changed".into()));
+        return Err(PdfError::DocumentError(
+            "round-trip page count changed".into(),
+        ));
     }
     for (index, expected) in original_events.iter().enumerate() {
         let page = u32::try_from(index)
             .map_err(|_| PdfError::ResourceLimit("v0.3 probe page index".into()))?;
-        let report = reopened.get_page(page)?.extract_characters_paint_order_report()?;
-        let actual = report.characters.into_iter().map(|item| {
-            (
-                item.unicode,
-                item.charcode,
-                item.position.x().to_bits(),
-                item.position.y().to_bits(),
-            )
-        }).collect::<Vec<_>>();
+        let report = reopened
+            .get_page(page)?
+            .extract_characters_paint_order_report()?;
+        let actual = report
+            .characters
+            .into_iter()
+            .map(|item| {
+                (
+                    item.unicode,
+                    item.charcode,
+                    item.position.x().to_bits(),
+                    item.position.y().to_bits(),
+                )
+            })
+            .collect::<Vec<_>>();
         if !report.diagnostics.is_empty() || actual != *expected {
             return Err(PdfError::DocumentError(format!(
                 "page {} text or position changed after save",

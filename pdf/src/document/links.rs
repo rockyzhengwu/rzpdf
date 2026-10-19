@@ -308,12 +308,12 @@ impl<R: Read + Seek> PdfDocument<R> {
             if subtype.as_name().map(PdfName::name) != Some("Link") {
                 continue;
             }
-            if let Some(owner) = dict.get("P") {
-                if owner.as_reference().map(PdfReference::id) != Some(page.page_id) {
-                    return Err(PdfError::DocumentError(
-                        "link P does not match its page".into(),
-                    ));
-                }
+            if let Some(owner) = dict.get("P")
+                && owner.as_reference().map(PdfReference::id) != Some(page.page_id)
+            {
+                return Err(PdfError::DocumentError(
+                    "link P does not match its page".into(),
+                ));
             }
             if dict.get("Dest").is_some() && dict.get("A").is_some() {
                 return Err(PdfError::DocumentError("link has both Dest and A".into()));

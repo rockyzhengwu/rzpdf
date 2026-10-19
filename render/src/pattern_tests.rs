@@ -136,16 +136,20 @@ fn pattern_surface_budget_rejects_before_paint_and_renderer_recovers() {
     ));
     assert!(
         rgba(&mut render)
-            .chunks_exact(4)
-            .all(|pixel| pixel == [255, 255, 255, 255])
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|pixel| *pixel == [255, 255, 255, 255])
     );
     doc.replace_page_contents(0, b"0 1 0 rg 0 0 40 40 re f".to_vec())
         .unwrap();
     doc.get_page(0).unwrap().display(&mut render).unwrap();
     assert!(
         rgba(&mut render)
-            .chunks_exact(4)
-            .all(|pixel| pixel == [0, 255, 0, 255])
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|pixel| *pixel == [0, 255, 0, 255])
     );
 }
 
@@ -167,8 +171,10 @@ fn combined_fill_and_pattern_stroke_preflight_prevents_partial_ink() {
     ));
     assert!(
         rgba(&mut render)
-            .chunks_exact(4)
-            .all(|pixel| pixel == [255, 255, 255, 255])
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|pixel| *pixel == [255, 255, 255, 255])
     );
     assert_eq!(render.surface.canvas().save_count(), 1);
 }
@@ -211,7 +217,9 @@ fn nonuniform_overlapping_tiles_have_no_white_seams_and_charge_reduction_buffers
             );
             assert!(
                 pixels
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .all(|pixel| pixel[1] == 0 && pixel[3] == 255)
             );
         }

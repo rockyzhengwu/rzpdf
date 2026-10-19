@@ -163,7 +163,6 @@ fn tiny_steps_hit_tile_budget_and_retry_is_independent() {
                 max_content_operations: 20,
                 ..Limits::default()
             },
-            ..ParseOptions::default()
         },
     )
     .unwrap();

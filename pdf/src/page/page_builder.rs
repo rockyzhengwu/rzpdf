@@ -90,14 +90,13 @@ impl PageBuilder {
                 "page rotation must be a multiple of 90".into(),
             ));
         }
-        if let Some(crop) = &self.crop_box {
-            if crop.llx().max(self.media_box.llx()) >= crop.urx().min(self.media_box.urx())
-                || crop.lly().max(self.media_box.lly()) >= crop.ury().min(self.media_box.ury())
-            {
-                return Err(PdfError::DocumentError(
-                    "CropBox must overlap MediaBox with positive area".into(),
-                ));
-            }
+        if let Some(crop) = &self.crop_box
+            && (crop.llx().max(self.media_box.llx()) >= crop.urx().min(self.media_box.urx())
+                || crop.lly().max(self.media_box.lly()) >= crop.ury().min(self.media_box.ury()))
+        {
+            return Err(PdfError::DocumentError(
+                "CropBox must overlap MediaBox with positive area".into(),
+            ));
         }
         Ok(())
     }

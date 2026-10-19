@@ -16,6 +16,140 @@ pub struct PostScriptFunction {
     max_depth: usize,
 }
 
+impl PostScriptFunction {
+    pub(crate) fn input_domain(&self) -> &[f32] {
+        &self.domain
+    }
+    pub(super) fn retained_own_bytes(&self) -> PdfResult<usize> {
+        super::retained_total(&[
+            super::retained_vector_bytes(&self.domain)?,
+            super::retained_vector_bytes(&self.range)?,
+            super::retained_vector_bytes(&self.program)?,
+        ])
+    }
+    pub(super) fn dimensions(&self) -> (usize, usize) {
+        (self.domain.len() / 2, self.range.len() / 2)
+    }
+
+    pub fn try_new<R: Seek + Read>(obj: &PdfObject, ctx: &PDFContext<R>) -> PdfResult<Self> {
+        let obj = ctx.resolve(obj)?;
+        let stream = obj
+            .as_stream()
+            .ok_or_else(|| PdfError::FunctionError("Type4 requires a stream".to_string()))?;
+
+        let pairs = |key: &str| -> PdfResult<Vec<f32>> {
+            let value = ctx.resolve(
+                stream
+                    .dict()
+                    .get(key)
+                    .ok_or_else(|| PdfError::FunctionError(format!("Type4 requires {key}")))?,
+            )?;
+            let array = value
+                .as_array()
+                .ok_or_else(|| PdfError::FunctionError(format!("Type4 {key} must be an array")))?;
+            if array.is_empty() || array.len() % 2 != 0 {
+                return Err(PdfError::FunctionError(format!(
+                    "Type4 {key} requires nonempty pairs"
+                )));
+            }
+            let bytes = array
+                .len()
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| PdfError::ResourceLimit("Type4 parameter size".into()))?;
+            if array.len() > ctx.limits().max_objects || bytes > ctx.limits().max_decoded_bytes {
+                return Err(PdfError::ResourceLimit("Type4 parameter array".into()));
+            }
+            let mut result = Vec::new();
+            result
+                .try_reserve_exact(array.len())
+                .map_err(|_| PdfError::ResourceLimit("Type4 parameter allocation".into()))?;
+            for item in array {
+                let value = ctx
+                    .resolve(item)?
+                    .as_f32()
+                    .filter(|n| n.is_finite())
+                    .ok_or_else(|| {
+                        PdfError::FunctionError(format!("Type4 {key} requires finite numbers"))
+                    })?;
+                result.push(value);
+            }
+            if result.as_chunks::<2>().0.iter().any(|p| p[0] > p[1]) {
+                return Err(PdfError::FunctionError(format!(
+                    "Type4 {key} requires ordered pairs"
+                )));
+            }
+            Ok(result)
+        };
+        // Reject invalid parameters before doing any stream decoding.
+        let domain = pairs("Domain")?;
+        let range = pairs("Range")?;
+        let data = stream.decode_data(ctx)?;
+        let limits = ctx.limits();
+        let program = super::calculator::compile(
+            &data,
+            limits.max_objects,
+            limits.max_decoded_bytes,
+            limits.max_depth,
+        )?;
+        Ok(Self {
+            domain,
+            range,
+            program,
+            max_nodes: limits.max_objects,
+            max_bytes: limits.max_decoded_bytes,
+            max_depth: limits.max_depth,
+        })
+    }
+
+    pub fn eval(&self, inputs: &[f32]) -> PdfResult<Vec<f32>> {
+        if self.domain.is_empty()
+            || self.range.is_empty()
+            || inputs.len() != self.domain.len() / 2
+            || inputs.iter().any(|value| !value.is_finite())
+        {
+            return Err(PdfError::FunctionError(
+                "Type4 invalid input dimensions or values".into(),
+            ));
+        }
+        let mut clipped = Vec::new();
+        clipped
+            .try_reserve_exact(inputs.len())
+            .map_err(|_| PdfError::ResourceLimit("Type4 input allocation".into()))?;
+        for (&input, bounds) in inputs.iter().zip(self.domain.as_chunks::<2>().0) {
+            clipped.push(input.clamp(bounds[0], bounds[1]));
+        }
+        let stack = super::calculator::evaluate(
+            &self.program,
+            &clipped,
+            self.max_nodes,
+            self.max_bytes,
+            self.max_depth,
+        )?;
+        if stack.len() != self.range.len() / 2 {
+            return Err(PdfError::FunctionError(
+                "Type4 output component count mismatch".into(),
+            ));
+        }
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(stack.len())
+            .map_err(|_| PdfError::ResourceLimit("Type4 output allocation".into()))?;
+        for (value, bounds) in stack.into_iter().zip(self.range.as_chunks::<2>().0) {
+            let number = match value {
+                super::calculator::Value::Integer(value) => f64::from(value),
+                super::calculator::Value::Real(value) => value,
+                _ => {
+                    return Err(PdfError::FunctionError(
+                        "Type4 output must be numeric".into(),
+                    ));
+                }
+            };
+            output.push(number.clamp(f64::from(bounds[0]), f64::from(bounds[1])) as f32);
+        }
+        Ok(output)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,139 +402,5 @@ mod tests {
             .is_ok()
         );
         assert!(doc.is_stamp_current(&stamp));
-    }
-}
-
-impl PostScriptFunction {
-    pub(crate) fn input_domain(&self) -> &[f32] {
-        &self.domain
-    }
-    pub(super) fn retained_own_bytes(&self) -> PdfResult<usize> {
-        super::retained_total(&[
-            super::retained_vector_bytes(&self.domain)?,
-            super::retained_vector_bytes(&self.range)?,
-            super::retained_vector_bytes(&self.program)?,
-        ])
-    }
-    pub(super) fn dimensions(&self) -> (usize, usize) {
-        (self.domain.len() / 2, self.range.len() / 2)
-    }
-
-    pub fn try_new<R: Seek + Read>(obj: &PdfObject, ctx: &PDFContext<R>) -> PdfResult<Self> {
-        let obj = ctx.resolve(obj)?;
-        let stream = obj
-            .as_stream()
-            .ok_or_else(|| PdfError::FunctionError("Type4 requires a stream".to_string()))?;
-
-        let pairs = |key: &str| -> PdfResult<Vec<f32>> {
-            let value = ctx.resolve(
-                stream
-                    .dict()
-                    .get(key)
-                    .ok_or_else(|| PdfError::FunctionError(format!("Type4 requires {key}")))?,
-            )?;
-            let array = value
-                .as_array()
-                .ok_or_else(|| PdfError::FunctionError(format!("Type4 {key} must be an array")))?;
-            if array.len() == 0 || array.len() % 2 != 0 {
-                return Err(PdfError::FunctionError(format!(
-                    "Type4 {key} requires nonempty pairs"
-                )));
-            }
-            let bytes = array
-                .len()
-                .checked_mul(std::mem::size_of::<f32>())
-                .ok_or_else(|| PdfError::ResourceLimit("Type4 parameter size".into()))?;
-            if array.len() > ctx.limits().max_objects || bytes > ctx.limits().max_decoded_bytes {
-                return Err(PdfError::ResourceLimit("Type4 parameter array".into()));
-            }
-            let mut result = Vec::new();
-            result
-                .try_reserve_exact(array.len())
-                .map_err(|_| PdfError::ResourceLimit("Type4 parameter allocation".into()))?;
-            for item in array {
-                let value = ctx
-                    .resolve(item)?
-                    .as_f32()
-                    .filter(|n| n.is_finite())
-                    .ok_or_else(|| {
-                        PdfError::FunctionError(format!("Type4 {key} requires finite numbers"))
-                    })?;
-                result.push(value);
-            }
-            if result.chunks_exact(2).any(|p| p[0] > p[1]) {
-                return Err(PdfError::FunctionError(format!(
-                    "Type4 {key} requires ordered pairs"
-                )));
-            }
-            Ok(result)
-        };
-        // Reject invalid parameters before doing any stream decoding.
-        let domain = pairs("Domain")?;
-        let range = pairs("Range")?;
-        let data = stream.decode_data(ctx)?;
-        let limits = ctx.limits();
-        let program = super::calculator::compile(
-            &data,
-            limits.max_objects,
-            limits.max_decoded_bytes,
-            limits.max_depth,
-        )?;
-        Ok(Self {
-            domain,
-            range,
-            program,
-            max_nodes: limits.max_objects,
-            max_bytes: limits.max_decoded_bytes,
-            max_depth: limits.max_depth,
-        })
-    }
-
-    pub fn eval(&self, inputs: &[f32]) -> PdfResult<Vec<f32>> {
-        if self.domain.is_empty()
-            || self.range.is_empty()
-            || inputs.len() != self.domain.len() / 2
-            || inputs.iter().any(|value| !value.is_finite())
-        {
-            return Err(PdfError::FunctionError(
-                "Type4 invalid input dimensions or values".into(),
-            ));
-        }
-        let mut clipped = Vec::new();
-        clipped
-            .try_reserve_exact(inputs.len())
-            .map_err(|_| PdfError::ResourceLimit("Type4 input allocation".into()))?;
-        for (&input, bounds) in inputs.iter().zip(self.domain.chunks_exact(2)) {
-            clipped.push(input.clamp(bounds[0], bounds[1]));
-        }
-        let stack = super::calculator::evaluate(
-            &self.program,
-            &clipped,
-            self.max_nodes,
-            self.max_bytes,
-            self.max_depth,
-        )?;
-        if stack.len() != self.range.len() / 2 {
-            return Err(PdfError::FunctionError(
-                "Type4 output component count mismatch".into(),
-            ));
-        }
-        let mut output = Vec::new();
-        output
-            .try_reserve_exact(stack.len())
-            .map_err(|_| PdfError::ResourceLimit("Type4 output allocation".into()))?;
-        for (value, bounds) in stack.into_iter().zip(self.range.chunks_exact(2)) {
-            let number = match value {
-                super::calculator::Value::Integer(value) => f64::from(value),
-                super::calculator::Value::Real(value) => value,
-                _ => {
-                    return Err(PdfError::FunctionError(
-                        "Type4 output must be numeric".into(),
-                    ));
-                }
-            };
-            output.push(number.clamp(f64::from(bounds[0]), f64::from(bounds[1])) as f32);
-        }
-        Ok(output)
     }
 }

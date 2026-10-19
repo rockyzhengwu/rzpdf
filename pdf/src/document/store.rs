@@ -1,5 +1,5 @@
-use std::collections::hash_map::RandomState;
 use crate::budget::table_allocator::TableAllocator;
+use std::collections::hash_map::RandomState;
 
 type ObjectTable = hashbrown::HashMap<ObjectId, StoreEntry, RandomState, TableAllocator>;
 
@@ -12,18 +12,34 @@ pub struct StoreEntries<'a> {
 }
 
 impl<'a> StoreEntries<'a> {
-    pub fn len(&self) -> usize { self.table.len() }
-    pub fn is_empty(&self) -> bool { self.table.is_empty() }
-    pub fn capacity(&self) -> usize { self.table.capacity() }
-    pub fn get(&self, id: &ObjectId) -> Option<&'a StoreEntry> { self.table.get(id) }
-    pub fn contains_key(&self, id: &ObjectId) -> bool { self.table.contains_key(id) }
-    pub fn keys(&self) -> impl Iterator<Item = &'a ObjectId> + 'a { self.table.keys() }
-    pub fn values(&self) -> impl Iterator<Item = &'a StoreEntry> + 'a { self.table.values() }
-    pub fn iter(&self) -> impl Iterator<Item = (&'a ObjectId, &'a StoreEntry)> + 'a { self.table.iter() }
+    pub fn len(&self) -> usize {
+        self.table.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.table.is_empty()
+    }
+    pub fn capacity(&self) -> usize {
+        self.table.capacity()
+    }
+    pub fn get(&self, id: &ObjectId) -> Option<&'a StoreEntry> {
+        self.table.get(id)
+    }
+    pub fn contains_key(&self, id: &ObjectId) -> bool {
+        self.table.contains_key(id)
+    }
+    pub fn keys(&self) -> impl Iterator<Item = &'a ObjectId> + 'a {
+        self.table.keys()
+    }
+    pub fn values(&self) -> impl Iterator<Item = &'a StoreEntry> + 'a {
+        self.table.values()
+    }
+    pub fn iter(&self) -> impl Iterator<Item = (&'a ObjectId, &'a StoreEntry)> + 'a {
+        self.table.iter()
+    }
 }
 
 use crate::error::{PdfError, PdfResult};
-use crate::objects::{object_id::ObjectId, PdfObject};
+use crate::objects::{PdfObject, object_id::ObjectId};
 
 #[derive(Debug, Clone)]
 pub enum StoreEntry {
@@ -82,15 +98,17 @@ mod tests {
         }));
         assert!(caught.is_err());
         assert_eq!(pool.live_bytes(), 0);
-        assert!(store
-            .snapshot_with_budget(
-                &pool,
-                Limits {
-                    max_objects: 1,
-                    ..Default::default()
-                }
-            )
-            .is_err());
+        assert!(
+            store
+                .snapshot_with_budget(
+                    &pool,
+                    Limits {
+                        max_objects: 1,
+                        ..Default::default()
+                    }
+                )
+                .is_err()
+        );
         assert_eq!(pool.live_bytes(), 0);
     }
 
@@ -176,7 +194,10 @@ impl StoreSnapshot {
 }
 
 impl DocumentStore {
-    pub(crate) fn enter_table_budget(&self, budget: &crate::budget::OperationBudget) -> PdfResult<()> {
+    pub(crate) fn enter_table_budget(
+        &self,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<()> {
         self.entries.allocator().enter(budget)
     }
 
@@ -309,6 +330,8 @@ impl DocumentStore {
     }
 
     pub fn entries(&self) -> StoreEntries<'_> {
-        StoreEntries { table: &self.entries }
+        StoreEntries {
+            table: &self.entries,
+        }
     }
 }

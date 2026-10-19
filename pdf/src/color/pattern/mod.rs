@@ -94,6 +94,10 @@ impl PatternColorSpace {
 }
 
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "preserve public pattern variants and inline budget accounting"
+)]
 pub enum Pattern {
     Tiling(TilingPattern),
     Shading(shading::ShadingPattern),
@@ -113,14 +117,12 @@ impl Pattern {
         match pt {
             1 => {
                 let p = TilingPattern::try_new(obj, ctx)?;
-                return Ok(Pattern::Tiling(p));
+                Ok(Pattern::Tiling(p))
             }
             2 => Ok(Pattern::Shading(shading::ShadingPattern::try_new(
                 obj, ctx,
             )?)),
-            _ => {
-                return Err(PdfError::UnsupportedFeature(format!("PatternType {pt}")));
-            }
+            _ => Err(PdfError::UnsupportedFeature(format!("PatternType {pt}"))),
         }
     }
 }

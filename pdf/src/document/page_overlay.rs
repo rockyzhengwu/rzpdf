@@ -465,7 +465,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         combined.extend_from_slice(prefix);
         combined.extend_from_slice(&original);
         combined.extend_from_slice(middle);
-        combined.extend_from_slice(&overlay);
+        combined.extend_from_slice(overlay);
         combined.extend_from_slice(suffix);
         let mut validation = Vec::new();
         validation.try_reserve_exact(size).map_err(|_| {

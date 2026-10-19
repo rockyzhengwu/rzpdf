@@ -102,12 +102,11 @@ fn document_entry_handles_truncations_and_byte_mutations_without_panics() {
         for mode in [ParseMode::Strict, ParseMode::Compatible] {
             if let Ok(document) =
                 PdfDocument::from_bytes_with_options(bytes.clone(), ParseOptions { mode, limits })
+                && let Ok(count) = document.try_page_count()
             {
-                if let Ok(count) = document.try_page_count() {
-                    for index in 0..count.min(8) {
-                        if let Ok(mut page) = document.get_page(index as u32) {
-                            let _ = page.display_list();
-                        }
+                for index in 0..count.min(8) {
+                    if let Ok(mut page) = document.get_page(index as u32) {
+                        let _ = page.display_list();
                     }
                 }
             }

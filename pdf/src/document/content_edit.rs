@@ -1,7 +1,7 @@
 use super::PdfDocument;
 use crate::{
     error::{PdfError, PdfResult},
-    objects::{pdf_array::PdfArray, pdf_stream::PdfStream, PdfObject},
+    objects::{PdfObject, pdf_array::PdfArray, pdf_stream::PdfStream},
     page::content_program::ContentProgram,
 };
 use std::io::{Read, Seek};
@@ -62,7 +62,7 @@ pub(crate) fn path_parameter_replacement(
         _ => {
             return Err(PdfError::ObjectError(
                 "replacement requires numeric path geometry".into(),
-            ))
+            ));
         }
     };
     if target.num_operands() != count || values.len() != count {
@@ -146,7 +146,7 @@ pub(crate) fn text_range_replacement(
         .try_reserve_exact(size)
         .map_err(|_| PdfError::ResourceLimit("text range replacement allocation".into()))?;
     replacement.extend_from_slice(&old[..range.start]);
-    replacement.extend_from_slice(&codes);
+    replacement.extend_from_slice(codes);
     replacement.extend_from_slice(&old[range.end..]);
     font.visit_chars_limited(&replacement, limits.max_text_chars, |_| Ok(()))?;
     Ok(replacement)
@@ -205,28 +205,53 @@ pub(crate) fn budgeted_text_array_range_adjustments(
 ) -> PdfResult<BudgetedTextAdjustments> {
     use crate::page::content_program::TextArrayAdjustment;
     let size = std::mem::size_of::<TextArrayAdjustment>();
-    let mut lease = budget.reserve(replacements.len().checked_mul(size)
-        .ok_or_else(|| PdfError::ResourceLimit("TJ adjustment metadata".into()))?)?;
+    let mut lease = budget.reserve(
+        replacements
+            .len()
+            .checked_mul(size)
+            .ok_or_else(|| PdfError::ResourceLimit("TJ adjustment metadata".into()))?,
+    )?;
     let mut items = Vec::new();
-    items.try_reserve_exact(replacements.len())
+    items
+        .try_reserve_exact(replacements.len())
         .map_err(|_| PdfError::ResourceLimit("TJ adjustment allocation".into()))?;
-    lease.resize(items.capacity().checked_mul(size)
-        .ok_or_else(|| PdfError::ResourceLimit("TJ adjustment metadata".into()))?)?;
+    lease.resize(
+        items
+            .capacity()
+            .checked_mul(size)
+            .ok_or_else(|| PdfError::ResourceLimit("TJ adjustment metadata".into()))?,
+    )?;
     for &(item, _) in replacements {
-        let old = array.get(item).and_then(PdfObject::as_string)
-            .ok_or_else(|| PdfError::ObjectError("TJ adjustment requires a string item".into()))?.bytes();
-        let start = if item == range.start.0 { range.start.1 } else { 0 };
-        let end = if item == range.end.0 { range.end.1 } else { old.len() };
-        let removed = old.get(start..end)
+        let old = array
+            .get(item)
+            .and_then(PdfObject::as_string)
+            .ok_or_else(|| PdfError::ObjectError("TJ adjustment requires a string item".into()))?
+            .bytes();
+        let start = if item == range.start.0 {
+            range.start.1
+        } else {
+            0
+        };
+        let end = if item == range.end.0 {
+            range.end.1
+        } else {
+            old.len()
+        };
+        let removed = old
+            .get(start..end)
             .ok_or_else(|| PdfError::ObjectError("TJ adjustment range out of bounds".into()))?;
         let inserted = if item == range.start.0 { codes } else { b"" };
         items.push(TextArrayAdjustment {
             value: measure(removed, inserted)?,
-            suffix_offset: start.checked_add(inserted.len())
+            suffix_offset: start
+                .checked_add(inserted.len())
                 .ok_or_else(|| PdfError::ResourceLimit("TJ suffix offset".into()))?,
         });
     }
-    Ok(BudgetedTextAdjustments { items, _lease: lease })
+    Ok(BudgetedTextAdjustments {
+        items,
+        _lease: lease,
+    })
 }
 
 #[cfg(test)]
@@ -440,7 +465,11 @@ impl<R: Read + Seek> PdfDocument<R> {
     ) -> PdfResult<()> {
         let budget = self.ctx.limits().operation_budget();
         self.commit_page_content_edit_with_budget(page, expected, &budget, || {
-            expected.with_replaced_operation_sequences_with_budget(replacements, self.ctx.options(), &budget)
+            expected.with_replaced_operation_sequences_with_budget(
+                replacements,
+                self.ctx.options(),
+                &budget,
+            )
         })
     }
 
@@ -460,35 +489,59 @@ impl<R: Read + Seek> PdfDocument<R> {
         let mut retained_state = None;
         let mut retained_replacements = None;
         self.commit_page_content_edit_with_budget(page, expected, &budget, || {
-            let target = &expected.operations().get(operation).ok_or_else(||
-                PdfError::ObjectError("text operation index out of range".into()))?.operator;
+            let target = &expected
+                .operations()
+                .get(operation)
+                .ok_or_else(|| PdfError::ObjectError("text operation index out of range".into()))?
+                .operator;
             if target.name() != "TJ" || target.num_operands() != 1 {
-                return Err(PdfError::ObjectError("array range compensation requires TJ".into()));
+                return Err(PdfError::ObjectError(
+                    "array range compensation requires TJ".into(),
+                ));
             }
             let array = target.get_as_array(0)?;
             validate_text_array_range(array, &range, self.ctx.limits())?;
             let count = (range.start.0..=range.end.0)
-                .filter(|&index| array.get(index).and_then(PdfObject::as_string).is_some()).count();
-            let added = count.checked_mul(2).and_then(|count| count.checked_add(array.len()))
+                .filter(|&index| array.get(index).and_then(PdfObject::as_string).is_some())
+                .count();
+            let added = count
+                .checked_mul(2)
+                .and_then(|count| count.checked_add(array.len()))
                 .ok_or_else(|| PdfError::ResourceLimit("TJ adjusted array items".into()))?;
             if added > self.ctx.limits().max_objects {
                 return Err(PdfError::ResourceLimit("TJ adjusted array items".into()));
             }
-            let state = self.get_page_with_budget(page, &budget)?
+            let state = self
+                .get_page_with_budget(page, &budget)?
                 .text_metrics_for_operation_with_budget(expected, operation, &budget)?;
             let state = retained_state.insert(state);
-            let codes = state.font.encode_text_with_budget(text, self.ctx.limits(), &budget)?;
+            let codes = state
+                .font
+                .encode_text_with_budget(text, self.ctx.limits(), &budget)?;
             let replacements = budgeted_text_array_range_replacements(
-                &budget, &state.font, array, range.clone(), codes.as_slice(), self.ctx.limits(),
+                &budget,
+                &state.font,
+                array,
+                range.clone(),
+                codes.as_slice(),
+                self.ctx.limits(),
             )?;
             let replacements = retained_replacements.insert(replacements);
             let borrowed = BudgetedTextItems::new(&budget, replacements.as_slice())?;
             let adjustments = budgeted_text_array_range_adjustments(
-                &budget, array, &range, codes.as_slice(), borrowed.as_slice(),
+                &budget,
+                array,
+                &range,
+                codes.as_slice(),
+                borrowed.as_slice(),
                 |old, new| state.replacement_adjustment(old, new, self.ctx.limits()),
             )?;
             expected.with_adjusted_text_array_items_codes_with_budget(
-                operation, borrowed.as_slice(), adjustments.as_slice(), self.ctx.options(), &budget,
+                operation,
+                borrowed.as_slice(),
+                adjustments.as_slice(),
+                self.ctx.options(),
+                &budget,
             )
         })
     }
@@ -770,7 +823,7 @@ impl<R: Read + Seek> PdfDocument<R> {
                 .ok_or_else(|| PdfError::ResourceLimit("text range replacement bytes".into()))?;
             let replacement_lease = budget.reserve(size)?;
             let replacement =
-                text_range_replacement(&font, old, range, codes.as_slice(), self.ctx.limits())?;
+                text_range_replacement(font, old, range, codes.as_slice(), self.ctx.limits())?;
             let replacement = retained_replacement.insert(
                 crate::budget::BudgetedBytes::from_reserved_vec(replacement, replacement_lease)?,
             );
@@ -890,7 +943,11 @@ impl<R: Read + Seek> PdfDocument<R> {
                 PdfError::ObjectError("image operation index out of range".into())
             })?;
             if target.operator.inline_image().is_some() {
-                return expected.with_transformed_image_operation(operation, matrix, self.ctx.options());
+                return expected.with_transformed_image_operation(
+                    operation,
+                    matrix,
+                    self.ctx.options(),
+                );
             }
             if target.operator.name() != "Do" || target.operator.num_operands() != 1 {
                 return Err(PdfError::ObjectError(
@@ -934,13 +991,20 @@ impl<R: Read + Seek> PdfDocument<R> {
         image: &crate::page::inline_image::InlineImage,
     ) -> PdfResult<()> {
         self.commit_page_content_edit(page, expected, || {
-            if expected.operations().get(operation)
-                .and_then(|o| o.operator.inline_image()).is_none()
+            if expected
+                .operations()
+                .get(operation)
+                .and_then(|o| o.operator.inline_image())
+                .is_none()
             {
-                return Err(PdfError::ObjectError("replacement target is not an inline image".into()));
+                return Err(PdfError::ObjectError(
+                    "replacement target is not an inline image".into(),
+                ));
             }
             expected.with_replaced_operation(
-                operation, &image.to_content_bytes(self.ctx.limits())?, self.ctx.options(),
+                operation,
+                &image.to_content_bytes(self.ctx.limits())?,
+                self.ctx.options(),
             )
         })
     }
@@ -967,13 +1031,17 @@ impl<R: Read + Seek> PdfDocument<R> {
             .operations()
             .get(operation)
             .ok_or_else(|| PdfError::ObjectError("image operation index out of range".into()))?;
-        if target.operator.inline_image().is_none() && (target.operator.name() != "Do" || target.operator.num_operands() != 1) {
+        if target.operator.inline_image().is_none()
+            && (target.operator.name() != "Do" || target.operator.num_operands() != 1)
+        {
             return Err(PdfError::ObjectError(
                 "image replacement requires one named Do".into(),
             ));
         }
         if target.operator.inline_image().is_none() {
-            let resource = target.named_resource_use()?.ok_or_else(|| PdfError::ObjectError("image resource name missing".into()))?;
+            let resource = target
+                .named_resource_use()?
+                .ok_or_else(|| PdfError::ObjectError("image resource name missing".into()))?;
             self.get_page(page)?.extract_image_source(resource.name)?;
         }
         let id = self.validate_handle(image)?;
@@ -1055,21 +1123,36 @@ impl<R: Read + Seek> PdfDocument<R> {
         let mut retained_state = None;
         let mut retained_codes = None;
         self.commit_page_content_edit_with_budget(page, expected, &budget, || {
-            let target = &expected.operations().get(operation).ok_or_else(||
-                PdfError::ObjectError("text operation index out of range".into()))?.operator;
+            let target = &expected
+                .operations()
+                .get(operation)
+                .ok_or_else(|| PdfError::ObjectError("text operation index out of range".into()))?
+                .operator;
             let old = match (target.name(), target.num_operands()) {
                 ("Tj" | "'", 1) => target.get_as_string(0)?.bytes(),
                 ("\"", 3) => target.get_as_string(2)?.bytes(),
-                _ => return Err(PdfError::UnsupportedFeature("Advance compensation requires single-string text".into())),
+                _ => {
+                    return Err(PdfError::UnsupportedFeature(
+                        "Advance compensation requires single-string text".into(),
+                    ));
+                }
             };
-            let state = self.get_page_with_budget(page, &budget)?
+            let state = self
+                .get_page_with_budget(page, &budget)?
                 .text_metrics_for_operation_with_budget(expected, operation, &budget)?;
             let state = retained_state.insert(state);
-            let codes = state.font.encode_text_with_budget(text, self.ctx.limits(), &budget)?;
+            let codes = state
+                .font
+                .encode_text_with_budget(text, self.ctx.limits(), &budget)?;
             let codes = retained_codes.insert(codes);
-            let adjustment = state.replacement_adjustment(old, codes.as_slice(), self.ctx.limits())?;
+            let adjustment =
+                state.replacement_adjustment(old, codes.as_slice(), self.ctx.limits())?;
             expected.with_adjusted_text_codes_with_budget(
-                operation, codes.as_slice(), adjustment, self.ctx.options(), &budget,
+                operation,
+                codes.as_slice(),
+                adjustment,
+                self.ctx.options(),
+                &budget,
             )
         })
     }
@@ -1090,23 +1173,41 @@ impl<R: Read + Seek> PdfDocument<R> {
         let mut retained_state = None;
         let mut retained_codes = None;
         self.commit_page_content_edit_with_budget(page, expected, &budget, || {
-            let target = &expected.operations().get(operation).ok_or_else(||
-                PdfError::ObjectError("text operation index out of range".into()))?.operator;
+            let target = &expected
+                .operations()
+                .get(operation)
+                .ok_or_else(|| PdfError::ObjectError("text operation index out of range".into()))?
+                .operator;
             if target.name() != "TJ" || target.num_operands() != 1 {
-                return Err(PdfError::ObjectError("text array compensation requires TJ".into()));
+                return Err(PdfError::ObjectError(
+                    "text array compensation requires TJ".into(),
+                ));
             }
-            let old = target.get_as_array(0)?.get(item)
+            let old = target
+                .get_as_array(0)?
+                .get(item)
                 .and_then(PdfObject::as_string)
-                .ok_or_else(|| PdfError::ObjectError("TJ compensation requires a string item".into()))?
+                .ok_or_else(|| {
+                    PdfError::ObjectError("TJ compensation requires a string item".into())
+                })?
                 .bytes();
-            let state = self.get_page_with_budget(page, &budget)?
+            let state = self
+                .get_page_with_budget(page, &budget)?
                 .text_metrics_for_operation_with_budget(expected, operation, &budget)?;
             let state = retained_state.insert(state);
-            let codes = state.font.encode_text_with_budget(text, self.ctx.limits(), &budget)?;
+            let codes = state
+                .font
+                .encode_text_with_budget(text, self.ctx.limits(), &budget)?;
             let codes = retained_codes.insert(codes);
-            let adjustment = state.replacement_adjustment(old, codes.as_slice(), self.ctx.limits())?;
+            let adjustment =
+                state.replacement_adjustment(old, codes.as_slice(), self.ctx.limits())?;
             expected.with_adjusted_text_array_item_codes_with_budget(
-                operation, item, codes.as_slice(), adjustment, self.ctx.options(), &budget,
+                operation,
+                item,
+                codes.as_slice(),
+                adjustment,
+                self.ctx.options(),
+                &budget,
             )
         })
     }
@@ -1272,7 +1373,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         let edited = edited_owner.as_ref();
         // Preparation may have registered a new resource in an enclosing
         // transaction. Preserve that current page dictionary when updating Contents.
-        let (_page_dict_lease, mut location) = if let Some(budget) = budget {
+        let (_page_dict_lease, location) = if let Some(budget) = budget {
             let (location, lease) = self.page_location_with_budget(page, budget)?.into_parts();
             (Some(lease), location)
         } else {
@@ -1399,11 +1500,13 @@ impl<R: Read + Seek> PdfDocument<R> {
             dict.replace_existing("Contents", result)?;
             doc.update_object(location.page_id, PdfObject::PdfDict(dict))?;
             if let Some(before) = &structure_before {
-                let after = doc.structure_associations()?.ok_or_else(||
-                    PdfError::DocumentError("content edit removed structure tree".into()))?;
+                let after = doc.structure_associations()?.ok_or_else(|| {
+                    PdfError::DocumentError("content edit removed structure tree".into())
+                })?;
                 if before.items != after.items {
                     return Err(PdfError::UnsupportedFeature(
-                        "content edit changes declared MCID/MCR/OBJR ownership".into()));
+                        "content edit changes declared MCID/MCR/OBJR ownership".into(),
+                    ));
                 }
             }
             Ok(())
@@ -1445,7 +1548,7 @@ mod tests {
         let mut contents = PdfArray::default();
         for bytes in [b"q ".as_slice(), b"Q".as_slice()]
             .into_iter()
-            .chain(std::iter::repeat(b"".as_slice()).take(14))
+            .chain(std::iter::repeat_n(b"".as_slice(), 14))
         {
             let id = doc
                 .try_insert_object(PdfObject::PdfStream(
@@ -1632,13 +1735,14 @@ mod tests {
         })
         .unwrap();
         assert_eq!(budget.live_bytes(), 3);
-        assert!(doc
-            .get_page(0)
-            .unwrap()
-            .content_program()
-            .unwrap()
-            .source_bytes()
-            .starts_with(b"(abc) Tj"));
+        assert!(
+            doc.get_page(0)
+                .unwrap()
+                .content_program()
+                .unwrap()
+                .source_bytes()
+                .starts_with(b"(abc) Tj")
+        );
         drop(neighbor);
         assert_eq!(budget.live_bytes(), 0);
     }
@@ -1979,15 +2083,17 @@ mod tests {
         );
         drop(owned);
         assert_eq!(budget.live_bytes(), 0);
-        assert!(budgeted_text_array_range_replacements(
-            &budget,
-            &font,
-            array,
-            (0, 1)..(4, 1),
-            b"XYZW",
-            limits,
-        )
-        .is_err());
+        assert!(
+            budgeted_text_array_range_replacements(
+                &budget,
+                &font,
+                array,
+                (0, 1)..(4, 1),
+                b"XYZW",
+                limits,
+            )
+            .is_err()
+        );
         assert_eq!(budget.live_bytes(), 0);
         assert_eq!(
             text_array_range_replacements(&font, array, (2, 0)..(2, 0), b"X", limits).unwrap(),
@@ -2142,12 +2248,10 @@ mod tests {
         ] {
             let program =
                 ContentProgram::from_decoded_bytes(body.to_vec(), Default::default()).unwrap();
-            assert!(path_parameter_replacement(
-                &program.operations()[0].operator,
-                &[1., 2.],
-                limits
-            )
-            .is_err());
+            assert!(
+                path_parameter_replacement(&program.operations()[0].operator, &[1., 2.], limits)
+                    .is_err()
+            );
         }
     }
 

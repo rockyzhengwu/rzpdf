@@ -819,7 +819,8 @@ impl<R: Read + Seek> PdfDocument<R> {
                             .as_number()
                             .ok_or_else(|| invalid("StructParents number"))?
                             .as_u32_checked()?;
-                        if !arrays.contains_key(&key) {
+                        if let std::collections::btree_map::Entry::Vacant(entry) = arrays.entry(key)
+                        {
                             let old = graph
                                 .reverse
                                 .get(&key)
@@ -830,7 +831,7 @@ impl<R: Read + Seek> PdfDocument<R> {
                             if slots > self.ctx().limits().max_objects {
                                 return Err(PdfError::ResourceLimit("ParentTree slots".into()));
                             }
-                            arrays.insert(key, old.into_iter().cloned().collect());
+                            entry.insert(old.into_iter().cloned().collect());
                         }
                         *arrays
                             .get_mut(&key)

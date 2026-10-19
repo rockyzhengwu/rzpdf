@@ -200,6 +200,10 @@ pub(super) fn history_constraints(doc: &Document, budget: &OperationBudget) -> P
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "PDF revision/signature invariants stay explicit; retain existing call contracts"
+)]
 fn form_reference_ownership(
     object: &PdfObject,
     owner: ObjectId,

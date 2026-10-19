@@ -17,7 +17,7 @@ pub enum BuiltEncoding {
     MsSymbol,
 }
 
-pub fn get_char_width(char: CharCode) -> Option<f32> {
+pub fn get_char_width(_character: CharCode) -> Option<f32> {
     None
 }
 
