@@ -4,7 +4,7 @@
 
 ## 当前目标
 
-v0.14 的 V14-00～09／阶段 A、B、C 已完成限定验收：完整工作区 93 组／1633 项、联合 189 项、十二组独立门禁、162 页目视和 30 条基线通过；654 输入、十四驱动及 2069 产物一致。交付 Catalog／page AF 读取、创建、绑定／解除、页面操作与保存保护，见[验收记录](docs/releases/v0.14-acceptance.md)及[边界](docs/releases/v0.14-boundaries.md)。仅 macOS x86_64 验证，本版未提交、推送或发布；不自动进入下一版或 v1.0。v0.13 检查点 `6be4cc3`，v0.14 计划基线 `222c0c8`；下方旧状态保留历史。
+v0.14 的 V14-00～09／阶段 A、B、C 已完成限定验收：完整工作区 93 组／1633 项、联合 189 项、十二组独立门禁、162 页目视和 30 条基线通过；654 输入、十四驱动及 2069 产物一致。交付 Catalog／page AF 读取、创建、绑定／解除、页面操作与保存保护，见[验收记录](docs/releases/v0.14-acceptance.md)及[边界](docs/releases/v0.14-boundaries.md)。仅 macOS x86_64 验证，本版已提交 `64be233`，未推送或发布；不自动进入下一版或 v1.0。v0.13 检查点 `6be4cc3`，v0.14 计划基线 `222c0c8`；下方旧状态保留历史。
 
 基于 v0.12 检查点 `57f338f` 的[v0.13 图层创建与编辑](docs/releases/v0.13.md)已完成 V13-00～08／阶段 A、B、C：完整工作区 92 组／1609 项、联合 23 组／273 项、十一组必选独立门禁及补充审计通过，432 页目视复核和 9 条预算基线完成；645 项输入、十三个驱动及 1676 项产物前后一致。范围限定为 OCG／OCMD、简单配置、新段及顶层单次调用绑定，不开放迁移／扁平化／动作执行。证据见[验收记录](docs/releases/v0.13-acceptance.md)，限制见[矩阵](docs/releases/v0.13-support.md)。仅 macOS x86_64 已验证，可另行提交检查点／盘点下一版，不自动进入 v1.0。v0.13 未提交或推送，未改包版本或发布；下方旧状态保留验收时快照。
 
@@ -16,7 +16,7 @@ v0.11 的 V11-00～13 已按[实施计划](docs/releases/v0.11.md)完成限定�
 
 v0.9 的 V09-01～11 已完成限定范围本地验收：当时冻结源码完整工作区 73 组、1,312 项、五组独立门禁和 23 页视觉/像素复核通过，见[v0.9 验收记录](docs/releases/v0.9-acceptance.md)。这些历史结果不自动覆盖 v0.10 的新增源码。v0.10 范围、架构边界和验收清单见[计划](docs/releases/v0.10.md)，初始模型见[结构读取指南](docs/structure.md)。v0.9/v0.10 实现已统一提交为 `c26f243`，未推送、打标签或发布。
 
-**v0.1～v0.8 的限定范围已完成本地工程验收，尚未打标签或发布。** 各版验收记录见 [v0.1](docs/releases/v0.1-acceptance.md)、[v0.2](docs/releases/v0.2-acceptance.md)、[v0.3](docs/releases/v0.3-acceptance.md)、[v0.4](docs/releases/v0.4-acceptance.md)、[v0.5](docs/releases/v0.5-acceptance.md)、[v0.6](docs/releases/v0.6-acceptance.md)、[v0.7](docs/releases/v0.7-acceptance.md) 与 [v0.8](docs/releases/v0.8-acceptance.md)。验收只承诺各版冻结的支持矩阵，不表示任意 PDF 均受支持。P0～P5 是长期技术分类，不再按整个阶段全部完成后才交付；[TODO.md](TODO.md) 保留技术任务和历史证据。
+**v0.1～v0.8 的限定范围已完成本地工程验收，尚未打标签或发布。** 各版验收记录见 [v0.1](docs/releases/v0.1-acceptance.md)、[v0.2](docs/releases/v0.2-acceptance.md)、[v0.3](docs/releases/v0.3-acceptance.md)、[v0.4](docs/releases/v0.4-acceptance.md)、[v0.5](docs/releases/v0.5-acceptance.md)、[v0.6](docs/releases/v0.6-acceptance.md)、[v0.7](docs/releases/v0.7-acceptance.md) 与 [v0.8](docs/releases/v0.8-acceptance.md)。验收只承诺各版冻结的支持矩阵，不表示任意 PDF 均受支持。P0～P5 是长期技术分类，不再按整个阶段全部完成后才交付；[TODO.md](TODO.md) 维护当前任务，[历史归档](TODO-history.md)保留旧任务和证据。
 
 v0.2 的范围、开工前盘点和最终结论见 [版本清单](docs/releases/v0.2.md)与 [支持矩阵](docs/releases/v0.2-support.md)。
 
@@ -29,6 +29,8 @@ v0.5 的增量保存、限定 R=6 加解密、外部签名接口均已完成限�
 已有后续版本能力保留代码与测试，在相应验收完成前标为实验支持。正式支持指通过已声明场景和样本验收，不表示支持任意 PDF，也不表示 v1.0 前公共 API 已稳定。
 
 ## 分期交付
+
+当前代码检查点：v0.14 已提交 `64be233`，未推送或发布；此前“本版未提交”等文字是验收时快照。当前待办集中在 [TODO.md](TODO.md)，完整旧日志及长期父项在 [TODO-history.md](TODO-history.md)。下一步先做跨版本差距审计与稳定版范围选择，不自动开启 v0.15 或 v1.0。
 
 | 版本 | 交付范围 | 退出条件 | 本期不承诺 |
 |---|---|---|---|
