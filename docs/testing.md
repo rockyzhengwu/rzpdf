@@ -1,5 +1,74 @@
 # 解析回归与异常输入验证
 
+## v0.13 图层编写门禁
+
+2026-10-19，V13-00～08／阶段 A、B、C 冻结范围已收口：最终 `v013-final3-` 完整工作区 92 组／1609 项、联合 23 组／273 项及十一组必选独立门禁退出 0，0 failed／ignored／filtered。间接配置补充审计、432 页目视复核和 9 条固定规模基线完成，645 项源清单／重新枚举列表、十三个驱动及 1676 PDF／PNG／JSON 前后核对一致。仅 macOS x86_64 已验证；未提交／推送／改包版本或发布。
+
+本版接口／限额见[冻结边界](releases/v0.13-boundaries.md)，真实结束结果见[验收记录](releases/v0.13-acceptance.md)。先运行新增定向，再按冻结源码完成完整回归；不能把下方 v0.12 的数字视为本版已通过。
+
+```sh
+cargo test --locked -p pdf --test v013_optional_content_edit
+cargo build --locked -p pdf --example v013_layers --example v013_benchmark \
+  --example inspect_optional_content -p render --example render_optional_content
+PYTHONPATH=tmp/pdfs/v05-verifiers:tmp/pdfs/python \
+  python3 docs/check-v013-layers.py NEW_LAYERS_DIRECTORY
+PYTHONPATH=tmp/pdfs/v05-verifiers:tmp/pdfs/python \
+  python3 docs/check-v010-optional-content.py NEW_OLD_LAYERS_DIRECTORY
+/usr/bin/time -l target/debug/examples/v013_benchmark > benchmark.jsonl 2> benchmark-rss.log
+cargo test --workspace --locked
+```
+
+新增门禁使用独立 pikepdf 与 MuPDF create 输入，三种全量布局、两种追加及 R6，共三种可见性配置和两页共享 Form 对照。qpdf／pikepdf 检查配置及对象共享；Skia 对照 MuPDF 期望文档，MuPDF 还直接绘制本库输出默认状态。所有输出新建目录，固定几何逐像素一致，跨后端颜色仅允许旧门禁已有的 1 级量化误差；还要目视复核，不只检查文本。旧结构／迁移、内容编辑、v0.11 安全和 v0.12 文件保存门禁仍需复验，命令见对应下节。
+
+基线固定 1／100／1000 组及三种保存布局，JSON 分列创建、状态／内容编辑、保存耗时、文件大小和编辑预算峰值；进程 RSS 另列。保守 reservation 不冒充实际内存。无新依赖／远端 CI／Poppler／fuzz，其他平台仅按实测登记。
+
+间接配置／旧别名的补充审计可在现有 Python 环境按下述配方重建；从仓库根运行，替换新目录名称。正例的 24 份输出再按主门禁的 qpdf 检查和 default 期望页面进行 MuPDF 对照；输出是相同的几何配方。此配方记录在文档中，不是新增的 Rust 测试目标。
+
+```python
+from pathlib import Path
+import subprocess
+import pikepdf as q
+
+out = Path("NEW_INDIRECT_DIRECTORY")
+out.mkdir(exist_ok=False)
+for variant in ["indirect", "ui-rule", "design-default"]:
+    source = out / (variant + ".pdf")
+    with q.Pdf.new() as p:
+        for _ in range(2):
+            page = p.add_blank_page(page_size=(200, 200))
+            page.Contents = p.make_stream(b"q 0 g 10 10 20 20 re f Q\n")
+        d = p.make_indirect(q.Dictionary(Name=q.String("Legacy"),
+            Creator=q.String("External producer"), BaseState=q.Name.ON,
+            Intent=q.Name.View))
+        if variant == "ui-rule":
+            d.RBGroups = q.Array([])
+        if variant == "design-default":
+            d.Intent = q.Name.Design
+        properties = p.make_indirect(q.Dictionary(
+            OCGs=p.make_indirect(q.Array([])), D=d,
+            Configs=p.make_indirect(q.Array([])), Private=q.String("opaque")))
+        p.Root.OCProperties = properties
+        p.Root.OldProperties = properties
+        p.Root.OldDefault = d
+        p.save(source, force_version="2.0")
+    destination = out / (variant + "-authored")
+    result = subprocess.run(["target/debug/examples/v013_layers",
+                             str(source), str(destination)])
+    assert (result.returncode == 0) == (variant == "indirect")
+    if variant != "indirect":
+        assert not destination.exists()
+        continue
+    assert len(list(destination.glob("*.pdf"))) == 24
+    for saved in destination.glob("*.pdf"):
+        with q.open(saved, password="user" if saved.stem.endswith("-r6") else "") as p:
+            assert len(p.Root.OldProperties.OCGs) == 0
+            assert len(p.Root.OldProperties.Configs) == 0
+            assert str(p.Root.OldDefault.Name) == "Legacy"
+            assert str(p.Root.OCProperties.D.Name) == "Default"
+            assert str(p.Root.OCProperties.D.Creator) == "External producer"
+            assert str(p.Root.OCProperties.Private) == "opaque"
+```
+
 ## v0.12 整版冻结门禁
 
 2026-10-19，最终 `v012-final2-` 冻结源码完整工作区 91 组、1591 passed，0 failed／ignored／filtered；18 组联合复验 217 项、九组必选独立门禁、422 组精确像素和 437 页目视复核通过。50 条固定规模预算／性能记录完成，640 项输入及十个二进制前后一致，1101 项产物 hash 核对通过。V12-00～13／阶段 A、B、C 全部按限定范围收口，详细数字、候选问题与真实退出状态见[验收记录](releases/v0.12-acceptance.md)。未提交、推送、改包版本或发布。

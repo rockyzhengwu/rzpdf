@@ -2,6 +2,14 @@
 
 本文件只记录交付变化，不替代长期任务池或原始测试日志。版本范围见 [ROADMAP](ROADMAP.md)。
 
+## Unreleased — v0.13 图层创建与编辑（限定范围已验收）
+
+新增独立 `optional_content_edit` 模块：OCG 创建／Unicode 重命名、带 stamp 的默认／替代配置目标和状态写入、四类 OCMD 策略及有界 VE。默认配置生成要求 ON／View，旧 Compatible 读取不收紧；复杂 Usage／UI／未知规则的修改继续拒绝。原 options 字段、默认保存及来源／权限保护保持。
+
+新增页面局部 Properties 注册、自包含新内容段追加及顶层 Form／image 单次 Do 的图层绑定。通过 BDC／EMC 包裹调用，不克隆或改写共享 XObject；保留旧别名、继承资源、ActualText／Artifact 规则，拒绝新的 MCID 所有权、二进制内联段、已有自身 OC／结构所有权及嵌套绑定。使用显式共享 OperationBudget，区分保守 reservation、未覆盖分配和 RSS。
+
+新增示例、18 项集成测试、双生产者独立门禁、间接配置补充审计及固定规模基线。[使用指南](docs/layer-authoring.md)、[边界](docs/releases/v0.13-boundaries.md)、[支持矩阵](docs/releases/v0.13-support.md)、[性能](docs/releases/v0.13-performance.md)及[平台说明](docs/releases/v0.13-platform.md)同步。2026-10-19，V13-00～08／三个阶段限定范围验收通过：完整工作区 92 组／1609 项、联合 273 项、十一组必选独立门禁及补充审计通过，432 页目视复核、9 条基线完成；645 输入／十三驱动／1676 产物前后一致。见[验收记录](docs/releases/v0.13-acceptance.md)。仅 macOS x86_64 已验证；未提交／推送／改包版本或发布。
+
 ## Unreleased — v0.12 文件结构与兼容收口（限定范围已验收）
 
 新增独立 `SaveLayout` 和完整保存入口，不改 SaveOptions 字段或旧默认；复用既有对象序列化及保护路径，内部一次性布局和类型化记录负责偏移、generation、自由链及输出专属结构对象。提供有效 PDF 1.5+ 的全量 xref stream，以及显式 `XrefStreamWithObjectStreams` 打包：100 成员／1 MiB 双上限、type 2 索引，保留成员身份；禁止及超大对象独立输出。旧容器存在 Extends、未知字段或活跃外部引用时明确拒绝，不静默丢失语义。签名重写及保留 Linearized 声明等未开放组合仍拒绝。接口及限制见[高级保存](docs/advanced-saving.md#explicit-full-save-layouts)。

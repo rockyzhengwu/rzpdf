@@ -39,6 +39,7 @@ pub mod metadata;
 mod nested_edit;
 pub mod outlines;
 pub mod optional_content;
+pub mod optional_content_edit;
 pub mod owned;
 pub mod recovery;
 pub mod page_labels;

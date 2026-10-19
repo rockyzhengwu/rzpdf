@@ -20,7 +20,9 @@ list.replay(&mut device)?;
 `optional_content()` exposes document-scoped group handles, decoded names, the
 default configuration, and alternative configurations in `/Configs` order.
 Original group/configuration dictionaries remain available for inspection.
-This is not an optional-content conformance validator or a layer-authoring API.
+This snapshot API is not an optional-content conformance validator or a
+layer-authoring API. Selected creation and editing are available separately
+through [layer authoring](layer-authoring.md).
 
 `OptionalContentOptions` selects:
 
@@ -127,8 +129,9 @@ whole-process RSS.
 
 Page copying/import/deletion/reordering involving OCProperties, and resource
 imports containing OCG/OCMD or XObject OC, remain refused by the existing safety
-guards. This version does not migrate configurations, author layer dictionaries,
-flatten layers, execute actions, or securely erase hidden content. Low-level
+guards. The read-only API does not migrate configurations, author layer dictionaries,
+flatten layers, execute actions, or securely erase hidden content. Selected
+authoring has its own [release boundary](releases/v0.13-boundaries.md). Low-level
 object/stream construction remains available without these semantic guarantees.
 
 Build `inspect_optional_content` and `render_optional_content` for command-line
