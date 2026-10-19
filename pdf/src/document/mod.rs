@@ -40,6 +40,7 @@ mod nested_edit;
 pub mod outlines;
 pub mod optional_content;
 pub mod owned;
+pub mod recovery;
 pub mod page_labels;
 mod span_tree;
 pub mod subset_text_edit;
@@ -53,6 +54,7 @@ pub mod page_transfer;
 pub mod page_overlay;
 pub mod page_tree;
 mod resource_import;
+pub(crate) mod preservation;
 pub mod resource_manager;
 pub mod save_options;
 pub(crate) mod state;
@@ -146,6 +148,13 @@ impl PdfDocument<Cursor<Vec<u8>>> {
 }
 
 impl<R: Seek + Read> PdfDocument<R> {
+    /// Bounded file-structure events, including events discovered by lazy reads.
+    pub fn structure_diagnostics(&self) -> PdfResult<Vec<crate::parser::diagnostic::StructureDiagnostic>> {
+        self.ctx.structure_diagnostics()
+    }
+    pub fn read_provenance(&self) -> crate::parser::diagnostic::ReadProvenance {
+        self.ctx.read_provenance()
+    }
     pub(crate) fn create_with_options(
         options: crate::parser::options::ParseOptions,
     ) -> PdfResult<Self> {

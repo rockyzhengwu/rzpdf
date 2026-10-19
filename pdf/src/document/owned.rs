@@ -113,6 +113,28 @@ impl Document {
         options: super::save_options::IncrementalSaveOptions,
         budget: &crate::budget::OperationBudget,
     ) -> PdfResult<crate::budget::BudgetedBytes> {
+        self.save_incremental_with_layout_and_budget(options, Default::default(), budget)
+    }
+
+    /// Explicit unsigned layout. Existing methods continue to emit classic
+    /// tables. No-op saves return the exact source without a new revision.
+    pub fn save_incremental_to_bytes_with_layout(
+        &self,
+        options: super::save_options::IncrementalSaveOptions,
+        layout: super::save_options::IncrementalSaveLayout,
+    ) -> PdfResult<Vec<u8>> {
+        let budget = self.inner.ctx().limits().operation_budget();
+        let bytes = self.save_incremental_with_layout_and_budget(options, layout, &budget)?;
+        let (bytes, _lease) = bytes.into_reserved_parts();
+        Ok(bytes)
+    }
+
+    pub fn save_incremental_with_layout_and_budget(
+        &self,
+        options: super::save_options::IncrementalSaveOptions,
+        layout: super::save_options::IncrementalSaveLayout,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<crate::budget::BudgetedBytes> {
         let baseline = self.source_baseline.as_ref().ok_or_else(|| {
             PdfError::UnsupportedFeature(
                 "incremental save requires an immutable byte source".into(),
@@ -123,12 +145,13 @@ impl Document {
                 "incremental save requires strict source parsing".into(),
             ));
         }
-        crate::writer::write_incremental(
+        crate::writer::write_incremental_with_layout(
             &self.inner,
             baseline.bytes.as_ref(),
             baseline.last_xref_offset,
             &baseline.original_trailer,
             options,
+            layout,
             budget,
         )
     }
@@ -143,6 +166,31 @@ impl Document {
     /// Atomically replace an independent output file. Never appends in place.
     pub fn save_incremental_to_file<P: AsRef<Path>>(&self, path: P) -> PdfResult<()> {
         crate::writer::save_bytes_atomically(path.as_ref(), &self.save_incremental_to_bytes()?)
+    }
+
+    /// Serialize before touching the caller's writer. Host I/O errors can
+    /// still leave partial host output, as with the classic method.
+    pub fn save_incremental_to_writer_with_layout<W: std::io::Write>(
+        &self,
+        output: &mut W,
+        options: super::save_options::IncrementalSaveOptions,
+        layout: super::save_options::IncrementalSaveLayout,
+    ) -> PdfResult<()> {
+        output.write_all(&self.save_incremental_to_bytes_with_layout(options, layout)?)?;
+        Ok(())
+    }
+
+    /// Atomically replace an independent output file; never append in place.
+    pub fn save_incremental_to_file_with_layout<P: AsRef<Path>>(
+        &self,
+        path: P,
+        options: super::save_options::IncrementalSaveOptions,
+        layout: super::save_options::IncrementalSaveLayout,
+    ) -> PdfResult<()> {
+        crate::writer::save_bytes_atomically(
+            path.as_ref(),
+            &self.save_incremental_to_bytes_with_layout(options, layout)?,
+        )
     }
 
     pub fn new() -> PdfResult<Self> {

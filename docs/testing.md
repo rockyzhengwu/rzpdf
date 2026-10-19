@@ -1,5 +1,155 @@
 # 解析回归与异常输入验证
 
+## v0.12 整版冻结门禁
+
+2026-10-19，最终 `v012-final2-` 冻结源码完整工作区 91 组、1591 passed，0 failed／ignored／filtered；18 组联合复验 217 项、九组必选独立门禁、422 组精确像素和 437 页目视复核通过。50 条固定规模预算／性能记录完成，640 项输入及十个二进制前后一致，1101 项产物 hash 核对通过。V12-00～13／阶段 A、B、C 全部按限定范围收口，详细数字、候选问题与真实退出状态见[验收记录](releases/v0.12-acceptance.md)。未提交、推送、改包版本或发布。
+
+完整工作区不加过滤、不跳过已知嵌套字体长用例：
+
+```sh
+cargo test --workspace --locked
+cargo test --locked -p pdf \
+  --test v012_recovery --test v012_preservation --test v09_page_relationships \
+  --test v010_structure_transfer --test v010_optional_content \
+  --test v012_incremental_stream --test v012_layout_security \
+  --test v012_object_streams --test v012_xref_output --test stream_structure \
+  --test v05_incremental --test v05_security --test v05_signatures \
+  --test v011_encrypted_incremental --test v011_controlled_updates --test v011_multisign \
+  --test v011_signature_fields --test v011_signature_history
+```
+
+外部门禁先构建示例。目录必须不存在，不自动安装依赖；全部凭证和密钥均为公开测试值／临时合成，无网络信任取证。
+
+```sh
+cargo build --locked -p pdf \
+  --example v012_layout --example v012_security_layout --example v012_incremental \
+  --example v012_preservation --example v012_benchmark \
+  --example v011_sign_verify --example v011_field_source --example v011_encrypted_incremental \
+  -p render --example v012_recovery --example render_annotations
+export PYTHONPATH=tmp/pdfs/v05-verifiers:tmp/pdfs/python
+python3 docs/check-v012-object-streams.py NEW_OBJECT_STREAMS_DIRECTORY
+python3 docs/check-v012-layout-security.py NEW_SECURITY_LAYOUT_DIRECTORY
+python3 docs/check-v012-incremental.py NEW_INCREMENTAL_DIRECTORY
+python3 docs/check-v012-preservation.py NEW_PRESERVATION_DIRECTORY
+python3 docs/check-v012-recovery.py NEW_RECOVERY_DIRECTORY
+python3 docs/check-v011-workflows.py NEW_WORKFLOWS_DIRECTORY
+python3 docs/check-v011-multisign.py NEW_MULTISIGN_DIRECTORY
+python3 docs/check-v011-signatures.py NEW_SIGNATURES_DIRECTORY
+PYTHONPATH=tmp/pdfs/v05-verifiers-py311 python3.11 docs/check-v011-encrypted-incremental.py NEW_ENCRYPTION_DIRECTORY
+/usr/bin/time -l target/debug/examples/v012_benchmark > benchmark.jsonl 2> benchmark-rss.log
+```
+
+ObjStm 门禁内部还执行 xref-output 门禁，不重复相加其案例。恢复门禁不写修复 PDF，比较分离的 Skia 绘制与无损来源并保留 MuPDF 参考。全量／增量保留与 R6 验证需检查对象／来源投影及最新渲染页，签名工作流还须跨引擎文字范围与八组精确像素；不能只看首个 PASS 或沿用旧截图。[最终验收记录](releases/v0.12-acceptance.md)登记各任务真实终态、源码／二进制清单和平台，不把定向数量加到完整回归中冒称更多独立测试。
+
+标准映射见[覆盖索引](pdf-standard-coverage.md)，恢复 API／拒绝与预算见[指南](file-recovery.md)，固定规模和 RSS 实测见[性能记录](releases/v0.12-performance.md)。不运行 fuzz 或安装 Poppler，平台不具备时明确记未验证。下方各子阶段记录保留当时口径，不代表本轮整版运行状态。
+
+## v0.12 对象与关系保留 V12-06
+
+同一冻结源码 21 组、288 项不重复定向测试通过：writer 73、安全 6（排除 writer）、读取 7、资源导入 8、页面复制 3、页面顺序 2、15 组联合 189。新增 preservation 12 项已包含在联合中。独立门禁 62 正例／120 组源页像素对照／7 页全白检查通过，127 张输出页的 8 张联系表已目视复核。634 项非 Markdown 输入内容和清单前后相同；日志统一前缀 `tmp/pdfs/v012-06-final-`。详见[验收记录](releases/v0.12-acceptance.md#v12-06-对象保留与页面关系)。
+
+```sh
+cargo build --locked -p pdf --example v012_preservation --example v012_layout
+cargo test --locked -p pdf --lib writer::
+cargo test --locked -p pdf --lib security:: -- --skip writer::
+cargo test --locked -p pdf --lib objects::object_streams::
+cargo test --locked -p pdf --lib document::resource_import::
+cargo test --locked -p pdf --lib document::page_copy::
+cargo test --locked -p pdf --lib document::page_order::
+cargo test --locked -p pdf \
+  --test v012_preservation --test v09_page_relationships \
+  --test v010_structure_transfer --test v010_optional_content \
+  --test v012_incremental_stream --test v012_layout_security \
+  --test v012_object_streams --test v012_xref_output --test stream_structure \
+  --test v05_incremental --test v05_security --test v05_signatures \
+  --test v011_encrypted_incremental --test v011_controlled_updates --test v011_multisign
+PYTHONPATH=tmp/pdfs/v05-verifiers:tmp/pdfs/python python3 docs/check-v012-preservation.py NEW_PRESERVATION_DIRECTORY
+```
+
+外部依赖须已存在，不自动安装；目录必须新建。脚本自建合成输入和公开凭证，检查三种全量／两种增量、R6、页面操作、业务图投影、源前缀及 MuPDF 像素，另查 Info／私有 trailer 反向引用、未选中页归属、结构容器与失败重试。未知旧 XRef 字段重打包仍拒绝，不因通过样本就放宽保留边界。qpdf／pikepdf 共用后端，MuPDF 独立绘制；不运行附件／脚本、fuzz 或 Poppler。
+
+关闭 V12-06，不关闭 M3／阶段 B 或整版。下方 V12-05 的三个独立门禁是历史结果，本轮未重跑；完整工作区、四组 v0.11 独立安全门禁和其他平台仍待 V12-12。
+
+## v0.12 unsigned 流式增量 V12-05 历史验收
+
+最终同一冻结源码 197 项不重复定向测试通过：writer 73、安全 6（排除 writer）、读取 7、联合 11 组 111。增量 66／132、全量 R6 48／92、M1 16／32 + 10／20 门禁通过，276 页目视复核与 630 项输入前后核对一致；日志统一前缀 `tmp/pdfs/v012-05-final2-`。关闭 V12-05／M2／阶段 A，不关闭阶段 B／C 或整版。
+
+专项复现命令如下。三个独立门禁必须使用新目录，并在 examples 构建完成后执行；不自动安装依赖。凭证全部为公开合成值，native 驱动从环境读取，不能拿本例日志处理真实凭证。
+
+```sh
+cargo build --locked -p pdf --example v012_layout --example v012_security_layout --example v012_incremental
+cargo test --locked -p pdf --lib writer::
+cargo test --locked -p pdf --lib security:: -- --skip writer::
+cargo test --locked -p pdf --lib objects::object_streams::
+cargo test --locked -p pdf \
+  --test v012_incremental_stream --test v012_layout_security \
+  --test v012_object_streams --test v012_xref_output --test stream_structure \
+  --test v05_incremental --test v05_security --test v05_signatures \
+  --test v011_encrypted_incremental --test v011_controlled_updates --test v011_multisign
+PYTHONPATH=tmp/pdfs/v05-verifiers:tmp/pdfs/python python3 docs/check-v012-incremental.py NEW_INCREMENTAL_DIRECTORY
+PYTHONPATH=tmp/pdfs/v05-verifiers:tmp/pdfs/python python3 docs/check-v012-layout-security.py NEW_R6_DIRECTORY
+PYTHONPATH=tmp/pdfs/v05-verifiers:tmp/pdfs/python python3 docs/check-v012-object-streams.py NEW_M1_DIRECTORY
+```
+
+增量脚本为 11 种未加密／R6 的传统、流、ObjStm、hybrid 与直接 Encrypt 来源，分别跑两条三轮混合布局链及精确 no-op；每个真实追加对照两页 MuPDF 像素，另查 qpdf、原字节前缀、成员身份、无新 ObjStm、Prev／Index／self、保护身份和业务投影。Rust 专项覆盖压缩成员删除、hybrid 补充流覆盖、限额／RNG／host 故障及重试；此脚本不替代完整工作区或 v0.11 四组独立安全门禁。最终结果和源码清单见[验收记录](releases/v0.12-acceptance.md#v12-05-实现与验收范围)。fuzz 暂缓，不安装 Poppler。
+
+## v0.12 全量 R6 新布局 V12-04 历史验收
+
+最终冻结源码通过 writer 72、安全 6、对象流读取 7、联合 10 组 95 项，共 180 项不重复定向测试，0 failed/ignored。安全专项排除 writer 的三项重叠；各 lib 专项分别有 701／767／766 filtered。联合包含新增 `v012_layout_security` 12 项，不重复计入总数。
+
+```sh
+cargo build -p pdf --example v012_security_layout --example v012_layout --locked -j2
+cargo test -p pdf --lib writer:: --locked -j2
+cargo test -p pdf --lib security:: --locked -j2 -- --skip writer::
+cargo test -p pdf --lib object_streams:: --locked -j2
+cargo test -p pdf --locked -j2 \
+  --test v012_layout_security --test v012_object_streams --test v012_xref_output \
+  --test stream_structure --test v05_incremental --test v05_security --test v05_signatures \
+  --test v011_encrypted_incremental --test v011_controlled_updates --test v011_multisign
+PYTHONPATH=tmp/pdfs/v05-verifiers:tmp/pdfs/python python3 docs/check-v012-layout-security.py NEW_R6_DIRECTORY
+PYTHONPATH=tmp/pdfs/v05-verifiers:tmp/pdfs/python python3 docs/check-v012-object-streams.py NEW_M1_DIRECTORY
+```
+
+R6 脚本的 48 个组合覆盖两种流布局的新设／保留／移除／替换、用户／所有者／错密码、外部传统／对象流、PDF 1.7 扩展／PDF 2.0、直接 Encrypt、明文元数据和不同默认 filter 的真实字符串。qpdf 不需结构重建，pikepdf 以独立读取句柄核对原始投影和语法，MuPDF 解密绘制 92 组全页像素完全一致。两个 Identity 结构样本为零页，不虚算像素；原 M1 另有 16／32 与 10／20 复验。全部 144 张最新输出页目视复核通过，R5／权限／目标已存在等负例明确拒绝。
+
+证据 `tmp/pdfs/v012-04-final-{example,writer,security,reader,regression,independent,m1}.log`，626 项非 Markdown 输入前后指纹及重新枚举一致；命令、版本、来源和 hash 见[验收记录](releases/v0.12-acceptance.md#v12-04-全量新布局与-r6-验收)及各独立目录 manifest。仅关闭 V12-04，不关闭 M2／阶段 A；未重新运行完整工作区、四组 v0.11 独立安全门禁或跨平台验证。fuzz 继续暂缓，不安装 Poppler。
+
+## v0.12 未加密文件结构输出 M1 历史验收
+
+V12-03 最终冻结源码通过 writer 72、对象流读取 7、联合 8 组 75 项，共 154 项定向测试，0 failed/ignored。联合包含新增打包 16 项与原 xref 输出 11 项，不重复计数；两个 lib 专项分别有 700／765 filtered。
+
+```sh
+cargo test -p pdf --lib writer:: --locked -j2
+cargo test -p pdf --lib object_streams:: --locked -j2
+cargo test -p pdf --locked -j2 \
+  --test v012_object_streams --test v012_xref_output --test stream_structure \
+  --test v05_incremental --test v05_security --test v05_signatures \
+  --test v011_controlled_updates --test v011_multisign
+cargo build -p pdf --example v012_layout --locked -j2
+PYTHONPATH=tmp/pdfs/v05-verifiers:tmp/pdfs/python python3 docs/check-v012-object-streams.py NEW_DIRECTORY
+```
+
+最后的脚本也在 `input-gate/` 运行下方未修改的 V12-02 独立门禁。新增八类输入 × 两种设置共 16 次打包／32 组 MuPDF 全页精确像素，原门禁另 10 次／20 组；业务 ID／值、共享循环、元数据／附件、N／First／成员偏移和 type 2 索引核对通过，并覆盖至少三组大量小对象、旧容器重建及 Extends／未知字段／活跃引用拒绝。所有 52 张最新输出页均目视复核通过。
+
+日志为 `tmp/pdfs/v012-03-final-{example,writer,reader,regression,independent}.log`，独立目录有 manifest 和视觉总览；623 项非 Markdown 输入指纹前后及重新枚举相同。此轮仅关闭 V12-03／M1，未运行完整工作区、四组 v0.11 独立安全门禁或跨平台验证，不代替 V12-12。详见[验收记录](releases/v0.12-acceptance.md#v12-03-实现与验收)。
+
+### V12-00 至 V12-02 历史验收
+
+V12-00～02 使用同一冻结源码执行以下专项，均退出 0：writer 70 项（700 filtered），联合 7 组 59 项（无 filtered），零失败／忽略。新增 `v012_xref_output` 的 11 项包含在 59 项内，不能重复计数。
+
+```sh
+cargo test -p pdf --lib writer:: --locked -j2
+cargo test -p pdf --locked -j2 \
+  --test v012_xref_output --test stream_structure \
+  --test v05_incremental --test v05_security --test v05_signatures \
+  --test v011_controlled_updates --test v011_multisign
+cargo build -p pdf --example v012_layout --locked -j2
+PYTHONPATH=tmp/pdfs/v05-verifiers:tmp/pdfs/python python3 docs/check-v012-xref-output.py NEW_DIRECTORY
+```
+
+构建完成后再运行独立脚本，避免链接期间调用尚未生成的二进制。脚本复用已有工具，不安装依赖；十个重写案例覆盖五种输入和两种流压缩设置，独立检查全部原有对象投影、xref 自身及元数据／附件内容，MuPDF 二十组全页像素相同，另有线性化声明拒绝和示例目标不覆盖。最新二十页渲染结果目视复核通过。
+
+日志为 `tmp/pdfs/v012-02-final-writer.log`、`v012-02-final-regression.log`、`v012-02-final-independent.log` 及同名独立目录。614 项冻结输入前后列表和内容一致，细节见[验收记录](releases/v0.12-acceptance.md)。此为子阶段验证，未跑完整工作区或四组 v0.11 独立安全门禁，不冒充整版通过；不运行 fuzz 或安装 Poppler。
+
 ## v0.11 字段、外观与受控修改
 
 新增 `v011_signature_fields`（7 项）与 `v011_controlled_updates`（6 项），覆盖层级/多 Widget、Unicode/零面积 AP、保留 Matrix、继承字段、Widget 标志、签名和填值链、权限交集、令牌单次/外来/rollback/panic、累计预算、恰好不足及失败重试。仓库内合成 PDF/CMS 夹具不需运行时私钥或外部签名器。

@@ -4,9 +4,13 @@ use std::path::Path;
 mod feature_versions;
 mod incremental;
 mod protection;
-pub(crate) use incremental::{write_incremental, write_signature_incremental, write_signed_revision_incremental};
+mod layout;
+mod object_stream;
+mod xref;
+pub(crate) use incremental::{write_incremental_with_layout, write_signature_incremental, write_signed_revision_incremental};
 
 use crate::document::PdfDocument;
+use crate::document::preservation::retained_trailer_key;
 use crate::error::{PdfError, PdfResult};
 use crate::objects::{
     PdfObject, object_id::ObjectId, pdf_array::PdfArray, pdf_dict::PdfDict, pdf_name::PdfName,
@@ -91,8 +95,21 @@ fn write_protected_document_with_budget<R: std::io::Read + std::io::Seek>(
 
 fn write_document_output_with_security<R: std::io::Read + std::io::Seek>(
     document: &PdfDocument<R>,
+    options: crate::document::save_options::SaveOptions,
+    policy: crate::security::SaveSecurity<'_>,
+    output: &mut impl OutputBuffer,
+) -> PdfResult<()> {
+    write_document_output_with_layout(
+        document, options, policy,
+        crate::document::save_options::SaveLayout::Classic, output,
+    )
+}
+
+fn write_document_output_with_layout<R: std::io::Read + std::io::Seek>(
+    document: &PdfDocument<R>,
     mut options: crate::document::save_options::SaveOptions,
     policy: crate::security::SaveSecurity<'_>,
+    layout: crate::document::save_options::SaveLayout,
     mut output: &mut impl OutputBuffer,
 ) -> PdfResult<()> {
     // Validate the latest Catalog override as well as the source Header.
@@ -155,6 +172,15 @@ fn write_document_output_with_security<R: std::io::Read + std::io::Seek>(
         Some(budget) => document.effective_version_with_budget(budget)?,
         None => document.effective_version()?,
     };
+    if layout != crate::document::save_options::SaveLayout::Classic {
+        if effective.max(options.version.unwrap_or(effective))
+            < crate::document::save_options::PdfVersion::V1_5
+        {
+            return Err(PdfError::UnsupportedFeature(
+                "xref-stream output requires PDF 1.5 or an explicit upgrade".into(),
+            ));
+        }
+    }
     let version = match options.version {
         Some(version) => {
             if version < effective {
@@ -216,7 +242,8 @@ fn write_document_output_with_security<R: std::io::Read + std::io::Seek>(
         (None, document.ctx().serializable_object_ids())
     };
     let max_obj_num = object_ids.iter().map(|id| id.obj_num()).max().unwrap_or(0);
-    let encryption_id = if security.is_some() {
+    let encryption_id = if security.is_some()
+        && layout == crate::document::save_options::SaveLayout::Classic {
         Some(ObjectId::new(
             max_obj_num
                 .checked_add(1)
@@ -226,24 +253,41 @@ fn write_document_output_with_security<R: std::io::Read + std::io::Seek>(
     } else {
         None
     };
-    let size = encryption_id
+    let classic_size = encryption_id
         .map(|id| id.obj_num())
         .unwrap_or(max_obj_num)
         .checked_add(1)
         .ok_or_else(|| PdfError::ResourceLimit("xref output Size overflow".into()))?;
-    let (_xref_lease, mut xref_entries) = {
-        let (entries, lease) = allocate_xref_entries_inner(
-            size,
-            document.ctx().limits().max_objects,
-            budget.as_ref(),
-        )?;
-        (lease, entries)
-    };
-    if !xref_entries.is_empty() {
-        xref_entries[0] = (0, 65535, b'f');
-    }
+    let mut plan = layout::FullLayoutPlan::new(
+        layout, classic_size, &document.ctx().trailer(),
+        document.ctx().source_xref(), document.ctx().limits(), budget.as_ref(),
+    )?;
+    // Preserve an existing indirect Encrypt identity in the new layouts.
+    // Direct/new Encrypt dictionaries need an ephemeral ID above source Size.
+    let encryption_id = if security.is_some() && plan.is_stream() {
+        Some(match document.ctx().encryption_dictionary_id() {
+            Some(id) => id,
+            None => plan.allocate_container(document.ctx().limits(), &crypto_budget)?,
+        })
+    } else { encryption_id };
+    let size = plan.size();
+    let packing = layout == crate::document::save_options::SaveLayout::XrefStreamWithObjectStreams;
+    let selection = if packing {
+        Some(object_stream::Selection::inspect(document, &object_ids, classic_size, &crypto_budget)?)
+    } else { None };
+    let mut packer = if packing {
+        Some(object_stream::Packer::new(document.ctx().limits(), &crypto_budget,
+            matches!(options.compression, crate::document::save_options::StreamCompression::FlateUnencoded), security)?)
+    } else { None };
 
-    for object_id in object_ids {
+    for &object_id in &object_ids {
+        // The active Encrypt dictionary is emitted below, in plaintext and
+        // outside ObjStm, from the authenticated/generated handler, not overlay.
+        if plan.is_stream() && Some(object_id) == encryption_id { continue; }
+        if selection.as_ref().is_some_and(|s| s.removed(object_id)) {
+            plan.record_deleted(object_id)?;
+            continue;
+        }
         let mut _object_lease = None;
         let object = if let Some(budget) = budget.as_ref() {
             document
@@ -257,6 +301,7 @@ fn write_document_output_with_security<R: std::io::Read + std::io::Seek>(
             document.ctx().object_for_write(object_id)?
         };
         if let Some(obj) = object {
+            plan.validate_references(&obj, document.ctx().limits().max_depth, 0)?;
             validate_serialization_nodes_with_budget(
                 std::iter::once((&obj, 1)),
                 0,
@@ -288,6 +333,12 @@ fn write_document_output_with_security<R: std::io::Read + std::io::Seek>(
                 effective.max(options.version.unwrap_or(effective)),
                 budget.as_ref(),
             )?;
+            if let (Some(selection), Some(packer)) = (&selection, &mut packer) {
+                if selection.eligible(object_id, &obj)
+                    && packer.try_pack(object_id, &obj, &mut plan, &mut output, options.max_output_bytes)? {
+                    continue;
+                }
+            }
             let mut _encoded_lease = None;
             let obj = if let Some(handler) = security {
                 let (object, lease) =
@@ -302,8 +353,7 @@ fn write_document_output_with_security<R: std::io::Read + std::io::Seek>(
             } else {
                 obj
             };
-            xref_entries[object_id.obj_num() as usize] =
-                (output.len() as u64, object_id.gen_num(), b'n');
+            plan.record(object_id, output.len() as u64)?;
             append_formatted_output(
                 &mut output,
                 format_args!("{} {} obj\n", object_id.obj_num(), object_id.gen_num()),
@@ -311,20 +361,36 @@ fn write_document_output_with_security<R: std::io::Read + std::io::Seek>(
             )?;
             write_object_limited(&mut output, &obj, options.max_output_bytes)?;
             append_output(&mut output, b"\nendobj\n", options.max_output_bytes)?;
+        } else {
+            plan.record_deleted(object_id)?;
+        }
+    }
+
+    if let Some(packer) = packer.as_mut() {
+        packer.flush(&mut plan, &mut output, options.max_output_bytes)?;
+        // Containers were allocated as groups were flushed. Check the final
+        // generated range too, before any host writer/file receives bytes.
+        for &id in &object_ids {
+            if selection.as_ref().is_some_and(|s| s.removed(id)) { continue; }
+            let loaded = document.ctx().object_for_write_with_budget(id, &crypto_budget)?;
+            if let Some((object, _)) = loaded.as_ref() {
+                plan.validate_references(object, document.ctx().limits().max_depth, 0)?;
+            }
         }
     }
 
     if let (Some(id), Some(handler)) = (encryption_id, security) {
+        plan.validate_trailer_references(&handler.dictionary, document.ctx().limits().max_depth, None)?;
         validate_serialization_nodes_with_budget(
             handler.dictionary.into_iter().map(|(_, value)| (value, 2)),
             1,
             document.ctx().limits(),
             Some(&crypto_budget),
         )?;
-        xref_entries[id.obj_num() as usize] = (output.len() as u64, 0, b'n');
+        plan.record(id, output.len() as u64)?;
         append_formatted_output(
             &mut output,
-            format_args!("{} 0 obj\n", id.obj_num()),
+            format_args!("{} {} obj\n", id.obj_num(), id.gen_num()),
             options.max_output_bytes,
         )?;
         write_dict_limited(&mut output, &handler.dictionary, options.max_output_bytes)?;
@@ -332,7 +398,6 @@ fn write_document_output_with_security<R: std::io::Read + std::io::Seek>(
     }
 
     let xref_offset = output.len() as u64;
-    write_xref_table(&mut output, &xref_entries, options.max_output_bytes)?;
     let mut _protected_trailer_lease = None;
     let protected_trailer = if security.is_some()
         || source_security.is_some()
@@ -349,15 +414,23 @@ fn write_document_output_with_security<R: std::io::Read + std::io::Seek>(
     } else {
         None
     };
-    write_trailer_limited(
-        &mut output,
-        protected_trailer
-            .as_ref()
-            .unwrap_or(&document.ctx().trailer()),
-        size,
-        document.ctx().limits(),
-        options.max_output_bytes,
-    )?;
+    let current_trailer = document.ctx().trailer();
+    let trailer = protected_trailer.as_ref().unwrap_or(&current_trailer);
+    plan.validate_trailer_references(trailer, document.ctx().limits().max_depth, encryption_id)?;
+    if plan.is_stream() {
+        plan.write_stream(
+            &mut output, trailer, document.ctx().limits(), options.max_output_bytes,
+        )?;
+    } else {
+        write_xref_table(&mut output, plan.classic_entries()?, options.max_output_bytes)?;
+        write_trailer_limited(
+            &mut output,
+            trailer,
+            size,
+            document.ctx().limits(),
+            options.max_output_bytes,
+        )?;
+    }
     append_output(&mut output, b"startxref\n", options.max_output_bytes)?;
     append_formatted_output(
         &mut output,
@@ -1099,13 +1172,6 @@ fn write_trailer_limited(
     Ok(())
 }
 
-fn retained_trailer_key(key: &str) -> bool {
-    !matches!(
-        key,
-        "Prev" | "XRefStm" | "Type" | "W" | "Index" | "Filter" | "DecodeParms" | "Length"
-    )
-}
-
 fn write_object(output: &mut Vec<u8>, obj: &PdfObject) -> PdfResult<()> {
     match obj {
         PdfObject::PdfNull => output.extend_from_slice(b"null"),
@@ -1437,6 +1503,113 @@ fn validated_number_lexeme(number: &crate::objects::pdf_number::PdfNumber) -> Pd
 }
 
 impl<R: std::io::Read + std::io::Seek> PdfDocument<R> {
+    /// Full rewrite using an explicit layout. Existing SaveOptions literals and
+    /// old save APIs are unchanged. Preserves existing R6 protection; signed
+    /// sources remain locked. Use the explicit security variant to change it.
+    pub fn save_to_bytes_with_layout(
+        &self,
+        options: crate::document::save_options::SaveOptions,
+        layout: crate::document::save_options::SaveLayout,
+    ) -> PdfResult<Vec<u8>> {
+        let budget = self.ctx().limits().operation_budget();
+        Ok(self
+            .save_with_layout_and_budget(options, layout, &budget)?
+            .into_reserved_parts().0)
+    }
+
+    /// Returned bytes retain their reservation in the supplied operation pool.
+    pub fn save_with_layout_and_budget(
+        &self,
+        options: crate::document::save_options::SaveOptions,
+        layout: crate::document::save_options::SaveLayout,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<crate::budget::BudgetedBytes> {
+        self.save_with_layout_and_security_and_budget(
+            options, layout, crate::security::SaveSecurity::Preserve, budget,
+        )
+    }
+
+    /// Explicit full-save layout plus Preserve/Remove/Set protection policy.
+    /// Changing existing protection requires owner authentication. No signature
+    /// layout or incremental-save capability is implied by this entry point.
+    pub fn save_to_bytes_with_layout_and_security(
+        &self,
+        options: crate::document::save_options::SaveOptions,
+        layout: crate::document::save_options::SaveLayout,
+        policy: crate::security::SaveSecurity<'_>,
+    ) -> PdfResult<Vec<u8>> {
+        let budget = self.ctx().limits().operation_budget();
+        Ok(self.save_with_layout_and_security_and_budget(options, layout, policy, &budget)?
+            .into_reserved_parts().0)
+    }
+
+    /// Combined layout/protection operation with caller-owned live-byte quota.
+    pub fn save_with_layout_and_security_and_budget(
+        &self,
+        options: crate::document::save_options::SaveOptions,
+        layout: crate::document::save_options::SaveLayout,
+        policy: crate::security::SaveSecurity<'_>,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<crate::budget::BudgetedBytes> {
+        let mut output = SerializationOutput {
+            bytes: crate::budget::BudgetedBytes::copy_from_slice(budget, &[])?,
+            limits: self.ctx().limits(),
+            capacity_limit: options.max_output_bytes,
+        };
+        write_document_output_with_layout(
+            self, options, policy, layout, &mut output,
+        )?;
+        Ok(output.bytes)
+    }
+
+    /// Serialization completes before the first host write; I/O may still
+    /// leave partial caller-owned output, as with the ordinary writer API.
+    pub fn save_to_writer_with_layout<W: Write>(
+        &self,
+        output: &mut W,
+        options: crate::document::save_options::SaveOptions,
+        layout: crate::document::save_options::SaveLayout,
+    ) -> PdfResult<()> {
+        output.write_all(&self.save_to_bytes_with_layout(options, layout)?)?;
+        Ok(())
+    }
+
+    pub fn save_to_file_with_layout<P: AsRef<Path>>(
+        &self,
+        path: P,
+        options: crate::document::save_options::SaveOptions,
+        layout: crate::document::save_options::SaveLayout,
+    ) -> PdfResult<()> {
+        save_bytes_atomically(
+            path.as_ref(), &self.save_to_bytes_with_layout(options, layout)?,
+        )
+    }
+
+    /// Finishes serialization before host writes; I/O failure can still leave
+    /// partial caller-owned output. Neither document nor prepared state changes.
+    pub fn save_to_writer_with_layout_and_security<W: Write>(
+        &self,
+        output: &mut W,
+        options: crate::document::save_options::SaveOptions,
+        layout: crate::document::save_options::SaveLayout,
+        policy: crate::security::SaveSecurity<'_>,
+    ) -> PdfResult<()> {
+        output.write_all(&self.save_to_bytes_with_layout_and_security(options, layout, policy)?)?;
+        Ok(())
+    }
+
+    /// Uses the same atomic host-file replacement contract as ordinary saves.
+    pub fn save_to_file_with_layout_and_security<P: AsRef<Path>>(
+        &self,
+        path: P,
+        options: crate::document::save_options::SaveOptions,
+        layout: crate::document::save_options::SaveLayout,
+        policy: crate::security::SaveSecurity<'_>,
+    ) -> PdfResult<()> {
+        save_bytes_atomically(path.as_ref(),
+            &self.save_to_bytes_with_layout_and_security(options, layout, policy)?)
+    }
+
     pub fn save_to_bytes_with_security(
         &self,
         options: crate::document::save_options::SaveOptions,

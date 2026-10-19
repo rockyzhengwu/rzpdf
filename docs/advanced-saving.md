@@ -1,11 +1,120 @@
 # Advanced saving
 
+For file-level diagnostics and explicitly read-only damaged-index input, see [file diagnostics and recovery](file-recovery.md). Recovery is a separate capability, not an additional save layout or an automatic repair step. [API/platform compatibility](releases/v0.12-platform.md) records defaults, migration and output failure contracts.
+
 See the [v0.5 baseline](releases/v0.5-support.md) for existing signing and
 protection limits, and the [v0.11 support matrix](releases/v0.11-support.md) for
 authenticated R6 incremental saving, [offline historical signature verification](signature-verification.md)
 and bounded additional approvals. Encrypted signatures and general editing of
 already signed input remain unsupported. Dedicated [controlled workflows](signed-workflows.md)
 can sign existing fields or produce bounded updates without removing signed-source guards.
+
+## Explicit full-save layouts
+
+For private keys, trailer roots, AF/XMP, sharing and source-container handling,
+see the [object and relationship preservation matrix](object-preservation.md).
+Saving and page transfer have different ownership guarantees.
+
+Existing save methods and `SaveOptions` literals still produce classic xref
+tables. To select an uncompressed cross-reference stream explicitly:
+
+```rust,no_run
+use pdf::document::{Document, save_options::{SaveLayout, SaveOptions}};
+let doc = Document::new()?; // PDF 1.7 by default
+doc.add_page(0)?;
+let bytes = doc.save_to_bytes_with_layout(SaveOptions::default(), SaveLayout::XrefStream)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+These full-rewrite profiles require unsigned input. Unencrypted output needs
+effective PDF 1.5 or later; choose an explicit `SaveOptions.version` upgrade
+for a lower version. Existing R6 protection is preserved automatically and
+requires PDF 2.0 or the supported PDF 1.7 ADBE extension level 8 declaration.
+Adding or replacing R6 requires PDF 2.0, as with existing security saves.
+Source-signature checks remain in force. Retained Linearized declarations
+are refused; these profiles do not migrate hint tables or repair their offsets.
+Stream-style incremental output has a separate explicit option described below.
+
+`SaveLayout::Classic` follows the existing serializer and preserves its default
+byte output. The new `XrefStream` profile emits independent objects and a fresh
+output-only xref object, with `/W [1 8 4]` and `/Index [0 Size]`; it does not
+mutate the document, reserve a persistent object ID or rebase its source.
+Holes remain free entries within the configured Size limit. The xref payload
+is uncompressed even when ordinary streams use `FlateUnencoded`; this is not
+a minimum-file-size guarantee or secure erasure.
+
+`save_with_layout_and_budget()` returns BudgetedBytes retaining its operation
+reservation. Matching writer/file methods are available; serialization finishes
+before host writes, while an I/O error may leave partial caller-owned output.
+The file method uses the existing atomic-replacement contract, not create-new
+semantics. The `v012_layout` example intentionally uses create-new output.
+
+See the [frozen boundaries](releases/v0.12-boundaries.md) and
+[milestone evidence](releases/v0.12-acceptance.md) for scope and validation.
+
+### Object-stream packing
+
+Select `SaveLayout::XrefStreamWithObjectStreams` to rebuild object containers
+while preserving business object IDs and values. The same four layout save
+methods apply. Groups contain at most 100 members and 1 MiB of decoded index
+and member data, intersected with stream and operation limits. A member that
+cannot fit alone remains an independent object; this is not an output error.
+
+Streams, nonzero generations, Catalog, Encrypt, indirect stream-length
+dependencies, reference-only objects and signature/placeholder dictionaries
+stay independent. With `StreamCompression::Preserve`, newly generated ObjStm
+payloads are unencoded. With `FlateUnencoded`, the packer uses Flate only when
+it reduces the payload and fits the raw-stream limit. The xref stream remains
+uncompressed in both cases; no compression ratio is promised.
+
+Old XRef/ObjStm containers are replaced only under a conservative profile.
+`Extends` collections, unknown container fields, or ordinary/trailer references
+to a replaced container cause explicit refusal. Ordinary private dictionaries,
+shared/cyclic references, metadata and attachments are not garbage-collected.
+The independent-object `XrefStream` mode retains its previous behavior; its
+selection does not silently opt into this container-replacement policy.
+Neither mode promises secure erasure of historical/private content.
+
+### Layout and protection together
+
+The ordinary layout methods preserve authenticated R6 protection, including
+when opened with a user password. Changing/removing existing protection needs
+owner authentication, through explicit combined entry points:
+
+```rust,no_run
+use pdf::{document::{Document, save_options::{SaveLayout, SaveOptions}},
+          security::{EncryptionOptions, SaveSecurity}};
+let doc = Document::new()?;
+doc.add_page(0)?;
+let settings = EncryptionOptions::new("illustrative-user", "illustrative-owner")?;
+let bytes = doc.save_to_bytes_with_layout_and_security(
+    SaveOptions::default(), SaveLayout::XrefStreamWithObjectStreams,
+    SaveSecurity::Set(&settings),
+)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Corresponding methods are `save_with_layout_and_security_and_budget`,
+`save_to_writer_with_layout_and_security` and
+`save_to_file_with_layout_and_security`. `SaveSecurity::Remove` is explicit;
+editing mutable Encrypt entries does not remove source protection. Use protected
+host credential input in real applications; strings above are illustrative.
+
+Members are serialized in plaintext, optionally compressed together, then the
+containing ObjStm uses the handler's default stream filter exactly once. XRef
+and active Encrypt stay unencrypted; Encrypt, Catalog, metadata and ordinary
+streams never enter the packer. If default string and stream filters differ,
+objects containing strings remain independent. Clear metadata and explicit
+Crypt/Identity streams keep their existing exceptions. AES grouping reserves
+space for IV and padding in the raw-stream limit; this remains a conservative
+packing strategy, not a minimum-size guarantee.
+
+New layouts reuse an existing indirect Encrypt identity, including generation;
+direct/new Encrypt receives a collision-checked output-only ID. File IDs and
+permission policy follow existing full-save security rules. Removal may retain
+the old Encrypt dictionary as an ordinary object; neither full rewriting nor
+protection changes promise removal of historical/private data. R2-R5, public-key
+encryption and encrypted signatures remain unsupported.
 
 ## Append changes without rewriting the source
 
@@ -24,6 +133,47 @@ Output preserves all original bytes, including removed private
 content. This is not redaction. Saving never rebases the document or clears
 edits; reopen the output to append the next revision. File/reader/new-document
 inputs must first full-save and reopen as owned bytes.
+
+### Explicit incremental cross-reference streams
+
+```rust,no_run
+use pdf::{
+    document::{Document, save_options::{IncrementalSaveLayout, IncrementalSaveOptions}},
+    parser::syntax::ParseMode,
+};
+let doc = Document::from_bytes_with_mode(std::fs::read("input.pdf")?, ParseMode::Strict)?;
+doc.rotate_page(0, 90)?;
+let bytes = doc.save_incremental_to_bytes_with_layout(
+    IncrementalSaveOptions::default(), IncrementalSaveLayout::XrefStream,
+)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The separate non-exhaustive `IncrementalSaveLayout` offers Classic (default)
+and XrefStream; it does not change the fields of `IncrementalSaveOptions`.
+Existing methods, signature preparation and controlled updates retain their
+classic layout. Matching `save_incremental_with_layout_and_budget`,
+`save_incremental_to_writer_with_layout` and `save_incremental_to_file_with_layout`
+methods accept the same options and layout; the budgeted method additionally
+accepts the shared operation budget and retains the output reservation.
+
+An actual stream append requires effective PDF 1.5+. It does not silently
+upgrade the version: use an explicit Catalog Version edit or full rewrite and
+reopen. No-op/rolled-back saves still return the original bytes, even for a
+lower version, without generating a new xref object or requesting randomness.
+Unsigned table, stream and hybrid sources can be reopened for mixed-layout
+revision chains. Prev points to the last physical section, not a hybrid
+supplement; the new revision does not inherit XRefStm.
+
+The tail uses plaintext, uncompressed `/W [1 8 4]` records and sparse `/Index`
+runs for changed objects, known free entries, object zero and its own entry.
+Untouched entries inherit through Prev. Modified compressed members become
+ordinary generation-zero objects; no new ObjStm is generated. The fresh xref
+ID is above the source Size and all source/current object numbers, ephemeral,
+and cannot capture existing dangling references. Size, payload, descriptor,
+operation and output limits remain enforced; a rejected save does not commit
+or consume the document's allocator. Full serialization precedes host writes;
+file output uses atomic replacement, while a host writer can fail partially.
 
 ### Authenticated R6 incremental saves
 

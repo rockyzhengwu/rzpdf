@@ -14,6 +14,7 @@ use crate::{
 
 #[derive(Debug)]
 pub struct PDFContext<R: Seek + Read> {
+    structure_diagnostics: crate::parser::diagnostic::DiagnosticLog,
     parser: Option<RefCell<PdfParser<R>>>,
     mode: crate::parser::syntax::ParseMode,
     cross_ref_table: CrossRefTable,
@@ -818,6 +819,7 @@ impl<R: Seek + Read> PDFContext<R> {
     ) -> Self {
         Self {
             parser: None,
+            structure_diagnostics: crate::parser::diagnostic::DiagnosticLog::new(options.limits.max_operation_bytes),
             mode: options.mode,
             cross_ref_table: CrossRefTable::new_empty(),
             indirect_objects: HashMap::new(),
@@ -961,6 +963,7 @@ impl<R: Seek + Read> PDFContext<R> {
         );
         let trailer = cross_ref_table.take_trailer();
         Ok(PDFContext {
+            structure_diagnostics: parser.diagnostic_log(),
             parser: Some(RefCell::new(parser)),
             mode,
             cross_ref_table,
@@ -1283,6 +1286,14 @@ impl<R: Seek + Read> PDFContext<R> {
             mode: self.mode,
             limits: self.limits,
         }
+    }
+
+    pub fn structure_diagnostics(&self) -> PdfResult<Vec<crate::parser::diagnostic::StructureDiagnostic>> {
+        self.structure_diagnostics.snapshot()
+    }
+    pub fn read_provenance(&self) -> crate::parser::diagnostic::ReadProvenance {
+        if self.parser.is_some() { crate::parser::diagnostic::ReadProvenance::Parsed(self.mode) }
+        else { crate::parser::diagnostic::ReadProvenance::Created }
     }
 
     pub(crate) fn with_decode_depth<T>(

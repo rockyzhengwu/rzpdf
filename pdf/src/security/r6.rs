@@ -97,8 +97,24 @@ mod tests {
         let stamp = document.stamp();
         let settings = EncryptionOptions::new("user", "owner").unwrap();
         let budget = OperationBudget::new(2 * 1024 * 1024);
+        let source = document.save_to_bytes_with_security(Default::default(),
+            crate::security::SaveSecurity::Set(&settings)).unwrap();
+        let incremental = crate::document::Document::from_bytes_with_password_and_options(
+            source.clone(), "owner", crate::parser::options::ParseOptions {
+                mode: crate::parser::syntax::ParseMode::Strict, ..Default::default()
+            }).unwrap();
+        let protected = crate::document::Document::from_bytes_with_password(source.clone(),"owner").unwrap();
         FAIL_RANDOM.with(|failure| failure.set(true));
         let _reset = Reset;
+        // No-op does not allocate a structural ID or request randomness.
+        let layout = crate::document::save_options::IncrementalSaveLayout::XrefStream;
+        assert_eq!(incremental.save_incremental_to_bytes_with_layout(Default::default(), layout).unwrap(), source);
+        incremental.set_info_text(crate::document::metadata::InfoTextField::Title, Some("private update")).unwrap();
+        let incremental_stamp = incremental.stamp();
+        assert!(matches!(incremental.save_incremental_with_layout_and_budget(
+            Default::default(), layout, &budget), Err(PdfError::RandomnessUnavailable)));
+        assert_eq!(incremental.stamp(), incremental_stamp);
+        assert_eq!(budget.live_bytes(), 0);
         assert!(matches!(
             document.save_with_security_and_budget(
                 Default::default(),
@@ -108,6 +124,24 @@ mod tests {
             Err(PdfError::RandomnessUnavailable)
         ));
         assert!(document.is_stamp_current(&stamp));
+        assert_eq!(budget.live_bytes(), 0);
+        for layout in [crate::document::save_options::SaveLayout::XrefStream,
+            crate::document::save_options::SaveLayout::XrefStreamWithObjectStreams] {
+            assert!(matches!(document.save_with_layout_and_security_and_budget(
+                Default::default(), layout, crate::security::SaveSecurity::Set(&settings), &budget,
+            ), Err(PdfError::RandomnessUnavailable)));
+            assert_eq!(budget.live_bytes(),0);
+            assert!(document.is_stamp_current(&stamp));
+            assert!(matches!(protected.save_with_layout_and_security_and_budget(
+                Default::default(), layout, crate::security::SaveSecurity::Preserve, &budget,
+            ), Err(PdfError::RandomnessUnavailable)));
+            assert_eq!(budget.live_bytes(),0);
+        }
+        drop(_reset);
+        let output = incremental.save_incremental_with_layout_and_budget(Default::default(), layout, &budget).unwrap();
+        assert!(output.as_slice().starts_with(&source));
+        assert_eq!(incremental.stamp(), incremental_stamp);
+        drop(output);
         assert_eq!(budget.live_bytes(), 0);
     }
 }

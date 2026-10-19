@@ -89,3 +89,34 @@ pub enum StreamCompression {
     /// remain unchanged.
     FlateUnencoded,
 }
+
+/// Unsigned append-only layout. New object streams are never generated.
+/// Signature and controlled-update workflows keep their existing private layout.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum IncrementalSaveLayout {
+    #[default]
+    Classic,
+    /// A plaintext, sparse cross-reference stream; requires effective PDF 1.5+.
+    /// Changed compressed members are appended as ordinary generation-zero objects.
+    XrefStream,
+}
+
+/// Full-save container layout, independent of ordinary stream compression.
+/// Existing save APIs always select Classic. No object-stream packing is
+/// implied by XrefStream; protection and incremental combinations are separate.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SaveLayout {
+    #[default]
+    Classic,
+    /// PDF 1.5+ with a new, uncompressed cross-reference stream. Existing R6
+    /// protection is preserved; adding R6 follows its PDF 2.0 requirements.
+    XrefStream,
+    /// PDF 1.5+; eligible generation-zero objects are grouped in
+    /// new object streams (100 members / 1 MiB decoded per group at most).
+    /// Extends collections or active references to replaced containers are
+    /// rejected rather than silently discarded. Existing object IDs survive.
+    /// With R6, members remain plaintext until the containing stream is encrypted.
+    XrefStreamWithObjectStreams,
+}

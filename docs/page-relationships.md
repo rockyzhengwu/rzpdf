@@ -86,7 +86,11 @@ All annotations on the removed page detach together. Fields lose departing
 widgets; fields with no surviving widgets and newly empty ancestor groups unlink
 from Fields/Kids. Surviving field/widget identities and values stay unchanged.
 Deleting only part of a Radio or indexed-button field is refused. A bounded scan
-of the live catalog graph rejects unknown back-references to the removed page.
+of retained live trailer roots, including Catalog, Info and private trailer
+graphs, rejects unknown back-references to the removed page. Reached XRef/ObjStm
+containers also reject because their opaque payload relationships cannot be
+rebound by this operation. Ordinary source indexing alone does not count as a
+business reference to a container.
 Detached historical objects may remain in the file, including an annotated page
 without a page-tree Parent; deletion is not secure erasure or reachability cleanup.
 
@@ -95,6 +99,12 @@ Widget P references; explicit labels follow their pages. Effective inherited
 page resources/boxes/rotation are materialized when moving across tree parents.
 
 ## Safety boundary and verification
+
+The [object preservation matrix](object-preservation.md) separates raw saving
+from page ownership changes, including page AF/AFRelationship, raw XMP,
+ordinary shared extensions, private trailer roots and source containers.
+Cross-document import rejects structural XRef/ObjStm containers in a page or
+resource extension graph rather than copying stale encoded IDs or offsets.
 
 Page operations refuse unsupported ownership/action graphs, including unsupported
 Tagged extensions,

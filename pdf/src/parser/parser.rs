@@ -22,6 +22,8 @@ pub(crate) fn parse_xref_with_offset<R: Seek + Read>(
     let xref = load_xref_chain(syntax, last_xref_offset)?;
     if syntax.mode() == crate::parser::syntax::ParseMode::Strict {
         validate_strict_xref_table(&xref)?;
+    } else if validate_strict_xref_table(&xref).is_err() {
+        syntax.report(last_xref_offset, None, super::diagnostic::StructureReason::CompatibleXrefTable)?;
     }
     Ok((xref, last_xref_offset))
 }
@@ -96,6 +98,10 @@ pub fn parse_xref_stream<R: Seek + Read>(
         "xref stream must be a stream".to_string(),
     ))?;
     let dict = stream.dict();
+    if syntax.mode() == crate::parser::syntax::ParseMode::Compatible
+        && dict.get("Type").and_then(PdfObject::as_name).is_none_or(|name| name.name() != "XRef") {
+        syntax.report(pos, Some(indirect.id()), super::diagnostic::StructureReason::CompatibleXrefStreamType)?;
+    }
     if syntax.mode() == crate::parser::syntax::ParseMode::Strict {
         let ty = dict
             .get("Type")
@@ -288,6 +294,9 @@ pub fn parse_xref_stream<R: Seek + Read>(
                 .to_string(),
         ));
     }
+    if syntax.mode() == crate::parser::syntax::ParseMode::Compatible && bptr != buffer.len() {
+        syntax.report(pos, Some(indirect.id()), super::diagnostic::StructureReason::CompatibleXrefTrailingBytes)?;
+    }
     let trailer = dict.to_owned();
     let cross_ref_table = CrossRefTable::new(entries, trailer);
     Ok(cross_ref_table)
@@ -326,6 +335,9 @@ pub(crate) fn parse_xref_section<R: Seek + Read>(
             ));
         }
         let objs = parse_xref_sub_section(syntax, start_objnum, obj_count)?;
+        if syntax.mode() == crate::parser::syntax::ParseMode::Compatible && (obj_count == 0 || objs.keys().any(|id| objects.contains_key(id))) {
+            syntax.report(pos, None, super::diagnostic::StructureReason::CompatibleXrefTable)?;
+        }
         if syntax.mode() == crate::parser::syntax::ParseMode::Strict {
             for objnum in objs.keys() {
                 if objects.contains_key(objnum) {
@@ -373,9 +385,29 @@ fn parse_xref_sub_section<R: Seek + Read>(
         let (offset, gennum, state) = if syntax.mode() == crate::parser::syntax::ParseMode::Strict {
             parse_xref_entry_strict(syntax)?
         } else {
-            let offset = syntax.get_next_word()?.as_u64_checked()?;
+            let entry_offset = syntax.position();
+            let offset_word = syntax.get_next_word()?;
+            let entry_start = syntax.position() - offset_word.raw().len() as u64;
+            let offset = offset_word.as_u64_checked()?;
             let gennum = syntax.get_next_word()?.as_u32_checked()?;
             let t = syntax.get_next_word()?;
+            let end = syntax.position();
+            syntax.set_pos(entry_start)?;
+            let mut line = [0u8; 20];
+            let mut length = 0;
+            while length < line.len() && !syntax.is_eof() {
+                let byte = syntax.get_next_char()?;
+                if matches!(byte,b'\r'|b'\n') { break; }
+                line[length] = byte; length += 1;
+            }
+            let strict_shape = (length == 18 || (length == 19 && line[18] == b' '))
+                && line[10] == b' ' && line[16] == b' '
+                && line[..10].iter().all(u8::is_ascii_digit)
+                && line[11..16].iter().all(u8::is_ascii_digit);
+            syntax.set_pos(end)?;
+            if !strict_shape {
+                syntax.report(entry_offset, Some(crate::objects::object_id::ObjectId::new(start_objnum + i, gennum)), super::diagnostic::StructureReason::CompatibleXrefEntry)?;
+            }
             let state = if t.is_equal(b"n") {
                 ObjectState::Normal
             } else if t.is_equal(b"f") {
@@ -443,6 +475,8 @@ fn find_start_xref<R: Seek + Read>(syntax: &mut SyntaxParser<R>) -> PdfResult<u6
     }
     if syntax.mode() == crate::parser::syntax::ParseMode::Strict {
         validate_final_eof_marker(&window)?;
+    } else if validate_final_eof_marker(&window).is_err() {
+        syntax.report(syntax.file_size(), None, super::diagnostic::StructureReason::CompatibleEof)?;
     }
     let Some(rel) = window.windows(tag.len()).rposition(|slice| slice == tag) else {
         return Err(PdfError::ParserError(
@@ -533,6 +567,7 @@ pub struct PdfParser<R: Seek + Read> {
 }
 
 impl<R: Seek + Read> PdfParser<R> {
+    pub(crate) fn diagnostic_log(&self) -> super::diagnostic::DiagnosticLog { self.syntax.diagnostics.clone() }
     pub fn mode(&self) -> super::syntax::ParseMode {
         self.syntax.mode()
     }

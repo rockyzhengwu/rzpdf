@@ -571,11 +571,20 @@ impl<R: Read + Seek> PdfDocument<R> {
         })
     }
 
-    // Scan only the live catalog graph. Detached historical objects are not
-    // owners; an unknown live back-reference to the removed page is refused.
+    // Scan all retained trailer roots, not just Catalog: Info and private
+    // trailer graphs may also own references. Detached history is not a root.
     fn verify_no_live_page_reference(&self, removed: ObjectId) -> PdfResult<()> {
         let limits = self.ctx().limits();
-        let mut pending = vec![(PdfObject::PdfDict(self.ctx().get_root_owned()?), 0usize)];
+        let mut roots = PdfDict::default();
+        for (key, value) in &*self.ctx().trailer() {
+            if super::preservation::retained_trailer_key(key) {
+                if (&roots).into_iter().len() >= limits.max_objects {
+                    return Err(PdfError::ResourceLimit("page deletion trailer roots".into()));
+                }
+                roots.try_insert(key.clone(), value.clone())?;
+            }
+        }
+        let mut pending = vec![(PdfObject::PdfDict(roots), 0usize)];
         let mut seen = HashSet::new();
         let mut nodes = 0usize;
         while let Some((object, depth)) = pending.pop() {
@@ -611,6 +620,12 @@ impl<R: Read + Seek> PdfDocument<R> {
                     pending.extend((&dict).into_iter().map(|(_, v)| (v.clone(), depth + 1)));
                 }
                 PdfObject::PdfStream(stream) => {
+                    let kind = stream.dict().get("Type")
+                        .map(|value| self.ctx().resolve_owned(value)).transpose()?;
+                    if kind.as_ref().and_then(PdfObject::as_name)
+                        .is_some_and(|name| matches!(name.name(), "XRef" | "ObjStm")) {
+                        return Err(unsupported("page deletion with live structural container reference"));
+                    }
                     pending.push((PdfObject::PdfDict(stream.dict().clone()), depth + 1))
                 }
                 _ => {}

@@ -278,6 +278,19 @@ pub(crate) fn plain_output<R: Read + Seek>(
 }
 
 impl SecurityHandler {
+    /// Generated ObjStm payloads use the default stream filter, after member
+    /// serialization and optional compression. Members are never encrypted
+    /// independently; generated dictionaries contain no string values.
+    pub(crate) fn encrypt_object_stream_bytes(
+        &self,
+        input: &[u8],
+        limit: usize,
+        budget: &OperationBudget,
+    ) -> PdfResult<BudgetedBytes> {
+        let (data, lease) = crypt_bytes(self.streams, &*self.key, input, true, limit, budget)?;
+        BudgetedBytes::from_reserved_vec(data, lease)
+    }
+
     pub(crate) fn transform<R: Read + Seek>(
         &self,
         ctx: &PDFContext<R>,
@@ -451,6 +464,26 @@ impl SecurityHandler {
 mod tests {
     use super::*;
     use crate::{document::PdfDocument, security::EncryptionOptions};
+
+    #[test]
+    fn object_stream_ciphertext_limits_include_iv_and_padding_and_release() {
+        let pool = OperationBudget::new(4 * 1024 * 1024);
+        let (handler, _lease) = SecurityHandler::generate(
+            &EncryptionOptions::new("user", "owner").unwrap(),
+            crate::parser::options::Limits::default(), &pool,
+        ).unwrap();
+        let live = pool.live_bytes();
+        for (length, ciphertext) in [(0,32), (15,32), (16,48), (31,48), (32,64)] {
+            let input = vec![42;length];
+            assert!(matches!(handler.encrypt_object_stream_bytes(&input,ciphertext-1,&pool), Err(PdfError::ResourceLimit(_))));
+            assert_eq!(pool.live_bytes(),live);
+            let bytes = handler.encrypt_object_stream_bytes(&input,ciphertext,&pool).unwrap();
+            assert_eq!(bytes.as_slice().len(),ciphertext);
+            let (plain, lease) = crypt_bytes(handler.streams,&*handler.key,bytes.as_slice(),false,ciphertext,&pool).unwrap();
+            assert_eq!(plain,input); drop(plain); drop(lease); drop(bytes);
+            assert_eq!(pool.live_bytes(),live);
+        }
+    }
 
     #[test]
     fn explicit_crypt_is_processed_once_and_plain_output_uses_identity() {

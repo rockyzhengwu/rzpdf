@@ -2,6 +2,22 @@
 
 本文件只记录交付变化，不替代长期任务池或原始测试日志。版本范围见 [ROADMAP](ROADMAP.md)。
 
+## Unreleased — v0.12 文件结构与兼容收口（限定范围已验收）
+
+新增独立 `SaveLayout` 和完整保存入口，不改 SaveOptions 字段或旧默认；复用既有对象序列化及保护路径，内部一次性布局和类型化记录负责偏移、generation、自由链及输出专属结构对象。提供有效 PDF 1.5+ 的全量 xref stream，以及显式 `XrefStreamWithObjectStreams` 打包：100 成员／1 MiB 双上限、type 2 索引，保留成员身份；禁止及超大对象独立输出。旧容器存在 Extends、未知字段或活跃外部引用时明确拒绝，不静默丢失语义。签名重写及保留 Linearized 声明等未开放组合仍拒绝。接口及限制见[高级保存](docs/advanced-saving.md#explicit-full-save-layouts)。
+
+两种流布局接入已有 R6，默认保留保护；新增四个显式布局／保护组合入口，owner 可移除／替换。成员在加密前打包，容器压缩后按流 filter 处理一次；XRef／Encrypt 保持明文，metadata／Identity、权限和版本沿用原规则。保留间接 Encrypt 的 ID／generation，直接／新增 Encrypt 使用临时高水位外 ID；不同默认 crypt filter 的含字符串对象独立，补齐安全字典标记拒绝与 AES 缓冲限额。
+
+新增 `IncrementalSaveLayout` 和四个 owned Document 显式增量入口，默认仍为 Classic，不向 options 增加字段或扩大签名入口。未加密／R6 unsigned 严格字节来源可追加明文稀疏 xref stream；Prev 指最后物理 section，保留源前缀，修改压缩成员独立追加，不新建 ObjStm。无操作精确返回原字节，结构 ID 临时且拒绝引用别名；自由链、generation、预算／输出限额和重试受检查。修复历史 XRef 直接 Encrypt 的 Perms 签名误判，仅允许与已认证 handler 完全相同的加密字典例外。
+
+新增[对象与关系保留矩阵](docs/object-preservation.md)，区分保存、复制、导入和删除。删除保护从 Catalog 扩展到 Info／私有 trailer 业务根，避免留下未知页面引用；通用导入拒绝 XRef／ObjStm 原始结构容器，包括间接 Type，失败原子回滚。原始 XMP、AF／AFRelationship、私有共享循环及来源容器分别有投影和拒绝证据，不新增通用扩展语义编辑器。
+
+新增有界 `StructureDiagnostic` 与不可变 `ReadProvenance`，记录既有 Compatible 文件结构容错，不干扰内容 diagnostics 或增加正文／xref 整行长度限制。新增独立只读 `RecoveredDocument`：对明确 Root、单 revision、未加密／非 ObjStm 来源顺序重建索引，要求精确直接 Length，限制输入／候选／扫描工作，拒绝歧义、保护和复杂历史；不暴露编辑、保存、签署或转换为 Document 的能力。接口见[恢复指南](docs/file-recovery.md)。
+
+补齐[跨版本标准覆盖索引](docs/pdf-standard-coverage.md)、可再生真实工具样本、50 条固定规模预算／性能记录和[平台／迁移说明](docs/releases/v0.12-platform.md)。
+
+2026-10-19，V12-00～13／M1～M4／阶段 A／B／C 限定范围全部验收通过。最终完整工作区 91 组、1591 项，联合复验 217 项、九组必选独立门禁及 437 页目视复核通过；640 项冻结输入和十个二进制前后一致，见[验收记录](docs/releases/v0.12-acceptance.md)。仅 macOS x86_64 已验证；未提交、推送、改包版本或发布。
+
 ## Unreleased — v0.11 保存与安全扩展（限定范围已验收）
 
 2026-10-17，V11-00～13 全部按限定范围收口：最终完整工作区 85 组、1,501 项、联合 156 项、四组独立门禁共 120 案例、八组精确像素及目视复核通过；609 项冻结输入前后内容和列表一致。仅本地 macOS x86_64 验收，未提交、推送、改包版本或发布；不等于完整 PDF/PAdES 合规。具体证据见[验收记录](docs/releases/v0.11-acceptance.md)。

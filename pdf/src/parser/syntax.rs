@@ -186,6 +186,9 @@ pub struct SyntaxParser<R: Seek + Read> {
     limits: super::options::Limits,
     object_depth: usize,
     input_end: u64,
+    pub(crate) diagnostics: super::diagnostic::DiagnosticLog,
+    work_remaining: Option<u64>,
+    diagnostic_object: Option<crate::objects::object_id::ObjectId>,
 }
 
 impl<R: Seek + Read> SyntaxParser<R> {
@@ -218,6 +221,9 @@ impl<R: Seek + Read> SyntaxParser<R> {
             limits: options.limits,
             object_depth: 0,
             input_end,
+            diagnostics: super::diagnostic::DiagnosticLog::new(options.limits.max_operation_bytes),
+            work_remaining: None,
+            diagnostic_object: None,
         }
     }
 
@@ -228,6 +234,19 @@ impl<R: Seek + Read> SyntaxParser<R> {
 
     pub fn position(&self) -> u64 {
         self.pos
+    }
+
+    pub(crate) fn limit_work(&mut self, steps: u64) { self.work_remaining = Some(steps); }
+    pub(crate) fn remaining_work(&self) -> Option<u64> { self.work_remaining }
+    pub(crate) fn finish_work(&mut self) { self.work_remaining = None; }
+    fn charge_work(&mut self, steps: u64) -> PdfResult<()> {
+        if let Some(remaining) = &mut self.work_remaining {
+            *remaining = remaining.checked_sub(steps).ok_or_else(|| PdfError::ResourceLimit("recovery scan steps".into()))?;
+        }
+        Ok(())
+    }
+    pub(crate) fn report(&self, offset: u64, object: Option<crate::objects::object_id::ObjectId>, reason: super::diagnostic::StructureReason) -> PdfResult<()> {
+        self.diagnostics.record(super::diagnostic::StructureDiagnostic { offset, object: object.or(self.diagnostic_object), reason })
     }
 
     pub fn mode(&self) -> ParseMode {
@@ -246,6 +265,22 @@ impl<R: Seek + Read> SyntaxParser<R> {
             if self.mode == ParseMode::Strict {
                 let binary_line = self.read_line()?;
                 validate_binary_comment_line(&binary_line)?;
+            } else {
+                // Inspect without a line allocation or an additional token-size
+                // restriction on the first body line in Compatible mode.
+                let mut binary = false;
+                if !self.is_eof() && self.get_next_char()? == b'%' {
+                    let mut high_bits = 0;
+                    while !self.is_eof() {
+                        let byte = self.get_next_char()?;
+                        if is_end_of_line(byte) { break; }
+                        high_bits += usize::from(byte >= 128);
+                        if high_bits == 4 { binary = true; break; }
+                    }
+                }
+                if !binary {
+                    self.report(0, None, super::diagnostic::StructureReason::CompatibleHeader)?;
+                }
             }
             self.set_pos(saved_pos)?;
             self.header = Some(parse_pdf_header(&line)?);
@@ -298,6 +333,8 @@ impl<R: Seek + Read> SyntaxParser<R> {
                 "get_indirect_object obj keyword is expected".to_string(),
             ));
         }
+        let previous_object = self.diagnostic_object.replace(crate::objects::object_id::ObjectId::new(objnum, u32::from(gennum)));
+        let result = (|| {
         let (lease, obj) = if let Some(budget) = budget {
             let (object, lease) = self.get_content_object_with_budget(budget)?;
             (Some(lease), object)
@@ -312,12 +349,16 @@ impl<R: Seek + Read> SyntaxParser<R> {
             ));
         }
         Ok((PdfIndirect::new(objnum, gennum, obj), lease))
+        })();
+        self.diagnostic_object = previous_object;
+        result
     }
 
     pub fn get_next_char(&mut self) -> PdfResult<u8> {
         if self.pos >= self.input_end {
             return Err(PdfError::EndofFile);
         }
+        self.charge_work(1)?;
         let byte = self.reader.read_byte()?;
         self.pos += 1;
         Ok(byte)
@@ -327,6 +368,7 @@ impl<R: Seek + Read> SyntaxParser<R> {
         if pos >= self.input_end {
             return Err(PdfError::EndofFile);
         }
+        self.charge_work(1)?;
         let saved_pos = self.pos;
         self.reader.seek(pos)?;
         let result = self.reader.read_byte();
@@ -501,6 +543,9 @@ impl<R: Seek + Read> SyntaxParser<R> {
                         "duplicate dictionary key is not allowed in strict mode at byte {saved_pos}"
                     )));
                 }
+                if self.mode == ParseMode::Compatible && dict.contains_key(&key) {
+                    self.report(saved_pos, None, super::diagnostic::StructureReason::DuplicateDictionaryKey)?;
+                }
                 let value = self.get_object()?;
                 dict.try_insert(key, value)?;
             }
@@ -560,6 +605,7 @@ impl<R: Seek + Read> SyntaxParser<R> {
         }
 
         self.set_pos(data_start)?;
+        self.report(data_start, None, super::diagnostic::StructureReason::StreamBoundarySearch)?;
         let end_of_stream = self.find_stream_end_pos()?;
         if let Some(end_pos) = end_of_stream {
             let data_len = end_pos.saturating_sub(self.pos);
@@ -622,6 +668,7 @@ impl<R: Seek + Read> SyntaxParser<R> {
                 Ok(())
             }
             _ if self.mode == ParseMode::Compatible => {
+                self.report(self.pos - 1, None, super::diagnostic::StructureReason::StreamStartWhitespace)?;
                 self.set_pos(self.pos - 1)?;
                 self.to_next_line()
             }
@@ -772,6 +819,7 @@ impl<R: Seek + Read> SyntaxParser<R> {
         }
         let size =
             usize::try_from(len).map_err(|_| PdfError::ResourceLimit("input block size".into()))?;
+        self.charge_work(len)?;
         let result = if let Some(budget) = budget {
             self.reader
                 .read_bytes_with_budget(size, budget)
@@ -946,6 +994,9 @@ impl<R: Seek + Read> SyntaxParser<R> {
                         return Err(PdfError::ParserError(
                             "duplicate dictionary key is not allowed in strict mode".into(),
                         ));
+                    }
+                    if self.mode == ParseMode::Compatible && builder.contains_key(&key) {
+                        self.report(start, None, super::diagnostic::StructureReason::DuplicateDictionaryKey)?;
                     }
                     let (value, value_lease) = self.get_content_object_with_budget(budget)?;
                     builder.insert(key, value, key_lease, value_lease)?;
@@ -1303,11 +1354,18 @@ impl<R: Seek + Read> SyntaxParser<R> {
             if c != b'%' {
                 break;
             }
+            let comment_start = self.pos - 1;
+            let mut comment_prefix = [0u8; 5];
+            let mut prefix_count = 0;
             loop {
                 c = self.get_next_char()?;
+                if prefix_count < comment_prefix.len() { comment_prefix[prefix_count] = c; prefix_count += 1; }
                 if is_end_of_line(c) {
                     break;
                 }
+            }
+            if self.work_remaining.is_some() && (&comment_prefix[..4] == b"%EOF" || (&comment_prefix[..4] == b"PDF-" && comment_start != 0)) {
+                return Err(PdfError::UnsupportedFeature("recovery refuses embedded revision/header markers".into()));
             }
         }
         self.set_pos(self.pos - 1)?;

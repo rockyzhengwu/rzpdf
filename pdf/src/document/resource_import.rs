@@ -97,10 +97,10 @@ impl<S: Read + Seek, T: Read + Seek> Importer<'_, S, T> {
         if kind
             .as_ref()
             .and_then(PdfObject::as_name)
-            .is_some_and(|name| matches!(name.name(), "Page" | "Pages" | "Catalog"))
+            .is_some_and(|name| matches!(name.name(), "Page" | "Pages" | "Catalog" | "XRef" | "ObjStm"))
         {
             return Err(PdfError::UnsupportedFeature(
-                "Resource graph refers to document/page ownership".into(),
+                "Resource graph refers to document/page ownership or structural containers".into(),
             ));
         }
         let mut output = PdfDict::default();

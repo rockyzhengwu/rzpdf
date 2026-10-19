@@ -1,10 +1,11 @@
 //! Explicit append-only serialization. Original bytes are never rewritten.
 mod security;
+mod stream;
 use super::*;
 use crate::{
     budget::{BudgetedBytes, MemoryLease, OperationBudget},
     document::{
-        cross_ref_table::ObjectState, save_options::IncrementalSaveOptions, store::StoreEntry,
+        cross_ref_table::ObjectState, save_options::{IncrementalSaveOptions, IncrementalSaveLayout, PdfVersion}, store::StoreEntry,
     },
     objects::{pdf_dict::BudgetedDictBuilder, pdf_number::PdfNumber},
     parser::options::Limits,
@@ -42,6 +43,7 @@ fn inspect(
     depth: usize,
     nodes: &mut usize,
     allow_signature: bool,
+    authenticated_encrypt: Option<&PdfDict>,
 ) -> PdfResult<()> {
     if depth > limits.max_depth || *nodes >= limits.max_objects {
         return Err(PdfError::ResourceLimit(
@@ -74,7 +76,14 @@ fn inspect(
                 "incremental save of signed or signature-bearing input",
             ));
         }
-        for (_, child) in dict {
+        for (key, child) in dict {
+            // A historical plaintext xref stream may carry direct Encrypt.
+            // Exempt only the exact authenticated dictionary: its Perms byte
+            // string is not a Catalog signature permissions dictionary.
+            if key == "Encrypt" && structural_stream_type(object) == Some("XRef")
+                && authenticated_encrypt.is_some() && child.as_dict() == authenticated_encrypt {
+                continue;
+            }
             inspect(
                 child,
                 changes,
@@ -83,6 +92,7 @@ fn inspect(
                 depth + 1,
                 nodes,
                 allow_signature,
+                authenticated_encrypt,
             )?;
         }
     } else if let PdfObject::PdfArray(array) = object {
@@ -95,6 +105,7 @@ fn inspect(
                 depth + 1,
                 nodes,
                 allow_signature,
+                authenticated_encrypt,
             )?;
         }
     } else if let PdfObject::PdfReference(reference) = object {
@@ -172,15 +183,16 @@ fn trailer(
     builder.finish()
 }
 
-pub(crate) fn write_incremental<R: std::io::Read + std::io::Seek>(
+pub(crate) fn write_incremental_with_layout<R: std::io::Read + std::io::Seek>(
     document: &PdfDocument<R>,
     source: &[u8],
     prev: u64,
     original: &PdfDict,
     options: IncrementalSaveOptions,
+    layout: IncrementalSaveLayout,
     budget: &OperationBudget,
 ) -> PdfResult<BudgetedBytes> {
-    write_incremental_inner(document, source, prev, original, options, budget, false, None)
+    write_incremental_inner(document, source, prev, original, options, budget, false, None, layout)
 }
 
 // Private capability: only signature preparation uses this on an isolated
@@ -193,14 +205,14 @@ pub(crate) fn write_signature_incremental<R: std::io::Read + std::io::Seek>(
     options: IncrementalSaveOptions,
     budget: &OperationBudget,
 ) -> PdfResult<BudgetedBytes> {
-    write_incremental_inner(document, source, prev, original, options, budget, true, None)
+    write_incremental_inner(document, source, prev, original, options, budget, true, None, IncrementalSaveLayout::Classic)
 }
 
 pub(crate) fn write_signed_revision_incremental<R: std::io::Read + std::io::Seek>(
     document: &PdfDocument<R>, source: &[u8], prev: u64, original: &PdfDict,
     plan: &crate::signatures::append::SignedRevisionPlan, budget: &OperationBudget,
 ) -> PdfResult<BudgetedBytes> {
-    write_incremental_inner(document, source, prev, original, Default::default(), budget, true, Some(plan))
+    write_incremental_inner(document, source, prev, original, Default::default(), budget, true, Some(plan), IncrementalSaveLayout::Classic)
 }
 
 fn write_incremental_inner<R: std::io::Read + std::io::Seek>(
@@ -212,6 +224,7 @@ fn write_incremental_inner<R: std::io::Read + std::io::Seek>(
     budget: &OperationBudget,
     allow_signature: bool,
     approval: Option<&crate::signatures::append::SignedRevisionPlan>,
+    layout: IncrementalSaveLayout,
 ) -> PdfResult<BudgetedBytes> {
     let limit = options.max_output_bytes;
     if source.len() > limit
@@ -237,6 +250,7 @@ fn write_incremental_inner<R: std::io::Read + std::io::Seek>(
             PdfError::InvalidReference("incremental source Root must be indirect".into())
         })?;
     let limits = document.ctx().limits();
+    let authenticated_encrypt = document.ctx().source_security().map(|handler| &handler.dictionary);
     // Leases precede owned values so data is dropped before its accounting.
     let (_changes_lease, mut changes) = {
         if let Some(plan) = approval {
@@ -277,7 +291,7 @@ fn write_incremental_inner<R: std::io::Read + std::io::Seek>(
                     .resolve_source_owned_with_budget(*id, budget)?;
                 (lease, object)
             };
-            inspect(&object, &changes, false, limits, 1, &mut 0, approval.is_some())?;
+            inspect(&object, &changes, false, limits, 1, &mut 0, approval.is_some(), authenticated_encrypt)?;
             if structural_stream_type(&object).is_some() && entry(&changes, *id).is_some() {
                 return Err(unsupported(
                     "incremental edits to structural xref/object-stream containers",
@@ -341,20 +355,21 @@ fn write_incremental_inner<R: std::io::Read + std::io::Seek>(
                 1,
                 &mut 0,
                 allow_signature,
+                authenticated_encrypt,
             )?;
         }
     }
     if approval.is_some() {
         for (_, change) in &changes {
             let StoreEntry::Upsert(object) = change else { return Err(unsupported("approval deletion")); };
-            inspect(object, &changes, true, limits, 1, &mut 0, true)?;
+            inspect(object, &changes, true, limits, 1, &mut 0, true, authenticated_encrypt)?;
         }
     }
     for (key, object) in &current {
         // A direct Encrypt dictionary is legal (e.g. MuPDF output). Its Perms
         // string is authenticated, unchanged, and not a signature transform.
         if key == "Encrypt" && document.ctx().source_security().is_some() { continue; }
-        inspect(object, &changes, true, limits, 1, &mut 0, allow_signature)?;
+        inspect(object, &changes, true, limits, 1, &mut 0, allow_signature, authenticated_encrypt)?;
     }
     let mut output = SerializationOutput {
         bytes: BudgetedBytes::copy_from_slice(budget, &[])?,
@@ -370,17 +385,40 @@ fn write_incremental_inner<R: std::io::Read + std::io::Seek>(
         .and_then(PdfObject::as_u32)
         .ok_or_else(|| PdfError::ObjectError("incremental source Size must be u32".into()))?;
     let max = ids.iter().map(|id| id.obj_num()).chain(changes.iter().map(|(id, _)| id.obj_num())).max().unwrap_or(0);
-    let size = original_size.max(
+    let mut size = original_size.max(
         max.checked_add(1)
             .ok_or_else(|| PdfError::ResourceLimit("incremental Size overflow".into()))?,
     );
+    // Allocate only after the no-op exit. This output-only object must not
+    // capture a dangling reference or mutate the document allocator.
+    let stream_id = if layout == IncrementalSaveLayout::XrefStream {
+        if effective < PdfVersion::V1_5 {
+            return Err(unsupported("xref-stream incremental save requires effective PDF 1.5+"));
+        }
+        let source_end = document.ctx().source_xref().objects().keys().max().copied()
+            .unwrap_or(0).checked_add(1)
+            .ok_or_else(|| PdfError::ResourceLimit("incremental source object number".into()))?;
+        let id = ObjectId::new(size.max(source_end).max(1), 0);
+        size = id.obj_num().checked_add(1)
+            .filter(|n| *n as usize <= limits.max_objects)
+            .ok_or_else(|| PdfError::ResourceLimit("incremental xref-stream Size".into()))?;
+        for id_to_check in &ids {
+            if let Some((object, _lease)) = document.ctx().object_for_write_with_budget(*id_to_check, budget)? {
+                stream::validate_references(&object, id, limits.max_depth, 0)?;
+            }
+        }
+        for (_, object) in &current {
+            stream::validate_references(object, id, limits.max_depth, 0)?;
+        }
+        Some(id)
+    } else { None };
     let capacity = document
         .ctx()
         .source_xref()
         .objects()
         .len()
         .checked_add(changes.len())
-        .and_then(|n| n.checked_add(1))
+        .and_then(|n| n.checked_add(1 + usize::from(stream_id.is_some())))
         .ok_or_else(|| PdfError::ResourceLimit("incremental xref entries".into()))?;
     let mut xref_lease = budget.reserve(
         capacity
@@ -393,6 +431,10 @@ fn write_incremental_inner<R: std::io::Read + std::io::Seek>(
     xref_lease.resize(xref.capacity() * std::mem::size_of::<(u32, u64, u32, u8)>())?;
     xref.push((0, 0, 65535, b'f'));
     for (&number, info) in document.ctx().source_xref().objects() {
+        if stream_id.is_some() && (info.gennum() > 65535 && matches!(info.state(), ObjectState::Free)
+            || number == 0 && (!matches!(info.state(), ObjectState::Free) || info.gennum() != 65535)) {
+            return Err(PdfError::ObjectError("invalid incremental free generation".into()));
+        }
         if number != 0 && matches!(info.state(), ObjectState::Free) {
             xref.push((number, 0, info.gennum(), b'f'));
         }
@@ -461,6 +503,11 @@ fn write_incremental_inner<R: std::io::Read + std::io::Seek>(
             }
         }
     }
+    let xref_offset = output.len();
+    if let Some(id) = stream_id {
+        xref.push((id.obj_num(), u64::try_from(xref_offset)
+            .map_err(|_| PdfError::ResourceLimit("incremental xref offset".into()))?, 0, b'n'));
+    }
     xref.sort_unstable_by_key(|entry| entry.0);
     if xref.windows(2).any(|pair| pair[0].0 == pair[1].0) {
         return Err(PdfError::InvalidReference(
@@ -474,7 +521,17 @@ fn write_incremental_inner<R: std::io::Read + std::io::Seek>(
             next_free = u64::from(*number);
         }
     }
-    let xref_offset = output.len();
+    if let Some(id) = stream_id {
+        let (_lease, dict) = {
+            let (dict, lease) = trailer(&current, original, size, prev,
+                document.ctx().source_security().is_some(), limits, budget)?;
+            (lease, dict)
+        };
+        stream::write(&mut output, id, &xref, &dict, limits, limit, budget)?;
+        append_formatted_output(&mut output,
+            format_args!("\nstartxref\n{xref_offset}\n%%EOF\n"), limit)?;
+        return Ok(output.bytes);
+    }
     append_output(&mut output, b"xref\n", limit)?;
     let mut start = 0;
     while start < xref.len() {
