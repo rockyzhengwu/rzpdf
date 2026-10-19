@@ -46,6 +46,10 @@ This is a capability index for the declared v0.1–v0.13 profiles, not a PDF con
 
 ## Reproducible evidence and licensing
 
+### Planned associated file profile
+
+The [v0.14 inventory](releases/v0.14-inventory.md) and [implementation plan](releases/v0.14.md) propose PDF 2.0 Catalog/page AF reading, creation, linking and unlinking, with selected page operations and save protection. No v0.14 capability has been implemented or accepted. The current AF rows above still describe preservation only; the plan does not broaden them to StructElem, content-sequence MCAF, arbitrary owners or PDF/A conformance. The accepted v0.13 checkpoint is `6be4cc3`.
+
 ### Read write render and edit distinctions
 
 Every supported cell below is limited to its linked detailed profile and the assertions above. “Preserve” means retaining an existing representation, not semantic authoring. “Selected” is not support for all valid combinations. A dash means that operation is not an applicable capability, not a passed test.
