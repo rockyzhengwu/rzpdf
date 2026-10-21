@@ -346,14 +346,11 @@ pub(crate) fn parse_xref_section<R: Seek + Read>(
         start_objnum
             .checked_add(obj_count)
             .ok_or_else(|| PdfError::ParserError("xref subsection range overflow".into()))?;
-        if syntax.mode() == crate::parser::syntax::ParseMode::Strict && obj_count == 0 {
-            return Err(PdfError::ParserError(
-                "strict mode requires xref subsection counts to be greater than zero".to_string(),
-            ));
-        }
+        // ISO 32000-2, 7.5.4 (erratum #147): both header integers are
+        // non-negative. An empty subsection consumes its header, not entries.
         let objs = parse_xref_sub_section(syntax, start_objnum, obj_count)?;
         if syntax.mode() == crate::parser::syntax::ParseMode::Compatible
-            && (obj_count == 0 || objs.keys().any(|id| objects.contains_key(id)))
+            && objs.keys().any(|id| objects.contains_key(id))
         {
             syntax.report(
                 pos,
@@ -882,12 +879,33 @@ mod tests {
     }
 
     #[test]
-    fn test_strict_parse_xref_rejects_zero_count_subsection() {
+    fn empty_xref_subsections_still_require_a_valid_free_list() {
         let pdf = b"%PDF-1.7\nxref\n0 0\ntrailer\n<< /Size 1 >>\nstartxref\n9\n%%EOF\n";
         let inner = Cursor::new(pdf.to_vec());
         let reader = StreamReader::try_new(inner).unwrap();
         let mut syntax = SyntaxParser::with_mode(reader, ParseMode::Strict);
         assert!(parse_xref(&mut syntax).is_err());
+    }
+
+    #[test]
+    fn empty_xref_subsections_are_valid_in_both_modes() {
+        for sections in [
+            "0 0\n0 1\n0000000000 65535 f \n",
+            "0 1\n0000000000 65535 f \n1 0\n1 0\n",
+            "0 0\n0 1\n0000000000 65535 f \n1 0\n3 1\n0000000123 00007 n \n4 0\n",
+        ] {
+            for mode in [ParseMode::Strict, ParseMode::Compatible] {
+                let pdf = format!(
+                    "%PDF-1.7\nxref\n{sections}trailer\n<< /Size 4 >>\nstartxref\n9\n%%EOF\n"
+                );
+                let reader = StreamReader::try_new(Cursor::new(pdf.into_bytes())).unwrap();
+                let table = parse_xref(&mut SyntaxParser::with_mode(reader, mode)).unwrap();
+                assert_eq!(table.lookup(&0).unwrap().gennum(), 65535);
+                if sections.contains("3 1") {
+                    assert_eq!(table.lookup(&3).unwrap().offset(), 123);
+                }
+            }
+        }
     }
 
     #[test]

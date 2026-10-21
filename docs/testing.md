@@ -1,5 +1,48 @@
 # 解析回归与异常输入验证
 
+## Xref and Matte compatibility regression
+
+2026-10-21：针对真实输入 `Financial-Examples-for-I20.pdf` 修复两处兼容缺口。
+空 xref 分段依据 [ISO 32000-2 7.5.4 勘误 #147](https://pdf-issues.pdfa.org/32000-2-2020/clause07.html)
+接受，不降级到 Compatible；必要的 object 0／空闲链与其他 Strict 检查保持。
+Matte 根据 ISO 32000-1 11.6.5.3 在源颜色空间反算，行为及边界见
+[图像说明](image-codecs.md#image-soft-masks-and-matte)。
+
+从仓库根目录执行定向回归，不需要 Poppler 或新增依赖：
+
+```sh
+cargo test -p pdf --lib --locked page::pdf_image::
+cargo test -p pdf --lib --locked parser::parser::tests::
+cargo test -p pdf --lib --locked color::
+cargo test -p pdf --locked --test resources --test image_extraction --test v012_xref_output
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo fmt --all -- --check
+git diff --check
+```
+
+真实文件不复制进仓库，许可／再分发权限未确认。默认只运行自行构造的
+确定性样本，唯一新增的 ignored 测试是需要本地文件的显式检查，不替代普通回归：
+
+```sh
+RZPDF_COMPATIBILITY_SAMPLE="$HOME/Downloads/Financial-Examples-for-I20.pdf" \
+  cargo test -p pdf --lib --locked local_financial_example_opens_and_builds_first_page \
+  -- --ignored --nocapture
+qpdf --check "$HOME/Downloads/Financial-Examples-for-I20.pdf"
+```
+
+本地文件 SHA-256：`6196dd97ba8071953c61e667dbdfaa1d6007025d85e150e75d29e82af9f241d9`。
+Strict／Compatible 均成功打开并生成第一页 487 个显示对象，8 张图片逐一转换
+RGBA 成功，qpdf 检查退出 0。这里验证的是文件结构、第一页解释及图像像素转换，
+不是整份文件所有页面的渲染／目视一致性证明，也不是重跑整工作区或版本发布验收。
+
+最终代码的定向结果：图像单元 19 项、xref parser 单元 20 项、颜色单元
+123 项；`image_extraction` 9 项、`resources` 14 项、`v012_xref_output`
+11 项；本地文件显式检查 1 项，共 197 项通过。图像单元默认跳过的本地文件
+测试已用上面的 `--ignored` 命令单独执行通过，没有跳过既有测试。
+全工作区／全目标严格 Clippy、格式及差异检查通过。日志位于本机
+`/tmp/rzpdf-matte-{tests,parser,color,integration,sample,clippy}.log`，属于临时
+证据；未升级依赖、修改系统配置或修复原有 mozjpeg 原生链接警告。
+
 ## 代码质量门禁
 
 从仓库根目录运行，使用锁定依赖；检查范围包含三个 crate、单元测试、集成测试和示例：

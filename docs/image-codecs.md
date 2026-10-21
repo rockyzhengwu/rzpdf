@@ -55,6 +55,33 @@ adapter converts these to row-padded one-bit samples before applying Decode
 and stencil semantics. Inline Group 4 with an ASCIIHex wrapper is covered,
 including widths not divisible by eight; direct CCITT inline framing is not.
 
+## Image soft masks and Matte
+
+Image `SMask` accepts matching-size, non-stencil `DeviceGray` images with
+1/2/4/8/16-bit samples and a valid `Decode` array. Packed mask samples retain
+their precision until conversion; the final RGBA buffer has 8-bit alpha.
+Nested `Mask`/`SMask` and mismatched dimensions remain unsupported.
+
+An optional `Matte` array describes preblended colour. The image adapter
+inverts `c' = m + alpha * (c - m)` after sample decoding, **in the source colour
+space before RGB/ICC/output-profile conversion**. Indexed images expand their
+palette first: Matte describes the base-space colour, not the palette index.
+Recovered components are clipped to the source-space ranges; exactly zero
+alpha uses transparent black without division. Nonzero alpha that rounds to
+zero in 8-bit output is still used at full mask precision for unblending.
+Matte values must be finite, in range, and match the source/base component
+count; indirect arrays/components are resolved, and retained Matte storage is
+included in image payload accounting. Original stream objects remain unchanged
+for saving. `PdfImage::data()` is not an unmatted RGB buffer; use RGBA conversion
+for display-ready pixels.
+
+The rule is defined in ISO 32000-1, 11.6.5.3; see also Adobe's
+[soft-mask image description](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/pdfreference1.5_v6.pdf).
+Deterministic coverage lives in `pdf_image_matte_tests.rs`; it includes RGB,
+Gray, CMYK, CalGray/CalRGB, Lab, ICCBased, tint spaces, Indexed palettes,
+Decode, packed row padding, precision and malformed parameters. This does not
+expand the existing codec or general transparency-group colour-space envelope.
+
 ## Limits and dependencies
 
 Explicit budget entry points share `OperationBudget` with Globals and retained

@@ -97,6 +97,17 @@ impl Indexed {
         value: &ColorValue,
         context: &super::conversion::ColorConversionContext,
     ) -> PdfResult<ColorRgb> {
+        self.base
+            .rgb_with_context(&self.base_value(value)?, context)
+    }
+
+    pub(crate) fn base(&self) -> &ColorSpace {
+        &self.base
+    }
+
+    /// Expand the palette before any image Matte unblending. Palette indices
+    /// themselves are not preblended colour components (ISO 32000, 11.6.5.3).
+    pub(crate) fn base_value(&self, value: &ColorValue) -> PdfResult<ColorValue> {
         if value.value_size() != 1 {
             return Err(PdfError::ColorError("Indexed requires one index".into()));
         }
@@ -146,8 +157,7 @@ impl Indexed {
                     as f32,
             );
         }
-        let value = ColorValue::new(cvs);
-        self.base.rgb_with_context(&value, context)
+        Ok(ColorValue::new(cvs))
     }
 
     pub fn number_of_components(&self) -> usize {

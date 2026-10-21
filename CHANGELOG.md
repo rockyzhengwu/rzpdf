@@ -2,6 +2,12 @@
 
 本文件只记录交付变化，不替代长期任务池或原始测试日志。版本范围见 [ROADMAP](ROADMAP.md)。
 
+## Unreleased — xref 与图像 Matte 兼容修复
+
+Strict 接受零条目的经典 xref 分段，不再把它当作 Compatible 修复；依据 ISO 32000-2 7.5.4 勘误 #147，分段头两个整数均可为非负数。保留条目格式、范围、重复条目及最终空闲链校验，空分段不能替代必要的 object 0 条目。
+
+支持图像 SMask 的 Matte 预混合颜色还原：Decode 后在原颜色空间中反算，再进行 RGB／ICC 转换；Indexed 先展开调色板。保留颜色及遮罩的 packed 精度，处理 alpha=0、分量裁剪和间接参数，Matte 保留内存计入 payload 预算；不忽略 Matte、不更改原始流或扩大其他软遮罩限制。接口行为见[图像说明](docs/image-codecs.md#image-soft-masks-and-matte)，定向回归及本地真实文件检查见[测试说明](docs/testing.md#xref-and-matte-compatibility-regression)。
+
 ## Unreleased — 代码质量维护
 
 统一 Rust 格式和测试模块布局，清理无用私有实现／导入，给复杂返回值命名，补充 Default／is_empty 并简化控制流。移除未使用的旧私有 CCITT 解码实现，生产 fax 后端及原有测试保持；预算所有权、公开枚举布局与源保护不放宽。局部 lint 例外逐项注明原因，不全局关闭警告。

@@ -18,10 +18,42 @@ pub struct PdfImage {
     is_inline: bool,
     pixel_count: usize,
     max_rgba_bytes: usize,
-    soft_mask: Option<Vec<u8>>,
-    // Non-device samples retain packed precision until color conversion.
+    soft_mask: Option<ImageSoftMask>,
+    // Non-device and Matte-preblended samples retain packed precision until
+    // unblending/colour conversion.
     color_sample_decode: Option<(usize, Vec<f64>)>,
     rendering_intent: Option<crate::color::conversion::RenderingIntent>,
+}
+
+#[derive(Debug, Clone)]
+struct ImageSoftMask {
+    // Keep packed precision: rounding 16-bit alpha before unblending can
+    // turn small nonzero alpha into zero and amplify colour errors.
+    data: Vec<u8>,
+    bits: usize,
+    decode: [f64; 2],
+    matte: Option<Vec<f32>>,
+}
+
+impl ImageSoftMask {
+    fn alpha(&self, pixel: usize, width: usize) -> f64 {
+        let row_bytes = (width * self.bits).div_ceil(8);
+        let row_start = pixel / width * row_bytes;
+        let offset = pixel % width * self.bits;
+        let sample = if self.bits == 16 {
+            u32::from(u16::from_be_bytes([
+                self.data[row_start + offset / 8],
+                self.data[row_start + offset / 8 + 1],
+            ]))
+        } else {
+            (u32::from(self.data[row_start + offset / 8]) >> (8 - self.bits - offset % 8))
+                & ((1 << self.bits) - 1)
+        };
+        (self.decode[0]
+            + f64::from(sample) / f64::from((1u32 << self.bits) - 1)
+                * (self.decode[1] - self.decode[0]))
+            .clamp(0.0, 1.0)
+    }
 }
 
 impl PdfImage {
@@ -263,13 +295,33 @@ impl PdfImage {
         } else {
             None
         };
+        let resolved_soft_mask = image
+            .get_attr("SMask")
+            .map(|mask| ctx.resolve(mask))
+            .transpose()?;
+        let matte = resolved_soft_mask
+            .as_ref()
+            .map(|mask| image_matte(mask, &colorspace, ctx))
+            .transpose()?
+            .flatten();
         let color_sample_decode = match &colorspace {
-            ColorSpace::CalGray(_)
+            ColorSpace::DeviceGray(_)
+            | ColorSpace::DeviceRgb(_)
+            | ColorSpace::DeviceCmyk(_)
+            | ColorSpace::CalGray(_)
             | ColorSpace::CalRgb(_)
             | ColorSpace::Lab(_)
             | ColorSpace::IccBased(_)
             | ColorSpace::Separation(_)
-            | ColorSpace::DeviceN(_) => {
+            | ColorSpace::DeviceN(_)
+                if matte.is_some()
+                    || !matches!(
+                        &colorspace,
+                        ColorSpace::DeviceGray(_)
+                            | ColorSpace::DeviceRgb(_)
+                            | ColorSpace::DeviceCmyk(_)
+                    ) =>
+            {
                 let count = colorspace.number_of_components()?;
                 let slots = count
                     .checked_mul(2)
@@ -301,7 +353,9 @@ impl PdfImage {
                     }
                     _ => {}
                 }
-                if let Some(decode) = image.get_attr("Decode") {
+                if jpx.is_none()
+                    && let Some(decode) = image.get_attr("Decode")
+                {
                     let decode = ctx.resolve(decode)?;
                     if !matches!(decode, PdfObject::PdfNull) {
                         let array = decode
@@ -414,98 +468,89 @@ impl PdfImage {
                 ctx.limits().max_decoded_bytes,
             )?;
         }
-        let soft_mask = match image.get_attr("SMask") {
+        let soft_mask = match resolved_soft_mask.as_ref() {
             None | Some(PdfObject::PdfNull) => None,
-            Some(value) => {
-                let mask = ctx.resolve(value)?;
-                if matches!(mask, PdfObject::PdfNull) {
-                    None
-                } else {
-                    let mask = mask.as_stream().ok_or_else(|| {
-                        PdfError::ObjectError("SMask must be an image stream".into())
-                    })?;
-                    for (key, expected) in [("Subtype", "Image"), ("ColorSpace", "DeviceGray")] {
-                        let value = mask.dict().get(key).ok_or_else(|| {
-                            PdfError::ObjectError("SMask image field missing".into())
-                        })?;
-                        let value = ctx.resolve(value)?;
-                        if value.as_name().map(|name| name.name()) != Some(expected) {
-                            return Err(PdfError::UnsupportedFeature(
-                                "SMask requires Image/DeviceGray".into(),
-                            ));
-                        }
-                    }
-                    for (key, expected) in [("Width", width), ("Height", height)] {
-                        let value = mask.dict().get(key).ok_or_else(|| {
-                            PdfError::ObjectError("SMask dimensions/components missing".into())
-                        })?;
-                        let value = ctx.resolve(value)?;
-                        let actual = value
-                            .as_number()
-                            .ok_or_else(|| {
-                                PdfError::ObjectError(
-                                    "SMask dimensions/components must be integers".into(),
-                                )
-                            })?
-                            .as_u32_checked()?;
-                        if actual != expected {
-                            return Err(PdfError::UnsupportedFeature(
-                                "SMask requires matching dimensions".into(),
-                            ));
-                        }
-                    }
-                    let mask_bits =
-                        ctx.resolve(mask.dict().get("BitsPerComponent").ok_or_else(|| {
-                            PdfError::ObjectError("SMask BitsPerComponent missing".into())
-                        })?)?;
-                    let mask_bits = mask_bits
-                        .as_u32()
-                        .filter(|bits| matches!(bits, 1 | 2 | 4 | 8 | 16))
-                        .ok_or_else(|| {
-                            PdfError::ObjectError("invalid SMask BitsPerComponent".into())
-                        })? as usize;
-                    for key in ["Mask", "SMask", "Matte"] {
-                        if let Some(value) = mask.dict().get(key)
-                            && !matches!(ctx.resolve(value)?, PdfObject::PdfNull)
-                        {
-                            return Err(PdfError::UnsupportedFeature(format!("SMask {key}")));
-                        }
-                    }
-                    if let Some(value) = mask.dict().get("ImageMask") {
-                        let value = ctx.resolve(value)?;
-                        let flag = value
-                            .as_bool()
-                            .ok_or_else(|| {
-                                PdfError::ObjectError("SMask ImageMask must be boolean".into())
-                            })?
-                            .value();
-                        if flag {
-                            return Err(PdfError::UnsupportedFeature("SMask stencil mask".into()));
-                        }
-                    }
-                    let mut alpha = mask.decode_data(ctx)?;
-                    if mask_bits == 8 {
-                        apply_image_decode(&mut alpha, Some(1), mask.dict().get("Decode"), ctx)?;
-                    } else {
-                        let endpoints =
-                            image_decode_endpoints(Some(1), mask.dict().get("Decode"), ctx)?;
-                        alpha = unpack_image_samples(
-                            &alpha,
-                            width as usize,
-                            height as usize,
-                            1,
-                            mask_bits,
-                            endpoints,
-                            ctx.limits().max_decoded_bytes,
-                        )?;
-                    }
-                    if alpha.len() != pixel_count {
-                        return Err(PdfError::ObjectError(
-                            "SMask data length does not match dimensions".into(),
+            Some(mask) => {
+                let mask = mask
+                    .as_stream()
+                    .ok_or_else(|| PdfError::ObjectError("SMask must be an image stream".into()))?;
+                for (key, expected) in [("Subtype", "Image"), ("ColorSpace", "DeviceGray")] {
+                    let value = mask
+                        .dict()
+                        .get(key)
+                        .ok_or_else(|| PdfError::ObjectError("SMask image field missing".into()))?;
+                    let value = ctx.resolve(value)?;
+                    if value.as_name().map(|name| name.name()) != Some(expected) {
+                        return Err(PdfError::UnsupportedFeature(
+                            "SMask requires Image/DeviceGray".into(),
                         ));
                     }
-                    Some(alpha)
                 }
+                for (key, expected) in [("Width", width), ("Height", height)] {
+                    let value = mask.dict().get(key).ok_or_else(|| {
+                        PdfError::ObjectError("SMask dimensions/components missing".into())
+                    })?;
+                    let value = ctx.resolve(value)?;
+                    let actual = value
+                        .as_number()
+                        .ok_or_else(|| {
+                            PdfError::ObjectError(
+                                "SMask dimensions/components must be integers".into(),
+                            )
+                        })?
+                        .as_u32_checked()?;
+                    if actual != expected {
+                        return Err(PdfError::UnsupportedFeature(
+                            "SMask requires matching dimensions".into(),
+                        ));
+                    }
+                }
+                let mask_bits =
+                    ctx.resolve(mask.dict().get("BitsPerComponent").ok_or_else(|| {
+                        PdfError::ObjectError("SMask BitsPerComponent missing".into())
+                    })?)?;
+                let mask_bits = mask_bits
+                    .as_u32()
+                    .filter(|bits| matches!(bits, 1 | 2 | 4 | 8 | 16))
+                    .ok_or_else(|| PdfError::ObjectError("invalid SMask BitsPerComponent".into()))?
+                    as usize;
+                for key in ["Mask", "SMask"] {
+                    if let Some(value) = mask.dict().get(key)
+                        && !matches!(ctx.resolve(value)?, PdfObject::PdfNull)
+                    {
+                        return Err(PdfError::UnsupportedFeature(format!("SMask {key}")));
+                    }
+                }
+                if let Some(value) = mask.dict().get("ImageMask") {
+                    let value = ctx.resolve(value)?;
+                    let flag = value
+                        .as_bool()
+                        .ok_or_else(|| {
+                            PdfError::ObjectError("SMask ImageMask must be boolean".into())
+                        })?
+                        .value();
+                    if flag {
+                        return Err(PdfError::UnsupportedFeature("SMask stencil mask".into()));
+                    }
+                }
+                let alpha = mask.decode_data(ctx)?;
+                let endpoints = image_decode_endpoints(Some(1), mask.dict().get("Decode"), ctx)?;
+                let row_bytes = (width as usize)
+                    .checked_mul(mask_bits)
+                    .and_then(|n| n.checked_add(7))
+                    .map(|n| n / 8)
+                    .ok_or_else(|| PdfError::ResourceLimit("SMask sample size".into()))?;
+                if row_bytes.checked_mul(height as usize) != Some(alpha.len()) {
+                    return Err(PdfError::ObjectError(
+                        "SMask data length does not match dimensions".into(),
+                    ));
+                }
+                Some(ImageSoftMask {
+                    data: alpha,
+                    bits: mask_bits,
+                    decode: endpoints.map_or([0.0, 1.0], |v| [v[0], v[1]]),
+                    matte,
+                })
             }
         };
 
@@ -556,7 +601,18 @@ impl PdfImage {
         let bytes = self
             .data
             .len()
-            .checked_add(self.soft_mask.as_ref().map_or(0, Vec::len))
+            .checked_add(self.soft_mask.as_ref().map_or(0, |mask| mask.data.len()))
+            .and_then(|n| {
+                self.soft_mask
+                    .as_ref()
+                    .and_then(|mask| mask.matte.as_ref())
+                    .map_or(Some(n), |matte| {
+                        matte
+                            .capacity()
+                            .checked_mul(std::mem::size_of::<f32>())
+                            .and_then(|bytes| n.checked_add(bytes))
+                    })
+            })
             .and_then(|n| {
                 self.color_sample_decode
                     .as_ref()
@@ -656,6 +712,16 @@ impl PdfImage {
                 "image data length does not match dimensions/components".into(),
             ));
         }
+        if let Some(mask) = &self.soft_mask {
+            let row_bytes = (self.width as usize)
+                .checked_mul(mask.bits)
+                .and_then(|n| n.checked_add(7))
+                .map(|n| n / 8)
+                .ok_or_else(|| PdfError::ResourceLimit("SMask sample size".into()))?;
+            if row_bytes.checked_mul(self.height as usize) != Some(mask.data.len()) {
+                return Err(PdfError::ObjectError("SMask alpha length mismatch".into()));
+            }
+        }
         let output_size = self
             .pixel_count
             .checked_mul(4)
@@ -701,6 +767,17 @@ impl PdfImage {
                                 * (endpoints[component * 2 + 1] - endpoints[component * 2]))
                             as f32;
                     }
+                    let pixel_index = rgba.len() / 4;
+                    if let Some(mask) = &self.soft_mask
+                        && let Some(matte) = &mask.matte
+                    {
+                        let alpha = mask.alpha(pixel_index, self.width as usize);
+                        if alpha == 0.0 {
+                            rgba.extend_from_slice(&[0, 0, 0, 0]);
+                            continue;
+                        }
+                        unblend_matte(&mut color, matte, alpha, &self.colorspace);
+                    }
                     let rgb = self.colorspace.rgb_with_context(&color, context)?;
                     rgba.extend_from_slice(&[rgb.r(), rgb.g(), rgb.b(), 255]);
                 }
@@ -740,7 +817,24 @@ impl PdfImage {
                     // entire table could fail on an unused tint-transform input.
                     // Fixed stack storage bounds the cache independently of image size.
                     let mut palette: [Option<[u8; 4]>; 256] = [None; 256];
-                    for &index in &self.data {
+                    for (pixel_index, &index) in self.data.iter().enumerate() {
+                        if let Some(mask) = &self.soft_mask
+                            && let Some(matte) = &mask.matte
+                        {
+                            let alpha = mask.alpha(pixel_index, self.width as usize);
+                            if alpha == 0.0 {
+                                rgba.extend_from_slice(&[0, 0, 0, 0]);
+                                continue;
+                            }
+                            let mut color =
+                                space.base_value(&crate::color::value::ColorValue::new(vec![
+                                    index as f32,
+                                ]))?;
+                            unblend_matte(&mut color, matte, alpha, space.base());
+                            let rgb = space.base().rgb_with_context(&color, context)?;
+                            rgba.extend_from_slice(&[rgb.r(), rgb.g(), rgb.b(), 255]);
+                            continue;
+                        }
                         let pixel = match palette[index as usize] {
                             Some(pixel) => pixel,
                             None => {
@@ -778,15 +872,95 @@ impl PdfImage {
                 pixel[2] = color.b();
             }
         }
-        if let Some(alpha) = &self.soft_mask {
-            if alpha.len() != self.pixel_count {
-                return Err(PdfError::ObjectError("SMask alpha length mismatch".into()));
-            }
-            for (pixel, &alpha) in rgba.as_chunks_mut::<4>().0.iter_mut().zip(alpha) {
-                pixel[3] = alpha;
+        if let Some(mask) = &self.soft_mask {
+            for (index, pixel) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                pixel[3] = (mask.alpha(index, self.width as usize) * 255.0).round() as u8;
             }
         }
         Ok(rgba)
+    }
+}
+
+fn component_range(space: &ColorSpace, component: usize) -> (f64, f64) {
+    let range = match space {
+        ColorSpace::Lab(space) => {
+            let ranges = space.component_ranges();
+            (ranges[component * 2], ranges[component * 2 + 1])
+        }
+        ColorSpace::IccBased(space) => (
+            space.range()[component * 2],
+            space.range()[component * 2 + 1],
+        ),
+        _ => (0.0, 1.0),
+    };
+    (f64::from(range.0), f64::from(range.1))
+}
+
+fn image_matte<R: Read + Seek>(
+    mask: &PdfObject,
+    space: &ColorSpace,
+    ctx: &PDFContext<R>,
+) -> PdfResult<Option<Vec<f32>>> {
+    let Some(matte) = mask.as_stream().and_then(|mask| mask.dict().get("Matte")) else {
+        return Ok(None);
+    };
+    let matte = ctx.resolve(matte)?;
+    if matches!(matte, PdfObject::PdfNull) {
+        return Ok(None);
+    }
+    // Indexed palettes contain the preblended base colours, not preblended
+    // indices. Consequently Matte describes the base colour components.
+    let space = match space {
+        ColorSpace::Indexed(space) => space.base(),
+        _ => space,
+    };
+    let count = space.number_of_components()?;
+    let values = matte
+        .as_array()
+        .filter(|array| array.len() == count)
+        .ok_or_else(|| PdfError::ObjectError("SMask Matte component count mismatch".into()))?;
+    if count
+        .checked_mul(std::mem::size_of::<f32>())
+        .is_none_or(|bytes| bytes > ctx.limits().max_decoded_bytes)
+    {
+        return Err(PdfError::ResourceLimit(
+            "SMask Matte component budget".into(),
+        ));
+    }
+    let mut color = Vec::new();
+    color
+        .try_reserve_exact(count)
+        .map_err(|_| PdfError::ResourceLimit("SMask Matte allocation".into()))?;
+    for (component, value) in values.into_iter().enumerate() {
+        let value = ctx
+            .resolve(value)?
+            .as_f32()
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| PdfError::ObjectError("SMask Matte requires finite numbers".into()))?;
+        let (low, high) = component_range(space, component);
+        if !(low..=high).contains(&f64::from(value)) {
+            return Err(PdfError::ObjectError(
+                "SMask Matte component out of range".into(),
+            ));
+        }
+        color.push(value);
+    }
+    Ok(Some(color))
+}
+
+fn unblend_matte(
+    color: &mut crate::color::value::ColorValue,
+    matte: &[f32],
+    alpha: f64,
+    space: &ColorSpace,
+) {
+    // ISO 32000-1, 11.6.5.3: c' = m + alpha * (c - m).
+    // Invert after Decode, before colour conversion (which may be nonlinear).
+    for (component, (value, matte)) in color.values_mut().iter_mut().zip(matte).enumerate() {
+        let (low, high) = component_range(space, component);
+        let premixed = f64::from(*value).clamp(low, high);
+        let matte = f64::from(*matte);
+        *value = (matte + (premixed - matte) / alpha).clamp(low, high) as f32;
     }
 }
 
@@ -921,6 +1095,10 @@ fn unpack_image_samples_inner(
     }
     Ok(output)
 }
+
+#[cfg(test)]
+#[path = "pdf_image_matte_tests.rs"]
+mod matte_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1499,9 +1677,14 @@ mod tests {
             rendering_intent: None,
         };
         assert_eq!(image.rgba_buffer().unwrap(), vec![10, 20, 30, 255]);
-        image.soft_mask = Some(vec![128]);
+        image.soft_mask = Some(ImageSoftMask {
+            data: vec![128],
+            bits: 8,
+            decode: [0.0, 1.0],
+            matte: None,
+        });
         assert_eq!(image.rgba_buffer().unwrap(), vec![10, 20, 30, 128]);
-        image.soft_mask = Some(vec![]);
+        image.soft_mask.as_mut().unwrap().data.clear();
         assert!(image.rgba_buffer().is_err());
         image.soft_mask = None;
         image.max_rgba_bytes = 3;
