@@ -64,10 +64,21 @@ impl<R: Read + Seek> Interpreter<'_, R> {
             PdfError::PageResourceError("SMask G must have a transparency Group".into())
         })?;
         let parameters = GroupParameters::parse(group, self.ctx)?;
-        if matches!(kind, SoftMaskKind::Luminosity) && group.get("CS").is_none() {
-            return Err(PdfError::UnsupportedFeature(
-                "luminosity mask requires explicit DeviceRGB group CS".into(),
-            ));
+        if matches!(kind, SoftMaskKind::Luminosity) {
+            let space = group
+                .get("CS")
+                .map(|value| self.ctx.resolve(value))
+                .transpose()?;
+            if space
+                .as_ref()
+                .and_then(PdfObject::as_name)
+                .map(|name| name.name())
+                != Some("DeviceRGB")
+            {
+                return Err(PdfError::UnsupportedFeature(
+                    "luminosity mask requires explicit DeviceRGB group CS".into(),
+                ));
+            }
         }
         let mut background = [0.; 3];
         if let Some(value) = dict.get("BC") {

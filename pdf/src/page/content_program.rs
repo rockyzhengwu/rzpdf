@@ -283,6 +283,18 @@ impl<R: Read + Seek> super::PdfPage<'_, R> {
                 _ => return Err(PdfError::PageContentIsNotStream),
             }
         }
+        let recovered_stream_seams = super::content_parser::separate_graphics_stream_seams(
+            &mut source,
+            &mut stream_ranges,
+            options,
+            budget,
+            &mut source_lease,
+        )?;
+        if recovered_stream_seams {
+            self.ctx.record_structure_recovery(
+                crate::parser::diagnostic::StructureReason::ContentStreamBoundary,
+            )?;
+        }
         let mut operations_lease = budget.map(|budget| budget.reserve(0)).transpose()?;
         let mut program = ContentProgram::parse_with_stream_ranges_budget(
             source,
@@ -291,6 +303,7 @@ impl<R: Read + Seek> super::PdfPage<'_, R> {
             budget,
             &mut operations_lease,
         )?;
+        program.recovered_stream_seams = recovered_stream_seams;
         program.stream_object_ids = Some(stream_ids);
         program.source_page_id = self.page_node.as_object_id();
         program.source_stamp = Some(crate::document::identity::DocumentStamp {
@@ -530,15 +543,16 @@ impl SourceOperation {
     }
 }
 
-/// Lossless source representation of one decoded content byte sequence.
-/// Unknown operators and original lexical spelling are retained. This is not
-/// yet a resource provenance graph or a validated editing program.
+/// Source representation of decoded content, preserving lexical spelling.
+/// Compatible page reads may add a diagnosed Q/q stream-seam separator.
+/// Unknown operators are otherwise retained; this is not a validated program.
 #[derive(Debug, Clone)]
 pub struct ContentProgram {
     source: Vec<u8>,
     operations: Vec<SourceOperation>,
     stream_ranges: Vec<Range<usize>>,
     stream_object_ids: Option<Vec<Option<crate::objects::object_id::ObjectId>>>,
+    pub(crate) recovered_stream_seams: bool,
     source_stamp: Option<crate::document::identity::DocumentStamp>,
     pub(crate) source_page_id: Option<crate::objects::object_id::ObjectId>,
 }
@@ -2003,9 +2017,9 @@ impl ContentProgram {
         Ok(edited)
     }
 
-    /// Concatenate decoded streams exactly, without adding separators. Tokens,
-    /// strings and operations can cross stream boundaries; empty streams remain
-    /// represented by empty ranges. Ranges refer to the combined source bytes.
+    /// Concatenate decoded streams, preserving split tokens and strings.
+    /// Compatible mode separates a bare Q/q collision at a known stream seam;
+    /// strict mode preserves every source byte. Empty streams retain ranges.
     pub fn from_decoded_streams(streams: Vec<Vec<u8>>, options: ParseOptions) -> PdfResult<Self> {
         if streams.len() > options.limits.max_objects {
             return Err(PdfError::ResourceLimit("content source streams".into()));
@@ -2030,6 +2044,13 @@ impl ContentProgram {
             source.extend_from_slice(&stream);
             ranges.push(start..source.len());
         }
+        super::content_parser::separate_graphics_stream_seams(
+            &mut source,
+            &mut ranges,
+            options,
+            None,
+            &mut None,
+        )?;
         Self::parse_with_stream_ranges(source, ranges, options)
     }
 
@@ -2204,12 +2225,13 @@ impl ContentProgram {
             operations,
             stream_ranges,
             stream_object_ids: None,
+            recovered_stream_seams: false,
             source_stamp: None,
             source_page_id: None,
         })
     }
 
-    /// Original bytes, including comments, spacing, unknown operators and tail.
+    /// Source bytes, including comments, spelling and any compatible seam repair.
     pub fn source_bytes(&self) -> &[u8] {
         &self.source
     }

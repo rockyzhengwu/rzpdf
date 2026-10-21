@@ -19,11 +19,15 @@ pub struct CidFont {
     dw2: Option<(f32, f32)>,
     descriptor: Option<Descriptor>,
     cid_to_gid: Option<Vec<u8>>,
+    cff_cid_to_gid: std::collections::HashMap<u32, u32>,
 }
 
 impl CidFont {
     /// TrueType glyph selection; CID-keyed CFF requires a separate charset lookup.
     pub fn glyph_id(&self, cid: u32) -> Option<u32> {
+        if self.sub_type == "CIDFontType0" {
+            return self.cff_cid_to_gid.get(&cid).copied();
+        }
         if self.sub_type != "CIDFontType2" {
             return None;
         }
@@ -38,6 +42,25 @@ impl CidFont {
                 )
             }
         }
+    }
+
+    pub(crate) fn unicode_fallback(
+        &self,
+        limits: crate::parser::options::Limits,
+        budget: Option<&crate::budget::OperationBudget>,
+    ) -> PdfResult<(Vec<Option<String>>, Option<crate::budget::MemoryLease>)> {
+        if self.sub_type != "CIDFontType2" {
+            return Ok((Vec::new(), None));
+        }
+        let Some(data) = self.fontfile() else {
+            return Ok((Vec::new(), None));
+        };
+        let face = match super::font_program::load_face_for_operation(data, budget) {
+            Ok(face) => face,
+            Err(error @ PdfError::ResourceLimit(_)) => return Err(error),
+            Err(_) => return Ok((Vec::new(), None)),
+        };
+        super::font_program::glyph_unicode_map(&face, limits, budget)
     }
 
     pub fn base_font(&self) -> &str {
@@ -208,7 +231,40 @@ impl CidFont {
             };
             font.descriptor = Some(descriptor);
         }
-        // TODO load font program
+        if sub_type == "CIDFontType0" {
+            if let Some(bytes) = font.fontfile() {
+                let face = super::font_program::load_face_for_operation(bytes, budget)?;
+                let count = usize::try_from(face.num_glyphs())
+                    .map_err(|_| PdfError::FontError("invalid CFF glyph count".into()))?;
+                if count > ctx.limits().max_objects {
+                    return Err(PdfError::ResourceLimit("CFF charset entries".into()));
+                }
+                // FreeType exposes the CFF charset, which maps glyph indices to
+                // CIDs (not Unicode). Invert it once for PDF glyph selection.
+                let mut retained =
+                    budget
+                        .map(|pool| {
+                            pool.reserve(count.checked_mul(32).ok_or_else(|| {
+                                PdfError::ResourceLimit("CFF charset bytes".into())
+                            })?)
+                        })
+                        .transpose()?;
+                let mut mappings = std::collections::HashMap::new();
+                mappings
+                    .try_reserve(count)
+                    .map_err(|_| PdfError::ResourceLimit("CFF charset allocation".into()))?;
+                if let Some(retained) = &mut retained {
+                    retained.resize(mappings.capacity().saturating_mul(16))?;
+                    lease.as_mut().unwrap().absorb(retained)?;
+                }
+                for gid in 0..count as u32 {
+                    if let Some(cid) = super::font_program::cff_cid(&face, gid) {
+                        mappings.entry(cid).or_insert(gid);
+                    }
+                }
+                font.cff_cid_to_gid = mappings;
+            }
+        }
 
         Ok((font, lease))
     }
@@ -750,5 +806,47 @@ mod tests {
         assert_eq!(font.text_widths(&chars).unwrap(), 1500.0);
         font.dw = Some(600.0);
         assert_eq!(font.text_widths(&chars).unwrap(), 1100.0);
+    }
+}
+
+#[cfg(test)]
+mod cff_charset_tests {
+    use super::*;
+    use crate::{
+        document::Document,
+        objects::{pdf_name::PdfName, pdf_stream::PdfStream},
+    };
+    #[test]
+    fn cid_keyed_charset_is_not_an_identity_gid_mapping() {
+        let doc = Document::new().unwrap();
+        let mut font = PdfDict::default();
+        font.insert(
+            "Subtype".into(),
+            PdfObject::PdfName(PdfName::new("CIDFontType0".into())),
+        );
+        font.insert(
+            "BaseFont".into(),
+            PdfObject::PdfName(PdfName::new("RzpdfSyntheticCID".into())),
+        );
+        let mut descriptor = PdfDict::default();
+        descriptor.insert(
+            "FontFile3".into(),
+            PdfObject::PdfStream(PdfStream::new(
+                Default::default(),
+                include_bytes!("../../tests/fixtures/synthetic-cid.cff").to_vec(),
+            )),
+        );
+        font.insert("FontDescriptor".into(), PdfObject::PdfDict(descriptor));
+        let parsed = CidFont::try_new(&font, doc.ctx()).unwrap();
+        assert_eq!(parsed.glyph_id(7), Some(1));
+        assert_eq!(parsed.glyph_id(42), Some(2));
+        assert_eq!(parsed.glyph_id(2), None);
+        let pool = crate::budget::OperationBudget::new(65536);
+        let (parsed, lease) = CidFont::try_new_with_budget(&font, doc.ctx(), &pool).unwrap();
+        assert_eq!(parsed.glyph_id(42), Some(2));
+        assert_eq!(pool.live_bytes(), lease.bytes());
+        drop(parsed);
+        drop(lease);
+        assert_eq!(pool.live_bytes(), 0);
     }
 }

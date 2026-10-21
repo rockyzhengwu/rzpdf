@@ -5,6 +5,7 @@ pub mod crypt;
 pub mod dct;
 pub mod flate;
 pub mod jbig2;
+mod jbig2_native;
 pub mod jpx;
 pub mod lzw;
 pub mod pnm;
@@ -25,11 +26,15 @@ pub struct FilterContext<'a> {
     pub jbig2_globals: Option<&'a [u8]>,
     pub max_decoded_bytes: usize,
     pub max_image_pixels: u64,
+    pub compatible: bool,
+    pub recovered: Option<&'a std::cell::Cell<bool>>,
 }
 
 impl Default for FilterContext<'_> {
     fn default() -> Self {
         Self {
+            compatible: false,
+            recovered: None,
             crypt_already_processed: false,
             stream_dict: None,
             jbig2_globals: None,
@@ -79,7 +84,7 @@ pub fn apply_filter_with_context(
         }
         "DCT" | "DCTDecode" => dct::dct_decode_limited(input, context),
         "CCF" | "CCITTFaxDecode" => {
-            ccittfax::ccittfax_decode_limited(input, params, context.max_decoded_bytes)
+            ccittfax::decode_context(input, params, context, None).map(|(bytes, _)| bytes)
         }
         "Crypt" => {
             check_output_size(0, input.len(), context.max_decoded_bytes, "Crypt")?;
@@ -160,7 +165,8 @@ pub fn apply_filter_with_budget(
         "JPXDecode" => jpx::decode_with_budget(input, context, budget).map(|(_, bytes)| bytes),
         "JBIG2Decode" => jbig2::decode_with_budget(input, context, budget),
         "CCF" | "CCITTFaxDecode" => {
-            ccittfax::ccittfax_decode_with_budget(input, params, context.max_decoded_bytes, budget)
+            let (bytes, lease) = ccittfax::decode_context(input, params, context, Some(budget))?;
+            crate::budget::BudgetedBytes::from_reserved_vec(bytes, lease.unwrap())
         }
         _ => Err(PdfError::FilterError(format!(
             "filter has no budget-aware decoder: {name}"

@@ -408,6 +408,17 @@ impl Cmap {
             .map(String::as_str)
     }
 
+    /// A simple font always supplies one-byte codes independently of a CMap's
+    /// codespace declaration. Honour an exact one-byte mapping even when a
+    /// producer copied a two-byte Identity codespace into its ToUnicode header.
+    /// Never reinterpret a two-byte source entry as a one-byte code.
+    pub(crate) fn single_byte_unicode(&self, code: u8) -> Option<&str> {
+        self.cid_to_unicode
+            .get(&(1, u32::from(code)))
+            .or_else(|| self.cid_to_unicode.get(&(0, u32::from(code))))
+            .map(String::as_str)
+    }
+
     pub fn add_code_to_cid(&mut self, code: u32, cid: u32) {
         self.code_to_cids.insert((0, code), cid);
     }

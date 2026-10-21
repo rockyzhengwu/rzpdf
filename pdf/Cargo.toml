@@ -34,3 +34,6 @@ stringprep = "0.1.5"
 cms = "0.2.3"
 der = { version = "0.7.10", features = ["alloc", "std"] }
 ring = "0.17.14"
+
+[build-dependencies]
+cc = "=1.2.56"

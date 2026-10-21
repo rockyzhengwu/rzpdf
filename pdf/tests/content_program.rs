@@ -1405,3 +1405,73 @@ fn source_program_preserves_unknown_operations_and_lexical_bytes() {
     );
     assert!(ContentProgram::from_decoded_bytes(b"1 2".to_vec(), ParseOptions::default()).is_err());
 }
+
+#[test]
+fn contents_q_q_seam_restores_ctm_and_repaired_source_edits_save_strict() {
+    use pdf::{
+        budget::OperationBudget,
+        document::Document,
+        page::{content_program::OperationReplacement, page_object::PageObject},
+        parser::syntax::ParseMode,
+    };
+    let doc = Document::new().unwrap();
+    doc.add_page(0).unwrap();
+    let first = b"q 2 0 0 3 0 0 cm 0 0 1 1 re f Q";
+    let second = b"q 5 0 0 7 0 0 cm 0 0 1 1 re f Q";
+    doc.replace_page_contents(0, first.to_vec()).unwrap();
+    doc.append_page_contents(0, second.to_vec()).unwrap();
+    let mut page = doc.get_page(0).unwrap();
+    let list = page.display_list().unwrap();
+    let scales: Vec<_> = list
+        .objects()
+        .iter()
+        .map(|o| match o {
+            PageObject::Path(p) => p.matrix().a(),
+            _ => panic!(),
+        })
+        .collect();
+    assert_eq!(scales, vec![2., 5.]);
+    let program = page.content_program().unwrap();
+    assert_eq!(
+        program.source_bytes(),
+        [first.as_slice(), b"\n", second.as_slice()].concat()
+    );
+    assert_eq!(program.operations().len(), 10);
+    assert_eq!(
+        program.stream_ranges(),
+        &[
+            0..first.len() + 1,
+            first.len() + 1..first.len() + 1 + second.len()
+        ]
+    );
+    let pool = OperationBudget::new(1024 * 1024);
+    let budgeted = page.content_program_with_budget(&pool).unwrap();
+    assert_eq!(budgeted.program().source_bytes(), program.source_bytes());
+    drop(budgeted);
+    assert_eq!(pool.live_bytes(), 0);
+    let strict =
+        Document::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict).unwrap();
+    assert!(strict.get_page(0).unwrap().display_list().is_err());
+    doc.replace_page_operation_sequences(
+        0,
+        &program,
+        &[OperationReplacement {
+            index: 6,
+            source: b"5 0 0 7 0 0 cm",
+            operation_count: 1,
+        }],
+    )
+    .unwrap();
+    let strict =
+        Document::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict).unwrap();
+    let list = strict.get_page(0).unwrap().display_list().unwrap();
+    let scales: Vec<_> = list
+        .objects()
+        .iter()
+        .map(|o| match o {
+            PageObject::Path(p) => p.matrix().a(),
+            _ => panic!(),
+        })
+        .collect();
+    assert_eq!(scales, vec![2., 5.]);
+}

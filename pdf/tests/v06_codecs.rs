@@ -244,10 +244,9 @@ fn truncated_or_unsupported_codec_envelopes_are_errors_not_blank_images() {
     }
     let mut symbol = GENERIC.to_vec();
     symbol[4] = 0;
-    assert!(matches!(
-        jbig2::jbig2_decode(&symbol, None, Default::default()),
-        Err(PdfError::UnsupportedFeature(_))
-    ));
+    // Changing a page-information segment into a symbol dictionary does not
+    // produce a valid symbol stream, even though real dictionaries now decode.
+    assert!(jbig2::jbig2_decode(&symbol, None, Default::default()).is_err());
     let mut image_dict = PdfDict::default();
     image_dict.insert(
         "Width".into(),
@@ -415,4 +414,39 @@ fn jpx_coding_envelope_rejects_precision_tiles_and_header_pixel_limits() {
         jpx::jpx_decode(&huge, None, Default::default()),
         Err(PdfError::ResourceLimit(_))
     ));
+}
+
+#[test]
+fn symbol_dictionary_text_and_globals_decode_with_exact_budget_release() {
+    use sha2::{Digest, Sha256};
+    let bytes = include_bytes!("fixtures/jbig2-annex-h-page1.bin");
+    let expected = "d806f2e73907d03b1defbb7afadcee5962d80a009a844d3170d8b3f8f446a2fd";
+    // Segment 0 (35 bytes) is the shared symbol dictionary. Same semantics
+    // whether delivered inline or separately through JBIG2Globals.
+    for (input, globals) in [(bytes.as_slice(), None), (&bytes[35..], Some(&bytes[..35]))] {
+        let pool = OperationBudget::new(8 * 1024 * 1024);
+        let context = FilterContext {
+            jbig2_globals: globals,
+            ..Default::default()
+        };
+        let decoded = jbig2::decode_with_budget(input, context, &pool).unwrap();
+        assert_eq!(decoded.as_slice().len(), 448);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(decoded.as_slice())),
+            expected
+        );
+        assert_eq!(pool.live_bytes(), decoded.capacity());
+        let peak = pool.peak_bytes();
+        drop(decoded);
+        assert_eq!(pool.live_bytes(), 0);
+        let neighbor = pool.reserve(pool.maximum_bytes() - 32 * 1024).unwrap();
+        assert!(matches!(
+            jbig2::decode_with_budget(input, context, &pool),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(pool.live_bytes(), neighbor.bytes());
+        drop(neighbor);
+        assert!(peak > 448);
+        assert!(jbig2::decode_with_budget(input, context, &pool).is_ok());
+    }
 }

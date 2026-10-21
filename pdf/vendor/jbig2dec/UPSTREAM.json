@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/ArtifexSoftware/jbig2dec",
+  "tag": "0.20",
+  "commit": "1d1347e38a55e657dcc4c8f1c77bb3a26bfc9ff3",
+  "modifications": [],
+  "test_fixture": {
+    "source": "annex-h.jbig2",
+    "derivation": "Sequential embedded segments 0 through 7 (Globals and page 1); file header removed",
+    "sha256_decoded_pdf_samples": "d806f2e73907d03b1defbb7afadcee5962d80a009a844d3170d8b3f8f446a2fd"
+  }
+}

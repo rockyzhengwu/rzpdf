@@ -4465,5 +4465,56 @@ lazy_static! {
 }
 
 pub fn adobe_glyph_list_to_unicode(glyph_name: &str) -> Option<u32> {
-    GLYPH_NAME_TO_UNICODE.get(glyph_name).map(|v| v.to_owned())
+    let name = glyph_name.split('.').next()?;
+    if let Some(value) = GLYPH_NAME_TO_UNICODE.get(name) {
+        return Some(*value);
+    }
+    let hex = if let Some(hex) = name.strip_prefix("uni") {
+        if hex.len() != 4 {
+            return None;
+        }
+        hex
+    } else if let Some(hex) = name.strip_prefix('u') {
+        if !(4..=6).contains(&hex.len()) {
+            return None;
+        }
+        hex
+    } else {
+        return None;
+    };
+    if !hex
+        .bytes()
+        .all(|c| c.is_ascii_digit() || (b'A'..=b'F').contains(&c))
+    {
+        return None;
+    }
+    let code = u32::from_str_radix(hex, 16).ok()?;
+    char::from_u32(code).map(u32::from)
+}
+
+#[cfg(test)]
+mod unicode_name_tests {
+    use super::*;
+    #[test]
+    fn canonical_unicode_names_and_suffixes() {
+        for (name, scalar) in [
+            ("uni4E2D", 0x4E2D),
+            ("u1F600", 0x1F600),
+            ("A.alt", 65),
+            ("uni4E2D.vert", 0x4E2D),
+        ] {
+            assert_eq!(adobe_glyph_list_to_unicode(name), Some(scalar), "{name}");
+        }
+        for name in [
+            "G21",
+            "uD800",
+            "u110000",
+            "uni00410042",
+            "u123",
+            "uni4e2d",
+            "A_B",
+        ] {
+            assert_eq!(adobe_glyph_list_to_unicode(name), None, "{name}");
+        }
+    }
 }

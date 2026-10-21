@@ -3,8 +3,8 @@ use crate::page::marked_text::{Capture, Mark, TextContentLocation};
 use std::{cell::RefCell, rc::Rc};
 
 impl<R: Read + Seek> Interpreter<'_, R> {
-    /// The explicit layer renderer can draw tagged text without requesting a
-    /// logical replacement. Validate known metadata; never apply it to glyphs.
+    /// Painting and paint-order extraction retain glyphs, not logical metadata
+    /// replacements. Validate standard properties without rejecting custom tags.
     pub(super) fn validate_selected_properties(&self, op: &Operator) -> PdfResult<()> {
         let tag = op.get_as_name(0)?.name();
         if tag == "OC" {
@@ -29,11 +29,6 @@ impl<R: Read + Seek> Interpreter<'_, R> {
                         .as_u32_checked()?;
                 }
                 "ActualText" | "Alt" | "Lang" => {
-                    if key == "ActualText" && !matches!(tag, "Span" | "Artifact") {
-                        return Err(PdfError::UnsupportedFeature(
-                            "ActualText requires Span or Artifact".into(),
-                        ));
-                    }
                     let value = self.ctx.resolve(value)?;
                     let text = value
                         .as_string()
@@ -45,11 +40,9 @@ impl<R: Read + Seek> Interpreter<'_, R> {
                         .semantic_chars(text.chars().count(), &self.ctx.limits())?;
                 }
                 "Type" | "Subtype" | "BBox" | "Attached" if tag == "Artifact" => {}
-                _ => {
-                    return Err(PdfError::UnsupportedFeature(format!(
-                        "selected rendering marked property {key}"
-                    )));
-                }
+                // Application metadata has no painting semantics. Keep it in
+                // the source program; don't resolve potentially large payloads.
+                _ => {}
             }
         }
         Ok(())

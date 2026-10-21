@@ -129,7 +129,9 @@ fn decode_inner(
             prefixes[next_code as usize] = prev;
             suffixes[next_code as usize] = first;
             next_code += 1;
-            while code_size < 12 && next_code + early_change as u16 > (1_u16 << code_size) {
+            // The next code is read at the larger width as soon as the next
+            // available dictionary slot reaches the EarlyChange boundary.
+            while code_size < 12 && next_code + early_change as u16 >= (1_u16 << code_size) {
                 code_size += 1;
             }
         }
@@ -190,11 +192,11 @@ mod tests {
             let mut expected = Vec::new();
             for ordinal in 1..=4200 {
                 // Explicit literal ordinals, independent of decoder next_code.
-                let width = if ordinal < 257 - early {
+                let width = if ordinal < 256 - early {
                     9
-                } else if ordinal < 769 - early {
+                } else if ordinal < 768 - early {
                     10
-                } else if ordinal < 1793 - early {
+                } else if ordinal < 1792 - early {
                     11
                 } else {
                     12

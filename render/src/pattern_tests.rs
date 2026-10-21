@@ -225,3 +225,79 @@ fn nonuniform_overlapping_tiles_have_no_white_seams_and_charge_reduction_buffers
         }
     }
 }
+
+#[test]
+fn dense_lattice_retains_one_cell_and_repeats_only_where_painted() {
+    let doc = document_sized(
+        1000.,
+        "/XStep 4 /YStep 4",
+        "1 0 0 rg 0 0 4 4 re f",
+        "0 0 20 20 re f",
+    );
+    let list = doc.get_page(0).unwrap().display_list().unwrap();
+    let pdf::page::page_object::PageObject::Path(path) = &list.objects()[0] else {
+        panic!("path")
+    };
+    let pdf::color::colorspace::ColorSpace::Pattern(space) =
+        &path.graphic_state().color_state.fill_color_space
+    else {
+        panic!("pattern")
+    };
+    let pattern = space.paint().unwrap();
+    assert!(pattern.tile_matrix.is_some());
+    assert_eq!(pattern.list.objects().len(), 1);
+    let mut renderer = SkiaRender::new(72., 72.).unwrap();
+    list.replay(&mut renderer).unwrap();
+    let info = skia_safe::ImageInfo::new(
+        (1000, 1000),
+        skia_safe::ColorType::RGBA8888,
+        skia_safe::AlphaType::Unpremul,
+        None,
+    );
+    let mut pixels = vec![0; 1000 * 1000 * 4];
+    assert!(
+        renderer
+            .surface
+            .read_pixels(&info, &mut pixels, 4000, (0, 0))
+    );
+    assert_eq!(
+        &pixels[(990 * 1000 + 10) * 4..(990 * 1000 + 10) * 4 + 4],
+        &[255, 0, 0, 255]
+    );
+    assert_eq!(
+        &pixels[(500 * 1000 + 500) * 4..(500 * 1000 + 500) * 4 + 4],
+        &[255, 255, 255, 255]
+    );
+}
+
+#[test]
+fn full_cells_remain_opaque_when_device_period_has_fractional_pixels() {
+    let doc = document(
+        "/BBox [0 0 10 10]",
+        "1 0 0 rg 0 0 10 10 re f",
+        "0 0 40 40 re f",
+    );
+    let mut renderer = SkiaRender::new(48., 48.).unwrap();
+    doc.get_page(0).unwrap().display(&mut renderer).unwrap();
+    let info = skia_safe::ImageInfo::new(
+        (27, 27),
+        skia_safe::ColorType::RGBA8888,
+        skia_safe::AlphaType::Unpremul,
+        None,
+    );
+    let mut pixels = vec![0; 27 * 27 * 4];
+    assert!(
+        renderer
+            .surface
+            .read_pixels(&info, &mut pixels, 108, (0, 0))
+    );
+    for y in 1..26 {
+        for x in 1..26 {
+            assert_eq!(
+                &pixels[(y * 27 + x) * 4..(y * 27 + x) * 4 + 4],
+                &[255, 0, 0, 255],
+                "{x},{y}"
+            );
+        }
+    }
+}

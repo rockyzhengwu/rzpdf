@@ -57,6 +57,16 @@ pub struct SkiaRender {
     shape_mode: bool,
     object_dispatch: bool,
     initial_override: Option<skia_safe::Image>,
+    substitute_font: Option<skia_safe::Typeface>,
+    typeface_cache: std::collections::HashMap<
+        usize,
+        (
+            std::rc::Weak<pdf::font::pdf_font::Font>,
+            skia_safe::Typeface,
+            usize,
+        ),
+    >,
+    typeface_cache_bytes: usize,
 }
 
 struct RenderGroup {
@@ -69,6 +79,57 @@ struct RenderGroup {
 }
 
 impl SkiaRender {
+    /// Explicit substitute for fonts without a program. PDF advances remain
+    /// authoritative; glyphs are resolved through proven Unicode mappings.
+    pub fn set_substitute_font(&mut self, data: &[u8], collection_index: usize) -> PdfResult<()> {
+        self.substitute_font = Some(
+            FontMgr::new()
+                .new_from_data(data, collection_index)
+                .ok_or_else(|| PdfError::FontError("invalid substitute font program".into()))?,
+        );
+        Ok(())
+    }
+
+    fn embedded_typeface(
+        &mut self,
+        font: &std::rc::Rc<pdf::font::pdf_font::Font>,
+    ) -> PdfResult<skia_safe::Typeface> {
+        let key = std::rc::Rc::as_ptr(font) as usize;
+        if let Some((source, face, _)) = self.typeface_cache.get(&key) {
+            if source
+                .upgrade()
+                .is_some_and(|source| std::rc::Rc::ptr_eq(&source, font))
+            {
+                return Ok(face.clone());
+            }
+        }
+        let data = font
+            .fontfile()
+            .ok_or_else(|| PdfError::FontError("missing embedded program".into()))?;
+        let maximum = self.limits.max_decoded_bytes;
+        if data.len() > maximum {
+            return Err(PdfError::ResourceLimit("render font program bytes".into()));
+        }
+        if self.typeface_cache.len() >= 128
+            || self.typeface_cache_bytes.saturating_add(data.len()) > maximum
+        {
+            self.typeface_cache.clear();
+            self.typeface_cache_bytes = 0;
+        }
+        let face = FontMgr::new()
+            .new_from_data(data, 0)
+            .ok_or_else(|| PdfError::FontError("Skia rejected font program".into()))?;
+        if let Some((_, _, bytes)) = self.typeface_cache.remove(&key) {
+            self.typeface_cache_bytes -= bytes;
+        }
+        self.typeface_cache_bytes += data.len();
+        self.typeface_cache.insert(
+            key,
+            (std::rc::Rc::downgrade(font), face.clone(), data.len()),
+        );
+        Ok(face)
+    }
+
     fn capture_group_alpha(
         &mut self,
         paint: impl FnOnce(&mut Self) -> PdfResult<()>,
@@ -190,6 +251,9 @@ impl SkiaRender {
             page_height: 0,
             limits,
             clear_color: Color::WHITE,
+            substitute_font: None,
+            typeface_cache: std::collections::HashMap::new(),
+            typeface_cache_bytes: 0,
             held_pattern_surfaces: 0,
             group_stack: Vec::new(),
             active_intent: Default::default(),
@@ -212,6 +276,70 @@ impl SkiaRender {
             let pattern = pattern.paint().ok_or_else(|| {
                 PdfError::ColorError("Pattern colour has no selected pattern".into())
             })?;
+            if let Some(placement) = &pattern.tile_matrix {
+                let transform = placement.checked_mul(&self.matrix)?;
+                // Resolve one cell at device resolution; enforce ordinary surface
+                // limits and keep at least one pixel for subpixel-sized cells.
+                let sx = transform
+                    .a()
+                    .hypot(transform.b())
+                    .max(1. / pattern.list.page_width());
+                let sy = transform
+                    .c()
+                    .hypot(transform.d())
+                    .max(1. / pattern.list.page_height());
+                // Match the cell transform to its integer raster dimensions;
+                // otherwise rounding leaves a transparent strip on each repeat.
+                let sx = (sx * pattern.list.page_width()).ceil() / pattern.list.page_width();
+                let sy = (sy * pattern.list.page_height()).ceil() / pattern.list.page_height();
+                let mut limits = self.limits;
+                let parent_pixels = (self.page_width as u64 * self.page_height as u64)
+                    .checked_mul(1 + self.held_pattern_surfaces)
+                    .ok_or_else(|| {
+                        PdfError::ResourceLimit("pattern aggregate surface pixels".into())
+                    })?;
+                limits.max_render_pixels = limits.max_render_pixels.saturating_sub(parent_pixels);
+                limits.max_render_bytes = limits
+                    .max_render_bytes
+                    .saturating_sub(parent_pixels as usize * 4);
+                let mut renderer = Self::with_limits(sx * 72., sy * 72., limits)?;
+                renderer.clear_color = Color::TRANSPARENT;
+                renderer.shape_mode = self.shape_mode;
+                renderer.substitute_font = self.substitute_font.clone();
+                pattern.list.replay(&mut renderer)?;
+                let image = renderer.surface.image_snapshot();
+                let local = Matrix::new(
+                    pattern.list.page_width() / image.width() as f32,
+                    0.,
+                    0.,
+                    pattern.list.page_height() / image.height() as f32,
+                    0.,
+                    0.,
+                )
+                .checked_mul(&transform)?
+                .checked_mul(&ctm.checked_inverse()?)?;
+                let matrix = skia_safe::Matrix::new_all(
+                    local.a(),
+                    local.c(),
+                    local.e(),
+                    local.b(),
+                    local.d(),
+                    local.f(),
+                    0.,
+                    0.,
+                    1.,
+                );
+                let shader = image
+                    .to_shader(
+                        (skia_safe::TileMode::Repeat, skia_safe::TileMode::Repeat),
+                        skia_safe::SamplingOptions::from(skia_safe::FilterMode::Linear),
+                        &matrix,
+                    )
+                    .ok_or_else(|| PdfError::ResourceLimit("pattern cell shader".into()))?;
+                self.paint.set_color(Color::WHITE);
+                self.paint.set_shader(shader);
+                return Ok(());
+            }
             let pixels = u64::from(self.page_width as u32) * u64::from(self.page_height as u32);
             let bytes = usize::try_from(pixels)
                 .ok()
@@ -274,6 +402,7 @@ impl SkiaRender {
             )?;
             renderer.clear_color = Color::TRANSPARENT;
             renderer.shape_mode = self.shape_mode;
+            renderer.substitute_font = self.substitute_font.clone();
             if needs_backdrop && !self.shape_mode {
                 renderer.start_page(pattern.list.page_width(), pattern.list.page_height())?;
                 let image = self.surface.image_snapshot();
@@ -841,6 +970,13 @@ impl Device for SkiaRender {
     }
 
     fn start_page(&mut self, page_width: f32, page_height: f32) -> PdfResult<()> {
+        self.typeface_cache
+            .retain(|_, (font, _, _)| font.strong_count() != 0);
+        self.typeface_cache_bytes = self
+            .typeface_cache
+            .values()
+            .map(|(_, _, bytes)| *bytes)
+            .sum();
         while !self.group_stack.is_empty() {
             self.end_group(false)?;
         }
@@ -926,7 +1062,7 @@ impl Device for SkiaRender {
             return Ok(());
         }
         if matches!(
-            textobject.state.text_state.font.as_ref(),
+            textobject.state.text_state.font.as_deref(),
             Some(pdf::font::pdf_font::Font::Type3(_))
         ) {
             return Err(PdfError::UnsupportedFeature(
@@ -1067,16 +1203,17 @@ impl Device for SkiaRender {
                 return Ok(()); // A collapsed text transform has no painted area.
             }
 
-            let fontmgr = FontMgr::new();
-            let data = font.fontfile().ok_or_else(|| {
-                PdfError::FontError(format!(
-                    "font '{}' has no embedded or declared substitute program",
-                    font.name()
-                ))
-            })?;
-            let typeface = fontmgr
-                .new_from_data(data, 0)
-                .ok_or_else(|| PdfError::FontError("Skia rejected font program".into()))?;
+            let substituted = font.fontfile().is_none();
+            let typeface = if font.fontfile().is_some() {
+                self.embedded_typeface(font)?
+            } else {
+                self.substitute_font.clone().ok_or_else(|| {
+                    PdfError::FontError(format!(
+                        "font '{}' needs an explicit substitute program",
+                        font.name()
+                    ))
+                })?
+            };
             let mut skia_font = skia_safe::Font::new(typeface, size.abs());
             skia_font.set_edging(skia_safe::font::Edging::SubpixelAntiAlias);
             skia_font.set_subpixel(true);
@@ -1104,8 +1241,32 @@ impl Device for SkiaRender {
                         "text position transform overflows".into(),
                     ));
                 }
-                match font.get_glyph(char_item.charcode()) {
-                    Some(GlyphDesc::Gid(gid)) if gid != 0 && gid <= u16::MAX as u32 => {
+                let glyph = if substituted {
+                    let unicode = font.unicode_mapping(char_item.charcode())?.ok_or_else(|| {
+                        PdfError::FontError("substitution requires a Unicode mapping".into())
+                    })?;
+                    let mut chars = unicode.chars();
+                    let ch = chars
+                        .next()
+                        .ok_or_else(|| PdfError::FontError("empty substitute mapping".into()))?;
+                    if chars.next().is_some() {
+                        return Err(PdfError::UnsupportedFeature(
+                            "substitute glyph needs text shaping for multi-character mapping"
+                                .into(),
+                        ));
+                    }
+                    Some(GlyphDesc::Gid(skia_font.unichar_to_glyph(ch as i32) as u32))
+                } else {
+                    font.raw_cff_cid(char_item.charcode())
+                        .map(GlyphDesc::Gid)
+                        .or_else(|| font.get_glyph(char_item.charcode()))
+                };
+                match glyph {
+                    // Embedded glyph zero is the font's defined .notdef glyph;
+                    // PDF producers also use an empty .notdef for spacing.
+                    Some(GlyphDesc::Gid(gid))
+                        if gid <= u16::MAX as u32 && (!substituted || gid != 0) =>
+                    {
                         glyphs.push(gid as u16);
                         positions.push(skia_safe::Point::new(x, y));
                     }
@@ -1337,7 +1498,8 @@ impl Device for SkiaRender {
                     .with_intent(self.active_intent),
             )?
         };
-        if self.shape_mode && !imageobject.image.is_mask() {
+        if self.shape_mode && !imageobject.image.is_mask() && !imageobject.image.has_explicit_mask()
+        {
             for pixel in rgba.as_chunks_mut::<4>().0 {
                 pixel[3] = 255;
             }
@@ -1357,6 +1519,39 @@ impl Device for SkiaRender {
         let pixels = skia_safe::Data::new_copy(&rgba);
         let image = skia_safe::images::raster_from_data(&info, pixels, row_bytes)
             .ok_or_else(|| PdfError::ResourceLimit("Skia rejected image pixel buffer".into()))?;
+        // Mipmaps integrate source pixels when scans and stencils shrink. A
+        // nearest-neighbour sample can erase entire thin strokes at low DPI.
+        let shrinking =
+            ctm.a().hypot(ctm.b()) < width as f32 || ctm.c().hypot(ctm.d()) < height as f32;
+        let sampling = if shrinking {
+            skia_safe::SamplingOptions::new(
+                skia_safe::FilterMode::Linear,
+                skia_safe::MipmapMode::Linear,
+            )
+        } else {
+            skia_safe::SamplingOptions::default()
+        };
+        let image = if shrinking {
+            let mut mip_pixels = 0u64;
+            let (mut w, mut h) = (width as u64, height as u64);
+            while w > 1 || h > 1 {
+                w = (w / 2).max(1);
+                h = (h / 2).max(1);
+                mip_pixels = mip_pixels
+                    .checked_add(w * h)
+                    .ok_or_else(|| PdfError::ResourceLimit("image mipmap pixels".into()))?;
+            }
+            if mip_pixels > self.limits.max_render_pixels
+                || mip_pixels > (self.limits.max_render_bytes / 4) as u64
+            {
+                return Err(PdfError::ResourceLimit("image mipmap storage".into()));
+            }
+            image
+                .with_default_mipmaps()
+                .ok_or_else(|| PdfError::ResourceLimit("image mipmap allocation".into()))?
+        } else {
+            image
+        };
         let alpha = imageobject.graphic_state.general_state.fill_alpha;
         if !alpha.is_finite() || !(0.0..=1.0).contains(&alpha) {
             return Err(PdfError::PageOperatorError(
@@ -1379,7 +1574,7 @@ impl Device for SkiaRender {
             let mask = image
                 .to_shader(
                     (skia_safe::TileMode::Decal, skia_safe::TileMode::Decal),
-                    skia_safe::SamplingOptions::default(),
+                    sampling,
                     &matrix,
                 )
                 .ok_or_else(|| PdfError::ResourceLimit("pattern stencil mask shader".into()))?;
@@ -1402,7 +1597,7 @@ impl Device for SkiaRender {
                     image
                         .to_shader(
                             (skia_safe::TileMode::Decal, skia_safe::TileMode::Decal),
-                            skia_safe::SamplingOptions::default(),
+                            sampling,
                             &image_matrix,
                         )
                         .ok_or_else(|| PdfError::ResourceLimit("masked image shader".into()))?,
@@ -1425,9 +1620,13 @@ impl Device for SkiaRender {
         if pattern_stencil || masked {
             self.surface.canvas().draw_rect(dest_rect, &image_paint);
         } else {
-            self.surface
-                .canvas()
-                .draw_image_rect(&image, None, dest_rect, &image_paint);
+            self.surface.canvas().draw_image_rect_with_sampling_options(
+                &image,
+                None,
+                dest_rect,
+                sampling,
+                &image_paint,
+            );
         }
         self.surface.canvas().restore();
         Ok(())
@@ -4955,6 +5154,252 @@ mod tests {
             renderer
                 .save(std::env::temp_dir().to_str().unwrap())
                 .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod font_program_regression_tests {
+    use super::*;
+    use pdf::{
+        document::{Document, resource_manager::ResourceKind},
+        io::stream_reader::StreamReader,
+        objects::{PdfObject, pdf_stream::PdfStream},
+        page::page_builder::PageBuilder,
+        parser::syntax::SyntaxParser,
+    };
+    fn document(embedded: bool) -> Document {
+        let doc = Document::new().unwrap();
+        doc.add_page_with_builder(0, PageBuilder::new().size(40., 40.))
+            .unwrap();
+        let parse = |text: &str| {
+            SyntaxParser::new(
+                StreamReader::try_new(std::io::Cursor::new(text.as_bytes().to_vec())).unwrap(),
+            )
+            .get_object()
+            .unwrap()
+            .into_dict()
+            .unwrap()
+        };
+        let mut descriptor = parse("<< /Flags 6 >>");
+        if embedded {
+            descriptor.insert(
+                "FontFile2".into(),
+                PdfObject::PdfStream(PdfStream::new(
+                    Default::default(),
+                    include_bytes!("../../pdf/tests/fixtures/synthetic-symbol.ttf").to_vec(),
+                )),
+            );
+        }
+        let mut font = parse(&format!(
+            "<< /Type /Font /Subtype /TrueType /BaseFont /RzpdfSyntheticSymbol /FirstChar 0 /LastChar 32 /Widths [{}] >>",
+            std::iter::repeat_n("1000", 33)
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+        font.insert("FontDescriptor".into(), PdfObject::PdfDict(descriptor));
+        font.insert("ToUnicode".into(), PdfObject::PdfStream(PdfStream::new(Default::default(), b"1 begincodespacerange <00> <ff> endcodespacerange 1 beginbfchar <20> <00d7> endbfchar".to_vec())));
+        let id = doc.try_insert_object(PdfObject::PdfDict(font)).unwrap();
+        let name = doc
+            .resources()
+            .register_existing(0, ResourceKind::Font, id)
+            .unwrap();
+        let bytes = if embedded { "0020" } else { "2020" };
+        doc.replace_page_contents(
+            0,
+            format!("BT /{name} 10 Tf 1 0 0 1 0 20 Tm <{bytes}> Tj ET").into_bytes(),
+        )
+        .unwrap();
+        doc
+    }
+    #[test]
+    fn embedded_empty_notdef_is_valid_and_does_not_abort_following_glyph() {
+        let doc = document(true);
+        let list = doc.get_page(0).unwrap().display_list().unwrap();
+        let mut renderer = SkiaRender::new(72., 72.).unwrap();
+        list.replay(&mut renderer).unwrap();
+        assert_eq!(renderer.typeface_cache.len(), 1);
+        list.replay(&mut renderer).unwrap();
+        assert_eq!(renderer.typeface_cache.len(), 1);
+        let info = skia_safe::ImageInfo::new(
+            (40, 40),
+            skia_safe::ColorType::RGBA8888,
+            skia_safe::AlphaType::Unpremul,
+            None,
+        );
+        let mut pixels = vec![0; 40 * 40 * 4];
+        assert!(
+            renderer
+                .surface
+                .read_pixels(&info, &mut pixels, 160, (0, 0))
+        );
+        assert!(pixels.as_chunks::<4>().0.iter().any(|p| p[0] < 200));
+    }
+    #[test]
+    fn explicit_substitution_uses_unicode_cmap_and_preserves_pdf_positions() {
+        let doc = document(false);
+        let list = doc.get_page(0).unwrap().display_list().unwrap();
+        let pdf::page::page_object::PageObject::Text(text) = &list.objects()[0] else {
+            panic!("text")
+        };
+        assert_eq!(text.items[1].pos().x() - text.items[0].pos().x(), 10.);
+        let mut renderer = SkiaRender::new(72., 72.).unwrap();
+        assert!(list.replay(&mut renderer).is_err());
+        renderer
+            .set_substitute_font(
+                include_bytes!("../../pdf/tests/fixtures/synthetic-symbol.ttf"),
+                0,
+            )
+            .unwrap();
+        list.replay(&mut renderer).unwrap();
+        assert!(renderer.set_substitute_font(b"invalid", 0).is_err());
+    }
+}
+
+#[cfg(test)]
+mod image_reduction_tests {
+    use super::*;
+    use pdf::{
+        io::stream_reader::StreamReader,
+        objects::{PdfObject, pdf_stream::PdfStream},
+        page::pdf_image::PdfImage,
+        parser::syntax::SyntaxParser,
+    };
+    #[test]
+    fn reducing_thin_scan_strokes_preserves_coverage_for_rgb_and_stencil_images() {
+        let context = pdf::pdf_context::PDFContext::try_new(
+            pdf::parser::parser::PdfParser::new(SyntaxParser::new(
+                StreamReader::try_new(std::io::Cursor::new(Vec::<u8>::new())).unwrap(),
+            )),
+            pdf::document::cross_ref_table::CrossRefTable::default(),
+        )
+        .unwrap();
+        for stencil in [false, true] {
+            let header = if stencil {
+                "<< /Width 64 /Height 64 /ImageMask true /BitsPerComponent 1 >>"
+            } else {
+                "<< /Width 64 /Height 64 /ColorSpace /DeviceRGB /BitsPerComponent 8 >>"
+            };
+            let dict = SyntaxParser::new(
+                StreamReader::try_new(std::io::Cursor::new(header.as_bytes().to_vec())).unwrap(),
+            )
+            .get_object()
+            .unwrap()
+            .into_dict()
+            .unwrap();
+            let bytes = if stencil {
+                vec![0x77; 512]
+            } else {
+                (0..4096)
+                    .flat_map(|i| [if i % 4 == 0 { 0 } else { 255 }; 3])
+                    .collect()
+            };
+            let image = PdfImage::try_new(
+                "test".into(),
+                &PdfObject::PdfStream(PdfStream::new(dict, bytes)),
+                &context,
+            )
+            .unwrap();
+            let mut renderer = SkiaRender::new(72., 72.).unwrap();
+            renderer.start_page(4., 4.).unwrap();
+            renderer
+                .do_image(ImageObject::new(
+                    Matrix::new(4., 0., 0., 4., 0., 0.),
+                    image,
+                    GraphicState::default(),
+                ))
+                .unwrap();
+            let info = skia_safe::ImageInfo::new(
+                (4, 4),
+                skia_safe::ColorType::RGBA8888,
+                skia_safe::AlphaType::Unpremul,
+                None,
+            );
+            let mut pixels = [0; 64];
+            assert!(renderer.surface.read_pixels(&info, &mut pixels, 16, (0, 0)));
+            for pixel in pixels.as_chunks::<4>().0 {
+                assert!(
+                    (175..=205).contains(&pixel[0]),
+                    "stencil={stencil}, pixel={pixel:?}"
+                );
+                assert_eq!(pixel[3], 255);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod cid_cff_backend_tests {
+    use super::*;
+    use pdf::{
+        document::{Document, resource_manager::ResourceKind},
+        io::stream_reader::StreamReader,
+        objects::{PdfObject, pdf_stream::PdfStream},
+        page::page_builder::PageBuilder,
+        parser::syntax::SyntaxParser,
+    };
+    #[test]
+    fn standalone_sparse_cff_uses_cid_for_backend_and_gid_for_charset_inspection() {
+        let doc = Document::new().unwrap();
+        doc.add_page_with_builder(0, PageBuilder::new().size(40., 40.))
+            .unwrap();
+        let program = doc
+            .try_insert_object(PdfObject::PdfStream(PdfStream::new(
+                Default::default(),
+                include_bytes!("../../pdf/tests/fixtures/synthetic-cid.cff").to_vec(),
+            )))
+            .unwrap();
+        let source = format!(
+            "<< /Type /Font /Subtype /Type0 /BaseFont /RzpdfSyntheticCID /Encoding /Identity-H /DescendantFonts [ << /Subtype /CIDFontType0 /BaseFont /RzpdfSyntheticCID /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor << /FontFile3 {} 0 R >> >> ] >>",
+            program.obj_num()
+        );
+        let font = SyntaxParser::new(
+            StreamReader::try_new(std::io::Cursor::new(source.into_bytes())).unwrap(),
+        )
+        .get_object()
+        .unwrap();
+        let id = doc.try_insert_object(font).unwrap();
+        let name = doc
+            .resources()
+            .register_existing(0, ResourceKind::Font, id)
+            .unwrap();
+        doc.replace_page_contents(
+            0,
+            format!("BT /{name} 20 Tf 1 0 0 1 5 10 Tm <002a> Tj ET").into_bytes(),
+        )
+        .unwrap();
+        let list = doc.get_page(0).unwrap().display_list().unwrap();
+        let pdf::page::page_object::PageObject::Text(text) = &list.objects()[0] else {
+            panic!("text")
+        };
+        let font = text.state.text_state.font.as_ref().unwrap();
+        assert!(matches!(
+            font.get_glyph(text.items[0].charcode()),
+            Some(GlyphDesc::Gid(2))
+        ));
+        assert_eq!(font.raw_cff_cid(text.items[0].charcode()), Some(42));
+        let mut renderer = SkiaRender::new(72., 72.).unwrap();
+        list.replay(&mut renderer).unwrap();
+        let info = skia_safe::ImageInfo::new(
+            (40, 40),
+            skia_safe::ColorType::RGBA8888,
+            skia_safe::AlphaType::Unpremul,
+            None,
+        );
+        let mut pixels = vec![0; 40 * 40 * 4];
+        assert!(
+            renderer
+                .surface
+                .read_pixels(&info, &mut pixels, 160, (0, 0))
+        );
+        assert!(
+            pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|p| p[0] < 128)
+                .count()
+                > 50
         );
     }
 }

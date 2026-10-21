@@ -91,6 +91,13 @@ pub(crate) fn resolve_blend_mode_using<O: std::borrow::Borrow<crate::objects::Pd
 
 #[derive(Debug, Clone)]
 pub struct GeneralState {
+    /// Retained print-device parameters; RGB consumers must choose their own
+    /// overprint simulation policy rather than losing these during parsing.
+    pub stroke_overprint: bool,
+    pub fill_overprint: bool,
+    pub overprint_mode: u8,
+    pub stroke_adjustment: bool,
+    pub smoothness: f32,
     pub blend_mode: BlendMode,
     pub stroke_alpha: f32,
     pub fill_alpha: f32,
@@ -102,6 +109,11 @@ pub struct GeneralState {
 impl Default for GeneralState {
     fn default() -> Self {
         Self {
+            stroke_overprint: false,
+            fill_overprint: false,
+            overprint_mode: 0,
+            stroke_adjustment: false,
+            smoothness: 0.,
             blend_mode: BlendMode::Normal,
             stroke_alpha: 1.0,
             fill_alpha: 1.0,

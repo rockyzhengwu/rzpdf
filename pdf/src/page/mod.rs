@@ -328,6 +328,7 @@ impl<'a, R: Seek + Read> PdfPage<'a, R> {
 
     pub(crate) fn content_bytes(&self) -> PdfResult<Vec<u8>> {
         let mut result = Vec::new();
+        let mut stream_ranges = Vec::new();
         let mut push = |data: Vec<u8>| -> PdfResult<()> {
             crate::filter::check_output_size(
                 result.len(),
@@ -338,7 +339,12 @@ impl<'a, R: Seek + Read> PdfPage<'a, R> {
             result
                 .try_reserve_exact(data.len())
                 .map_err(|_| PdfError::ResourceLimit("page content allocation".into()))?;
+            stream_ranges
+                .try_reserve(1)
+                .map_err(|_| PdfError::ResourceLimit("content stream ranges allocation".into()))?;
+            let start = result.len();
             result.extend_from_slice(&data);
+            stream_ranges.push(start..result.len());
             Ok(())
         };
         if let Some(contents) = self.pagedict()?.get("Contents") {
@@ -369,6 +375,17 @@ impl<'a, R: Seek + Read> PdfPage<'a, R> {
             }
         } else {
             return Ok(result);
+        }
+        if content_parser::separate_graphics_stream_seams(
+            &mut result,
+            &mut stream_ranges,
+            self.ctx.options(),
+            None,
+            &mut None,
+        )? {
+            self.ctx.record_structure_recovery(
+                crate::parser::diagnostic::StructureReason::ContentStreamBoundary,
+            )?;
         }
         Ok(result)
     }

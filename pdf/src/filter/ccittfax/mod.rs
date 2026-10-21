@@ -114,7 +114,7 @@ pub fn ccittfax_decode_limited(
     params: Option<&PdfDict>,
     limit: usize,
 ) -> PdfResult<Vec<u8>> {
-    decode_inner(buf, params, limit, None, &mut None)
+    decode_inner(buf, params, limit, None, &mut None, None)
 }
 
 /// Output capacity is charged; fax decoder transition buffers are excluded.
@@ -125,8 +125,26 @@ pub fn ccittfax_decode_with_budget(
     budget: &crate::budget::OperationBudget,
 ) -> PdfResult<crate::budget::BudgetedBytes> {
     let mut lease = Some(budget.reserve(0)?);
-    let data = decode_inner(buf, params, limit, Some(budget), &mut lease)?;
+    let data = decode_inner(buf, params, limit, Some(budget), &mut lease, None)?;
     crate::budget::BudgetedBytes::from_reserved_vec(data, lease.unwrap())
+}
+
+pub(crate) fn decode_context(
+    buf: &[u8],
+    params: Option<&PdfDict>,
+    context: super::FilterContext<'_>,
+    budget: Option<&crate::budget::OperationBudget>,
+) -> PdfResult<(Vec<u8>, Option<crate::budget::MemoryLease>)> {
+    let mut lease = budget.map(|pool| pool.reserve(0)).transpose()?;
+    let bytes = decode_inner(
+        buf,
+        params,
+        context.max_decoded_bytes,
+        budget,
+        &mut lease,
+        Some(context),
+    )?;
+    Ok((bytes, lease))
 }
 
 fn decode_inner(
@@ -135,11 +153,19 @@ fn decode_inner(
     limit: usize,
     budget: Option<&crate::budget::OperationBudget>,
     lease: &mut Option<crate::budget::MemoryLease>,
+    context: Option<super::FilterContext<'_>>,
 ) -> PdfResult<Vec<u8>> {
-    let p = match params {
+    let mut p = match params {
         Some(d) => Param::try_new(d)?,
         None => Param::default(),
     };
+    let known_height = context
+        .and_then(|c| c.stream_dict)
+        .and_then(|d| d.get("Height"))
+        .and_then(|v| v.as_u16());
+    if p.rows == 0 {
+        p.rows = known_height.unwrap_or(0);
+    }
     let width = p.columns;
     if width == 0 {
         return Err(PdfError::FilterError(
@@ -160,8 +186,12 @@ fn decode_inner(
     let exceeded = std::cell::Cell::new(false);
     let mut append_error = None;
     if p.k < 0 {
+        let consumed = std::cell::Cell::new(0usize);
         let decoded = decode_g4(
-            buf.iter().copied().take_while(|_| !exceeded.get()),
+            buf.iter()
+                .copied()
+                .inspect(|_| consumed.set(consumed.get() + 1))
+                .take_while(|_| !exceeded.get()),
             width,
             height,
             |line| {
@@ -185,9 +215,31 @@ fn decode_inner(
         if exceeded.get() {
             return Err(PdfError::ResourceLimit("CCITT output size".into()));
         }
-        decoded.ok_or(PdfError::FilterError(
-            "CCITTFaxDecode Group 4 decoding failed".to_string(),
-        ))?;
+        if decoded.is_none() {
+            let actual = res.len() / usize::from(width);
+            let missing = usize::from(p.rows).saturating_sub(actual);
+            // Recover only physical EOF and a small tail of a known image.
+            // Invalid codes before EOF and substantial damage stay fatal.
+            let recover = context.is_some_and(|c| c.compatible)
+                && known_height == Some(p.rows)
+                && consumed.get() == buf.len()
+                && actual > 0
+                && (1..=4).contains(&missing)
+                && missing * 100 <= usize::from(p.rows);
+            if !recover {
+                return Err(PdfError::FilterError(
+                    "CCITTFaxDecode Group 4 decoding failed".into(),
+                ));
+            }
+            let additional = missing * usize::from(width);
+            super::check_output_size(res.len(), additional, limit, "CCITTFaxDecode")?;
+            for _ in 0..missing {
+                append_line(&mut res, &[], width, p.black_is_1, budget, lease)?;
+            }
+            if let Some(flag) = context.and_then(|c| c.recovered) {
+                flag.set(true);
+            }
+        }
         return Ok(res);
     }
     if p.k == 0 {
@@ -439,5 +491,63 @@ mod tests {
             ccittfax_decode(&buffer, Some(&pd)).unwrap(),
             expected.iter().map(|value| 255 - value).collect::<Vec<_>>()
         );
+    }
+}
+
+#[cfg(test)]
+mod tail_recovery_tests {
+    use super::*;
+    use crate::objects::{PdfObject, pdf_number::PdfNumber};
+    #[test]
+    fn only_short_physical_eof_tail_of_known_image_is_recovered() {
+        let mut params = PdfDict::default();
+        params.insert("K".into(), PdfObject::PdfNumber(PdfNumber::new(-1.)));
+        params.insert("Columns".into(), PdfObject::PdfNumber(PdfNumber::new(8.)));
+        let mut image = PdfDict::default();
+        image.insert("Height".into(), PdfObject::PdfNumber(PdfNumber::new(1022.)));
+        let recovered = std::cell::Cell::new(false);
+        let context = super::super::FilterContext {
+            stream_dict: Some(&image),
+            compatible: true,
+            recovered: Some(&recovered),
+            ..Default::default()
+        };
+        // Group 4 V(0) repeats the preceding white row, one bit per row.
+        let input = [255; 128];
+        assert!(ccittfax_decode_limited(&input, Some(&params), 8176).is_err());
+        let (bytes, _) = decode_context(&input, Some(&params), context, None).unwrap();
+        assert_eq!(bytes, [255; 8176]);
+        assert!(recovered.get());
+        assert!(decode_context(&input[..127], Some(&params), context, None).is_err());
+        assert!(
+            decode_context(
+                &input,
+                Some(&params),
+                super::super::FilterContext {
+                    compatible: false,
+                    ..context
+                },
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            decode_context(
+                &input,
+                Some(&params),
+                super::super::FilterContext {
+                    max_decoded_bytes: 8175,
+                    ..context
+                },
+                None
+            )
+            .is_err()
+        );
+        let pool = crate::budget::OperationBudget::new(32768);
+        let (bytes, lease) = decode_context(&input, Some(&params), context, Some(&pool)).unwrap();
+        assert_eq!(pool.live_bytes(), bytes.capacity());
+        drop(bytes);
+        drop(lease);
+        assert_eq!(pool.live_bytes(), 0);
     }
 }

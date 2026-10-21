@@ -18,6 +18,10 @@ pub enum StructureReason {
     StreamBoundarySearch,
     StreamStartWhitespace,
     RebuiltObjectIndex,
+    ImageTailRecovery,
+    ImageTrailingBytes,
+    ContentStreamBoundary,
+    RepairedObjectOffset,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

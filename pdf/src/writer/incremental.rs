@@ -448,6 +448,15 @@ fn write_incremental_inner<R: std::io::Read + std::io::Seek>(
             authenticated_encrypt,
         )?;
     }
+    // Appending would preserve the damaged source index and its invalid offsets.
+    // A full rewrite resolves recovered objects and writes a fresh index.
+    if document.ctx().structure_diagnostics()?.iter().any(|event| {
+        event.reason == crate::parser::diagnostic::StructureReason::RepairedObjectOffset
+    }) {
+        return Err(unsupported(
+            "repaired object offsets require a full rewrite",
+        ));
+    }
     let mut output = SerializationOutput {
         bytes: BudgetedBytes::copy_from_slice(budget, &[])?,
         limits,

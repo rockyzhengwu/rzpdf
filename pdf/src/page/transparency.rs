@@ -64,12 +64,9 @@ impl GroupParameters {
         };
         let isolated = flag("I")?;
         let knockout = flag("K")?;
-        if let Some(space) = group.get("CS") {
-            if !isolated {
-                return Err(PdfError::PageResourceError(
-                    "nonisolated group cannot select a blending space".into(),
-                ));
-            }
+        // Nonisolated Form groups inherit their backdrop's blending space.
+        // Their CS entry does not select a new space (ISO 32000, table 146).
+        if let Some(space) = group.get("CS").filter(|_| isolated) {
             let space = ctx.resolve(space)?;
             if space.as_name().map(|n| n.name()) != Some("DeviceRGB") {
                 return Err(PdfError::UnsupportedFeature(
@@ -78,5 +75,37 @@ impl GroupParameters {
             }
         }
         Ok(Self { isolated, knockout })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn nonisolated_forms_inherit_blending_space_but_isolated_groups_validate_it() {
+        use crate::{
+            document::Document, io::stream_reader::StreamReader, parser::syntax::SyntaxParser,
+        };
+        use std::io::Cursor;
+        let doc = Document::new().unwrap();
+        for (source, valid) in [
+            ("<< /S /Transparency /CS /DeviceCMYK >>", true),
+            ("<< /S /Transparency /I false /CS /DeviceRGB >>", true),
+            ("<< /S /Transparency /I true /CS /DeviceRGB >>", true),
+            ("<< /S /Transparency /I true /CS /DeviceCMYK >>", false),
+            ("<< /S /Transparency /I 1 >>", false),
+        ] {
+            let dict = SyntaxParser::new(
+                StreamReader::try_new(Cursor::new(source.as_bytes().to_vec())).unwrap(),
+            )
+            .get_object()
+            .unwrap()
+            .into_dict()
+            .unwrap();
+            assert_eq!(
+                super::GroupParameters::parse(&dict, doc.ctx()).is_ok(),
+                valid,
+                "{source}"
+            );
+        }
     }
 }

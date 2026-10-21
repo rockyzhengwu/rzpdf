@@ -15,7 +15,7 @@ pub struct ImageDrawSource {
 #[derive(Debug, Clone)]
 pub struct ImageObject {
     pub matrix: Matrix,
-    pub image: PdfImage,
+    pub image: std::rc::Rc<PdfImage>,
     pub graphic_state: GraphicState,
     source: Option<ImageDrawSource>,
     nested_source: Option<super::source_provenance::NestedDrawSource>,
@@ -66,10 +66,14 @@ impl ImageObject {
         Ok((0.0..=1.0).contains(&u) && (0.0..=1.0).contains(&v))
     }
 
-    pub fn new(matrix: Matrix, image: PdfImage, graphic_state: GraphicState) -> Self {
+    pub fn new(
+        matrix: Matrix,
+        image: impl Into<std::rc::Rc<PdfImage>>,
+        graphic_state: GraphicState,
+    ) -> Self {
         Self {
             matrix,
-            image,
+            image: image.into(),
             graphic_state,
             source: None,
             nested_source: None,

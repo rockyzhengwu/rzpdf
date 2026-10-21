@@ -1390,7 +1390,7 @@ impl<R: Read + Seek> PdfDocument<R> {
                 let after = edited
                     .stream_bytes(index)
                     .ok_or(PdfError::PageContentIsNotStream)?;
-                if before != after {
+                if before != after || current.recovered_stream_seams {
                     total = total.checked_add(after.len()).ok_or_else(|| {
                         PdfError::ResourceLimit("edited stream payload total".into())
                     })?;
@@ -1425,7 +1425,10 @@ impl<R: Read + Seek> PdfDocument<R> {
                     .stream_bytes(index)
                     .ok_or(PdfError::PageContentIsNotStream)?;
                 index += 1;
-                if before == after {
+                // A recovered snapshot contains separators absent from the
+                // original streams. Materialize them on edit rather than
+                // reusing raw bytes that would join Q and q again on strict read.
+                if before == after && !current.recovered_stream_seams {
                     return Ok(original.clone());
                 }
                 doc.validate_content_bytes(after.len())?;

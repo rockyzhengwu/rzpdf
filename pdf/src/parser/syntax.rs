@@ -305,11 +305,163 @@ impl<R: Seek + Read> SyntaxParser<R> {
                 }
             }
             self.set_pos(saved_pos)?;
-            self.header = Some(parse_pdf_header(&line)?);
+            let mut end = line.len();
+            if self.mode == ParseMode::Compatible {
+                while end > 0 && is_white_space(line[end - 1]) {
+                    end -= 1;
+                }
+            }
+            let header = parse_pdf_header(&line[..end])?;
+            if end != line.len() {
+                self.report(
+                    0,
+                    None,
+                    super::diagnostic::StructureReason::CompatibleHeader,
+                )?;
+            }
+            self.header = Some(header);
         }
         self.header.as_ref().ok_or(PdfError::ParserError(
             "pdf header was not parsed".to_string(),
         ))
+    }
+
+    /// Repair only a current normal entry between validated object boundaries.
+    /// Sequential object parsing skips stream payloads; text resembling an object
+    /// inside a stream is never accepted as a recovery candidate.
+    pub(crate) fn recover_xref_offset(
+        &mut self,
+        damaged: u64,
+        expected: crate::objects::object_id::ObjectId,
+    ) -> PdfResult<u64> {
+        let budget = self.limits().operation_budget();
+        self.recover_xref_offset_with_budget(damaged, expected, &budget)
+    }
+
+    pub(crate) fn recover_xref_offset_with_budget(
+        &mut self,
+        damaged: u64,
+        expected: crate::objects::object_id::ObjectId,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<u64> {
+        use crate::document::cross_ref_table::ObjectState;
+        if self.mode() != ParseMode::Compatible {
+            return Err(PdfError::InvalidReference(
+                "xref recovery requires compatible mode".into(),
+            ));
+        }
+        let xref = self.xref_table.as_ref().ok_or_else(|| {
+            PdfError::InvalidReference("xref recovery requires current index".into())
+        })?;
+        if xref.trailer().contains_key("Encrypt")
+            || xref.has_hybrid_references()
+            || xref
+                .historical_objects()
+                .iter()
+                .any(|i| i.object_id() == expected)
+        {
+            return Err(PdfError::InvalidReference(
+                "xref recovery refuses protected or ambiguous historical objects".into(),
+            ));
+        }
+        let entry_bytes = std::mem::size_of::<(u64, crate::objects::object_id::ObjectId)>();
+        let mut index_lease = budget.reserve(
+            xref.objects()
+                .len()
+                .checked_mul(entry_bytes)
+                .ok_or_else(|| PdfError::ResourceLimit("xref recovery index size".into()))?,
+        )?;
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(xref.objects().len())
+            .map_err(|_| PdfError::ResourceLimit("xref recovery index allocation".into()))?;
+        index_lease.resize(entries.capacity().saturating_mul(entry_bytes))?;
+        entries.extend(
+            xref.objects()
+                .values()
+                .filter(|i| matches!(i.state(), ObjectState::Normal))
+                .map(|i| (i.offset(), i.object_id())),
+        );
+        entries.sort_unstable_by_key(|v| v.0);
+        let mut anchor = None;
+        for &(offset, id) in entries
+            .iter()
+            .rev()
+            .filter(|(offset, _)| *offset < damaged)
+            .take(128)
+        {
+            self.set_pos(offset)?;
+            match self.get_indirect_object_with_budget(budget) {
+                Err(error @ PdfError::ResourceLimit(_)) => return Err(error),
+                Ok((object, _lease)) if object.id() == id => {
+                    anchor = Some(offset);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let start = anchor.ok_or_else(|| {
+            PdfError::InvalidReference("no validated xref recovery anchor".into())
+        })?;
+        let mut end = None;
+        for &(offset, id) in entries
+            .iter()
+            .filter(|(offset, _)| *offset > damaged)
+            .take(128)
+        {
+            self.set_pos(offset)?;
+            match self.get_indirect_object_with_budget(budget) {
+                Err(error @ PdfError::ResourceLimit(_)) => return Err(error),
+                Ok((object, _lease)) if object.id() == id => {
+                    end = Some(offset);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let end = end
+            .ok_or_else(|| PdfError::InvalidReference("no validated upper xref boundary".into()))?;
+        if end.saturating_sub(start) > 64 * 1024 * 1024 {
+            return Err(PdfError::ResourceLimit("xref recovery span".into()));
+        }
+        self.set_pos(start)?;
+        let mut found = None;
+        let mut count = 0;
+        while self.position() < end {
+            let word = self.get_next_word()?;
+            if word.is_empty() {
+                break;
+            }
+            let offset = self.position().saturating_sub(word.raw().len() as u64);
+            if offset == end {
+                break;
+            }
+            self.set_pos(offset)?;
+            let (object, _lease) = self.get_indirect_object_with_budget(budget)?;
+            if self.position() > end {
+                return Err(PdfError::InvalidReference(
+                    "xref recovery crosses validated boundary".into(),
+                ));
+            }
+            if object.id() == expected {
+                if found.replace(offset).is_some() {
+                    return Err(PdfError::InvalidReference("ambiguous xref recovery".into()));
+                }
+            }
+            count += 1;
+            if count > self.limits().max_objects {
+                return Err(PdfError::ResourceLimit("xref recovery objects".into()));
+            }
+        }
+        let offset = found.ok_or_else(|| {
+            PdfError::InvalidReference("current xref object not found between anchors".into())
+        })?;
+        self.report(
+            damaged,
+            Some(expected),
+            super::diagnostic::StructureReason::RepairedObjectOffset,
+        )?;
+        Ok(offset)
     }
 
     pub fn get_indirect_object(&mut self) -> PdfResult<PdfIndirect> {
@@ -645,6 +797,14 @@ impl<R: Seek + Read> SyntaxParser<R> {
         if let Some(end_pos) = end_of_stream {
             let data_len = end_pos.saturating_sub(self.pos);
             let (data, lease) = self.read_stream_block(data_len, budget)?;
+            // The recovery search locates the payload boundary, not the end of
+            // the stream object. Consume endstream just as the Length path does;
+            // leave endobj unread for the enclosing indirect-object parser.
+            let marker_pos = self.pos;
+            let marker = self.get_next_word_inner(budget)?;
+            if !marker.is_equal(b"endstream") {
+                self.set_pos(marker_pos)?;
+            }
             return Ok((PdfStream::new(dict, data), lease));
         }
         self.set_pos(saved_pos)?;
@@ -2540,5 +2700,187 @@ mod tests {
                 .raw_data(),
             b"abc\r"
         );
+    }
+
+    #[test]
+    fn recovered_indirect_stream_consumes_endstream_and_preserves_next_object() {
+        for length in ["", "/Length 1", "/Length 999"] {
+            let source = format!(
+                "1 0 obj << {length} >> stream\nabc\r\nendstream\nendobj\n2 0 obj 42 endobj"
+            );
+            for budgeted in [false, true] {
+                let mut parser = new_parser(&source);
+                let budget = crate::budget::OperationBudget::new(16384);
+                let (object, lease) = if budgeted {
+                    let (object, lease) = parser.get_indirect_object_with_budget(&budget).unwrap();
+                    (object, Some(lease))
+                } else {
+                    (parser.get_indirect_object().unwrap(), None)
+                };
+                assert_eq!(object.obj().as_stream().unwrap().raw_data(), b"abc");
+                if budgeted {
+                    assert!(budget.live_bytes() >= 3);
+                }
+                drop((object, lease));
+                assert_eq!(parser.get_next_word().unwrap().raw(), b"2");
+                assert_eq!(budget.live_bytes(), 0);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod xref_offset_repair_tests {
+    use super::*;
+    use crate::{
+        document::cross_ref_table::{ObjectInfo, ObjectState},
+        objects::object_id::ObjectId,
+    };
+    fn parser(
+        bytes: &[u8],
+        mode: ParseMode,
+        offsets: [u64; 3],
+    ) -> SyntaxParser<std::io::Cursor<Vec<u8>>> {
+        let entries = offsets
+            .into_iter()
+            .enumerate()
+            .map(|(i, offset)| {
+                (
+                    (i + 1) as u32,
+                    ObjectInfo::new((i + 1) as u32, offset, 0, ObjectState::Normal),
+                )
+            })
+            .collect();
+        SyntaxParser::with_mode(
+            StreamReader::try_new(std::io::Cursor::new(bytes.to_vec())).unwrap(),
+            mode,
+        )
+        .with_xref_table(CrossRefTable::new(entries, Default::default()))
+    }
+    #[test]
+    fn recovery_walks_objects_and_skips_fake_headers_in_stream_payloads() {
+        let payload = b"2 0 obj 999 endobj";
+        let first = format!(
+            "1 0 obj << /Length {} >> stream\n{}\nendstream\nendobj\n",
+            payload.len(),
+            String::from_utf8_lossy(payload)
+        );
+        let second = "2 0 obj 42 endobj\n";
+        let bytes = format!("{first}{second}3 0 obj 7 endobj\n");
+        let offsets = [0, 10, (first.len() + second.len()) as u64];
+        let mut compatible = parser(bytes.as_bytes(), ParseMode::Compatible, offsets);
+        assert_eq!(
+            compatible
+                .recover_xref_offset(10, ObjectId::new(2, 0))
+                .unwrap(),
+            first.len() as u64
+        );
+        assert!(
+            parser(bytes.as_bytes(), ParseMode::Strict, offsets)
+                .recover_xref_offset(10, ObjectId::new(2, 0))
+                .is_err()
+        );
+    }
+    #[test]
+    fn recovery_respects_the_callers_live_memory_reservations() {
+        let bytes = b"1 0 obj 1 endobj\n2 0 obj 2 endobj\n3 0 obj 3 endobj\n";
+        let end = bytes.windows(7).position(|s| s == b"3 0 obj").unwrap() as u64;
+        let mut syntax = parser(bytes, ParseMode::Compatible, [0, 2, end]);
+        let pool = crate::budget::OperationBudget::new(1024);
+        let held = pool.reserve(1024).unwrap();
+        assert!(matches!(
+            syntax.recover_xref_offset_with_budget(2, ObjectId::new(2, 0), &pool),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(pool.live_bytes(), 1024);
+        drop(held);
+        assert_eq!(
+            syntax
+                .recover_xref_offset_with_budget(2, ObjectId::new(2, 0), &pool)
+                .unwrap(),
+            17
+        );
+        assert_eq!(pool.live_bytes(), 0);
+    }
+    #[test]
+    fn duplicate_candidates_are_ambiguous() {
+        let bytes = b"1 0 obj 1 endobj\n2 0 obj 2 endobj\n2 0 obj 3 endobj\n3 0 obj 4 endobj\n";
+        let end = bytes.windows(7).position(|s| s == b"3 0 obj").unwrap() as u64;
+        assert!(
+            parser(bytes, ParseMode::Compatible, [0, 2, end])
+                .recover_xref_offset(2, ObjectId::new(2, 0))
+                .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod recovered_save_tests {
+    use crate::{document::Document, parser::syntax::ParseMode};
+    #[test]
+    fn recovered_objects_full_rewrite_opens_strict_but_incremental_append_is_refused() {
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Count 1 /Kids [3 0 R] >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 40] /Resources << >> /Contents 4 0 R >>",
+            "<< /Length 16 >> stream\n0 0 10 10 re f\n\nendstream",
+            "42",
+        ];
+        let mut source = "%PDF-1.4\n".to_owned();
+        let mut offsets = Vec::new();
+        for (i, object) in objects.into_iter().enumerate() {
+            offsets.push(source.len());
+            source.push_str(&format!("{} 0 obj\n{object}\nendobj\n", i + 1));
+        }
+        let xref = source.len();
+        source.push_str("xref\n0 6\n0000000000 65535 f \n");
+        for (i, offset) in offsets.into_iter().enumerate() {
+            source.push_str(&format!("{:010} 00000 n \n", offset + usize::from(i == 3)));
+        }
+        source.push_str(&format!(
+            "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
+        ));
+        let document =
+            Document::from_bytes_with_mode(source.into_bytes(), ParseMode::Compatible).unwrap();
+        document.get_page(0).unwrap().display_list().unwrap();
+        assert!(document.save_incremental_to_bytes().is_err());
+        let saved = document.save_to_bytes().unwrap();
+        let strict = Document::from_bytes_with_mode(saved, ParseMode::Strict).unwrap();
+        strict.get_page(0).unwrap().display_list().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod trailing_header_space_tests {
+    use super::*;
+    #[test]
+    fn compatible_trims_only_trailing_pdf_whitespace_and_records_recovery() {
+        for tail in [b" ".as_slice(), b"\t\0"] {
+            let mut bytes = b"%PDF-1.2".to_vec();
+            bytes.extend_from_slice(tail);
+            bytes.extend_from_slice(b"\r%\xe2\xe3\xcf\xd3\r");
+            let mut compatible = SyntaxParser::with_mode(
+                StreamReader::try_new(std::io::Cursor::new(bytes.clone())).unwrap(),
+                ParseMode::Compatible,
+            );
+            assert_eq!(compatible.read_header().unwrap().version(), "1.2");
+            assert!(
+                compatible.diagnostics.snapshot().unwrap().iter().any(
+                    |d| d.reason == super::super::diagnostic::StructureReason::CompatibleHeader
+                )
+            );
+            let mut strict = SyntaxParser::with_mode(
+                StreamReader::try_new(std::io::Cursor::new(bytes)).unwrap(),
+                ParseMode::Strict,
+            );
+            assert!(strict.read_header().is_err());
+        }
+        for bytes in [b"%PDF-1.2 X\n".as_slice(), b" %PDF-1.2\n", b"%PDF-1.20\n"] {
+            let mut parser = SyntaxParser::with_mode(
+                StreamReader::try_new(std::io::Cursor::new(bytes)).unwrap(),
+                ParseMode::Compatible,
+            );
+            assert!(parser.read_header().is_err());
+        }
     }
 }

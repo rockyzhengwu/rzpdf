@@ -308,6 +308,15 @@ impl Font {
         }
     }
 
+    /// Backend glyph index for a standalone CID-keyed CFF program. This is
+    /// separate from get_glyph(), which returns the CFF charset's actual GID.
+    pub fn raw_cff_cid(&self, code: &CharCode) -> Option<u32> {
+        match self {
+            Self::Type0(font) => font.raw_cff_cid(code),
+            _ => None,
+        }
+    }
+
     pub fn fontfile(&self) -> Option<&[u8]> {
         match self {
             Font::Simple(s) => s.fontfile(),

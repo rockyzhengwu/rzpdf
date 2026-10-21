@@ -19,6 +19,7 @@ pub struct PdfImage {
     pixel_count: usize,
     max_rgba_bytes: usize,
     soft_mask: Option<ImageSoftMask>,
+    hard_mask_alpha: Option<Vec<u8>>,
     // Non-device and Matte-preblended samples retain packed precision until
     // unblending/colour conversion.
     color_sample_decode: Option<(usize, Vec<f64>)>,
@@ -172,7 +173,7 @@ impl PdfImage {
             }
         }
         if is_mask {
-            for key in ["ColorSpace", "SMask"] {
+            for key in ["ColorSpace", "SMask", "Mask"] {
                 if let Some(value) = image.get_attr(key)
                     && !matches!(ctx.resolve(value)?, PdfObject::PdfNull)
                 {
@@ -180,12 +181,6 @@ impl PdfImage {
                         "stencil image must not specify {key}"
                     )));
                 }
-            }
-        }
-        if let Some(value) = image.get_attr("Mask") {
-            let value = ctx.resolve(value)?;
-            if !matches!(value, PdfObject::PdfNull) {
-                return Err(PdfError::UnsupportedFeature("image Mask".into()));
             }
         }
         let dimension = |key: &str| -> PdfResult<u32> {
@@ -389,9 +384,9 @@ impl PdfImage {
             // The legacy fax filter returns one 0/255 byte per sample. Adapt
             // that contract to PDF's row-padded 1-bit samples before applying
             // Decode or stencil semantics; do not unpack the expanded bytes.
-            if bits != 1 || !matches!(colorspace, ColorSpace::DeviceGray(_)) {
+            if bits != 1 || colorspace.number_of_components()? != 1 {
                 return Err(PdfError::ObjectError(
-                    "CCITT images require Gray/stencil 1-bit samples".into(),
+                    "CCITT images require one-component 1-bit samples".into(),
                 ));
             }
             if data.len() != pixel_count || data.iter().any(|value| !matches!(*value, 0 | 255)) {
@@ -419,6 +414,74 @@ impl PdfImage {
             ColorSpace::DeviceRgb(_) => Some(3),
             ColorSpace::DeviceCmyk(_) => Some(4),
             _ => None,
+        };
+        // Some producers count the two stream-separating whitespace bytes in
+        // an image's decoded samples. Recover only this bounded surplus;
+        // never pad missing samples or discard arbitrary extra image data.
+        let packed_row = (width as usize)
+            .checked_mul(colorspace.number_of_components()?)
+            .and_then(|n| n.checked_mul(bits))
+            .and_then(|n| n.checked_add(7))
+            .map(|n| n / 8)
+            .ok_or_else(|| PdfError::ResourceLimit("image packed row bytes".into()))?;
+        let expected = packed_row
+            .checked_mul(height as usize)
+            .ok_or_else(|| PdfError::ResourceLimit("image packed bytes".into()))?;
+        if !is_mask
+            && (filter
+                .as_ref()
+                .is_none_or(|filter| matches!(filter, PdfObject::PdfNull))
+                || filter.as_ref().is_some_and(|filter| match filter {
+                    PdfObject::PdfName(name) => {
+                        matches!(name.name(), "FlateDecode" | "Fl" | "LZWDecode" | "LZW")
+                    }
+                    PdfObject::PdfArray(filters) => {
+                        filters.len() == 1
+                            && filters
+                                .get(0)
+                                .and_then(PdfObject::as_name)
+                                .is_some_and(|name| {
+                                    matches!(
+                                        name.name(),
+                                        "FlateDecode" | "Fl" | "LZWDecode" | "LZW"
+                                    )
+                                })
+                    }
+                    _ => false,
+                }))
+            && data.len() > expected
+            && matches!(&data[expected..], b"\r\n" | b"\n" | b"\r")
+            && ctx.options().mode == crate::parser::syntax::ParseMode::Compatible
+        {
+            data.truncate(expected);
+            ctx.record_structure_recovery(
+                crate::parser::diagnostic::StructureReason::ImageTrailingBytes,
+            )?;
+        }
+        // SMask takes precedence over Mask. Colour keys compare encoded samples
+        // before Decode, colour conversion, or indexed palette lookup.
+        let hard_mask_alpha = if resolved_soft_mask
+            .as_ref()
+            .is_some_and(|value| !matches!(value, PdfObject::PdfNull))
+        {
+            None
+        } else if let Some(value) = image.get_attr("Mask") {
+            let value = ctx.resolve(value)?;
+            if matches!(value, PdfObject::PdfNull) {
+                None
+            } else {
+                Some(image_mask_alpha(
+                    &value,
+                    &data,
+                    width,
+                    height,
+                    bits,
+                    colorspace.number_of_components()?,
+                    ctx,
+                )?)
+            }
+        } else {
+            None
         };
         if color_sample_decode.is_some() {
             let count = colorspace.number_of_components()?;
@@ -577,10 +640,15 @@ impl PdfImage {
             pixel_count,
             max_rgba_bytes: ctx.limits().max_decoded_bytes,
             soft_mask,
+            hard_mask_alpha,
             color_sample_decode,
             rendering_intent,
         })
     }
+    pub fn has_explicit_mask(&self) -> bool {
+        self.hard_mask_alpha.is_some()
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -602,6 +670,7 @@ impl PdfImage {
             .data
             .len()
             .checked_add(self.soft_mask.as_ref().map_or(0, |mask| mask.data.len()))
+            .and_then(|n| n.checked_add(self.hard_mask_alpha.as_ref().map_or(0, Vec::len)))
             .and_then(|n| {
                 self.soft_mask
                     .as_ref()
@@ -877,8 +946,129 @@ impl PdfImage {
                 pixel[3] = (mask.alpha(index, self.width as usize) * 255.0).round() as u8;
             }
         }
+        if let Some(alpha) = &self.hard_mask_alpha {
+            if alpha.len() != self.pixel_count {
+                return Err(PdfError::ObjectError(
+                    "image Mask alpha length mismatch".into(),
+                ));
+            }
+            for (pixel, alpha) in rgba.as_chunks_mut::<4>().0.iter_mut().zip(alpha) {
+                pixel[3] = ((u16::from(pixel[3]) * u16::from(*alpha) + 127) / 255) as u8;
+            }
+        }
         Ok(rgba)
     }
+}
+
+fn image_mask_alpha<R: Read + Seek>(
+    mask: &PdfObject,
+    data: &[u8],
+    width: u32,
+    height: u32,
+    bits: usize,
+    components: usize,
+    ctx: &PDFContext<R>,
+) -> PdfResult<Vec<u8>> {
+    let count = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| PdfError::ResourceLimit("image Mask pixels".into()))?;
+    crate::filter::check_output_size(0, count, ctx.limits().max_decoded_bytes, "image Mask alpha")?;
+    let mut alpha = Vec::new();
+    alpha
+        .try_reserve_exact(count)
+        .map_err(|_| PdfError::ResourceLimit("image Mask allocation".into()))?;
+    if let Some(ranges) = mask.as_array() {
+        if ranges.len()
+            != components
+                .checked_mul(2)
+                .ok_or_else(|| PdfError::ResourceLimit("image Mask ranges".into()))?
+        {
+            return Err(PdfError::ObjectError(
+                "colour-key Mask component count mismatch".into(),
+            ));
+        }
+        let mut keys = Vec::new();
+        keys.try_reserve_exact(components)
+            .map_err(|_| PdfError::ResourceLimit("image Mask keys allocation".into()))?;
+        for pair in 0..components {
+            let endpoint = |offset| -> PdfResult<u32> {
+                ctx.resolve(ranges.get(offset).unwrap())?
+                    .as_number()
+                    .ok_or_else(|| {
+                        PdfError::ObjectError("image Mask keys must be integers".into())
+                    })?
+                    .as_u32_checked()
+            };
+            let (low, high) = (endpoint(pair * 2)?, endpoint(pair * 2 + 1)?);
+            if low > high || high >= (1u32 << bits) {
+                return Err(PdfError::ObjectError(
+                    "image Mask range outside sample domain".into(),
+                ));
+            }
+            keys.push((low, high));
+        }
+        let row_bytes = (width as usize)
+            .checked_mul(components)
+            .and_then(|n| n.checked_mul(bits))
+            .and_then(|n| n.checked_add(7))
+            .map(|n| n / 8)
+            .ok_or_else(|| PdfError::ResourceLimit("image Mask row bytes".into()))?;
+        if row_bytes.checked_mul(height as usize) != Some(data.len()) {
+            return Err(PdfError::ObjectError(
+                "colour-key Mask sample length mismatch".into(),
+            ));
+        }
+        for row in data.chunks_exact(row_bytes) {
+            for x in 0..width as usize {
+                let transparent = keys.iter().enumerate().all(|(component, (low, high))| {
+                    let offset = (x * components + component) * bits;
+                    let value = if bits == 16 {
+                        u32::from(u16::from_be_bytes([row[offset / 8], row[offset / 8 + 1]]))
+                    } else {
+                        (u32::from(row[offset / 8]) >> (8 - bits - offset % 8)) & ((1 << bits) - 1)
+                    };
+                    (*low..=*high).contains(&value)
+                });
+                alpha.push(if transparent { 0 } else { 255 });
+            }
+        }
+    } else if let Some(stream) = mask.as_stream() {
+        let stencil = stream
+            .dict()
+            .get("ImageMask")
+            .map(|v| ctx.resolve(v))
+            .transpose()?;
+        if !stencil
+            .as_ref()
+            .and_then(PdfObject::as_bool)
+            .is_some_and(|v| v.value())
+        {
+            return Err(PdfError::ObjectError(
+                "explicit Mask must be an ImageMask stream".into(),
+            ));
+        }
+        // A stencil is forbidden from containing Mask/SMask, bounding recursion.
+        let stencil = PdfImage::try_new("Mask".into(), mask, ctx)?;
+        if stencil.data.len() != stencil.pixel_count {
+            return Err(PdfError::ObjectError(
+                "explicit Mask sample length mismatch".into(),
+            ));
+        }
+        for y in 0..height {
+            let sy = (((u128::from(y) * 2 + 1) * u128::from(stencil.height))
+                / (u128::from(height) * 2)) as usize;
+            for x in 0..width {
+                let sx = (((u128::from(x) * 2 + 1) * u128::from(stencil.width))
+                    / (u128::from(width) * 2)) as usize;
+                alpha.push(255 - stencil.data[sy * stencil.width as usize + sx]);
+            }
+        }
+    } else {
+        return Err(PdfError::ObjectError(
+            "image Mask must be an array or stencil stream".into(),
+        ));
+    }
+    Ok(alpha)
 }
 
 fn component_range(space: &ColorSpace, component: usize) -> (f64, f64) {
@@ -1673,6 +1863,7 @@ mod tests {
             pixel_count: 1,
             max_rgba_bytes: 4,
             soft_mask: None,
+            hard_mask_alpha: None,
             color_sample_decode: None,
             rendering_intent: None,
         };
@@ -1697,5 +1888,216 @@ mod tests {
         assert!(image.rgba_buffer().is_err());
         image.data.extend_from_slice(&[30, 40]);
         assert!(image.rgba_buffer().is_err());
+    }
+}
+
+#[cfg(test)]
+mod image_tail_whitespace_tests {
+    use super::*;
+    use crate::{
+        document::cross_ref_table::CrossRefTable,
+        io::stream_reader::StreamReader,
+        objects::pdf_stream::PdfStream,
+        parser::{
+            parser::PdfParser,
+            syntax::{ParseMode, SyntaxParser},
+        },
+    };
+    #[test]
+    fn compatible_short_whitespace_surplus_is_diagnosed_without_hiding_other_size_errors() {
+        for mode in [ParseMode::Strict, ParseMode::Compatible] {
+            let context = PDFContext::try_new(
+                PdfParser::new(SyntaxParser::with_mode(
+                    StreamReader::try_new(std::io::Cursor::new(Vec::<u8>::new())).unwrap(),
+                    mode,
+                )),
+                CrossRefTable::default(),
+            )
+            .unwrap();
+            let dict=SyntaxParser::new(StreamReader::try_new(std::io::Cursor::new(b"<< /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceGray >>".to_vec())).unwrap()).get_object().unwrap().into_dict().unwrap();
+            for filtered in [false, true] {
+                let mut dict = dict.clone();
+                if filtered {
+                    dict.insert(
+                        "Filter".into(),
+                        PdfObject::PdfName(crate::objects::pdf_name::PdfName::new(
+                            "FlateDecode".into(),
+                        )),
+                    );
+                }
+                for (bytes, recoverable) in [
+                    (vec![128, 13, 10], true),
+                    (vec![128, 1, 2], false),
+                    (vec![128, 32, 32, 32], false),
+                    (vec![], false),
+                ] {
+                    let bytes = if filtered {
+                        use std::io::Write;
+                        let mut encoder = flate2::write::ZlibEncoder::new(
+                            Vec::new(),
+                            flate2::Compression::default(),
+                        );
+                        encoder.write_all(&bytes).unwrap();
+                        encoder.finish().unwrap()
+                    } else {
+                        bytes
+                    };
+                    let result = PdfImage::try_new(
+                        "test".into(),
+                        &PdfObject::PdfStream(PdfStream::new(dict.clone(), bytes)),
+                        &context,
+                    )
+                    .and_then(|image| image.rgba_buffer());
+                    if mode == ParseMode::Compatible && recoverable {
+                        assert_eq!(result.unwrap(), [128, 128, 128, 255]);
+                    } else {
+                        assert!(result.is_err());
+                    }
+                }
+            }
+            assert_eq!(
+                context
+                    .structure_diagnostics()
+                    .unwrap()
+                    .iter()
+                    .any(|d| d.reason
+                        == crate::parser::diagnostic::StructureReason::ImageTrailingBytes),
+                mode == ParseMode::Compatible
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod explicit_mask_tests {
+    use super::*;
+    use crate::{
+        io::stream_reader::StreamReader,
+        objects::{pdf_dict::PdfDict, pdf_stream::PdfStream},
+        parser::{options::ParseOptions, syntax::SyntaxParser},
+    };
+    use std::io::Cursor;
+    fn object(dict: &str, data: Vec<u8>) -> PdfObject {
+        let dict = SyntaxParser::new(
+            StreamReader::try_new(Cursor::new(dict.as_bytes().to_vec())).unwrap(),
+        )
+        .get_object()
+        .unwrap()
+        .into_dict()
+        .unwrap();
+        PdfObject::PdfStream(PdfStream::new(dict, data))
+    }
+    #[test]
+    fn group4_indexed_samples_keep_palette_and_decode_semantics() {
+        let ctx = PDFContext::<Cursor<Vec<u8>>>::new_without_source(
+            PdfDict::default(),
+            ParseOptions::default(),
+        );
+        let mut encoder = fax::encoder::Encoder::new(fax::VecWriter::new());
+        let pixels = [fax::Color::Black, fax::Color::White, fax::Color::Black];
+        encoder.encode_line(pixels.into_iter(), 3).unwrap();
+        let bytes = encoder.finish().unwrap().finish();
+        for (decode, expected) in [
+            ("", vec![255, 0, 0, 255, 0, 255, 0, 255, 255, 0, 0, 255]),
+            (
+                "/Decode [1 0]",
+                vec![0, 255, 0, 255, 255, 0, 0, 255, 0, 255, 0, 255],
+            ),
+        ] {
+            let image = object(
+                &format!(
+                    "<< /Width 3 /Height 1 /BitsPerComponent 1 /ColorSpace [/Indexed /DeviceRGB 1 <FF000000FF00>] /Filter /CCITTFaxDecode /DecodeParms << /K -1 /Columns 3 /Rows 1 >> {decode} >>"
+                ),
+                bytes.clone(),
+            );
+            assert_eq!(
+                PdfImage::try_new("fax".into(), &image, &ctx)
+                    .unwrap()
+                    .rgba_buffer()
+                    .unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn colour_keys_compare_original_samples_before_decode_and_palette() {
+        let ctx = PDFContext::<Cursor<Vec<u8>>>::new_without_source(
+            PdfDict::default(),
+            ParseOptions::default(),
+        );
+        let rgb = object(
+            "<< /Width 2 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceRGB /Mask [10 10 20 20 30 30] /Decode [1 0 1 0 1 0] >>",
+            vec![10, 20, 30, 10, 21, 30],
+        );
+        let rgba = PdfImage::try_new("rgb".into(), &rgb, &ctx)
+            .unwrap()
+            .rgba_buffer()
+            .unwrap();
+        assert_eq!(rgba, vec![245, 235, 225, 0, 245, 234, 225, 255]);
+        let indexed = object(
+            "<< /Width 3 /Height 2 /BitsPerComponent 1 /ColorSpace [/Indexed /DeviceRGB 1 <FF000000FF00>] /Mask [0 0] /Decode [1 0] >>",
+            vec![0b01000000, 0b10100000],
+        );
+        let rgba = PdfImage::try_new("palette".into(), &indexed, &ctx)
+            .unwrap()
+            .rgba_buffer()
+            .unwrap();
+        assert_eq!(
+            rgba.chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>(),
+            vec![0, 255, 0, 255, 0, 255]
+        );
+        let wide = object(
+            "<< /Width 2 /Height 1 /BitsPerComponent 16 /ColorSpace /DeviceGray /Mask [256 256] >>",
+            vec![1, 0, 1, 1],
+        );
+        let rgba = PdfImage::try_new("wide".into(), &wide, &ctx)
+            .unwrap()
+            .rgba_buffer()
+            .unwrap();
+        assert_eq!((rgba[3], rgba[7]), (0, 255));
+    }
+    #[test]
+    fn explicit_stencil_resamples_and_honours_decode() {
+        let ctx = PDFContext::<Cursor<Vec<u8>>>::new_without_source(
+            PdfDict::default(),
+            ParseOptions::default(),
+        );
+        for (decode, expected) in [
+            ("", vec![255, 255, 0, 0]),
+            ("/Decode [1 0]", vec![0, 0, 255, 255]),
+        ] {
+            let mask = object(
+                &format!("<< /Width 2 /Height 1 /ImageMask true {decode} >>"),
+                vec![0b01000000],
+            );
+            let base = object(
+                "<< /Width 4 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceGray >>",
+                vec![128; 4],
+            );
+            let mut dict = base.as_stream().unwrap().dict().clone();
+            dict.try_insert("Mask".into(), mask).unwrap();
+            let base = PdfObject::PdfStream(PdfStream::new(dict, vec![128; 4]));
+            let image = PdfImage::try_new("masked".into(), &base, &ctx).unwrap();
+            assert!(image.has_explicit_mask());
+            assert_eq!(
+                image
+                    .rgba_buffer()
+                    .unwrap()
+                    .chunks_exact(4)
+                    .map(|p| p[3])
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+        for ranges in ["[1 0]", "[0 256]", "[0]", "[0.5 1]"] {
+            let bad = object(
+                &format!(
+                    "<< /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceGray /Mask {ranges} >>"
+                ),
+                vec![0],
+            );
+            assert!(PdfImage::try_new("bad".into(), &bad, &ctx).is_err());
+        }
     }
 }

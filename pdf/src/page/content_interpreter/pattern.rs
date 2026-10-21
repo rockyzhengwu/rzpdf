@@ -51,6 +51,12 @@ impl<R: Read + Seek> Interpreter<'_, R> {
                 self.compile_shading_pattern(pattern)?
             }
         };
+        if !paint.list.diagnostics().is_empty() {
+            self.unsupported_operator_reason(
+                op,
+                Some("pattern cell recovered unsupported operations; inspect pattern diagnostics"),
+            )?;
+        }
         // Sharing immutable paint snapshots does not promise Send or Sync.
         #[expect(
             clippy::arc_with_non_send_sync,
@@ -120,6 +126,7 @@ impl<R: Read + Seek> Interpreter<'_, R> {
             retained_bytes,
             retained_segments,
             tiling: false,
+            tile_matrix: None,
         })
     }
 
@@ -130,6 +137,17 @@ impl<R: Read + Seek> Interpreter<'_, R> {
         base: Option<&ColorSpace>,
         tint: &ColorValue,
     ) -> PdfResult<PatternPaint> {
+        self.compile_tiling_pattern_impl(object, pattern, base, tint, true)
+    }
+
+    fn compile_tiling_pattern_impl(
+        &self,
+        object: &PdfObject,
+        pattern: &TilingPattern,
+        base: Option<&ColorSpace>,
+        tint: &ColorValue,
+        allow_compact: bool,
+    ) -> PdfResult<PatternPaint> {
         let limits = self.ctx.limits();
         let budget = self.execution_budget.child(&limits)?;
         if self.pattern_depth + self.form_depth + self.type3_depth >= 128 {
@@ -139,6 +157,15 @@ impl<R: Read + Seek> Interpreter<'_, R> {
         }
         let to_user = pattern.matrix.checked_mul(&self.initial_ctm)?;
         let to_display = to_user.checked_mul(&self.page.page_matrix)?;
+        // Nonoverlapping cells can be retained once and repeated by the device.
+        // Overlapping/negative-step patterns keep the ordered expansion path.
+        let compact = allow_compact
+            && pattern.xstep > 0.
+            && pattern.ystep > 0.
+            && pattern.bbox.llx() >= 0.
+            && pattern.bbox.lly() >= 0.
+            && pattern.bbox.urx() <= pattern.xstep
+            && pattern.bbox.ury() <= pattern.ystep;
         let inverse = to_display.checked_inverse()?;
         let corners = [
             [0., 0.],
@@ -169,8 +196,14 @@ impl<R: Read + Seek> Interpreter<'_, R> {
             }
             Ok((start as i64, end as i64))
         };
-        let (x0, x1) = range(0, pattern.bbox.llx(), pattern.bbox.urx(), pattern.xstep)?;
-        let (y0, y1) = range(1, pattern.bbox.lly(), pattern.bbox.ury(), pattern.ystep)?;
+        let (mut x0, mut x1) = range(0, pattern.bbox.llx(), pattern.bbox.urx(), pattern.xstep)?;
+        let (mut y0, mut y1) = range(1, pattern.bbox.lly(), pattern.bbox.ury(), pattern.ystep)?;
+        if compact {
+            x0 = 0;
+            x1 = 0;
+            y0 = 0;
+            y1 = 0;
+        }
         let count = (x1 - x0 + 1)
             .checked_mul(y1 - y0 + 1)
             .filter(|n| *n >= 0 && *n as u64 <= limits.max_objects as u64)
@@ -184,7 +217,19 @@ impl<R: Read + Seek> Interpreter<'_, R> {
             .ok_or_else(|| PdfError::ColorError("pattern stream missing".into()))?
             .decode_data(self.ctx)?;
         let mut trace = TraceDevice::for_display_list(limits);
-        trace.start_page(self.page.page_width, self.page.page_height)?;
+        trace.start_page(
+            if compact {
+                pattern.xstep
+            } else {
+                self.page.page_width
+            },
+            if compact {
+                pattern.ystep
+            } else {
+                self.page.page_height
+            },
+        )?;
+        let mut diagnostics = Vec::new();
         for y in y0..=y1 {
             for x in x0..=x1 {
                 budget.decoded(data.len(), &limits)?;
@@ -196,7 +241,11 @@ impl<R: Read + Seek> Interpreter<'_, R> {
                     (x as f64 * f64::from(pattern.xstep)) as f32,
                     (y as f64 * f64::from(pattern.ystep)) as f32,
                 );
-                let ctm = translate.checked_mul(&to_user)?;
+                let ctm = if compact {
+                    self.page.page_matrix.checked_inverse()?
+                } else {
+                    translate.checked_mul(&to_user)?
+                };
                 let parser = ContentParser::new(crate::parser::syntax::SyntaxParser::with_options(
                     crate::io::stream_reader::StreamReader::try_new(std::io::Cursor::new(
                         data.clone(),
@@ -239,20 +288,42 @@ impl<R: Read + Seek> Interpreter<'_, R> {
                         &limits,
                     )?;
                 child.run_content(&mut trace)?;
-                if !child.diagnostics.is_empty() {
-                    return Err(PdfError::UnsupportedFeature(
-                        "pattern cell contains unsupported operations".into(),
-                    ));
+                if diagnostics.is_empty() {
+                    diagnostics.extend(child.diagnostics);
                 }
+                // Cell diagnostics remain attached to its immutable snapshot.
             }
         }
         trace.end_page()?;
         let (retained_bytes, retained_segments) = trace.pattern_storage()?;
+        let mut list = trace.into_display_list();
+        list.set_diagnostics(diagnostics);
+        if compact
+            && list.objects().iter().any(|object| {
+                use crate::page::{general_state::BlendMode, page_object::PageObject};
+                let state = match object {
+                    PageObject::Path(v) => &v.graphic_state().general_state,
+                    PageObject::Text(v) => &v.state.general_state,
+                    PageObject::Image(v) => &v.graphic_state.general_state,
+                    PageObject::Shading(v) => &v.graphic_state.general_state,
+                    PageObject::GroupBegin(v) => {
+                        return !v.isolated || v.blend_mode != BlendMode::Normal;
+                    }
+                    _ => return false,
+                };
+                state.blend_mode != BlendMode::Normal
+            })
+        {
+            // Blending inside a cell must see the page's current backdrop.
+            // Keep the existing ordered path for this less common case.
+            return self.compile_tiling_pattern_impl(object, pattern, base, tint, false);
+        }
         Ok(PatternPaint {
-            list: trace.into_display_list(),
+            list,
             retained_bytes,
             retained_segments,
             tiling: true,
+            tile_matrix: compact.then_some(to_display),
         })
     }
 }

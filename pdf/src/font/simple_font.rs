@@ -12,7 +12,6 @@ use crate::pdf_context::PDFContext;
 use super::GlyphDesc;
 use super::afm::parse_afm_str_with_limits;
 use super::builtin_font::{find_builtin_font, load_builtin_font_data, load_builtin_metrics};
-use super::encoding::stand_mac_roman_name_to_unicode;
 use super::font_program::{CharmapType, load_face_for_operation, use_charmap};
 use super::glyph_name::adobe_glyph_list_to_unicode;
 
@@ -36,6 +35,31 @@ fn simple_char_code(obj: &PdfObject) -> PdfResult<u32> {
 mod safety_tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn simple_unicode_uses_exact_byte_entries_with_a_copied_identity_codespace() {
+        let mut font = SimpleFont {
+            to_unicode: Some(Cmap::try_new(b"1 begincodespacerange <0000> <FFFF> endcodespacerange 3 beginbfchar <30> <0030> <31> <0031> <0032> <4E2D> endbfchar".to_vec()).unwrap()),
+            ..Default::default()
+        };
+        let ch = CharCode::new(48, 1, 0.);
+        assert_eq!(font.unicode_mapping(&ch).unwrap().as_deref(), Some("0"));
+        assert_eq!(font.unicode(&ch).unwrap(), "0");
+        assert!(font.matches_unicode(&ch, "0"));
+        assert_eq!(
+            font.encode_text_with_limits("01", Default::default())
+                .unwrap(),
+            b"01"
+        );
+        // A true two-byte source code is not a mapping for simple-font byte 32.
+        assert_eq!(
+            font.unicode_mapping(&CharCode::new(50, 1, 0.)).unwrap(),
+            None
+        );
+        font.to_unicode =
+            Some(Cmap::try_new(b"1 beginbfchar <30> <0041> endbfchar".to_vec()).unwrap());
+        assert_eq!(font.unicode_mapping(&ch).unwrap().as_deref(), Some("A"));
+    }
 
     #[test]
     fn base14_differences_without_base_keep_builtin_codes_and_overrides() {
@@ -532,7 +556,16 @@ pub struct SimpleFont {
     is_embed: bool,
     subtype: SimpleSubType,
     code_to_gid: SimpleGlyphMap,
+    program_unicode: SimpleUnicodeMap,
     afm: Option<Afm>,
+}
+
+#[derive(Debug, Clone)]
+struct SimpleUnicodeMap([Option<char>; 256]);
+impl Default for SimpleUnicodeMap {
+    fn default() -> Self {
+        Self([None; 256])
+    }
 }
 
 /// Simple fonts have exactly 256 possible character codes. Keep the mapping
@@ -632,13 +665,14 @@ impl SimpleFont {
         let mut mapping_count = 0;
         for code in 0..=255u8 {
             let unicode = if let Some(cmap) = &self.to_unicode {
-                cmap.unicode(&CharCode::new(code as u32, 1, 0.0))
+                cmap.single_byte_unicode(code)
                     .map(EncodingMapping::Borrowed)
             } else {
                 self.encoding
                     .as_ref()
                     .and_then(|encoding| encoding.unicode_mapping(code))
                     .and_then(char::from_u32)
+                    .or(self.program_unicode.0[code as usize])
                     .map(EncodingMapping::Scalar)
             };
             let Some(unicode) = unicode else {
@@ -815,7 +849,7 @@ impl SimpleFont {
         if let Some(mut afm_lease) = font.load_width_inner(dict, ctx, budget)? {
             lease.as_mut().unwrap().absorb(&mut afm_lease)?;
         }
-        font.init_cid_to_gid(budget)?;
+        font.init_cid_to_gid(ctx.limits(), budget)?;
 
         // TODO code to gid
 
@@ -830,6 +864,7 @@ impl SimpleFont {
 
     fn init_truetype_cid_to_gid(
         &mut self,
+        limits: crate::parser::options::Limits,
         budget: Option<&crate::budget::OperationBudget>,
     ) -> PdfResult<()> {
         if let Some(fontfile) = self.fontfile() {
@@ -840,13 +875,19 @@ impl SimpleFont {
                 if let Some(gname) = self.code_to_name(charcode) {
                     match charmap_type {
                         CharmapType::MsSymbol => {
-                            let idx = charcode as u16 + 0xf00;
-                            let gid = face.get_char_index(idx as usize).unwrap_or(0);
+                            let gid = face
+                                .get_char_index(0xF000 + charcode as usize)
+                                .or_else(|| face.get_char_index(charcode as usize))
+                                .unwrap_or(0);
                             self.code_to_gid.insert(charcode, gid);
                         }
                         CharmapType::MacRoman => {
-                            let unicode = stand_mac_roman_name_to_unicode(charcode).unwrap_or(0);
-                            let gid = face.get_char_index(unicode as usize).unwrap_or(0);
+                            let mac = Encoding::new_from_name("MacRomanEncoding")?;
+                            let code =
+                                (0..=255u8).find(|code| mac.get_glyph_name(*code) == Some(gname));
+                            let gid = code
+                                .and_then(|code| face.get_char_index(code as usize))
+                                .unwrap_or(0);
                             self.code_to_gid.insert(charcode, gid);
                         }
                         CharmapType::MsUnicode => {
@@ -869,6 +910,18 @@ impl SimpleFont {
                             let gid = face.get_char_index(charcode as usize).unwrap_or(0);
                             self.code_to_gid.insert(charcode, gid);
                         }
+                    }
+                }
+            }
+            if self.to_unicode.is_none() {
+                let (mappings, _lease) =
+                    super::font_program::glyph_unicode_map(&face, limits, budget)?;
+                for code in 0..=255u8 {
+                    if let Some(gid) = self.code_to_gid.get(&code) {
+                        self.program_unicode.0[code as usize] = mappings
+                            .get(*gid as usize)
+                            .and_then(Option::as_deref)
+                            .and_then(|s| s.chars().next());
                     }
                 }
             }
@@ -904,11 +957,12 @@ impl SimpleFont {
 
     fn init_cid_to_gid(
         &mut self,
+        limits: crate::parser::options::Limits,
         budget: Option<&crate::budget::OperationBudget>,
     ) -> PdfResult<()> {
         match self.subtype {
             SimpleSubType::Type1 | SimpleSubType::MMType1 => self.init_type1_cid_to_gid(budget),
-            SimpleSubType::TrueType => self.init_truetype_cid_to_gid(budget),
+            SimpleSubType::TrueType => self.init_truetype_cid_to_gid(limits, budget),
         }
     }
 
@@ -1170,13 +1224,14 @@ impl SimpleFont {
             ));
         }
         if let Some(cmap) = &self.to_unicode {
-            return Ok(cmap.unicode(ch).map(str::to_owned));
+            return Ok(cmap.single_byte_unicode(ch.code() as u8).map(str::to_owned));
         }
         Ok(self
             .encoding
             .as_ref()
             .and_then(|encoding| encoding.unicode_mapping(ch.code() as u8))
             .and_then(char::from_u32)
+            .or(self.program_unicode.0[ch.code() as usize])
             .map(|value| value.to_string()))
     }
 
@@ -1185,13 +1240,14 @@ impl SimpleFont {
             return false;
         }
         if let Some(cmap) = &self.to_unicode {
-            return cmap.unicode(ch) == Some(expected);
+            return cmap.single_byte_unicode(ch.code() as u8) == Some(expected);
         }
         let actual = self
             .encoding
             .as_ref()
             .and_then(|encoding| encoding.unicode_mapping(ch.code() as u8))
-            .and_then(char::from_u32);
+            .and_then(char::from_u32)
+            .or(self.program_unicode.0[ch.code() as usize]);
         let mut chars = expected.chars();
         actual.is_some() && actual == chars.next() && chars.next().is_none()
     }
@@ -1202,10 +1258,17 @@ impl SimpleFont {
                 "SimpleFont character code exceeds 255".to_string(),
             ));
         }
+        if self.to_unicode.is_none() {
+            if let Some(value) = self.unicode_mapping(ch)? {
+                return Ok(value);
+            }
+        }
         // TODO handle simple font to_unicode is None
         match &self.to_unicode {
             Some(cmap) => {
-                let u = cmap.unicode(ch).unwrap_or("\u{fffd}");
+                let u = cmap
+                    .single_byte_unicode(ch.code() as u8)
+                    .unwrap_or("\u{fffd}");
                 Ok(u.to_string())
             }
             None => match &self.encoding {

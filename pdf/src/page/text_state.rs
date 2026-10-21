@@ -19,7 +19,7 @@ pub struct TextState {
     pub font_size: f32,
     pub word_space: f32,
     pub char_space: f32,
-    pub font: Option<Font>,
+    pub font: Option<std::rc::Rc<Font>>,
 }
 
 impl Default for TextState {

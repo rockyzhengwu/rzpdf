@@ -1,4 +1,3 @@
-use std::char;
 use std::io::{Read, Seek};
 
 use crate::error::{PdfError, PdfResult};
@@ -14,6 +13,8 @@ pub struct Type0 {
     base_font: Option<String>,
     encoding: Option<Cmap>,
     to_unicode: Option<Cmap>,
+    cid_unicode: Option<Cmap>,
+    glyph_unicode: Vec<Option<String>>,
     descent_font: CidFont,
 }
 
@@ -362,8 +363,60 @@ impl Type0 {
                 Cmap::from_stream(stream, ctx)?
             };
             font.to_unicode = Some(tu_cmap);
+        } else if let Some(info) = descendant_dict.get("CIDSystemInfo") {
+            // ISO 32000 text extraction fallback: source code -> CID through
+            // Encoding, then CID -> Unicode through the registered collection.
+            // Identity/custom collections are not assumed to contain Unicode.
+            let (info, _temporary) = resolve(info)?;
+            let info = info
+                .as_dict()
+                .ok_or_else(|| PdfError::FontError("CIDSystemInfo must be a dictionary".into()))?;
+            let matches = |key: &str, expected: &[u8]| -> PdfResult<bool> {
+                let Some(value) = info.get(key) else {
+                    return Ok(false);
+                };
+                let (value, _temporary) = resolve(value)?;
+                let value = value.as_string().ok_or_else(|| {
+                    PdfError::FontError(format!("CIDSystemInfo {key} must be a string"))
+                })?;
+                // Registry/Ordering are ASCII identifiers, not general text
+                // strings. Borrow their bytes without an unbudgeted text copy.
+                Ok(value.bytes() == expected)
+            };
+            if matches("Registry", b"Adobe")? {
+                let mut name = None;
+                for (ordering, map) in [
+                    (b"GB1".as_slice(), "Adobe-GB1-UCS2"),
+                    (b"CNS1", "Adobe-CNS1-UCS2"),
+                    (b"Japan1", "Adobe-Japan1-UCS2"),
+                    (b"Korea1", "Adobe-Korea1-UCS2"),
+                ] {
+                    if matches("Ordering", ordering)? {
+                        name = Some(map);
+                        break;
+                    }
+                }
+                if let Some(name) = name {
+                    font.cid_unicode = Some(if let Some(pool) = budget {
+                        let (cmap, mut retained) =
+                            Cmap::new_from_predefined_with_budget(name, &ctx.limits(), pool)?;
+                        lease.as_mut().unwrap().absorb(&mut retained)?;
+                        cmap
+                    } else {
+                        Cmap::new_from_predefined_with_limits(name, &ctx.limits())?
+                    });
+                }
+            }
         }
 
+        if font.to_unicode.is_none() && font.cid_unicode.is_none() {
+            let (mappings, mut retained) =
+                font.descent_font.unicode_fallback(ctx.limits(), budget)?;
+            if let Some(retained) = &mut retained {
+                lease.as_mut().unwrap().absorb(retained)?;
+            }
+            font.glyph_unicode = mappings;
+        }
         Ok((font, lease))
     }
 
@@ -378,27 +431,23 @@ impl Type0 {
     }
 
     pub fn unicode(&self, ch: &CharCode) -> PdfResult<String> {
-        match &self.to_unicode {
-            Some(cmap) => {
-                if let Some(u) = cmap.unicode(ch) {
-                    Ok(u.to_string())
-                } else {
-                    let mut s = String::new();
-                    s.push(char::REPLACEMENT_CHARACTER);
-                    Ok(s)
-                }
-            }
-            None => {
-                let mut s = String::new();
-                s.push(char::REPLACEMENT_CHARACTER);
-                Ok(s)
-                //return Err(PdfError::Font("Type0 Font to_unicode is None".to_string()));
-            }
-        }
+        Ok(self.unicode_mapping(ch).unwrap_or("\u{fffd}").to_owned())
     }
 
     pub fn unicode_mapping(&self, ch: &CharCode) -> Option<&str> {
-        self.to_unicode.as_ref().and_then(|cmap| cmap.unicode(ch))
+        if let Some(cmap) = &self.to_unicode {
+            return cmap.unicode(ch);
+        }
+        let cid = self.cid(ch);
+        if cid == 0 || cid > u32::from(u16::MAX) {
+            return None;
+        }
+        if let Some(map) = &self.cid_unicode {
+            return map.unicode(&CharCode::new(cid, 2, 0.));
+        }
+        self.glyph_unicode
+            .get(self.descent_font.glyph_id(cid)? as usize)?
+            .as_deref()
     }
 
     pub fn text_widths(&self, chars: &[CharCode]) -> PdfResult<f32> {
@@ -480,6 +529,18 @@ impl Type0 {
             .glyph_id(self.cid(code))
             .map(GlyphDesc::Gid)
     }
+    /// FreeType's standalone CID-keyed CFF face uses CIDs as its glyph indices.
+    /// OpenType-wrapped CFF faces use ordinary GIDs instead.
+    pub(crate) fn raw_cff_cid(&self, code: &CharCode) -> Option<u32> {
+        let bytes = self.fontfile()?;
+        if bytes.first() != Some(&1) {
+            return None;
+        }
+        let cid = self.cid(code);
+        self.descent_font.glyph_id(cid)?;
+        Some(cid)
+    }
+
     pub fn fontfile(&self) -> Option<&[u8]> {
         self.descent_font.fontfile()
     }
@@ -494,6 +555,95 @@ mod tests {
         parser::{parser::PdfParser, syntax::SyntaxParser},
     };
     use std::{collections::HashMap, io::Cursor};
+
+    #[test]
+    fn identity_cids_follow_embedded_gid_unicode_and_explicit_override() {
+        use crate::{budget::OperationBudget, document::Document, objects::pdf_stream::PdfStream};
+        let doc = Document::new().unwrap();
+        let parse = |s: &str| {
+            SyntaxParser::new(StreamReader::try_new(Cursor::new(s.as_bytes().to_vec())).unwrap())
+                .get_object()
+                .unwrap()
+                .into_dict()
+                .unwrap()
+        };
+        let mut descendant = parse("<< /Subtype /CIDFontType2 /BaseFont /Test /DW 500 >>");
+        let mut descriptor = PdfDict::default();
+        descriptor.insert(
+            "FontFile2".into(),
+            PdfObject::PdfStream(PdfStream::new(
+                PdfDict::default(),
+                include_bytes!("../../tests/fixtures/synthetic-symbol.ttf").to_vec(),
+            )),
+        );
+        descendant.insert("FontDescriptor".into(), PdfObject::PdfDict(descriptor));
+        descendant.insert(
+            "CIDToGIDMap".into(),
+            PdfObject::PdfStream(PdfStream::new(PdfDict::default(), vec![0, 0, 0, 2])),
+        );
+        let mut dict = parse("<< /Subtype /Type0 /BaseFont /Test /Encoding /Identity-H >>");
+        dict.insert(
+            "DescendantFonts".into(),
+            PdfObject::PdfArray(crate::objects::pdf_array::PdfArray::from_items(vec![
+                PdfObject::PdfDict(descendant),
+            ])),
+        );
+        let pool = OperationBudget::new(2 * 1024 * 1024);
+        let (font, lease) = Type0::try_new_with_budget(&dict, doc.ctx(), &pool).unwrap();
+        let chars = font.chars(&[0, 1]).unwrap();
+        assert_eq!(font.unicode_mapping(&chars[0]), Some("×"));
+        assert_eq!(pool.live_bytes(), lease.bytes());
+        drop((font, lease));
+        assert_eq!(pool.live_bytes(), 0);
+        dict.insert(
+            "ToUnicode".into(),
+            PdfObject::PdfStream(PdfStream::new(
+                PdfDict::default(),
+                b"1 beginbfchar <0001> <0041> endbfchar".to_vec(),
+            )),
+        );
+        let font = Type0::try_new(&dict, doc.ctx()).unwrap();
+        assert_eq!(font.unicode_mapping(&chars[0]), Some("A"));
+    }
+
+    #[test]
+    fn registered_cid_collection_fallback_uses_cids_and_respects_explicit_unicode() {
+        use crate::{budget::OperationBudget, document::Document};
+        let doc = Document::new().unwrap();
+        let parse = |registry: &str, ordering: &str| {
+            let source = format!(
+                "<< /Type /Font /Subtype /Type0 /BaseFont /Test /Encoding /GBK-EUC-H /DescendantFonts [<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Test /DW 1000 /CIDSystemInfo << /Registry ({registry}) /Ordering ({ordering}) /Supplement 2 >> >>] >>"
+            );
+            SyntaxParser::new(StreamReader::try_new(Cursor::new(source.into_bytes())).unwrap())
+                .get_object()
+                .unwrap()
+                .into_dict()
+                .unwrap()
+        };
+        let dict = parse("Adobe", "GB1");
+        let font = Type0::try_new(&dict, doc.ctx()).unwrap();
+        let chars = font.chars(&[0xd6, 0xd0]).unwrap();
+        assert_eq!(font.unicode_mapping(&chars[0]), Some("中"));
+        assert_eq!(font.unicode(&chars[0]).unwrap(), "中");
+        assert_eq!(font.unicode_mapping(&CharCode::new(0xffff, 2, 0.)), None);
+        let pool = OperationBudget::new(32 * 1024 * 1024);
+        let (font, lease) = Type0::try_new_with_budget(&dict, doc.ctx(), &pool).unwrap();
+        assert_eq!(font.unicode_mapping(&chars[0]), Some("中"));
+        assert!(pool.live_bytes() > 0);
+        drop((font, lease));
+        assert_eq!(pool.live_bytes(), 0);
+        for dict in [parse("Custom", "GB1"), parse("Adobe", "Identity")] {
+            let font = Type0::try_new(&dict, doc.ctx()).unwrap();
+            assert_eq!(font.unicode_mapping(&chars[0]), None);
+        }
+        let mut font = Type0::try_new(&dict, doc.ctx()).unwrap();
+        font.to_unicode = Some(Cmap::default());
+        assert_eq!(font.unicode_mapping(&chars[0]), None);
+        let mut explicit = Cmap::default();
+        explicit.add_unicode(0xd6d0, "override".into());
+        font.to_unicode = Some(explicit);
+        assert_eq!(font.unicode_mapping(&chars[0]), Some("override"));
+    }
 
     #[test]
     fn budget_construction_tracks_named_and_stream_cmaps_until_font_release() {

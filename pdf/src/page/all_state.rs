@@ -4,24 +4,40 @@ use crate::{
 };
 
 pub(crate) fn supported_ext_gs_keys(state: &PdfDict) -> bool {
-    state.into_iter().all(|(key, _)| {
-        matches!(
-            key.as_str(),
-            "Type"
-                | "Font"
-                | "LW"
-                | "LC"
-                | "LJ"
-                | "ML"
-                | "D"
-                | "FL"
-                | "CA"
-                | "ca"
-                | "BM"
-                | "SMask"
-                | "RI"
-        )
-    })
+    state.into_iter().all(|(key, _)| supported_ext_gs_key(key))
+}
+
+pub(crate) fn supported_ext_gs_key(key: &str) -> bool {
+    matches!(
+        key,
+        "Type"
+            | "Font"
+            | "LW"
+            | "LC"
+            | "LJ"
+            | "ML"
+            | "D"
+            | "FL"
+            | "CA"
+            | "ca"
+            | "BM"
+            | "SMask"
+            | "RI"
+            | "OP"
+            | "op"
+            | "OPM"
+            | "SA"
+            | "SM"
+            | "AIS"
+            | "TK"
+            | "BG"
+            | "BG2"
+            | "UCR"
+            | "UCR2"
+            | "HT"
+            | "TR"
+            | "TR2"
+    )
 }
 
 #[derive(Debug, Clone)]

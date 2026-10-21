@@ -529,11 +529,7 @@ mod tests {
             let result = PdfImage::try_new("image".into(), &image, doc.ctx());
             // ImageMask=true forbids the ColorSpace in this fixture; valid
             // one-bit stencils are covered by the PdfImage tests.
-            if matches!(key, "SMask" | "Decode" | "ImageMask") {
-                assert!(matches!(result, Err(PdfError::ObjectError(_))));
-            } else {
-                assert!(matches!(result, Err(PdfError::UnsupportedFeature(_))));
-            }
+            assert!(matches!(result, Err(PdfError::ObjectError(_))));
         }
         let mut dict = base.clone();
         dict.insert(

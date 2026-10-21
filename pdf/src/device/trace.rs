@@ -17,6 +17,7 @@ pub struct TraceDevice {
     collect_xml: bool,
     limits: Option<crate::parser::options::Limits>,
     retained_payload_bytes: usize,
+    retained_images: std::collections::HashSet<usize>,
     retained_path_segments: usize,
     objects: Vec<PageObject>,
     page_width: f32,
@@ -97,9 +98,15 @@ impl Device for TraceDevice {
     fn do_image(&mut self, imageobject: ImageObject) -> PdfResult<()> {
         self.reserve_object()?;
         let segments = self.next_retained_segments(None, &imageobject.graphic_state)?;
+        let identity = std::rc::Rc::as_ptr(&imageobject.image) as usize;
+        let first = !self.retained_images.contains(&identity);
         let total = self
             .next_draw_bytes(imageobject.nested_source(), &imageobject.graphic_state)?
-            .checked_add(imageobject.image.retained_sample_bytes()?)
+            .checked_add(if first {
+                imageobject.image.retained_sample_bytes()?
+            } else {
+                0
+            })
             .ok_or_else(|| PdfError::ResourceLimit("display retained payload overflow".into()))?;
         if self
             .limits
@@ -110,6 +117,12 @@ impl Device for TraceDevice {
             ));
         }
         self.add_xml_image(&imageobject)?;
+        if first {
+            self.retained_images
+                .try_reserve(1)
+                .map_err(|_| PdfError::ResourceLimit("display image identities".into()))?;
+            self.retained_images.insert(identity);
+        }
         self.retained_payload_bytes = total;
         self.retained_path_segments = segments;
         self.objects.push(PageObject::Image(imageobject));
@@ -292,6 +305,7 @@ impl TraceDevice {
             collect_xml: true,
             limits: None,
             retained_payload_bytes: 0,
+            retained_images: Default::default(),
             retained_path_segments: 0,
             objects: Vec::new(),
             page_width: 0.0,

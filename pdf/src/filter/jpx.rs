@@ -202,6 +202,9 @@ pub fn inspect(data: &[u8], context: FilterContext<'_>) -> PdfResult<JpxInfo> {
                 );
             }
             0xff52 => {
+                if saw_cod {
+                    return Err(unsupported("tile coding overrides"));
+                }
                 if payload.len() < 10 {
                     return Err(error("truncated COD"));
                 }
@@ -214,6 +217,14 @@ pub fn inspect(data: &[u8], context: FilterContext<'_>) -> PdfResult<JpxInfo> {
                     return Err(unsupported(
                         "coding progression/layers/decomposition/code-block envelope",
                     ));
+                }
+                let precinct_bytes = if payload[0] & 1 != 0 {
+                    usize::from(payload[5]) + 1
+                } else {
+                    0
+                };
+                if payload.len() != 10 + precinct_bytes {
+                    return Err(error("COD precinct length mismatch"));
                 }
                 saw_cod = true;
             }
@@ -244,6 +255,79 @@ pub fn inspect(data: &[u8], context: FilterContext<'_>) -> PdfResult<JpxInfo> {
     })
 }
 
+// The backend keeps coefficient/sample planes and code-block metadata, not
+// 128 bytes for every output sample. Account separately for small code-blocks
+// and decomposition boundaries so ordinary multi-megapixel RGB scans fit.
+fn scratch_envelope(input: &[u8], info: JpxInfo) -> PdfResult<usize> {
+    let stream = codestream(input)?;
+    let mut p = 2;
+    let mut blocks = None;
+    while p + 4 <= stream.len() {
+        let marker = u16be(stream, p)?;
+        let length = u16be(stream, p + 2)? as usize;
+        if marker == 0xff52 {
+            let payload = stream
+                .get(p + 4..p + 2 + length)
+                .ok_or_else(|| error("truncated COD"))?;
+            let levels = *payload.get(5).ok_or_else(|| error("truncated COD"))?;
+            let mut bw = 1usize << (payload[6] + 2);
+            let mut bh = 1usize << (payload[7] + 2);
+            if payload[0] & 1 != 0 {
+                for byte in &payload[10..] {
+                    bw = bw.min(1usize << (byte & 15).saturating_sub(1));
+                    bh = bh.min(1usize << (byte >> 4).saturating_sub(1));
+                }
+            }
+            let (mut w, mut h) = (info.width as usize, info.height as usize);
+            let mut count = 0usize;
+            for _ in 0..levels {
+                w = w.div_ceil(2);
+                h = h.div_ceil(2);
+                // One boundary block per axis covers odd high-band origins.
+                count = count
+                    .checked_add(
+                        (w.div_ceil(bw) + 1)
+                            .checked_mul(h.div_ceil(bh) + 1)
+                            .and_then(|n| n.checked_mul(3))
+                            .ok_or_else(|| limit("code-block count"))?,
+                    )
+                    .ok_or_else(|| limit("code-block count"))?;
+            }
+            count = count
+                .checked_add(
+                    (w.div_ceil(bw) + 1)
+                        .checked_mul(h.div_ceil(bh) + 1)
+                        .ok_or_else(|| limit("code-block count"))?,
+                )
+                .ok_or_else(|| limit("code-block count"))?;
+            // Layers hold per-code-block packet metadata. Its size grows
+            // with layers even when the image sample count stays fixed.
+            blocks = Some(
+                count
+                    .checked_mul(2048 + usize::from(u16be(payload, 2)?) * 128)
+                    .ok_or_else(|| limit("code-block metadata"))?,
+            );
+            break;
+        }
+        if length < 2 {
+            return Err(error("invalid marker length"));
+        }
+        p = p
+            .checked_add(2 + length)
+            .ok_or_else(|| limit("header offset"))?;
+    }
+    let samples = (info.width as usize)
+        .checked_mul(info.height as usize)
+        .and_then(|n| n.checked_mul(info.components))
+        .ok_or_else(|| limit("sample size"))?;
+    samples
+        .checked_mul(32)
+        .and_then(|n| blocks?.checked_mul(info.components)?.checked_add(n))
+        .and_then(|n| input.len().checked_mul(8)?.checked_add(n))
+        .and_then(|n| n.checked_add(1024 * 1024))
+        .ok_or_else(|| limit("scratch envelope overflow"))
+}
+
 pub fn decode_with_budget(
     input: &[u8],
     context: FilterContext<'_>,
@@ -251,11 +335,7 @@ pub fn decode_with_budget(
 ) -> PdfResult<(JpxInfo, BudgetedBytes)> {
     let info = inspect(input, context)?;
     let samples = (info.width as usize) * (info.height as usize) * info.components;
-    let scratch = samples
-        .checked_mul(128)
-        .and_then(|n| input.len().checked_mul(8).and_then(|m| n.checked_add(m)))
-        .and_then(|n| n.checked_add(1024 * 1024))
-        .ok_or_else(|| limit("scratch envelope overflow"))?;
+    let scratch = scratch_envelope(input, info)?;
     let _scratch = budget.reserve(scratch)?;
     let settings = hayro_jpeg2000::DecodeSettings {
         strict: true,
@@ -314,4 +394,34 @@ pub fn jpx_decode(
     let budget = crate::parser::options::Limits::default().operation_budget();
     let (_, bytes) = decode_with_budget(input, context, &budget)?;
     Ok(bytes.into_reserved_parts().0)
+}
+
+#[cfg(test)]
+mod scratch_tests {
+    use super::*;
+    #[test]
+    fn workspace_tracks_codeblock_size_and_layers_instead_of_flat_sample_multiplier() {
+        let bytes = include_bytes!("../../tests/fixtures/v06/rgb-raw.j2k");
+        let info = inspect(bytes, FilterContext::default()).unwrap();
+        let base = scratch_envelope(bytes, info).unwrap();
+        let marker = bytes.windows(2).position(|b| b == [0xff, 0x52]).unwrap();
+        let mut fine = bytes.to_vec();
+        fine[marker + 4 + 6] = 0;
+        fine[marker + 4 + 7] = 0;
+        assert!(scratch_envelope(&fine, info).unwrap() > base);
+        let mut layered = bytes.to_vec();
+        layered[marker + 4 + 2..marker + 4 + 4].copy_from_slice(&64u16.to_be_bytes());
+        assert!(scratch_envelope(&layered, info).unwrap() > base);
+        let mut large = info;
+        large.width = 1527;
+        large.height = 1276;
+        let workspace = scratch_envelope(bytes, large).unwrap();
+        assert!(workspace < 512 * 1024 * 1024);
+        let pool = OperationBudget::new(1024);
+        assert!(matches!(
+            decode_with_budget(bytes, FilterContext::default(), &pool),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(pool.live_bytes(), 0);
+    }
 }

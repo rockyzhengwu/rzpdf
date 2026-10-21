@@ -309,7 +309,8 @@ impl PdfStream {
             .as_ref()
             .filter(|obj| !matches!(obj, PdfObject::PdfNull))
         {
-            decode(
+            let recovered = std::cell::Cell::new(false);
+            let result = decode(
                 filter,
                 params.as_ref(),
                 self.data.as_slice(),
@@ -327,8 +328,16 @@ impl PdfStream {
                     max_decoded_bytes: ctx.limits().max_decoded_bytes,
                     max_image_pixels: ctx.limits().max_image_pixels,
                     crypt_already_processed: self.crypt_processed,
+                    compatible: ctx.options().mode == crate::parser::syntax::ParseMode::Compatible,
+                    recovered: Some(&recovered),
                 },
-            )
+            );
+            if recovered.get() {
+                ctx.record_structure_recovery(
+                    crate::parser::diagnostic::StructureReason::ImageTailRecovery,
+                )?;
+            }
+            result
         } else {
             copy()
         }

@@ -24,6 +24,8 @@ pub struct PatternPaint {
     pub(crate) retained_bytes: usize,
     pub(crate) retained_segments: usize,
     pub(crate) tiling: bool,
+    /// Single-cell snapshot and its placement in page display coordinates.
+    pub tile_matrix: Option<crate::geom::matrix::Matrix>,
 }
 
 impl PatternPaint {

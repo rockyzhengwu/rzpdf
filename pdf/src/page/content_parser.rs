@@ -323,3 +323,156 @@ mod tests {
         assert!(parser.read_operator().unwrap().is_none());
     }
 }
+
+/// Recover only a bare Q/q token collision at a known Contents stream seam.
+/// Lex the original concatenation first so names, comments and split strings
+/// remain untouched. The added separator belongs to the preceding stream.
+pub(crate) fn separate_graphics_stream_seams(
+    source: &mut Vec<u8>,
+    ranges: &mut [std::ops::Range<usize>],
+    options: crate::parser::options::ParseOptions,
+    budget: Option<&crate::budget::OperationBudget>,
+    source_lease: &mut Option<crate::budget::MemoryLease>,
+) -> PdfResult<bool> {
+    use crate::{budget::MemoryLease, parser::syntax::ParseMode};
+    if options.mode != ParseMode::Compatible {
+        return Ok(false);
+    }
+    let candidates = ranges
+        .iter()
+        .take(ranges.len().saturating_sub(1))
+        .filter(|r| r.end > 0 && source.get(r.end - 1..r.end + 1) == Some(b"Qq"))
+        .count();
+    if candidates == 0 {
+        return Ok(false);
+    }
+    let bytes = candidates
+        .checked_mul(size_of::<usize>())
+        .filter(|n| *n <= options.limits.max_decoded_bytes)
+        .ok_or_else(|| PdfError::ResourceLimit("content stream seam table".into()))?;
+    let mut positions_lease = budget.map(|b| b.reserve(bytes)).transpose()?;
+    let mut positions = Vec::new();
+    positions
+        .try_reserve_exact(candidates)
+        .map_err(|_| PdfError::ResourceLimit("content stream seams allocation".into()))?;
+    if let Some(lease) = &mut positions_lease {
+        lease.resize(positions.capacity() * size_of::<usize>())?;
+    }
+    let mut parser = ContentParser::new(SyntaxParser::with_options(
+        crate::io::stream_reader::StreamReader::try_new(Cursor::new(source.as_slice()))?,
+        options,
+    ));
+    loop {
+        let mut tokens: Option<MemoryLease> = budget.map(|b| b.reserve(0)).transpose()?;
+        let operator = if let (Some(b), Some(lease)) = (budget, tokens.as_mut()) {
+            parser.read_operator_with_budget(b, lease)?
+        } else {
+            parser.read_operator()?
+        };
+        let Some(operator) = operator else {
+            break;
+        };
+        if operator.name() == "Qq" && operator.num_operands() == 0 {
+            let at = usize::try_from(operator.byte_offset().unwrap())
+                .map_err(|_| PdfError::ResourceLimit("content seam offset".into()))?
+                + 1;
+            if ranges.binary_search_by_key(&at, |r| r.end).is_ok() && positions.last() != Some(&at)
+            {
+                positions.push(at);
+            }
+        }
+    }
+    drop(parser);
+    if positions.is_empty() {
+        return Ok(false);
+    }
+    let length = source
+        .len()
+        .checked_add(positions.len())
+        .filter(|n| *n <= options.limits.max_decoded_bytes)
+        .ok_or_else(|| PdfError::ResourceLimit("recovered content source bytes".into()))?;
+    let mut lease = budget.map(|b| b.reserve(length)).transpose()?;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(length)
+        .map_err(|_| PdfError::ResourceLimit("recovered content source allocation".into()))?;
+    if let Some(lease) = &mut lease {
+        lease.resize(output.capacity())?;
+    }
+    let mut copied = 0;
+    for at in &positions {
+        output.extend_from_slice(&source[copied..*at]);
+        output.push(b'\n');
+        copied = *at;
+    }
+    output.extend_from_slice(&source[copied..]);
+    for range in ranges {
+        range.start += positions.partition_point(|p| *p <= range.start);
+        range.end += positions.partition_point(|p| *p <= range.end);
+    }
+    *source = output;
+    *source_lease = lease;
+    Ok(true)
+}
+
+#[cfg(test)]
+mod stream_seam_tests {
+    use super::*;
+    use crate::{
+        budget::OperationBudget,
+        parser::{options::ParseOptions, syntax::ParseMode},
+    };
+    #[test]
+    fn only_bare_graphics_tokens_at_real_seams_are_recovered() {
+        for (left, right, recover) in [
+            (b"q Q".as_slice(), b"q Q".as_slice(), true),
+            (b"q BT (Q", b"q) Tj ET Q", false),
+            (b"% Q", b"q\nq Q", false),
+            (b"/Q", b"q 1 Tf", false),
+            (b"Q", b"quux", false),
+        ] {
+            for mode in [ParseMode::Compatible, ParseMode::Strict] {
+                let pool = OperationBudget::new(65536);
+                let length = left.len() + right.len();
+                let mut source = [left, right].concat();
+                let original = source.clone();
+                let mut lease = Some(pool.reserve(source.capacity()).unwrap());
+                let mut ranges = [0..left.len(), left.len()..length];
+                let changed = separate_graphics_stream_seams(
+                    &mut source,
+                    &mut ranges,
+                    ParseOptions {
+                        mode,
+                        ..Default::default()
+                    },
+                    Some(&pool),
+                    &mut lease,
+                )
+                .unwrap();
+                assert_eq!(changed, recover && mode == ParseMode::Compatible);
+                if changed {
+                    assert_eq!(source, [left, b"\n", right].concat());
+                    assert_eq!(ranges, [0..left.len() + 1, left.len() + 1..length + 1]);
+                } else {
+                    assert_eq!(source, original);
+                }
+                assert_eq!(pool.live_bytes(), lease.as_ref().unwrap().bytes());
+                drop(lease);
+                assert_eq!(pool.live_bytes(), 0);
+            }
+        }
+        // Qq inside one stream remains an unknown operator.
+        let mut source = b"q Qq Q".to_vec();
+        let mut ranges = [0..source.len()];
+        assert!(
+            !separate_graphics_stream_seams(
+                &mut source,
+                &mut ranges,
+                Default::default(),
+                None,
+                &mut None
+            )
+            .unwrap()
+        );
+    }
+}

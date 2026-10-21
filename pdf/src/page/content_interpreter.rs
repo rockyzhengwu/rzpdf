@@ -69,11 +69,20 @@ pub struct Interpreter<'a, R: Seek + Read> {
     type3_depth: usize,
     type3_uncoloured: bool,
     type3_budget: crate::budget::OperationBudget,
+    // Cache is local to a resource invocation and invalidated after edits.
+    font_cache_revision: u64,
+    image_cache: std::collections::HashMap<String, std::rc::Rc<PdfImage>>,
+    image_cache_bytes: usize,
+    font_cache: std::collections::HashMap<String, std::rc::Rc<Font>>,
 }
 
 impl<'a, R: Seek + Read> Interpreter<'a, R> {
     pub fn new(page: &'a PdfPage<'a, R>, ctx: &'a PDFContext<R>, parser: ContentParser) -> Self {
         Interpreter {
+            font_cache_revision: ctx.revision(),
+            image_cache: Default::default(),
+            image_cache_bytes: 0,
+            font_cache: std::collections::HashMap::new(),
             invocation_path: Vec::new(),
             type3_depth: 0,
             type3_uncoloured: false,
@@ -158,6 +167,9 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
     /// Replace the entire lookup scope for an isolated content invocation.
     /// Does not merge missing entries with page resources.
     pub fn with_resource_scope(mut self, scope: crate::objects::pdf_dict::PdfDict) -> Self {
+        self.font_cache.clear();
+        self.image_cache.clear();
+        self.image_cache_bytes = 0;
         self.resource_scope = Some(scope);
         self
     }
@@ -276,9 +288,17 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                     | "sh"
             )
         {
-            return Err(PdfError::ColorError(
-                "uncoloured pattern cannot specify colour".into(),
-            ));
+            if self.ctx.options().mode == crate::parser::syntax::ParseMode::Strict
+                || op.name() == "sh"
+            {
+                return Err(PdfError::ColorError(
+                    "uncoloured pattern cannot specify colour".into(),
+                ));
+            }
+            return self.unsupported_operator_reason(
+                &op,
+                Some("ignored colour change in uncoloured pattern; caller tint retained"),
+            );
         }
         if self.type3_depth != 0 {
             if !matches!(
@@ -510,10 +530,8 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                 self.in_text_object = false;
             }
 
-            // These delimiters do not alter painting. MCID-only BDC is safe
-            // for visual/text interpretation; richer properties such as
-            // ActualText stays diagnostic in the default path. Only explicit
-            // marked-text capture interprets the supported richer properties.
+            // Metadata does not change glyph painting. Logical replacements
+            // are applied only by explicit marked-text capture.
             "BMC" => {
                 self.begin_optional_mark(&op)?;
                 if self.semantic_capture.is_some() {
@@ -536,7 +554,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                 if self.semantic_capture.is_some() {
                     self.capture_mark(&op)?;
                 } else if !mcid_only {
-                    if self.optional_content.is_some() {
+                    if self.optional_content.is_some() || op.get_as_name(0)?.name() != "OC" {
                         self.validate_selected_properties(&op)?;
                     } else {
                         self.unsupported_operator(&op)?;
@@ -576,6 +594,14 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
     }
 
     fn unsupported_operator(&mut self, op: &Operator) -> PdfResult<()> {
+        self.unsupported_operator_reason(op, None)
+    }
+
+    fn unsupported_operator_reason(
+        &mut self,
+        op: &Operator,
+        reason: Option<&str>,
+    ) -> PdfResult<()> {
         use crate::page::diagnostic::{ContentDiagnostic, DiagnosticKind};
         crate::filter::check_output_size(
             self.diagnostics.len(),
@@ -584,7 +610,10 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             "page content diagnostics",
         )?;
         let prefix = "unsupported content operator ";
-        let suffix = format!(" at byte {:?}", op.byte_offset());
+        let suffix = match reason {
+            Some(reason) => format!(" at byte {:?}: {reason}", op.byte_offset()),
+            None => format!(" at byte {:?}", op.byte_offset()),
+        };
         let message_bytes = op
             .name()
             .len()
@@ -884,7 +913,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                 .borrow_mut()
                 .text(&text, self.semantic_location()?, self.optional_visible)?;
         }
-        if let Some(Font::Type3(font)) = &text.state.text_state.font {
+        if let Some(Font::Type3(font)) = text.state.text_state.font.as_deref() {
             if text.state.text_state.text_rendering_mode
                 != super::text_state::TextRenderingMode::Fill
             {
@@ -1069,10 +1098,27 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
         let font_size = op.get_as_f32(1)?;
         self.current_state.graphic_state.text_state.font_size = font_size;
         let font_name = op.get_as_name(0)?;
-        let font_resource = self.named_resource("Font", font_name.name())?;
-        let font = self.load_font(font_resource.as_dict().ok_or_else(|| {
-            PdfError::PageResourceError("Font resource must be a dictionary".into())
-        })?)?;
+        if self.font_cache_revision != self.ctx.revision() {
+            self.font_cache.clear();
+            self.image_cache.clear();
+            self.image_cache_bytes = 0;
+            self.font_cache_revision = self.ctx.revision();
+        }
+        let font = if let Some(font) = self.font_cache.get(font_name.name()) {
+            font.clone()
+        } else {
+            if self.font_cache.len() >= self.ctx.limits().max_objects {
+                return Err(PdfError::ResourceLimit("font cache entries".into()));
+            }
+            let font_resource = self.named_resource("Font", font_name.name())?;
+            let font =
+                std::rc::Rc::new(self.load_font(font_resource.as_dict().ok_or_else(|| {
+                    PdfError::PageResourceError("Font resource must be a dictionary".into())
+                })?)?);
+            self.font_cache
+                .insert(font_name.name().to_owned(), font.clone());
+            font
+        };
         self.current_state.graphic_state.text_state.font = Some(font);
         Ok(())
     }
@@ -1351,7 +1397,101 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
         // mode the diagnostic remains visible; unsupported transparency must not
         // be silently treated as opaque or partially applied.
         if !crate::page::all_state::supported_ext_gs_keys(extgs) {
-            return self.unsupported_operator(&op);
+            let key = extgs
+                .into_iter()
+                .find(|(key, _)| !crate::page::all_state::supported_ext_gs_key(key))
+                .unwrap()
+                .0;
+            return self.unsupported_operator_reason(&op, Some(&format!("ExtGState field {key}")));
+        }
+        // Neutral printer defaults have no effect on an RGB raster surface.
+        // Real functions/halftones remain explicit diagnostics, never silently
+        // treated as their neutral defaults. The *2 entries take precedence.
+        for (legacy, modern) in [("BG", "BG2"), ("UCR", "UCR2"), ("TR", "TR2"), ("HT", "HT")] {
+            let selected = extgs.get(modern).or_else(|| extgs.get(legacy));
+            if let Some(value) = selected {
+                let value = self.ctx.resolve(value)?;
+                let neutral = value.as_name().is_some_and(|name| {
+                    name.name() == "Default" || ((legacy == "TR") && name.name() == "Identity")
+                });
+                let neutral = neutral
+                    || (legacy == "TR"
+                        && value.as_array().is_some_and(|a| {
+                            a.len() == 4
+                                && a.into_iter()
+                                    .all(|v| v.as_name().is_some_and(|n| n.name() == "Identity"))
+                        }));
+                if !neutral {
+                    self.unsupported_operator_reason(
+                        &op,
+                        Some(&format!(
+                            "ExtGState {modern} nondefault print function/halftone"
+                        )),
+                    )?;
+                }
+            }
+        }
+        // Nondefault AIS/TK need separate shape/text compositing support.
+        // Validate them before applying any part of this state.
+        for (key, default) in [("AIS", false), ("TK", true)] {
+            if let Some(value) = extgs.get(key) {
+                let value = self.ctx.resolve(value)?;
+                let value = value
+                    .as_bool()
+                    .ok_or_else(|| {
+                        PdfError::PageResourceError(format!("ExtGState {key} must be boolean"))
+                    })?
+                    .value();
+                if value != default {
+                    return self.unsupported_operator_reason(
+                        &op,
+                        Some(&format!("ExtGState {key}={value}")),
+                    );
+                }
+            }
+        }
+        let mut general = self.current_state.graphic_state.general_state.clone();
+        for key in ["OP", "op", "SA"] {
+            if let Some(value) = extgs.get(key) {
+                let value = self.ctx.resolve(value)?;
+                let value = value
+                    .as_bool()
+                    .ok_or_else(|| {
+                        PdfError::PageResourceError(format!("ExtGState {key} must be boolean"))
+                    })?
+                    .value();
+                match key {
+                    "OP" => {
+                        general.stroke_overprint = value;
+                        if !extgs.contains_key("op") {
+                            general.fill_overprint = value;
+                        }
+                    }
+                    "op" => general.fill_overprint = value,
+                    "SA" => general.stroke_adjustment = value,
+                    _ => unreachable!(),
+                }
+            }
+        }
+        if let Some(value) = extgs.get("OPM") {
+            general.overprint_mode = self
+                .ctx
+                .resolve(value)?
+                .as_u8()
+                .filter(|value| *value <= 1)
+                .ok_or_else(|| {
+                    PdfError::PageResourceError("ExtGState OPM must be 0 or 1".into())
+                })?;
+        }
+        if let Some(value) = extgs.get("SM") {
+            general.smoothness = self
+                .ctx
+                .resolve(value)?
+                .as_f32()
+                .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
+                .ok_or_else(|| {
+                    PdfError::PageResourceError("ExtGState SM must be finite and in [0,1]".into())
+                })?;
         }
         let mask = extgs
             .get("SMask")
@@ -1378,6 +1518,24 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             };
             self.current_state.graphic_state.general_state.blend_mode = mode;
         }
+        // Preserve the print-device state through q/Q and into display objects.
+        self.current_state
+            .graphic_state
+            .general_state
+            .stroke_overprint = general.stroke_overprint;
+        self.current_state
+            .graphic_state
+            .general_state
+            .fill_overprint = general.fill_overprint;
+        self.current_state
+            .graphic_state
+            .general_state
+            .overprint_mode = general.overprint_mode;
+        self.current_state
+            .graphic_state
+            .general_state
+            .stroke_adjustment = general.stroke_adjustment;
+        self.current_state.graphic_state.general_state.smoothness = general.smoothness;
         for key in ["CA", "ca"] {
             if let Some(value) = extgs.get(key) {
                 let alpha = self
@@ -1476,7 +1634,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             let dict = font
                 .as_dict()
                 .ok_or_else(|| PdfError::FontError("ExtGState font must be a dictionary".into()))?;
-            let font = self.load_font(dict)?;
+            let font = std::rc::Rc::new(self.load_font(dict)?);
             self.current_state.graphic_state.text_state.font = Some(font);
             self.current_state.graphic_state.text_state.font_size = size;
         }
@@ -2157,7 +2315,34 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
         match subtype {
             "Image" => {
                 device.preflight_draw(&self.current_state.graphic_state, None)?;
-                let pdfimage = PdfImage::try_new(name.to_string(), &xobject, self.ctx)?;
+                if self.font_cache_revision != self.ctx.revision() {
+                    self.font_cache.clear();
+                    self.image_cache.clear();
+                    self.image_cache_bytes = 0;
+                    self.font_cache_revision = self.ctx.revision();
+                }
+                let pdfimage = if let Some(image) = self.image_cache.get(name) {
+                    image.clone()
+                } else {
+                    let image =
+                        std::rc::Rc::new(PdfImage::try_new(name.to_string(), &xobject, self.ctx)?);
+                    let bytes = image.retained_sample_bytes()?;
+                    if self.image_cache.len() < self.ctx.limits().max_objects
+                        && bytes
+                            <= self
+                                .ctx
+                                .limits()
+                                .max_decoded_bytes
+                                .saturating_sub(self.image_cache_bytes)
+                    {
+                        self.image_cache.try_reserve(1).map_err(|_| {
+                            PdfError::ResourceLimit("image cache allocation".into())
+                        })?;
+                        self.image_cache.insert(name.to_owned(), image.clone());
+                        self.image_cache_bytes += bytes;
+                    }
+                    image
+                };
                 if (self.type3_uncoloured || self.pattern_uncoloured) && !pdfimage.is_mask() {
                     return Err(PdfError::FontError(
                         "d1 glyph image must be a stencil".into(),
@@ -2318,6 +2503,142 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
 
 #[cfg(test)]
 mod resource_scope_tests {
+    #[test]
+    fn print_device_state_is_typed_retained_and_restored() {
+        use crate::{
+            document::{Document, resource_manager::ResourceKind},
+            io::stream_reader::StreamReader,
+            objects::pdf_stream::PdfStream,
+            page::page_object::PageObject,
+            parser::syntax::{ParseMode, SyntaxParser},
+        };
+        use std::io::Cursor;
+        let parse = |s: &str| {
+            SyntaxParser::new(StreamReader::try_new(Cursor::new(s.as_bytes().to_vec())).unwrap())
+                .get_object()
+                .unwrap()
+                .into_dict()
+                .unwrap()
+        };
+        for state in [
+            "<< /OP true /OPM 1 /SA true /SM 0.02 /AIS false /TK true >>",
+            "<< /OP true /op false /OPM 1 /SA true /SM 0.02 >>",
+            "<< /OP true /OPM 1 /SA true /SM 0.02 /BG2 /Default /UCR2 /Default /HT /Default /TR /UnusedLegacyTransfer /TR2 /Identity >>",
+        ] {
+            let doc = Document::new().unwrap();
+            doc.add_page(0).unwrap();
+            let dict = parse(&format!(
+                "<< /Subtype /Form /BBox [0 0 10 10] /Resources << /ExtGState << /G {state} >> >> >>"
+            ));
+            let id = doc
+                .try_insert_object(PdfObject::PdfStream(
+                    PdfStream::from_decoded_data(
+                        dict,
+                        b"q /G gs 0 0 1 1 re f Q 1 1 1 1 re f".to_vec(),
+                    )
+                    .unwrap(),
+                ))
+                .unwrap();
+            let name = doc
+                .resources()
+                .register_existing(0, ResourceKind::Form, id)
+                .unwrap();
+            doc.replace_page_contents(0, format!("/{name} Do").into_bytes())
+                .unwrap();
+            let doc =
+                Document::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict)
+                    .unwrap();
+            let list = doc.get_page(0).unwrap().display_list().unwrap();
+            assert!(list.diagnostics().is_empty());
+            let PageObject::Path(first) = &list.objects()[0] else {
+                panic!()
+            };
+            let general = &first.graphic_state().general_state;
+            assert!(general.stroke_overprint);
+            assert_eq!(general.fill_overprint, !state.contains("/op false"));
+            assert_eq!(general.overprint_mode, 1);
+            assert!(general.stroke_adjustment);
+            assert_eq!(general.smoothness, 0.02);
+            let PageObject::Path(second) = &list.objects()[1] else {
+                panic!()
+            };
+            assert!(!second.graphic_state().general_state.stroke_overprint);
+            assert!(!second.graphic_state().general_state.stroke_adjustment);
+        }
+        for state in [
+            "<< /OP 1 >>",
+            "<< /OPM 2 >>",
+            "<< /OPM 0.5 >>",
+            "<< /SM -1 >>",
+            "<< /SA /true >>",
+            "<< /AIS true >>",
+            "<< /TK false >>",
+            "<< /Unknown true >>",
+        ] {
+            let doc = Document::new().unwrap();
+            doc.add_page(0).unwrap();
+            let dict = parse(&format!(
+                "<< /Subtype /Form /BBox [0 0 10 10] /Resources << /ExtGState << /G {state} >> >> >>"
+            ));
+            let id = doc
+                .try_insert_object(PdfObject::PdfStream(
+                    PdfStream::from_decoded_data(dict, b"/G gs".to_vec()).unwrap(),
+                ))
+                .unwrap();
+            let name = doc
+                .resources()
+                .register_existing(0, ResourceKind::Form, id)
+                .unwrap();
+            doc.replace_page_contents(0, format!("/{name} Do").into_bytes())
+                .unwrap();
+            let doc =
+                Document::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict)
+                    .unwrap();
+            assert!(doc.get_page(0).unwrap().display_list().is_err(), "{state}");
+        }
+    }
+
+    #[test]
+    fn named_application_marked_metadata_preserves_paint_order_text() {
+        use crate::{
+            document::{Document, resource_manager::ResourceKind},
+            io::stream_reader::StreamReader,
+            objects::pdf_stream::PdfStream,
+            parser::syntax::{ParseMode, SyntaxParser},
+        };
+        use std::io::Cursor;
+        let dict = SyntaxParser::new(StreamReader::try_new(Cursor::new(b"<< /Subtype /Form /BBox [0 0 10 10] /Resources << /Font << /F << /Type /Font /Subtype /Type1 /BaseFont /Courier >> >> /Properties << /Meta << /Metadata 999 0 R >> /Text << /ActualText (replacement) >> >> >> >>".to_vec())).unwrap()).get_object().unwrap().into_dict().unwrap();
+        let doc = Document::new().unwrap();
+        doc.add_page(0).unwrap();
+        // Metadata references must not be loaded by a glyph-painting reader.
+        let id = doc
+            .try_insert_object(PdfObject::PdfStream(
+                PdfStream::from_decoded_data(
+                    dict,
+                    b"/PlacedGraphic /Meta BDC /Span /Text BDC BT /F 10 Tf (A) Tj ET EMC EMC"
+                        .to_vec(),
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+        let name = doc
+            .resources()
+            .register_existing(0, ResourceKind::Form, id)
+            .unwrap();
+        doc.replace_page_contents(0, format!("/{name} Do").into_bytes())
+            .unwrap();
+        let doc = Document::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict)
+            .unwrap();
+        let report = doc
+            .get_page(0)
+            .unwrap()
+            .extract_characters_paint_order_report()
+            .unwrap();
+        assert!(report.diagnostics.is_empty());
+        assert_eq!(report.characters.len(), 1);
+        assert_eq!(report.characters[0].unicode.as_deref(), Some("A"));
+    }
+
     use super::*;
     #[test]
     fn direct_inner_form_is_located_through_parent_resource_scope() {
@@ -2989,5 +3310,205 @@ mod resource_scope_tests {
                 .is_ok()
         );
         assert!(empty.named_resource("Font", &page_font).is_err());
+    }
+}
+
+#[cfg(test)]
+mod font_reuse_tests {
+    use crate::{
+        document::{Document, resource_manager::StandardFont},
+        page::page_object::PageObject,
+    };
+    #[test]
+    fn repeated_selection_and_saved_states_share_font_but_edits_build_fresh_snapshot() {
+        let doc = Document::new().unwrap();
+        doc.add_page(0).unwrap();
+        let name = doc
+            .resources()
+            .register_standard_font(0, StandardFont::Courier)
+            .unwrap();
+        doc.replace_page_contents(
+            0,
+            format!("BT /{name} 12 Tf (A) Tj q /{name} 14 Tf (B) Tj Q (C) Tj ET").into_bytes(),
+        )
+        .unwrap();
+        let first = doc.get_page(0).unwrap().display_list().unwrap();
+        let fonts: Vec<_> = first
+            .objects()
+            .iter()
+            .filter_map(|v| match v {
+                PageObject::Text(v) => v.state.text_state.font.as_ref(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fonts.len(), 3);
+        assert!(std::rc::Rc::ptr_eq(fonts[0], fonts[1]));
+        assert!(std::rc::Rc::ptr_eq(fonts[0], fonts[2]));
+        let other = doc
+            .resources()
+            .register_standard_font(0, StandardFont::Helvetica)
+            .unwrap();
+        doc.replace_page_contents(0, format!("BT /{other} 12 Tf (D) Tj ET").into_bytes())
+            .unwrap();
+        let second = doc.get_page(0).unwrap().display_list().unwrap();
+        let PageObject::Text(text) = &second.objects()[0] else {
+            panic!("text")
+        };
+        assert_eq!(
+            text.state.text_state.font.as_ref().unwrap().name(),
+            "Helvetica"
+        );
+        assert_eq!(fonts[0].name(), "Courier");
+        assert!(!std::rc::Rc::ptr_eq(
+            fonts[0],
+            text.state.text_state.font.as_ref().unwrap()
+        ));
+    }
+}
+
+#[cfg(test)]
+mod font_cache_revision_tests {
+    use super::*;
+    use crate::{
+        document::{Document, resource_manager::StandardFont},
+        io::stream_reader::StreamReader,
+        objects::{pdf_name::PdfName, pdf_number::PdfNumber},
+        parser::syntax::SyntaxParser,
+    };
+    #[test]
+    fn replacing_resource_invalidates_an_existing_interpreters_font_cache() {
+        let doc = Document::new().unwrap();
+        doc.add_page(0).unwrap();
+        let name = doc
+            .resources()
+            .register_standard_font(0, StandardFont::Courier)
+            .unwrap();
+        let page = doc.get_page(0).unwrap();
+        let resources = page.resource().unwrap();
+        let id = resources
+            .get("Font")
+            .unwrap()
+            .get_attr(&name)
+            .unwrap()
+            .as_object_id()
+            .unwrap();
+        let parser = ContentParser::new(SyntaxParser::new(
+            StreamReader::try_new(std::io::Cursor::new(Vec::<u8>::new())).unwrap(),
+        ));
+        let mut interpreter = Interpreter::new(&page, doc.ctx(), parser);
+        let selection = || {
+            Operator::new(
+                "Tf".into(),
+                vec![
+                    PdfObject::PdfName(PdfName::new(name.clone())),
+                    PdfObject::PdfNumber(PdfNumber::new(12.)),
+                ],
+            )
+        };
+        interpreter.handle_set_font(selection()).unwrap();
+        let original = interpreter
+            .current_state
+            .graphic_state
+            .text_state
+            .font
+            .clone()
+            .unwrap();
+        let replacement = SyntaxParser::new(
+            StreamReader::try_new(std::io::Cursor::new(
+                b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+            ))
+            .unwrap(),
+        )
+        .get_object()
+        .unwrap();
+        doc.update_object(id, replacement).unwrap();
+        interpreter.handle_set_font(selection()).unwrap();
+        let updated = interpreter
+            .current_state
+            .graphic_state
+            .text_state
+            .font
+            .as_ref()
+            .unwrap();
+        assert_eq!(original.name(), "Courier");
+        assert_eq!(updated.name(), "Helvetica");
+        assert!(!std::rc::Rc::ptr_eq(&original, updated));
+    }
+}
+
+#[cfg(test)]
+mod image_cache_tests {
+    use super::*;
+    use crate::{document::Document, objects::pdf_name::PdfName, parser::options::ParseOptions};
+    #[test]
+    fn repeated_images_share_pixels_under_budget_and_resource_edits_invalidate_cache() {
+        let mut options = ParseOptions::default();
+        options.limits.max_decoded_bytes = 16 * 1024;
+        let doc = Document::new_with_options(options).unwrap();
+        doc.add_page(0).unwrap();
+        let name = doc
+            .resources()
+            .embed_rgb_image(0, 32, 32, vec![128; 32 * 32 * 3])
+            .unwrap();
+        let page = doc.get_page(0).unwrap();
+        let resources = page.resource().unwrap();
+        let id = resources
+            .get("XObject")
+            .unwrap()
+            .get_attr(&name)
+            .unwrap()
+            .as_object_id()
+            .unwrap();
+        let parser = ContentParser::new(crate::parser::syntax::SyntaxParser::new(
+            crate::io::stream_reader::StreamReader::try_new(std::io::Cursor::new(Vec::<u8>::new()))
+                .unwrap(),
+        ));
+        let mut interpreter = Interpreter::new(&page, doc.ctx(), parser);
+        let mut trace = TraceDevice::for_display_list(options.limits);
+        let op = || {
+            Operator::new(
+                "Do".into(),
+                vec![PdfObject::PdfName(PdfName::new(name.clone()))],
+            )
+        };
+        for _ in 0..22 {
+            interpreter.handle_do(op(), &mut trace).unwrap();
+        }
+        assert_eq!(trace.objects().len(), 22);
+        let first = match &trace.objects()[0] {
+            super::super::page_object::PageObject::Image(v) => v.image.clone(),
+            _ => panic!(),
+        };
+        for draw in trace.objects() {
+            let super::super::page_object::PageObject::Image(image) = draw else {
+                panic!()
+            };
+            assert!(std::rc::Rc::ptr_eq(&first, &image.image));
+        }
+        let list = trace.into_display_list();
+        assert!(list.collection_usage().0 < 16 * 1024);
+        let updated = doc
+            .ctx()
+            .resolve(&PdfObject::PdfReference(
+                crate::objects::pdf_reference::PdfReference::from_id(id),
+            ))
+            .unwrap()
+            .into_stream()
+            .unwrap();
+        let updated = crate::objects::pdf_stream::PdfStream::from_decoded_data(
+            updated.dict().clone(),
+            vec![0; 32 * 32 * 3],
+        )
+        .unwrap();
+        doc.update_object(id, PdfObject::PdfStream(updated))
+            .unwrap();
+        let mut trace = TraceDevice::for_display_list(options.limits);
+        interpreter.handle_do(op(), &mut trace).unwrap();
+        let super::super::page_object::PageObject::Image(image) = &trace.objects()[0] else {
+            panic!()
+        };
+        assert!(!std::rc::Rc::ptr_eq(&first, &image.image));
+        assert_eq!(first.rgba_buffer().unwrap()[0], 128);
+        assert_eq!(image.image.rgba_buffer().unwrap()[0], 0);
     }
 }

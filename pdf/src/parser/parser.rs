@@ -219,6 +219,8 @@ pub fn parse_xref_stream<R: Seek + Read>(
                 max_decoded_bytes: syntax.limits().max_decoded_bytes,
                 max_image_pixels: syntax.limits().max_image_pixels,
                 crypt_already_processed: false,
+                compatible: false,
+                recovered: None,
             },
         )
         .map_err(|e| PdfError::ParserError(format!("xref stream filter decode failed: {e}")))?,
@@ -632,7 +634,22 @@ impl<R: Seek + Read> PdfParser<R> {
         expected: crate::objects::object_id::ObjectId,
     ) -> PdfResult<PdfObject> {
         self.syntax.set_pos(pos)?;
-        let indirect = self.syntax.get_indirect_object()?;
+        let indirect = match self.syntax.get_indirect_object() {
+            Ok(indirect) if indirect.id() == expected => indirect,
+            Err(error @ PdfError::ResourceLimit(_)) => return Err(error),
+            result => {
+                if self.mode() != super::syntax::ParseMode::Compatible {
+                    let indirect = result?;
+                    return Err(PdfError::InvalidReference(format!(
+                        "xref for {expected:?} points to {:?}",
+                        indirect.id()
+                    )));
+                }
+                let repaired = self.syntax.recover_xref_offset(pos, expected)?;
+                self.syntax.set_pos(repaired)?;
+                self.syntax.get_indirect_object()?
+            }
+        };
         if indirect.id() != expected {
             return Err(PdfError::InvalidReference(format!(
                 "xref for {expected:?} at byte {pos} points to {:?}",
@@ -650,7 +667,24 @@ impl<R: Seek + Read> PdfParser<R> {
     ) -> PdfResult<(PdfObject, crate::budget::MemoryLease)> {
         self.syntax.set_pos(pos)?;
         let (lease, indirect) = {
-            let (indirect, lease) = self.syntax.get_indirect_object_with_budget(budget)?;
+            let (indirect, lease) = match self.syntax.get_indirect_object_with_budget(budget) {
+                Ok((indirect, lease)) if indirect.id() == expected => (indirect, lease),
+                Err(error @ PdfError::ResourceLimit(_)) => return Err(error),
+                result => {
+                    if self.mode() != super::syntax::ParseMode::Compatible {
+                        let (indirect, _lease) = result?;
+                        return Err(PdfError::InvalidReference(format!(
+                            "xref for {expected:?} points to {:?}",
+                            indirect.id()
+                        )));
+                    }
+                    let repaired = self
+                        .syntax
+                        .recover_xref_offset_with_budget(pos, expected, budget)?;
+                    self.syntax.set_pos(repaired)?;
+                    self.syntax.get_indirect_object_with_budget(budget)?
+                }
+            };
             (lease, indirect)
         };
         if indirect.id() != expected {

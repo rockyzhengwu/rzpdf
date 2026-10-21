@@ -1,16 +1,16 @@
-//! Embedded JBIG2 region baseline with shared pattern/region Globals.
-//! Symbol dictionaries are deliberately rejected: their bitmap dimensions are
-//! encoded inside arithmetic/Huffman data, outside our preflight envelope.
+//! Embedded JBIG2 with bounded headers and shared Globals. Symbol/text streams
+//! use bundled jbig2dec with live allocation callbacks; region-only streams
+//! retain the Rust decoder and its preflight scratch envelope.
 use crate::{
     budget::{BudgetedBytes, OperationBudget},
     error::{PdfError, PdfResult},
     filter::FilterContext,
     objects::pdf_dict::PdfDict,
 };
-fn error(s: &str) -> PdfError {
+pub(super) fn error(s: &str) -> PdfError {
     PdfError::FilterError(format!("JBIG2Decode: {s}"))
 }
-fn limit(s: &str) -> PdfError {
+pub(super) fn limit(s: &str) -> PdfError {
     PdfError::ResourceLimit(format!("JBIG2Decode {s}"))
 }
 fn unsupported(s: &str) -> PdfError {
@@ -43,6 +43,7 @@ struct Envelope {
     segments: Vec<(u32, u8)>,
     scratch: usize,
     work: usize,
+    symbols: bool,
 }
 fn preflight(
     data: &[u8],
@@ -185,10 +186,53 @@ fn preflight(
                     return Err(error("invalid end segment"));
                 }
             }
-            0 | 4 | 6 | 7 => {
-                return Err(unsupported(
-                    "symbol dictionary/text region outside bounded baseline",
-                ));
+            0 => {
+                let flags = u16::from_be_bytes(
+                    body.get(..2)
+                        .ok_or_else(|| error("truncated symbol header"))?
+                        .try_into()
+                        .unwrap(),
+                );
+                let mut offset = 2;
+                if flags & 1 == 0 {
+                    offset += if (flags >> 10) & 3 == 0 { 8 } else { 2 };
+                }
+                if flags & 2 != 0 && flags & 0x1000 == 0 {
+                    offset += 4;
+                }
+                let exported = u32be(body, offset)?;
+                let created = u32be(body, offset + 4)?;
+                if u64::from(exported) + u64::from(created)
+                    > context.max_image_pixels.min(1_000_000)
+                {
+                    return Err(limit("symbol count"));
+                }
+                state.symbols = true;
+            }
+            4 | 6 | 7 => {
+                if globals && kind != 4 {
+                    return Err(error("immediate text in Globals"));
+                }
+                bitmap_pixels = area(u32be(body, 0)?, u32be(body, 4)?, context)?;
+                let flags = u16::from_be_bytes(
+                    body.get(17..19)
+                        .ok_or_else(|| error("truncated text header"))?
+                        .try_into()
+                        .unwrap(),
+                );
+                let mut offset = 19;
+                if flags & 1 != 0 {
+                    offset += 2;
+                } else if flags & 2 != 0 && flags & 0x8000 == 0 {
+                    offset += 4;
+                }
+                if u64::from(u32be(body, offset)?) > context.max_image_pixels.min(1_000_000) {
+                    return Err(limit("text instance count"));
+                }
+                state.symbols = true;
+            }
+            53 => {
+                state.symbols = true;
             }
             _ => return Err(unsupported("segment type outside region baseline")),
         }
@@ -260,6 +304,7 @@ pub fn decode_with_budget(
         segments: Vec::new(),
         scratch: 1024 * 1024,
         work: 0,
+        symbols: false,
     };
     let _headers = budget.reserve(1024 * std::mem::size_of::<(u32, u8)>())?;
     envelope
@@ -291,6 +336,9 @@ pub fn decode_with_budget(
         .checked_mul(height as usize)
         .filter(|n| *n <= context.max_decoded_bytes)
         .ok_or_else(|| limit("packed output bytes"))?;
+    if envelope.symbols {
+        return super::jbig2_native::decode(input, context.jbig2_globals, width, height, budget);
+    }
     let _scratch = budget.reserve(envelope.scratch)?;
     let mut lease = budget.reserve(length)?;
     let mut data = Vec::new();

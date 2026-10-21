@@ -456,15 +456,11 @@ impl<'a> CmapParser<'a> {
         while self.pos < self.data.len() {
             let c = self.data[self.pos];
             if is_delimiter(c) || is_white_space(c) {
-                if start == self.pos {
-                    return None;
-                }
+                // Empty literal names are tokens, not EOF. Some producers emit
+                // /CMapName //SubsetName before the actual mapping sections.
                 return Some(self.word(start, self.pos));
             }
             self.pos += 1;
-        }
-        if start == self.pos {
-            return None;
         }
         Some(self.word(start, self.pos))
     }
@@ -885,6 +881,27 @@ impl<'a> CmapParser<'a> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn empty_literal_name_does_not_truncate_unicode_sections() {
+        use crate::{
+            budget::OperationBudget,
+            font::{CharCode, cmap::Cmap},
+        };
+        let source = b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n/CIDSystemInfo << /Registry (Subset) /Ordering (Subset) /Supplement 0 >> def\n/CMapName //Subset def\n/CMapType 2 def\n1 begincodespacerange <20> <7F> endcodespacerange\n2 beginbfchar <20> <4E2D> <21> <6587> endbfchar\nendcmap";
+        let map = Cmap::try_new(source.to_vec()).unwrap();
+        assert_eq!(map.unicode(&CharCode::new(32, 1, 0.)), Some("中"));
+        assert_eq!(map.unicode(&CharCode::new(33, 1, 0.)), Some("文"));
+        let budget = OperationBudget::new(65536);
+        let mut parser = super::CmapParser::new(source.to_vec());
+        parser.set_budget(&budget);
+        let map = parser.parse().unwrap();
+        let lease = parser.take_retained_lease();
+        assert_eq!(map.unicode(&CharCode::new(32, 1, 0.)), Some("中"));
+        drop((map, lease));
+        drop(parser);
+        assert_eq!(budget.live_bytes(), 0);
+    }
+
+    #[test]
     fn budget_nested_sources_coexist_and_release_on_limit_or_callback_error() {
         use crate::budget::OperationBudget;
         let resolver = |name: &str| -> crate::error::PdfResult<Option<Vec<u8>>> {
@@ -1166,7 +1183,14 @@ mod tests {
         let word = parser.required_word().unwrap();
         drop(parser);
         assert_eq!(word.as_slice(), b"Final");
-        for truncated in [&b"/"[..], &b"[<41>"[..], &b"<< /Key"[..]] {
+        assert_eq!(
+            super::CmapParser::new(b"/".to_vec())
+                .required_word()
+                .unwrap()
+                .as_slice(),
+            b""
+        );
+        for truncated in [&b"[<41>"[..], &b"<< /Key"[..]] {
             assert!(
                 super::CmapParser::new(truncated.to_vec())
                     .get_next_word()

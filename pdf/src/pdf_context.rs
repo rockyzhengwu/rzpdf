@@ -357,6 +357,18 @@ impl<R: Seek + Read> PDFContext<R> {
         Ok(())
     }
 
+    pub(crate) fn record_structure_recovery(
+        &self,
+        reason: crate::parser::diagnostic::StructureReason,
+    ) -> PdfResult<()> {
+        self.structure_diagnostics
+            .record(crate::parser::diagnostic::StructureDiagnostic {
+                offset: 0,
+                object: None,
+                reason,
+            })
+    }
+
     pub fn revision(&self) -> u64 {
         self.state.revision.get()
     }
