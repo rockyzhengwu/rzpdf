@@ -78,3 +78,35 @@ throughput promise.
 
 See [v0.8 support matrix](releases/v0.8-support.md) for exact verification scope.
 The compositing model follows [PDF 32000-1, sections 11.4–11.7](https://opensource.adobe.com/dc-acrobat-sdk-docs/standards/pdfstandards/pdf/PDF32000_2008.pdf).
+
+## Page backdrop and text strokes
+
+Page content blends against an initially transparent backdrop; the configured white output substrate is added after page compositing. Pattern/offscreen renderers retain their transparent output. Raw RGBA readback preserves straight alpha. Text outlines are transformed into graphics user space before stroking, so text-matrix scaling does not scale the graphics-state line width or dash pattern.
+
+Subpixel positive stroke widths use a one-device-pixel hairline when every principal CTM scale makes the requested width smaller than a pixel. This display policy keeps very thin rules visible; anisotropic strokes that are wide in any principal direction retain their user-space width. Zero/singular transforms are not promoted into painted hairlines by this rule.
+
+
+## Corpus compatibility extensions
+
+Isolated DeviceGray groups and DeviceGray luminosity masks accept DeviceGray
+path/text paints, grayscale images and gray shadings. Equal RGB channels keep
+this subset's blending arithmetic identical in the existing compositor. Colored
+paints and patterns in these groups remain explicit errors until working-space
+conversion is implemented. Gray mask BC has one component, replicated for
+luminance evaluation; RGB BC retains three. Nested paints use the same check,
+and failed groups are discarded rather than partially committed.
+
+For a Type6/7 patch whose exact inverse point query reports unresolved geometry,
+display can use forward device-space tessellation. Rounded control-hull flatness
+and diagonal warp must total at most 1/8 device pixel per accepted cell. Geometry
+and colors remain separate: source components/function parameters interpolate in
+parameter space before function evaluation and color conversion. Greatest v then
+u wins within a patch; a proven common-v identity selects greatest u without
+epsilon tie merging; later patches paint over earlier ones.
+
+The fallback is bounded by depth 12, a fixed maximum DFS stack, a per-pixel root
+buffer, and explicit raster work including offscreen scans. Scratch is counted
+alongside retained patch storage and the renderer's simultaneous raster/surface
+allocation. A failed raster is discarded before painting. Exact color_at_point
+queries retain their certified semantics and unresolved errors; this rendering
+approximation is not an exact inverse-geometry certificate.

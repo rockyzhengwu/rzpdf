@@ -19,6 +19,8 @@ use crate::{
 
 #[derive(Clone, Copy)]
 pub struct FilterContext<'a> {
+    /// Keep JPEG 2000 source indices for a PDF Indexed color space.
+    pub jpx_preserve_indices: bool,
     /// True only when a document parser already applied the explicit Crypt
     /// stage. Does not authenticate or decrypt caller-owned ciphertext.
     pub crypt_already_processed: bool,
@@ -28,13 +30,16 @@ pub struct FilterContext<'a> {
     pub max_image_pixels: u64,
     pub compatible: bool,
     pub recovered: Option<&'a std::cell::Cell<bool>>,
+    pub recovered_filter_parameters: Option<&'a std::cell::Cell<bool>>,
 }
 
 impl Default for FilterContext<'_> {
     fn default() -> Self {
         Self {
+            jpx_preserve_indices: false,
             compatible: false,
             recovered: None,
+            recovered_filter_parameters: None,
             crypt_already_processed: false,
             stream_dict: None,
             jbig2_globals: None,
@@ -123,6 +128,78 @@ pub fn apply_filters(
             copied.extend_from_slice(input);
             Ok(copied)
         },
+    )
+}
+
+/// Decode byte wrappers preceding a terminal JPX stage, preserving its codestream
+/// for bounded header inspection. Validate the full chain before allocating.
+pub(crate) fn encoded_jpx_payload(
+    filter: &PdfObject,
+    params: Option<&PdfObject>,
+    input: &[u8],
+    context: FilterContext<'_>,
+) -> PdfResult<Vec<u8>> {
+    let names: Vec<&str> = match filter {
+        PdfObject::PdfName(name) => vec![name.name()],
+        PdfObject::PdfArray(array) => array
+            .into_iter()
+            .map(|value| {
+                value
+                    .as_name()
+                    .map(|n| n.name())
+                    .ok_or_else(|| PdfError::FilterError("filter array must contain names".into()))
+            })
+            .collect::<PdfResult<_>>()?,
+        _ => {
+            return Err(PdfError::FilterError(
+                "JPX Filter must be a name or array".into(),
+            ));
+        }
+    };
+    if names.last() != Some(&"JPXDecode")
+        || names[..names.len().saturating_sub(1)].iter().any(|name| {
+            !matches!(
+                *name,
+                "AHx"
+                    | "ASCIIHexDecode"
+                    | "A85"
+                    | "ASCII85Decode"
+                    | "Fl"
+                    | "FlateDecode"
+                    | "LZW"
+                    | "LZWDecode"
+                    | "RL"
+                    | "RunLengthDecode"
+                    | "Crypt"
+            )
+        })
+    {
+        return Err(PdfError::UnsupportedFeature(
+            "JPX requires a terminal image stage preceded by byte filters".into(),
+        ));
+    }
+    let copy = |bytes: &[u8]| {
+        check_output_size(0, bytes.len(), context.max_decoded_bytes, "encoded JPX")?;
+        let mut result = Vec::new();
+        result
+            .try_reserve_exact(bytes.len())
+            .map_err(|_| PdfError::ResourceLimit("encoded JPX copy".into()))?;
+        result.extend_from_slice(bytes);
+        Ok(result)
+    };
+    apply_filter_chain(
+        filter,
+        params,
+        input,
+        context,
+        |name, bytes, params, context| {
+            if name == "JPXDecode" {
+                copy(bytes)
+            } else {
+                apply_filter_with_context(name, bytes, params, context)
+            }
+        },
+        copy,
     )
 }
 
@@ -217,7 +294,43 @@ fn apply_filter_chain<'a, T: AsRef<[u8]>>(
             decode(name.name(), input, params, context)
         }
         PdfObject::PdfArray(filters) => {
+            // A single parameter-consuming terminal stage has an unambiguous
+            // dictionary even when the producer omitted the surrounding array.
+            let terminal_params = params.and_then(PdfObject::as_dict).filter(|_| {
+                context.compatible
+                    && !filters.is_empty()
+                    && filters.into_iter().take(filters.len() - 1).all(|f| {
+                        f.as_name().is_some_and(|n| {
+                            matches!(
+                                n.name(),
+                                "AHx"
+                                    | "ASCIIHexDecode"
+                                    | "A85"
+                                    | "ASCII85Decode"
+                                    | "RL"
+                                    | "RunLengthDecode"
+                            )
+                        })
+                    })
+                    && filters
+                        .into_iter()
+                        .last()
+                        .and_then(PdfObject::as_name)
+                        .is_some_and(|n| {
+                            matches!(
+                                n.name(),
+                                "Fl" | "FlateDecode"
+                                    | "LZW"
+                                    | "LZWDecode"
+                                    | "DCT"
+                                    | "DCTDecode"
+                                    | "CCF"
+                                    | "CCITTFaxDecode"
+                            )
+                        })
+            });
             let params_array = match params {
+                Some(PdfObject::PdfDict(_)) if terminal_params.is_some() => None,
                 Some(PdfObject::PdfArray(arr)) => Some(arr),
                 None | Some(PdfObject::PdfNull) => None,
                 Some(_) => {
@@ -254,12 +367,22 @@ fn apply_filter_chain<'a, T: AsRef<[u8]>>(
                     })
                     .transpose()?
                     .flatten();
+                let params = if index + 1 == filters.len() {
+                    terminal_params.or(params)
+                } else {
+                    params
+                };
                 Ok::<_, PdfError>((filter_name.name(), params))
             };
             // Validate the entire chain before any decoder allocates output.
             // Borrow its entries instead of building another metadata table.
             for index in 0..filters.len() {
                 stage(index)?;
+            }
+            if terminal_params.is_some()
+                && let Some(flag) = context.recovered_filter_parameters
+            {
+                flag.set(true);
             }
             let mut data: Option<T> = None;
             for index in 0..filters.len() {
@@ -293,6 +416,77 @@ fn apply_filter_chain<'a, T: AsRef<[u8]>>(
 #[cfg(test)]
 mod limit_tests {
     use super::*;
+
+    #[test]
+    fn compatible_terminal_parameter_dictionary_is_unambiguous_and_budgeted() {
+        use crate::{
+            budget::OperationBudget, io::stream_reader::StreamReader, parser::syntax::SyntaxParser,
+        };
+        use std::io::{Cursor, Write};
+        let parse = |s: &str| {
+            SyntaxParser::new(StreamReader::try_new(Cursor::new(s.as_bytes().to_vec())).unwrap())
+                .get_object()
+                .unwrap()
+        };
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(b"abc").unwrap();
+        let data = encoder.finish().unwrap();
+        let hex = data.iter().map(|b| format!("{b:02X}")).collect::<String>() + ">";
+        let filters = parse("[/ASCIIHexDecode /FlateDecode]");
+        let params = parse("<< /Predictor 1 >>");
+        let recovered = std::cell::Cell::new(false);
+        let pool = OperationBudget::new(65536);
+        for compatible in [false, true] {
+            let context = FilterContext {
+                compatible,
+                recovered_filter_parameters: Some(&recovered),
+                ..Default::default()
+            };
+            let result =
+                apply_filters_with_budget(&filters, Some(&params), hex.as_bytes(), context, &pool);
+            if compatible {
+                let bytes = result.unwrap();
+                assert_eq!(bytes.as_slice(), b"abc");
+                drop(bytes);
+            } else {
+                assert!(result.is_err());
+            }
+            assert_eq!(pool.live_bytes(), 0);
+            assert_eq!(recovered.get(), compatible);
+        }
+        for filters in ["[/FlateDecode /LZWDecode]", "[/Unknown /FlateDecode]", "[]"] {
+            assert!(
+                apply_filters_with_budget(
+                    &parse(filters),
+                    Some(&params),
+                    &data,
+                    FilterContext {
+                        compatible: true,
+                        ..Default::default()
+                    },
+                    &pool
+                )
+                .is_err()
+            );
+            assert_eq!(pool.live_bytes(), 0);
+        }
+        let tiny = OperationBudget::new(2);
+        assert!(matches!(
+            apply_filters_with_budget(
+                &filters,
+                Some(&params),
+                hex.as_bytes(),
+                FilterContext {
+                    compatible: true,
+                    ..Default::default()
+                },
+                &tiny
+            ),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(tiny.live_bytes(), 0);
+    }
 
     #[test]
     fn budgeted_chain_retains_intermediate_capacity_and_result_lease() {

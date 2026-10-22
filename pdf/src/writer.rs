@@ -126,6 +126,11 @@ fn write_document_output_with_layout<R: std::io::Read + std::io::Seek>(
         .clone()
         .unwrap_or_else(|| document.ctx().limits().operation_budget());
     let source_security = document.ctx().source_security();
+    if source_security.is_some_and(|h| h.revision == 4) {
+        return Err(PdfError::UnsupportedSecurity(
+            "R4 AES-128 is currently read-only; saving is not supported".into(),
+        ));
+    }
     document
         .ctx()
         .require_unsigned_source_with_budget(&crypto_budget)?;

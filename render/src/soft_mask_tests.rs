@@ -12,7 +12,7 @@ fn parse(s: &str) -> PdfObject {
         .get_object()
         .unwrap()
 }
-fn document(
+pub(super) fn document(
     kind: &str,
     background: &str,
     transfer: &str,
@@ -72,7 +72,7 @@ fn pixels(render: &mut SkiaRender) -> Vec<u8> {
     );
     let mut data = vec![0u8; 40 * 20 * 4];
     assert!(render.surface.read_pixels(&info, &mut data, 160, (0, 0)));
-    data
+    super::white_test_output(data)
 }
 #[test]
 fn alpha_luminosity_background_and_transfer_survive_strict_reopen() {
@@ -164,5 +164,53 @@ fn soft_mask_surface_neighbor_budget_rejects_without_ink_and_recovers() {
         } else {
             result.unwrap();
         }
+    }
+}
+
+#[test]
+fn devicegray_luminosity_groups_keep_background_and_reject_colored_paints() {
+    for colored in [false, true] {
+        let doc = PdfDocument::new().unwrap();
+        let dict=parse("<< /Subtype /Form /BBox [0 0 40 20] /Resources << >> /Group << /S /Transparency /I true /CS /DeviceGray >> >>").into_dict().unwrap();
+        let group = doc
+            .try_insert_object(PdfObject::PdfStream(PdfStream::new(
+                dict,
+                if colored {
+                    b"1 0 0 rg 0 0 20 20 re f".to_vec()
+                } else {
+                    b"0.5 g 0 0 20 20 re f".to_vec()
+                },
+            )))
+            .unwrap();
+        let resources = parse(&format!(
+            "<< /ExtGState << /M << /SMask << /S /Luminosity /G {} 0 R /BC [0.25] >> >> >> >>",
+            group.obj_num()
+        ))
+        .into_dict()
+        .unwrap();
+        doc.add_page_with_builder(
+            0,
+            PageBuilder::new()
+                .size(40., 20.)
+                .resources(resources)
+                .content(b"/M gs 0 0 1 rg 0 0 40 20 re f".to_vec()),
+        )
+        .unwrap();
+        let mut render = SkiaRender::new(72., 72.).unwrap();
+        let result = doc.get_page(0).unwrap().display(&mut render);
+        if colored {
+            assert!(matches!(result, Err(PdfError::UnsupportedFeature(_))));
+            continue;
+        }
+        result.unwrap();
+        let rgba = pixels(&mut render);
+        let first = &rgba[(10 * 40 + 10) * 4..(10 * 40 + 10) * 4 + 4];
+        let background = &rgba[(10 * 40 + 30) * 4..(10 * 40 + 30) * 4 + 4];
+        assert!(first[0].abs_diff(128) <= 1 && first[1] == first[0] && first[2..] == [255, 255]);
+        assert!(
+            background[0].abs_diff(191) <= 1
+                && background[1] == background[0]
+                && background[2..] == [255, 255]
+        );
     }
 }

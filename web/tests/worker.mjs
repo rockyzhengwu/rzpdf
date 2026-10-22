@@ -1,0 +1,144 @@
+import assert from 'node:assert/strict';
+class FakeWorker {
+  static instances=[];
+  requests=[];terminated=0;next=0;held=[];
+  constructor(){FakeWorker.instances.push(this);}
+  postMessage(message,transfer=[]) {
+    const request=structuredClone(message,{transfer});this.requests.push(request);
+    queueMicrotask(()=>{
+      if(this.terminated)return;
+      if(request.operation==='initialize'){this.emit(request,{kind:'ready'});return;}
+      this.emit(request,{kind:'started'});
+      if(['render','renderRegion','font'].includes(request.operation)){this.held.push(request);return;}
+      const value=request.operation==='open'?{document:++this.next,pageCount:2}:request.operation==='pageInfo'?{width:100,height:200}:request.operation==='statistics'?{handles:0,retainedBytes:0,documents:0}:request.operation==='apply'?{stamp:request.args[0].stamp,pageCount:2,created:null}:null;
+      this.emit(request,{kind:'result',value});
+    });
+  }
+  emit(request,response){this.onmessage?.({data:{protocol:2,session:request.session,id:request.id,...response}});}
+  complete(request,value={width:1,height:1,pixels:new Uint8ClampedArray([0,0,0,255])}){this.emit(request,{kind:'result',value});}
+  terminate(){this.terminated++;}
+}
+globalThis.Worker=FakeWorker;
+const {WorkerPdfEngine,createWorkerEngine}=await import('../dist/worker-client.js');
+const {validateArguments}=await import('../dist/protocol.js');
+const tick=()=>new Promise(resolve=>setTimeout(resolve,0));
+const failure=async(promise,code)=>{await assert.rejects(promise,error=>error.code===code);};
+const pdf=new Uint8Array([1,2,3]);
+assert.throws(()=>new WorkerPdfEngine({taskTimeoutMs:1}));
+assert.throws(()=>new WorkerPdfEngine(null));
+assert.throws(()=>new WorkerPdfEngine({workerUrl:'invalid'}));
+for(const [operation,args] of [['search',['x'.repeat(1025),{}]],['open',[pdf,{password:'x'.repeat(1025)}]],['render',[0,NaN,{}]],['renderRegion',[0,72,{}, {x:0,y:0,width:1025,height:1}]],['font',[undefined,-1]],['unknown',[]]])assert.throws(()=>validateArguments(operation,args));
+const cold=new WorkerPdfEngine(),pre=new AbortController();pre.abort();
+await failure(cold.open(pdf,{}, {signal:pre.signal}),'cancelled');assert.equal(FakeWorker.instances.length,0);cold.dispose();
+const engine=await createWorkerEngine();
+const first=await engine.open(pdf),second=await engine.open(pdf);assert.equal(pdf.length,3);assert.equal(pdf.buffer.byteLength,3);
+assert.equal(first.pageCount,2);
+await failure(first.pageInfo(0,{signal:{aborted:false}}),'invalid_argument');
+await failure(engine.open(pdf,{},null),'invalid_argument');
+await failure(engine.open(pdf,{}, {signal:null}),'invalid_argument');
+const worker=FakeWorker.instances.at(-1),session=engine.sessionId;
+const area={x:0,y:0,width:1,height:1},regionPending=first.renderRegion(0,area);area.x=999;await tick();
+const regionRequest=worker.held.shift();assert.equal(regionRequest.operation,'renderRegion');assert.equal(regionRequest.args[3].x,0);
+worker.complete(regionRequest,{x:0,y:0,width:1,height:1,pixels:new Uint8ClampedArray([0,0,0,255])});assert.equal((await regionPending).x,0);
+await failure(first.renderRegion(0,{x:0,y:0,width:0,height:1}),'invalid_argument');
+const active=first.render();await tick();
+const cancelQueued=new AbortController(),queued=second.pageInfo(0,{signal:cancelQueued.signal});cancelQueued.abort();
+await failure(queued,'cancelled');assert.equal(worker.terminated,0);assert.equal(engine.sessionId,session);
+assert.equal(worker.requests.filter(r=>r.operation==='pageInfo').length,0);
+worker.complete(worker.held.shift());await active;
+const saturation=second.render();await tick();
+const saturated=Array.from({length:31},()=>second.pageInfo(0));
+const release=first.close();assert.equal(first.close(),release);assert.throws(()=>first.pageCount);
+worker.complete(worker.held.shift());await saturation;await Promise.all(saturated);await release;
+assert.equal(worker.requests.filter(r=>r.operation==='close').length,1);
+const replacement=await engine.open(pdf);
+const holding=replacement.render();await tick();
+const opts={mode:'strict'},snapOpen=engine.open(pdf,opts);opts.mode='invalid-after-call';
+worker.complete(worker.held.shift());await holding;
+const snapshotDoc=await snapOpen;
+assert.equal(worker.requests.filter(r=>r.operation==='open').at(-1).args[1].mode,'strict');
+await snapshotDoc.close();
+const blocked=replacement.render();await tick();const pending=[];
+for(let i=0;i<31;i++)pending.push(second.pageInfo(0));
+await failure(second.pageInfo(0),'resource_limit');
+const all=Promise.allSettled([blocked,...pending]);engine.cancel();
+const stoppedSession=engine.sessionId;engine.cancel();assert.equal(engine.sessionId,stoppedSession);
+const outcomes=await all;assert(outcomes.every(r=>r.status==='rejected'&&r.reason.code==='cancelled'&&r.reason.session===session));
+assert.equal(worker.terminated,1);await failure(first.pageInfo(0),'invalid_handle');assert.throws(()=>first.pageCount);
+const reopened=await engine.open(pdf),fresh=FakeWorker.instances.at(-1);assert.notEqual(engine.sessionId,session);
+const newRender=reopened.render();await tick();const current=fresh.held.shift();let settled=false;newRender.then(()=>{settled=true;});
+worker.complete(worker.held.shift());await tick();assert.equal(settled,false);
+fresh.emit(current,{kind:'result',session:'wrong-session',value:{}});await tick();assert.equal(settled,false);
+fresh.complete(current);assert.equal((await newRender).pixels.length,4);
+await first.close();await first.close();assert.equal(fresh.terminated,0);
+const closing=reopened.render();await tick();const closingResult=Promise.allSettled([closing]);await reopened.close();
+assert.equal((await closingResult)[0].reason.code,'cancelled');assert.equal(fresh.terminated,1);
+const budget=new Uint8Array(32*1024*1024),font1=engine.setSubstituteFont(budget),font2=engine.setSubstituteFont(budget);
+await failure(engine.setSubstituteFont(budget),'resource_limit');
+assert.equal(budget.buffer.byteLength,32*1024*1024);
+const fonts=Promise.allSettled([font1,font2]);engine.dispose();engine.dispose();assert((await fonts).every(r=>r.reason.code==='cancelled'));
+await failure(engine.open(pdf),'invalid_handle');
+const timed=await createWorkerEngine({taskTimeoutMs:100}),timedDoc=await timed.open(pdf);
+await failure(timedDoc.render(),'resource_limit');await failure(timedDoc.pageInfo(0),'invalid_handle');
+const afterTimeout=await timed.open(pdf);await afterTimeout.close();
+const beforeClose=FakeWorker.instances.at(-1).requests.length;await afterTimeout.close();assert.equal(FakeWorker.instances.at(-1).requests.length,beforeClose);
+const doc=await timed.open(pdf),broken=doc.render();await tick();const crashed=Promise.allSettled([broken]);
+FakeWorker.instances.at(-1).onerror({preventDefault(){}});assert.equal((await crashed)[0].reason.code,'internal');await failure(doc.pageInfo(0),'invalid_handle');
+timed.dispose();
+const reentrant=await createWorkerEngine(),oldDoc=await reentrant.open(pdf),oldJob=oldDoc.render();await tick();
+const oldOutcome=Promise.allSettled([oldJob]);let reopening;
+reentrant.addEventListener('queuechange',()=>{reopening=reentrant.open(pdf);},{once:true});
+reentrant.cancel();assert.equal((await oldOutcome)[0].reason.code,'cancelled');
+const newDoc=await reopening;assert.equal((await newDoc.pageInfo(0)).width,100);
+await newDoc.close();reentrant.dispose();
+const listenerEngine=await createWorkerEngine(),controller=new AbortController(),signal=controller.signal;
+let added=0,removed=0;
+const add=signal.addEventListener.bind(signal),remove=signal.removeEventListener.bind(signal);
+signal.addEventListener=(...args)=>{added++;return add(...args);};signal.removeEventListener=(...args)=>{removed++;return remove(...args);};
+listenerEngine.addEventListener('queuechange',()=>listenerEngine.cancel(),{once:true});
+await failure(listenerEngine.open(pdf,{}, {signal}),'cancelled');assert.equal(added,removed);listenerEngine.dispose();
+// Binary mutations own their queued bytes and share the existing 64 MiB budget.
+const assetEngine=await createWorkerEngine(),assetDoc=await assetEngine.open(pdf),assetWorker=FakeWorker.instances.at(-1);
+const assetHold=assetDoc.render();await tick();
+const imageBytes=new Uint8Array(8*1024*1024);imageBytes[0]=7;
+const mutation={operation:'replaceImage',stamp:{engine:'test',document:1,revision:'0'},page:0,index:0,format:'png'};
+const binaryJobs=Array.from({length:8},()=>assetDoc.apply(mutation,{asset:imageBytes}));
+imageBytes[0]=99;mutation.index=99;
+await failure(assetDoc.apply(mutation,{asset:imageBytes}),'resource_limit');assert.equal(imageBytes.byteLength,8*1024*1024);
+assetWorker.complete(assetWorker.held.shift());await assetHold;await Promise.all(binaryJobs);
+const binaryRequests=assetWorker.requests.filter(r=>r.operation==='apply');assert.equal(binaryRequests.length,8);assert.equal(binaryRequests[0].args[0].index,0);assert.equal(binaryRequests[0].args[1][0],7);assert.equal(imageBytes[0],99);
+await failure(assetDoc.apply({...mutation,operation:'removeImage'},{asset:imageBytes}),'invalid_argument');
+await assetDoc.close();assetEngine.dispose();
+const fontMutationEngine=await createWorkerEngine(),fontMutationDoc=await fontMutationEngine.open(pdf),fontMutationWorker=FakeWorker.instances.at(-1);
+const fontMutationHold=fontMutationDoc.render();await tick();
+const fullFont=new Uint8Array(32*1024*1024);fullFont[0]=17;
+const fontMutation={operation:'replaceText',stamp:{engine:'test',document:1,revision:'0'},page:0,start:0,end:1,text:'新',font:{postscriptName:'Before',capHeight:733,stemV:80,serif:false}};
+const fontMutations=[fontMutationDoc.apply(fontMutation,{asset:fullFont}),fontMutationDoc.apply(fontMutation,{asset:fullFont})];
+await failure(fontMutationDoc.apply(fontMutation,{asset:fullFont}),'resource_limit');fontMutation.font.postscriptName='After';fullFont[0]=99;
+fontMutationWorker.complete(fontMutationWorker.held.shift());await fontMutationHold;await Promise.all(fontMutations);
+const sentFonts=fontMutationWorker.requests.filter(r=>r.operation==='apply');assert.equal(sentFonts[0].args[0].font.postscriptName,'Before');assert.equal(sentFonts[0].args[1][0],17);assert.equal(fullFont.byteLength,32*1024*1024);
+await fontMutationDoc.close();fontMutationEngine.dispose();
+const registryEngine=await createWorkerEngine(),registryDoc=await registryEngine.open(pdf),registryWorker=FakeWorker.instances.at(-1);
+const registryHold=registryDoc.render();await tick();
+const registration={family:'Before',aliases:['Original'],weight:400,italic:false,serif:false};fullFont[0]=23;
+const registrations=[registryEngine.registerFont(fullFont,registration),registryEngine.registerFont(fullFont,registration)];
+await failure(registryEngine.registerFont(fullFont,registration),'resource_limit');registration.family='After';registration.aliases[0]='Changed';fullFont[0]=99;
+registryWorker.complete(registryWorker.held.shift());await registryHold;await Promise.all(registrations);
+const registeredRequests=registryWorker.requests.filter(r=>r.operation==='registerFont');assert.equal(registeredRequests[0].args[1].family,'Before');assert.equal(registeredRequests[0].args[1].aliases[0],'Original');assert.equal(registeredRequests[0].args[0][0],23);assert.equal(fullFont.byteLength,32*1024*1024);
+await failure(registryEngine.registerFont(fullFont,{...registration,aliases:['x'.repeat(257)]}),'invalid_argument');await registryEngine.clearFonts();await registryDoc.close();registryEngine.dispose();
+const scopedEngine=await createWorkerEngine(),scopedDoc=await scopedEngine.open(pdf),scopedWorker=FakeWorker.instances.at(-1);
+const scopedHold=scopedDoc.render();await tick();
+const scopedMetadata={family:'ScopedBefore',aliases:['Alias'],weight:400,italic:false,serif:false},scopedStamp={engine:'test',document:1,revision:'3',fontEpoch:'0'};fullFont[0]=31;
+const scopedJobs=[scopedDoc.registerFont(fullFont,scopedMetadata,scopedStamp),scopedDoc.registerFont(fullFont,scopedMetadata,scopedStamp)];
+await failure(scopedDoc.registerFont(fullFont,scopedMetadata,scopedStamp),'resource_limit');scopedMetadata.family='ScopedAfter';scopedMetadata.aliases[0]='Changed';scopedStamp.revision='99';scopedStamp.fontEpoch='99';fullFont[0]=99;
+scopedWorker.complete(scopedWorker.held.shift());await scopedHold;await Promise.all(scopedJobs);
+const scopedSent=scopedWorker.requests.filter(r=>r.operation==='registerDocumentFont');assert.equal(scopedSent[0].args[0][0],31);assert.equal(scopedSent[0].args[1].aliases[0],'Alias');assert.equal(scopedSent[0].args[2].revision,'3');assert.equal(scopedSent[0].args[2].fontEpoch,'0');assert.equal(fullFont.byteLength,32*1024*1024);
+const requirementHold=scopedDoc.render();await tick();const renderOptions={annotations:false,viewZoom:2};const waitingRequirements=scopedDoc.fontRequirements(0,renderOptions);renderOptions.annotations=true;scopedWorker.complete(scopedWorker.held.shift());await requirementHold;await waitingRequirements;assert.equal(scopedWorker.requests.find(r=>r.operation==='fontRequirements').args[1].annotations,false);
+await scopedDoc.close();scopedEngine.dispose();
+console.log('Worker queue, ownership, cancellation, timeout, stale response and disposal checks passed');
+
+const rotating=await createWorkerEngine();const rotatingDoc=await rotating.open(new Uint8Array([1]));
+const rotationOptions={viewRotation:90},rotatingRequest=rotatingDoc.render(0,72,rotationOptions);rotationOptions.viewRotation=180;await tick();
+const rotationWorker=FakeWorker.instances.at(-1),queuedRotation=rotationWorker.held.at(-1);
+assert.equal(queuedRotation.args[2].viewRotation,90);rotationWorker.complete(queuedRotation);await rotatingRequest;
+rotating.dispose();

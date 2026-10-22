@@ -764,3 +764,33 @@ fn default_generation_enforces_on_and_view_without_restricting_alternatives() {
     assert_eq!(d.save_to_bytes().unwrap(), before);
     assert_eq!(b.live_bytes(), 0);
 }
+
+#[test]
+fn layer_append_separates_a_complete_final_operator_or_unterminated_comment() {
+    use pdf::document::resource_manager::StandardFont;
+    for suffix in ["ET", "ET% final comment"] {
+        let d = doc();
+        let b = pool();
+        let font = d
+            .resources()
+            .register_standard_font(0, StandardFont::Helvetica)
+            .unwrap();
+        d.replace_page_contents(
+            0,
+            format!("BT /{font} 12 Tf 20 100 Td (A) Tj {suffix}").into_bytes(),
+        )
+        .unwrap();
+        let layer = d.create_layer("Append", LayerIntent::View, &b).unwrap();
+        d.append_layer_content(
+            0,
+            &layer,
+            format!("BT /{font} 12 Tf 20 80 Td (B) Tj ET").as_bytes(),
+            &b,
+        )
+        .unwrap();
+        assert_eq!(text(&d, Default::default()), "AB");
+        let saved = d.save_to_bytes().unwrap();
+        let reopened = Document::from_bytes_with_mode(saved, ParseMode::Strict).unwrap();
+        assert_eq!(text(&reopened, Default::default()), "AB");
+    }
+}

@@ -680,3 +680,47 @@ fn multi_widget_appearance_character_work_is_aggregate_and_rolls_back() {
         .set_form_value("a", Value::Text("123".into()))
         .unwrap();
 }
+
+#[test]
+fn field_records_preserve_known_fields_beside_unsupported_profiles() {
+    let doc = document();
+    doc.add_text_field(0, [10., 10., 120., 30.], "known", "Hello")
+        .unwrap();
+    doc.add_text_field(0, [10., 40., 120., 60.], "unsupported", "Hidden")
+        .unwrap();
+    let field = doc
+        .form_field_tree()
+        .unwrap()
+        .into_iter()
+        .find(|f| f.name == "unsupported")
+        .unwrap();
+    let mut dict = doc
+        .resolve_handle(&field.handle)
+        .unwrap()
+        .into_dict()
+        .unwrap();
+    dict.try_insert(
+        "Ff".into(),
+        PdfObject::PdfNumber(pdf::objects::pdf_number::PdfNumber::new(
+            (1u32 << 13) as f32,
+        )),
+    )
+    .unwrap();
+    doc.update_object(field.handle.object_id(), PdfObject::PdfDict(dict))
+        .unwrap();
+    assert!(doc.form_field_details().is_err());
+    let records = doc.form_field_records().unwrap();
+    assert_eq!(records.len(), 2);
+    assert!(
+        records
+            .iter()
+            .find(|r| r.name == "known")
+            .unwrap()
+            .details
+            .is_some()
+    );
+    let unknown = records.iter().find(|r| r.name == "unsupported").unwrap();
+    assert!(unknown.details.is_none());
+    assert!(unknown.unsupported_reason.is_some());
+    assert_eq!(unknown.widgets.len(), 1);
+}

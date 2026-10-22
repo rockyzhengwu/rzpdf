@@ -29,6 +29,9 @@ pub(super) fn validate<R: Read + Seek>(
         }
         return Ok(());
     };
+    if handler.revision == 4 {
+        return Err(unsupported("R4 AES-128 is currently read-only"));
+    }
     if current.get("Encrypt") != original.get("Encrypt") {
         return Err(unsupported(
             "Encrypt identity changed; use explicit full save",

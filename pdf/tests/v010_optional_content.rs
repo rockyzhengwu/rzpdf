@@ -1048,3 +1048,131 @@ fn optional_content_on_softmask_g_refuses_instead_of_rendering_wrong_mask() {
     );
     assert_eq!(before, doc.stamp());
 }
+
+#[test]
+fn compatible_single_alternative_config_recovers_without_changing_default() {
+    let (doc, a, b, _) = fixture();
+    set(
+        &doc,
+        root(&doc),
+        "OCProperties",
+        parse(&format!(
+            "<< /OCGs [{} 0 R {} 0 R] /D << /ON [{} 0 R] /OFF [{} 0 R] >> /Configs << /Name (Single) /BaseState /OFF >> >>",
+            a.obj_num(),
+            b.obj_num(),
+            a.obj_num(),
+            b.obj_num()
+        )),
+    );
+    let bytes = doc.save_to_bytes().unwrap();
+    for mode in [ParseMode::Strict, ParseMode::Compatible] {
+        let source = Doc::from_bytes_with_mode(bytes.clone(), mode).unwrap();
+        if mode == ParseMode::Strict {
+            assert!(source.optional_content().is_err());
+            continue;
+        }
+        let model = source.optional_content().unwrap().unwrap();
+        assert_eq!(model.configurations.len(), 1);
+        let visibility = source
+            .optional_content_visibility(&Default::default())
+            .unwrap();
+        assert!(
+            visibility
+                .group_state(&source.object_handle(a).unwrap())
+                .unwrap()
+        );
+        assert!(
+            !visibility
+                .group_state(&source.object_handle(b).unwrap())
+                .unwrap()
+        );
+        assert!(
+            source.structure_diagnostics().unwrap().iter().any(
+                |d| d.reason == pdf::parser::diagnostic::StructureReason::OptionalContentConfig
+            )
+        );
+    }
+}
+
+#[test]
+fn compatible_source_recovers_underdeclared_layer_version_with_diagnostic() {
+    let (doc, a, b, _) = fixture();
+    let mut bytes = doc.save_to_bytes().unwrap();
+    bytes[5..8].copy_from_slice(b"1.4");
+    let strict = Doc::from_bytes_with_mode(bytes.clone(), ParseMode::Strict).unwrap();
+    assert!(strict.optional_content().is_err());
+    let source = Doc::from_bytes_with_mode(bytes, ParseMode::Compatible).unwrap();
+    let before = source.stamp();
+    let visibility = source
+        .optional_content_visibility(&Default::default())
+        .unwrap();
+    assert!(
+        visibility
+            .group_state(&source.object_handle(a).unwrap())
+            .unwrap()
+    );
+    assert!(
+        !visibility
+            .group_state(&source.object_handle(b).unwrap())
+            .unwrap()
+    );
+    assert_eq!(before, source.stamp());
+    assert!(
+        source
+            .structure_diagnostics()
+            .unwrap()
+            .iter()
+            .any(|d| d.reason == pdf::parser::diagnostic::StructureReason::OptionalContentVersion)
+    );
+    // The compatibility exception does not turn malformed properties into layers.
+    set(
+        &source,
+        root(&source),
+        "OCProperties",
+        parse("<< /OCGs (invalid) /D << >> >>"),
+    );
+    assert!(source.optional_content().is_err());
+}
+
+#[test]
+fn visible_character_extraction_uses_the_same_layer_selection_as_rendering() {
+    let (doc, _, _, font) = fixture_with_options(ParseOptions {
+        mode: ParseMode::Compatible,
+        ..Default::default()
+    });
+    content(
+        &doc,
+        &format!(
+            "/OC /A BDC BT /{font} 10 Tf (A) Tj ET EMC /OC /B BDC BT /{font} 10 Tf (B) Tj ET EMC"
+        ),
+    );
+    let visibility = doc
+        .optional_content_visibility(&Default::default())
+        .unwrap();
+    let selected = doc
+        .get_page(0)
+        .unwrap()
+        .extract_characters_with_optional_content_report(&visibility)
+        .unwrap();
+    assert_eq!(
+        selected
+            .characters
+            .iter()
+            .filter_map(|c| c.unicode.as_deref())
+            .collect::<String>(),
+        "A"
+    );
+    let raw = doc
+        .get_page(0)
+        .unwrap()
+        .extract_characters_paint_order_report()
+        .unwrap();
+    assert_eq!(
+        raw.characters
+            .iter()
+            .filter_map(|c| c.unicode.as_deref())
+            .collect::<String>(),
+        "AB"
+    );
+    assert!(selected.diagnostics.is_empty());
+}

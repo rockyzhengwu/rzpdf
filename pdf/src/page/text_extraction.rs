@@ -31,6 +31,9 @@ pub struct ExtractedCharacter {
     pub writing_mode: Option<crate::font::WritingMode>,
     pub unicode: Option<String>,
     pub position: Point,
+    /// Display-space advance including character/word spacing, excluding TJ adjustments.
+    /// A layout vector, not a glyph ink bounding box.
+    pub advance: [f32; 2],
     /// W2 vector from horizontal glyph origin to vertical text origin, in
     /// thousandths of text space; [0, 0] for horizontal fonts. Not yet applied
     /// to `position`. Use `glyph_origin_display()` for the horizontal outline.
@@ -296,9 +299,27 @@ impl<R: Read + Seek> PdfPage<'_, R> {
     /// Interpret once, preserving warnings alongside paint-order character events.
     /// Missing Unicode stays None; diagnostics do not repair unsupported content.
     pub fn extract_characters_paint_order_report(&mut self) -> PdfResult<TextExtractionReport> {
+        let list = self.display_list()?;
+        self.extract_characters_from_list(list)
+    }
+
+    /// Paint-order characters under an explicit layer selection. The same
+    /// visibility model is used for drawing; hidden content is still validated.
+    pub fn extract_characters_with_optional_content_report(
+        &mut self,
+        visibility: &crate::document::optional_content::OptionalContentVisibility,
+    ) -> PdfResult<TextExtractionReport> {
+        let list = self.display_list_with_optional_content(visibility)?;
+        self.extract_characters_from_list(list)
+    }
+
+    fn extract_characters_from_list(
+        &self,
+        list: super::display_list::DisplayList,
+    ) -> PdfResult<TextExtractionReport> {
         let provenance = self.source_provenance();
         let limits = self.ctx.limits();
-        let (objects, diagnostics) = self.display_list()?.into_objects_with_diagnostics();
+        let (objects, diagnostics) = list.into_objects_with_diagnostics();
         let mut output = Vec::new();
         let mut retained_bytes = 0usize;
         for (object_index, object) in objects.into_iter().enumerate() {
@@ -358,6 +379,34 @@ impl<R: Read + Seek> PdfPage<'_, R> {
                 } else {
                     None
                 };
+                let local_advance = text
+                    .state
+                    .text_state
+                    .font
+                    .as_ref()
+                    .map(|font| {
+                        font.text_advance(
+                            item.charcode(),
+                            text.state.text_state.font_size,
+                            text.state.text_state.char_space,
+                            text.state.text_state.word_space,
+                            text.horizontal_scale,
+                        )
+                    })
+                    .transpose()?
+                    .unwrap_or([0., 0.]);
+                let advance = [
+                    f64::from(local_advance[0]) * f64::from(text.matrix.a())
+                        + f64::from(local_advance[1]) * f64::from(text.matrix.c()),
+                    f64::from(local_advance[0]) * f64::from(text.matrix.b())
+                        + f64::from(local_advance[1]) * f64::from(text.matrix.d()),
+                ]
+                .map(|v| v as f32);
+                if advance.iter().any(|v| !v.is_finite()) {
+                    return Err(PdfError::ResourceLimit(
+                        "extracted character advance overflow".into(),
+                    ));
+                }
                 output.push(ExtractedCharacter {
                     source: text.source(),
                     nested_source,
@@ -377,6 +426,7 @@ impl<R: Read + Seek> PdfPage<'_, R> {
                         .map(|font| font.writting_mode()),
                     unicode,
                     position: item.pos().clone(),
+                    advance,
                     vertical_origin: if text.state.text_state.font.as_ref().is_some_and(|font| {
                         font.writting_mode() == crate::font::WritingMode::Vertical
                     }) {

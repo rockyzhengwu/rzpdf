@@ -1,6 +1,6 @@
 # Type3 字体与字形执行
 
-v0.7 已接通受限 Type3 图形字形执行、文字提取和来源隔离；独立检查模型仍可单独使用。当前执行范围是 Tr=0、不透明、普通混合模式的图形字形，不支持任意 Type3 程序。版本进度见 [v0.7 计划](releases/v0.7.md)。
+v0.7 已接通受限 Type3 图形字形执行、文字提取和来源隔离；独立检查模型仍可单独使用。当前执行范围是 Tr=0、填充与描边 alpha 相等、普通混合模式且无外部软遮罩的图形字形，不支持任意 Type3 程序。版本进度见 [v0.7 计划](releases/v0.7.md)。
 
 ## 字体与字形程序
 
@@ -19,7 +19,7 @@ let operators = glyph.program().operations();
 
 `width` 返回 Widths 中的字形空间宽度；`text_space_advance` 只取经 FontMatrix 变换后的水平分量，不应用平移，也不固定除以 1000。即使 FontMatrix 旋转字形，文字推进仍在文本空间的水平方向，见 [PDF 1.7 §5.5.4，Widths 条目](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/pdfreference1.7old.pdf)。此方法不应用字号和文字间距；解释器另行应用 Tf/Tz/Tc/Tw/TJ、文字上移及页面变换。
 
-`inspect_type3_glyph` 有界解码并解析完整 CharProc，要求首个操作是两个参数的 d0 或六个参数的 d1；参数有限，纵向宽度为零，d1 包围框有序，后续不重复声明度量。`Type3GlyphMetrics` 保留 CharProc 自己的宽度与可选包围框，不覆盖 Widths。检查成功不代表能执行所有后续操作；实际执行还要求 CharProc 宽度与 Widths 一致。
+`inspect_type3_glyph` 有界解码并解析完整 CharProc，要求首个操作是两个参数的 d0 或六个参数的 d1；参数有限，纵向宽度为零，d1 包围框有序，后续不重复声明度量。`Type3GlyphMetrics` 保留 CharProc 自己的宽度与可选包围框，不覆盖 Widths。检查成功不代表能执行所有后续操作；Strict 及新建字体要求 CharProc 宽度与 Widths 一致；Compatible 读取源文档时可保留该冲突为诊断，文字推进仍以 Widths 为准，不采用冲突的 d0/d1 宽度。
 
 ## 执行与编辑边界
 
@@ -31,7 +31,7 @@ let operators = glyph.program().operations();
 | 来源与状态 | 每个字形隔离图形状态，保留父裁剪。内部路径/图像没有页面根或普通 Form 编辑来源；不允许将其当作页面操作修改 |
 | 文字提取 | 保留原文字操作的字符码、Unicode、位置、TJ 数组项和代码字节范围；不将内部图形当成额外字符 |
 | 文字编辑 | 已有原始代码替换/整次文字绘制删除沿用来源、共享页隔离及权限保护；不提供 Type3 Unicode 编码、保留 advance 的宽度聚合或字形内部编辑 |
-| 明确未支持 | Tr 非 0、透明度/非 Normal 混合、字形内 BT/ET 文字、ExtGState、sh、透明组和其他未列出的操作 |
+| 明确未支持 | Tr 非 0、不一致 alpha、外部软遮罩/非 Normal 混合、字形内 BT/ET 文字、ExtGState、sh、透明组和其他未列出的操作 |
 
 执行与 Form 共用累计操作、解码工作量、路径及文本额度；Form 循环被拒绝，深度另受 128 层实现限制。字形内文字递归目前直接拒绝，不声称已支持任意递归字体。R6 的 CharProcs 随各自流解密，不重复解密外层内容；编辑继续受既有密码权限及签后保护约束。
 
@@ -64,3 +64,8 @@ PYTHONPATH=tmp/pdfs/v06-verifiers:tmp/pdfs/v05-verifiers:tmp/pdfs/python python3
 ```
 
 模型脚本用 pikepdf 生成项目自有字形，核对度量、操作数目及保存，仍不调用本库渲染。渲染脚本另用 12 页项目自有 PDF 比较 Type3 与直接展开的等价图形，包含 4 个页面方向、水平缩放/上移、非标准 FontMatrix、负字号/缩放、裁剪、图像、stencil 和 Form；同时核对原编码保存、Skia/MuPDF 保存前后整页像素以及明确拒绝的 Tr=3/7。栅格基线保持图像形式，不用抗锯齿矢量边缘替代最近邻图像采样。证据写入新的 `tmp/pdfs/v07-type3-*` 目录，不覆盖旧报告；这些检查不代表 v0.7 整版验收。
+
+
+一致的外部 alpha 按整个字形应用一次：字形内部先以不透明状态绘制到隔离组，
+再合成组，避免重叠图元重复积累 alpha。字形内部 ExtGState、软遮罩及透明组
+等未列出的程序能力仍保持原有限制。

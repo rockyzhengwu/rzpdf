@@ -125,13 +125,18 @@ fn image_extraction_report_retains_compatibility_diagnostics() {
 }
 
 #[test]
-fn image_draw_sample_budget_counts_soft_masks_and_repeated_draws() {
+fn image_draw_sample_budget_counts_distinct_images_and_shared_repeated_draws() {
     use pdf::{
         error::PdfError,
         page::content_builder::ContentBuilder,
         parser::options::{Limits, ParseOptions},
     };
-    for (budget, draws, success) in [(256, 2, true), (255, 2, false), (256, 3, false)] {
+    for (budget, draws, distinct, success, extraction_success) in [
+        (256, 2, true, true, true),
+        (255, 2, true, false, false),
+        (256, 3, true, false, false),
+        (128, 3, false, true, false),
+    ] {
         let doc = Document::new_with_options(ParseOptions {
             limits: Limits {
                 max_decoded_bytes: budget,
@@ -145,7 +150,8 @@ fn image_draw_sample_budget_counts_soft_masks_and_repeated_draws() {
             .resources()
             .embed_rgba_image(0, 32, 1, vec![128; 32 * 4])
             .unwrap();
-        // Each draw retains 96 normalized RGB bytes plus 32 soft-mask bytes.
+        // Each distinct image retains 96 RGB bytes plus 32 mask bytes.
+        // Repeated draws of the same Rc payload retain that storage once.
         assert_eq!(
             doc.get_page(0)
                 .unwrap()
@@ -157,6 +163,13 @@ fn image_draw_sample_budget_counts_soft_masks_and_repeated_draws() {
         );
         let mut builder = ContentBuilder::new();
         for index in 0..draws {
+            let name = if distinct && index > 0 {
+                doc.resources()
+                    .embed_rgba_image(0, 32, 1, vec![128; 32 * 4])
+                    .unwrap()
+            } else {
+                name.clone()
+            };
             builder
                 .draw_image(&name, [32.0, 0.0, 0.0, 1.0, index as f32 * 40.0, 10.0])
                 .unwrap();
@@ -167,10 +180,14 @@ fn image_draw_sample_budget_counts_soft_masks_and_repeated_draws() {
         if success {
             assert!(display.is_ok());
         } else {
-            assert!(matches!(display, Err(PdfError::ResourceLimit(_))));
+            assert!(
+                matches!(display, Err(PdfError::ResourceLimit(_))),
+                "{display:?}"
+            );
         }
+        // Extraction materializes independent owned samples per occurrence.
         let result = doc.get_page(0).unwrap().extract_images_paint_order();
-        if success {
+        if extraction_success {
             assert_eq!(result.unwrap().len(), draws);
         } else {
             assert!(matches!(result, Err(PdfError::ResourceLimit(_))));

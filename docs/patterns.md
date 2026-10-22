@@ -44,3 +44,12 @@ The Python environment needs Pillow and pikepdf; the gate also needs qpdf and mu
 `PatternColorSpace` is no longer an empty marker struct: use its constructors
 or `Default` rather than an empty literal. `Default` has no selected Pattern;
 attempting to paint it is an explicit error, not a black colour substitute.
+
+## Calculator compatibility
+
+Type4 functions in Strict mode require exactly the declared numeric outputs. Compatible mode takes the required number of values from the top of a larger operand stack, preserving output order; too few values or nonnumeric selected outputs still fail. Program, recursion and operand-stack limits remain enforced. This does not execute arbitrary PostScript or JavaScript.
+
+Compatible mode may treat an omitted tiling-pattern Resources dictionary as an
+empty local scope, recording a diagnostic. It never imports page resources into
+that scope; an unresolved name and a malformed explicit dictionary still fail.
+Strict continues to require the dictionary.

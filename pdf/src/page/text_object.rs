@@ -62,6 +62,7 @@ pub struct TextDrawSource {
 pub struct TextObject {
     clipping_interpreted: bool,
     type3_metadata: bool,
+    language: Option<std::rc::Rc<str>>,
     source: Option<TextDrawSource>,
     nested_source: Option<super::source_provenance::NestedDrawSource>,
     pub state: GraphicState,
@@ -69,11 +70,20 @@ pub struct TextObject {
     pub origin_x: f32,
     pub origin_y: f32,
     pub matrix: Matrix,
+    // CTM without the text matrix: PDF stroke widths live in user space.
+    pub(crate) paint_matrix: Matrix,
     /// Tz as a unit factor (50 percent = 0.5), independent of the text matrix.
     pub horizontal_scale: f32,
 }
 
 impl TextObject {
+    pub fn language(&self) -> Option<&str> {
+        self.language.as_deref()
+    }
+    pub(crate) fn set_language(&mut self, language: Option<std::rc::Rc<str>>) {
+        self.language = language;
+    }
+
     pub(crate) fn clear_edit_source(&mut self) {
         self.source = None;
         self.nested_source = None;
@@ -202,10 +212,15 @@ impl TextObject {
         Ok(commands)
     }
 
+    pub fn paint_matrix(&self) -> &Matrix {
+        &self.paint_matrix
+    }
+
     pub fn new(state: GraphicState) -> Self {
         TextObject {
             clipping_interpreted: false,
             type3_metadata: false,
+            language: None,
             source: None,
             nested_source: None,
             state,
@@ -213,6 +228,7 @@ impl TextObject {
             origin_x: 0.0,
             origin_y: 0.0,
             matrix: Matrix::identity(),
+            paint_matrix: Matrix::identity(),
             horizontal_scale: 1.0,
         }
     }

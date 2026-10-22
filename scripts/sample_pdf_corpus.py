@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sample new PDFs, interpret every page, and compare sampled renders with MuPDF.
+"""Sample new PDFs, interpret every page, and compare selected or all page renders with MuPDF.
 
 Pixel differences are review signals, not a proof of incorrect rendering.
 Reports and PNGs are written to a new output directory; inputs remain read-only.
@@ -87,12 +87,12 @@ def check_file(index, path, args):
     folder.mkdir()
     renders = []
     if pages:
-        selected = sorted({1, (pages + 1) // 2, pages})
+        selected = range(1, pages + 1) if args.pages == "all" else sorted({1, (pages + 1) // 2, pages})
         for page in selected:
             actual = folder / f"page-{page}-rzpdf.png"
             reference = folder / f"page-{page}-mupdf.png"
-            rendered = run([str(args.render_binary), str(path), str(actual), str(page), args.mode, str(args.dpi)], args.render_timeout)
-            baseline = run(["mutool", "draw", "-q", "-r", str(args.dpi), "-c", "rgb", "-o", str(reference), str(path), str(page)], args.render_timeout)
+            rendered = run(args.command_prefix + [str(args.render_binary), str(path), str(actual), str(page), args.mode, str(args.dpi)], args.render_timeout)
+            baseline = run(args.command_prefix + ["mutool", "draw", "-q", "-r", str(args.dpi), "-c", "rgb", "-o", str(reference), str(path), str(page)], args.render_timeout)
             row = dict(page=page, rzpdf=rendered, mupdf=baseline,
                        actual=str(actual.resolve()), reference=str(reference.resolve()))
             if rendered["status"] == "ok" and baseline["status"] == "ok":
@@ -111,6 +111,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, help="Repeat an exact prior sample")
     parser.add_argument("--count", type=int, default=30)
+    parser.add_argument("--pages", choices=["sample", "all"], default="sample")
+    parser.add_argument("--memory-limit-mib", type=int, default=2048)
     parser.add_argument("--seed", type=int, default=20261021)
     parser.add_argument("--exclude", type=Path, action="append", default=[])
     parser.add_argument("--jobs", type=int, default=3)
@@ -124,6 +126,9 @@ def main():
     args = parser.parse_args()
     if any(value <= 0 or not math.isfinite(value) for value in (args.count, args.jobs, args.timeout, args.render_timeout, args.dpi)):
         parser.error("count, jobs, timeouts and DPI must be positive and finite")
+    if args.memory_limit_mib < 1:
+        parser.error("memory-limit-mib must be positive")
+    args.command_prefix = ["prlimit", f"--as={args.memory_limit_mib * 1024 * 1024}", "--"]
     if not args.skip_build:
         subprocess.run(["cargo", "build", "--release", "-p", "pdf", "--example", "check_pdf", "-p", "render", "--example", "check_render"], cwd=REPO, check=True)
     excluded = set()
@@ -169,7 +174,7 @@ def main():
         setattr(args, attribute, destination)
     (args.output / "manifest.jsonl").write_text("".join(json.dumps(dict(path=str(path)), ensure_ascii=False) + "\n" for path in chosen), encoding="utf-8")
     metadata = dict(worker_sha256=fingerprints, substitute_font=str(os.environ.get("RZPDF_SUBSTITUTE_FONT", "")), candidates=candidates, count=len(chosen), seed=args.seed if not args.manifest else None, source_manifest=str(args.manifest) if args.manifest else None, mode=args.mode,
-                    dpi=args.dpi, render_pages="first, middle, last", excluded_reports=[str(p) for p in args.exclude])
+                    dpi=args.dpi, render_pages="all" if args.pages == "all" else "first, middle, last", memory_limit_mib=args.memory_limit_mib, excluded_reports=[str(p) for p in args.exclude])
     (args.output / "settings.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n")
     print(f"Selected {len(chosen)} of {candidates} eligible PDFs", flush=True)
     rows = []

@@ -16,6 +16,10 @@ jobs:
       - run: rustc --version && cargo --version
       - name: Verify bundled CMap provenance and mappings
         run: python3 docs/check-cmap-data.py
+      - name: Install regression driver dependencies
+        run: python3 -m pip install Pillow==11.3.0
+      - name: Check regression drivers
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
       - run: cargo test --workspace --locked
       - name: Validate v0.1 creation with independent tools
         run: |

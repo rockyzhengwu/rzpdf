@@ -10,8 +10,8 @@ mod types;
 mod write;
 pub use graph::{FormFieldNode, FormWidget};
 pub use model::{
-    ChoiceOption, FormFieldDefinition, FormFieldDetails, FormFieldKind, FormTextStyle,
-    FormWidgetSpec,
+    ChoiceOption, FormFieldDefinition, FormFieldDetails, FormFieldKind, FormFieldRecord,
+    FormTextStyle, FormWidgetSpec,
 };
 pub(crate) use text::AppearanceWork;
 

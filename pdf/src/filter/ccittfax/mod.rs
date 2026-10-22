@@ -551,3 +551,83 @@ mod tail_recovery_tests {
         assert_eq!(pool.live_bytes(), 0);
     }
 }
+
+/// Determine Group 4 framing from decoded row/EOB boundaries, never EI bytes.
+/// A counting sink avoids allocating a bitmap during inline-image framing.
+pub(crate) fn encoded_length(
+    input: &[u8],
+    params: Option<&PdfDict>,
+    width: u32,
+    height: u32,
+    limits: crate::parser::options::Limits,
+    budget: &crate::budget::OperationBudget,
+) -> PdfResult<usize> {
+    let p = params.map(Param::try_new).transpose()?.unwrap_or_default();
+    if p.k >= 0 {
+        return Err(PdfError::UnsupportedFeature(
+            "direct inline CCITT Group 3 framing".into(),
+        ));
+    }
+    if width == 0
+        || height == 0
+        || u32::from(p.columns) != width
+        || (p.rows != 0 && u32::from(p.rows) != height)
+    {
+        return Err(PdfError::FilterError(
+            "inline CCITT dimensions disagree with parameters".into(),
+        ));
+    }
+    if u64::from(width) * u64::from(height) > limits.max_image_pixels {
+        return Err(PdfError::ResourceLimit("inline CCITT pixels".into()));
+    }
+    let scratch = (width as usize)
+        .checked_mul(64)
+        .and_then(|n| n.checked_add(4096))
+        .filter(|n| *n <= limits.max_decoded_bytes)
+        .ok_or_else(|| PdfError::ResourceLimit("inline CCITT framing scratch".into()))?;
+    let _lease = budget.reserve(scratch)?;
+    struct Counter {
+        width: u32,
+        pixels: u32,
+        rows: u32,
+        invalid: bool,
+    }
+    impl hayro_ccitt::Decoder for Counter {
+        fn push_pixels(&mut self, _white: bool, count: u32) {
+            self.pixels = self.pixels.saturating_add(count);
+            self.invalid |= self.pixels > self.width;
+        }
+        fn next_line(&mut self) {
+            self.invalid |= self.pixels != self.width;
+            self.rows = self.rows.saturating_add(1);
+            self.pixels = 0;
+        }
+    }
+    let mut counter = Counter {
+        width,
+        pixels: 0,
+        rows: 0,
+        invalid: false,
+    };
+    let rows = height
+        .checked_add(u32::from(p.end_of_block))
+        .ok_or_else(|| PdfError::ResourceLimit("inline CCITT row count".into()))?;
+    let mut decoder = hayro_ccitt::DecoderContext::new(hayro_ccitt::DecodeSettings {
+        columns: width,
+        rows,
+        end_of_block: p.end_of_block,
+        end_of_line: p.end_of_line,
+        rows_are_byte_aligned: p.encoded_byte_align,
+        encoding: hayro_ccitt::EncodingMode::Group4,
+        invert_black: p.black_is_1,
+    });
+    let consumed = hayro_ccitt::decode(input, &mut counter, &mut decoder).map_err(|_| {
+        PdfError::FilterError("inline CCITT incomplete or invalid coded rows".into())
+    })?;
+    if counter.invalid || counter.rows != height || consumed == 0 || consumed > input.len() {
+        return Err(PdfError::FilterError(
+            "inline CCITT row count mismatch".into(),
+        ));
+    }
+    Ok(consumed)
+}

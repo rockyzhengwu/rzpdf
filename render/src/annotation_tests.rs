@@ -156,3 +156,96 @@ fn annotation_no_zoom_compensates_view_magnification_not_device_density() {
         assert_eq!((x, y), ((10. * zoom) as usize, (40. * zoom) as usize));
     }
 }
+
+#[test]
+fn annotation_no_rotate_composes_extra_view_rotation_without_changing_page_geometry() {
+    for rotation in [0, 90, 180, 270] {
+        let doc = PdfDocument::new().unwrap();
+        doc.add_page_with_builder(0, PageBuilder::new().size(160., 160.))
+            .unwrap();
+        let page_id = doc.destination(0, DestinationView::Fit).unwrap().page;
+        let mut dictionary = doc.resolve_handle(&page_id).unwrap().into_dict().unwrap();
+        dictionary
+            .try_insert("Rotate".into(), parse(&rotation.to_string()))
+            .unwrap();
+        doc.update_handle(&page_id, PdfObject::PdfDict(dictionary))
+            .unwrap();
+        let mut annotation = Annotation::new(AnnotationKind::Square, [60., 60., 80., 70.]);
+        annotation.flags = 20;
+        let handle = doc.add_annotation(0, &annotation).unwrap();
+        let stream = PdfStream::from_decoded_data(
+            parse("<< /Type /XObject /Subtype /Form /BBox [0 0 20 10] /Resources << >> >>")
+                .into_dict()
+                .unwrap(),
+            b"1 0 0 rg 0 0 20 10 re f".to_vec(),
+        )
+        .unwrap();
+        let id = doc.try_insert_object(PdfObject::PdfStream(stream)).unwrap();
+        let mut dictionary = doc.resolve_handle(&handle).unwrap().into_dict().unwrap();
+        let mut appearance = PdfDict::default();
+        appearance
+            .try_insert(
+                "N".into(),
+                PdfObject::PdfReference(PdfReference::from_id(id)),
+            )
+            .unwrap();
+        dictionary
+            .try_insert("AP".into(), PdfObject::PdfDict(appearance))
+            .unwrap();
+        doc.update_handle(&handle, PdfObject::PdfDict(dictionary))
+            .unwrap();
+        let mut page = doc.get_page(0).unwrap();
+        let geometry = page.geometry().unwrap();
+        let anchor = geometry
+            .user_to_display
+            .checked_transform(&pdf::geom::point::Point::new(60., 70.))
+            .unwrap();
+        for view_rotation in [0, 90, 180, 270] {
+            let mut renderer = SkiaRender::new(72., 72.).unwrap();
+            page.display_with_annotations(
+                &mut renderer,
+                AnnotationRenderOptions {
+                    view_rotation,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let source = pixels(&mut renderer, 160, 160);
+            let mut rotated = vec![255; source.len()];
+            for y in 0..160 {
+                for x in 0..160 {
+                    let (rx, ry) = match view_rotation {
+                        0 => (x, y),
+                        90 => (159 - y, x),
+                        180 => (159 - x, 159 - y),
+                        270 => (y, 159 - x),
+                        _ => unreachable!(),
+                    };
+                    rotated[(ry * 160 + rx) * 4..(ry * 160 + rx + 1) * 4]
+                        .copy_from_slice(&source[(y * 160 + x) * 4..(y * 160 + x + 1) * 4]);
+                }
+            }
+            let (x, y) = (anchor.x() as usize, anchor.y() as usize);
+            let (left, top) = match view_rotation {
+                0 => (x, y),
+                90 => (160 - y, x),
+                180 => (160 - x, 160 - y),
+                270 => (y, 160 - x),
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                bounds(&rotated, 160, [255, 0, 0]),
+                (left, top, left + 19, top + 9),
+                "page {rotation}, view {view_rotation}"
+            );
+            assert_eq!(page.geometry().unwrap().rotation, rotation);
+        }
+        assert!(
+            page.display_list_with_annotations(AnnotationRenderOptions {
+                view_rotation: 45,
+                ..Default::default()
+            })
+            .is_err()
+        );
+    }
+}

@@ -88,7 +88,7 @@ fn two_nodes(doc: &Doc) -> (ObjectId, ObjectId, ObjectId, ObjectId) {
 }
 
 #[test]
-fn actualtext_is_opt_in_and_legacy_strict_and_compatible_behavior_remains() {
+fn actualtext_is_opt_in_while_metadata_preserves_paint_order() {
     let (doc, font) = strict();
     contents(
         &doc,
@@ -99,11 +99,19 @@ fn actualtext_is_opt_in_and_legacy_strict_and_compatible_behavior_remains() {
     let stamp = doc.stamp();
     assert_eq!(text(&doc, Default::default()), "replacement");
     assert_eq!(text(&doc, raw()), "ABC");
-    assert!(
-        doc.get_page(0)
-            .unwrap()
-            .extract_characters_paint_order_report()
-            .is_err()
+    let paint = doc
+        .get_page(0)
+        .unwrap()
+        .extract_characters_paint_order_report()
+        .unwrap();
+    assert!(paint.diagnostics.is_empty());
+    assert_eq!(
+        paint
+            .characters
+            .iter()
+            .filter_map(|c| c.unicode.as_deref())
+            .collect::<String>(),
+        "ABC"
     );
     assert!(doc.is_stamp_current(&stamp));
     assert_eq!(before, doc.save_to_bytes().unwrap());
@@ -113,7 +121,7 @@ fn actualtext_is_opt_in_and_legacy_strict_and_compatible_behavior_remains() {
         .unwrap()
         .extract_characters_paint_order_report()
         .unwrap();
-    assert_eq!(report.diagnostics.len(), 1);
+    assert!(report.diagnostics.is_empty());
     assert_eq!(
         report
             .characters

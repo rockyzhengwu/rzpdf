@@ -16,10 +16,11 @@ pub struct PdfImage {
     data: Vec<u8>,
     is_mask: bool,
     is_inline: bool,
+    interpolate: bool,
     pixel_count: usize,
     max_rgba_bytes: usize,
     soft_mask: Option<ImageSoftMask>,
-    hard_mask_alpha: Option<Vec<u8>>,
+    hard_mask_alpha: Option<ImageHardMask>,
     // Non-device and Matte-preblended samples retain packed precision until
     // unblending/colour conversion.
     color_sample_decode: Option<(usize, Vec<f64>)>,
@@ -27,7 +28,26 @@ pub struct PdfImage {
 }
 
 #[derive(Debug, Clone)]
+struct ImageHardMask {
+    width: u32,
+    height: u32,
+    alpha: Vec<u8>,
+}
+
+impl ImageHardMask {
+    fn alpha_at(&self, x: u32, y: u32, width: u32, height: u32) -> u8 {
+        let sx =
+            (((u128::from(x) * 2 + 1) * u128::from(self.width)) / (u128::from(width) * 2)) as usize;
+        let sy = (((u128::from(y) * 2 + 1) * u128::from(self.height)) / (u128::from(height) * 2))
+            as usize;
+        self.alpha[sy * self.width as usize + sx]
+    }
+}
+
+#[derive(Debug, Clone)]
 struct ImageSoftMask {
+    width: u32,
+    height: u32,
     // Keep packed precision: rounding 16-bit alpha before unblending can
     // turn small nonzero alpha into zero and amplify colour errors.
     data: Vec<u8>,
@@ -37,7 +57,21 @@ struct ImageSoftMask {
 }
 
 impl ImageSoftMask {
-    fn alpha(&self, pixel: usize, width: usize) -> f64 {
+    fn alpha(&self, pixel: usize, width: usize, height: usize) -> f64 {
+        let x = pixel % width;
+        let y = pixel / width;
+        let sx = if width == self.width as usize {
+            x
+        } else {
+            ((x as u128 * 2 + 1) * u128::from(self.width) / (width as u128 * 2)) as usize
+        };
+        let sy = if height == self.height as usize {
+            y
+        } else {
+            ((y as u128 * 2 + 1) * u128::from(self.height) / (height as u128 * 2)) as usize
+        };
+        let pixel = sy * self.width as usize + sx;
+        let width = self.width as usize;
         let row_bytes = (width * self.bits).div_ceil(8);
         let row_start = pixel / width * row_bytes;
         let offset = pixel % width * self.bits;
@@ -79,19 +113,9 @@ impl PdfImage {
             .transpose()?;
         let is_jpx = match filter.as_ref() {
             Some(PdfObject::PdfName(name)) => name.name() == "JPXDecode",
-            Some(PdfObject::PdfArray(array)) if array.len() == 1 => array
-                .get(0)
-                .and_then(PdfObject::as_name)
-                .is_some_and(|n| n.name() == "JPXDecode"),
-            Some(PdfObject::PdfArray(array))
-                if array
-                    .into_iter()
-                    .any(|f| f.as_name().is_some_and(|n| n.name() == "JPXDecode")) =>
-            {
-                return Err(PdfError::UnsupportedFeature(
-                    "JPX image filter chain outside single-stage baseline".into(),
-                ));
-            }
+            Some(PdfObject::PdfArray(array)) => array
+                .into_iter()
+                .any(|f| f.as_name().is_some_and(|n| n.name() == "JPXDecode")),
             _ => false,
         };
         let is_jbig2 = filter.as_ref().is_some_and(|filter| match filter {
@@ -110,10 +134,21 @@ impl PdfImage {
                 .is_some_and(|name| matches!(name.name(), "CCF" | "CCITTFaxDecode")),
             _ => false,
         });
+        let jpx_preserve_indices = if is_jpx {
+            image
+                .get_attr("ColorSpace")
+                .map(|value| ColorSpace::try_new(value, ctx))
+                .transpose()?
+                .is_some_and(|color| matches!(color, ColorSpace::Indexed(_)))
+        } else {
+            false
+        };
         let jpx = if is_jpx {
+            let encoded = stream.encoded_jpx_payload(ctx)?;
             Some(crate::filter::jpx::inspect(
-                stream.raw_data(),
+                &encoded,
                 crate::filter::FilterContext {
+                    jpx_preserve_indices,
                     max_decoded_bytes: ctx.limits().max_decoded_bytes,
                     max_image_pixels: ctx.limits().max_image_pixels,
                     ..Default::default()
@@ -130,10 +165,32 @@ impl PdfImage {
                     .transpose()
                     .map(|v| v.and_then(|v| v.as_u32()))
             };
-            if image.get_attr("SMaskInData").is_some() && number("SMaskInData")? != Some(0) {
-                return Err(PdfError::UnsupportedFeature(
-                    "JPX image SMaskInData/alpha".into(),
+            let alpha_mode = number("SMaskInData")?.unwrap_or(0);
+            if image.get_attr("SMaskInData").is_some() && number("SMaskInData")?.is_none() {
+                return Err(PdfError::ObjectError(
+                    "JPX SMaskInData must be an integer".into(),
                 ));
+            }
+            if alpha_mode > 1 {
+                return Err(PdfError::UnsupportedFeature(
+                    "JPX premultiplied SMaskInData".into(),
+                ));
+            }
+            if alpha_mode == 1 && !info.has_alpha {
+                return Err(PdfError::ObjectError(
+                    "JPX SMaskInData requires an opacity channel".into(),
+                ));
+            }
+            if alpha_mode == 1 {
+                for key in ["Mask", "SMask"] {
+                    if let Some(value) = image.get_attr(key) {
+                        if !matches!(ctx.resolve(value)?, PdfObject::PdfNull) {
+                            return Err(PdfError::UnsupportedFeature(
+                                "JPX embedded and explicit masks combined".into(),
+                            ));
+                        }
+                    }
+                }
             }
             if number("Width")? != Some(info.width) || number("Height")? != Some(info.height) {
                 return Err(PdfError::ObjectError(
@@ -147,6 +204,17 @@ impl PdfImage {
                 return Err(PdfError::ObjectError("image Subtype must be /Image".into()));
             }
         }
+        let interpolate = image
+            .get_attr("Interpolate")
+            .map(|value| ctx.resolve(value))
+            .transpose()?
+            .map(|value| {
+                value.as_bool().map(|v| v.value()).ok_or_else(|| {
+                    PdfError::ObjectError("image Interpolate must be boolean".into())
+                })
+            })
+            .transpose()?
+            .unwrap_or(false);
         let is_mask = if let Some(mask) = image.get_attr("ImageMask") {
             let mask = ctx.resolve(mask)?;
 
@@ -250,19 +318,11 @@ impl PdfImage {
             if let Some(colorspace_obj) = image.get_attr("ColorSpace") {
                 let color = ColorSpace::try_new(colorspace_obj, ctx)?;
                 if let Some(info) = jpx
-                    && !matches!(
-                        (&color, info.color_space),
-                        (
-                            ColorSpace::DeviceGray(_),
-                            crate::filter::jpx::JpxColorSpace::Gray
-                        ) | (
-                            ColorSpace::DeviceRgb(_),
-                            crate::filter::jpx::JpxColorSpace::Rgb
-                        )
-                    )
+                    && color.number_of_components()?
+                        != info.components - usize::from(info.has_alpha)
                 {
-                    return Err(PdfError::UnsupportedFeature(
-                        "JPX dictionary colour override outside baseline".into(),
+                    return Err(PdfError::ObjectError(
+                        "JPX dictionary color component count mismatch".into(),
                     ));
                 }
                 color
@@ -273,6 +333,9 @@ impl PdfImage {
                     }
                     crate::filter::jpx::JpxColorSpace::Rgb => {
                         ColorSpace::DeviceRgb(crate::color::device_rgb::DeviceRgb::new())
+                    }
+                    crate::filter::jpx::JpxColorSpace::Cmyk => {
+                        ColorSpace::DeviceCmyk(crate::color::device_cmyk::DeviceCmyk::new())
                     }
                 }
             } else {
@@ -285,7 +348,7 @@ impl PdfImage {
                 "JBIG2 colour space outside Gray/stencil baseline".into(),
             ));
         }
-        let indexed_decode = if indexed {
+        let indexed_decode = if indexed && jpx.is_none() {
             image_decode_endpoints(Some(1), image.get_attr("Decode"), ctx)?
         } else {
             None
@@ -379,7 +442,69 @@ impl PdfImage {
             }
             _ => None,
         };
-        let mut data = stream.decode_data(ctx)?;
+        let mut data = if is_jpx {
+            stream.decode_jpx_image_data(ctx, jpx_preserve_indices)?
+        } else {
+            stream.decode_data(ctx)?
+        };
+        let embedded_alpha = if let Some(info) = jpx.filter(|info| info.has_alpha) {
+            if data.len()
+                != pixel_count
+                    .checked_mul(info.components)
+                    .ok_or_else(|| PdfError::ResourceLimit("JPX channel bytes".into()))?
+            {
+                return Err(PdfError::ObjectError(
+                    "JPX interleaved channel length mismatch".into(),
+                ));
+            }
+            let use_alpha = image
+                .get_attr("SMaskInData")
+                .map(|v| ctx.resolve_owned(v))
+                .transpose()?
+                .and_then(|v| v.as_u32())
+                == Some(1);
+            let colors = info.components - 1;
+            let color_bytes = pixel_count
+                .checked_mul(colors)
+                .ok_or_else(|| PdfError::ResourceLimit("JPX color bytes".into()))?;
+            let alpha_bytes = if use_alpha { pixel_count } else { 0 };
+            if data
+                .capacity()
+                .checked_add(color_bytes)
+                .and_then(|n| n.checked_add(alpha_bytes))
+                .is_none_or(|n| n > ctx.limits().max_decoded_bytes)
+            {
+                return Err(PdfError::ResourceLimit(
+                    "JPX channel separation bytes".into(),
+                ));
+            }
+            let mut pixels = Vec::new();
+            pixels
+                .try_reserve_exact(color_bytes)
+                .map_err(|_| PdfError::ResourceLimit("JPX color allocation".into()))?;
+            let mut alpha = Vec::new();
+            alpha
+                .try_reserve_exact(alpha_bytes)
+                .map_err(|_| PdfError::ResourceLimit("JPX opacity allocation".into()))?;
+            for sample in data.chunks_exact(info.components) {
+                pixels.extend_from_slice(&sample[..colors]);
+                if use_alpha {
+                    alpha.push(sample[colors]);
+                }
+            }
+            data = pixels;
+            use_alpha.then_some(ImageSoftMask {
+                width,
+                height,
+                data: alpha,
+                bits: 8,
+                decode: [0., 1.],
+                matte: None,
+            })
+        } else {
+            None
+        };
+
         if is_ccitt {
             // The legacy fax filter returns one 0/255 byte per sample. Adapt
             // that contract to PDF's row-padded 1-bit samples before applying
@@ -435,18 +560,13 @@ impl PdfImage {
                     PdfObject::PdfName(name) => {
                         matches!(name.name(), "FlateDecode" | "Fl" | "LZWDecode" | "LZW")
                     }
-                    PdfObject::PdfArray(filters) => {
-                        filters.len() == 1
-                            && filters
-                                .get(0)
-                                .and_then(PdfObject::as_name)
-                                .is_some_and(|name| {
-                                    matches!(
-                                        name.name(),
-                                        "FlateDecode" | "Fl" | "LZWDecode" | "LZW"
-                                    )
-                                })
-                    }
+                    PdfObject::PdfArray(filters) => filters
+                        .into_iter()
+                        .last()
+                        .and_then(PdfObject::as_name)
+                        .is_some_and(|name| {
+                            matches!(name.name(), "FlateDecode" | "Fl" | "LZWDecode" | "LZW")
+                        }),
                     _ => false,
                 }))
             && data.len() > expected
@@ -532,7 +652,7 @@ impl PdfImage {
             )?;
         }
         let soft_mask = match resolved_soft_mask.as_ref() {
-            None | Some(PdfObject::PdfNull) => None,
+            None | Some(PdfObject::PdfNull) => embedded_alpha,
             Some(mask) => {
                 let mask = mask
                     .as_stream()
@@ -549,24 +669,18 @@ impl PdfImage {
                         ));
                     }
                 }
-                for (key, expected) in [("Width", width), ("Height", height)] {
-                    let value = mask.dict().get(key).ok_or_else(|| {
-                        PdfError::ObjectError("SMask dimensions/components missing".into())
-                    })?;
-                    let value = ctx.resolve(value)?;
-                    let actual = value
-                        .as_number()
-                        .ok_or_else(|| {
-                            PdfError::ObjectError(
-                                "SMask dimensions/components must be integers".into(),
-                            )
-                        })?
-                        .as_u32_checked()?;
-                    if actual != expected {
-                        return Err(PdfError::UnsupportedFeature(
-                            "SMask requires matching dimensions".into(),
-                        ));
-                    }
+                let dimension = |key: &str| -> PdfResult<u32> {
+                    let value = ctx.resolve(mask.dict().get(key).ok_or_else(|| {
+                        PdfError::ObjectError("SMask dimension missing".into())
+                    })?)?;
+                    value.as_u32().filter(|n| *n > 0).ok_or_else(|| {
+                        PdfError::ObjectError("SMask dimension must be a positive integer".into())
+                    })
+                };
+                let mask_width = dimension("Width")?;
+                let mask_height = dimension("Height")?;
+                if u64::from(mask_width) * u64::from(mask_height) > ctx.limits().max_image_pixels {
+                    return Err(PdfError::ResourceLimit("SMask pixel limit".into()));
                 }
                 let mask_bits =
                     ctx.resolve(mask.dict().get("BitsPerComponent").ok_or_else(|| {
@@ -596,19 +710,33 @@ impl PdfImage {
                         return Err(PdfError::UnsupportedFeature("SMask stencil mask".into()));
                     }
                 }
-                let alpha = mask.decode_data(ctx)?;
+                let mut alpha = mask.decode_data(ctx)?;
                 let endpoints = image_decode_endpoints(Some(1), mask.dict().get("Decode"), ctx)?;
-                let row_bytes = (width as usize)
+                let row_bytes = (mask_width as usize)
                     .checked_mul(mask_bits)
                     .and_then(|n| n.checked_add(7))
                     .map(|n| n / 8)
                     .ok_or_else(|| PdfError::ResourceLimit("SMask sample size".into()))?;
-                if row_bytes.checked_mul(height as usize) != Some(alpha.len()) {
+                let expected = row_bytes
+                    .checked_mul(mask_height as usize)
+                    .ok_or_else(|| PdfError::ResourceLimit("SMask sample bytes".into()))?;
+                if alpha.len() > expected
+                    && matches!(&alpha[expected..], b"\r\n" | b"\n" | b"\r")
+                    && ctx.options().mode == crate::parser::syntax::ParseMode::Compatible
+                {
+                    alpha.truncate(expected);
+                    ctx.record_structure_recovery(
+                        crate::parser::diagnostic::StructureReason::ImageTrailingBytes,
+                    )?;
+                }
+                if row_bytes.checked_mul(mask_height as usize) != Some(alpha.len()) {
                     return Err(PdfError::ObjectError(
                         "SMask data length does not match dimensions".into(),
                     ));
                 }
                 Some(ImageSoftMask {
+                    width: mask_width,
+                    height: mask_height,
                     data: alpha,
                     bits: mask_bits,
                     decode: endpoints.map_or([0.0, 1.0], |v| [v[0], v[1]]),
@@ -637,6 +765,7 @@ impl PdfImage {
             data,
             is_inline: false,
             is_mask,
+            interpolate,
             pixel_count,
             max_rgba_bytes: ctx.limits().max_decoded_bytes,
             soft_mask,
@@ -670,7 +799,13 @@ impl PdfImage {
             .data
             .len()
             .checked_add(self.soft_mask.as_ref().map_or(0, |mask| mask.data.len()))
-            .and_then(|n| n.checked_add(self.hard_mask_alpha.as_ref().map_or(0, Vec::len)))
+            .and_then(|n| {
+                n.checked_add(
+                    self.hard_mask_alpha
+                        .as_ref()
+                        .map_or(0, |mask| mask.alpha.len()),
+                )
+            })
             .and_then(|n| {
                 self.soft_mask
                     .as_ref()
@@ -701,6 +836,10 @@ impl PdfImage {
     pub fn colorspace(&self) -> &ColorSpace {
         &self.colorspace
     }
+    pub fn interpolate(&self) -> bool {
+        self.interpolate
+    }
+
     pub fn is_mask(&self) -> bool {
         self.is_mask
     }
@@ -713,7 +852,7 @@ impl PdfImage {
         if let Some(intent) = self.rendering_intent {
             context.rendering_intent = intent;
         }
-        self.rgba_buffer_inner(None, &context)
+        self.rgba_buffer_inner(None, &context, self.width, self.height)
     }
     pub fn rendering_intent(&self) -> Option<crate::color::conversion::RenderingIntent> {
         self.rendering_intent
@@ -722,7 +861,27 @@ impl PdfImage {
         &self,
         context: &crate::color::conversion::ColorConversionContext,
     ) -> PdfResult<Vec<u8>> {
-        self.rgba_buffer_inner(None, context)
+        self.rgba_buffer_inner(None, context, self.width, self.height)
+    }
+
+    /// Rasterize an image mask at its own resolution when it is finer than
+    /// the base image. Extraction APIs retain the original image dimensions.
+    pub fn rendering_rgba_with_context(
+        &self,
+        context: &crate::color::conversion::ColorConversionContext,
+    ) -> PdfResult<(u32, u32, Vec<u8>)> {
+        let mut width = self.width;
+        let mut height = self.height;
+        if let Some(mask) = &self.hard_mask_alpha {
+            width = width.max(mask.width);
+            height = height.max(mask.height);
+        }
+        if let Some(mask) = &self.soft_mask {
+            width = width.max(mask.width);
+            height = height.max(mask.height);
+        }
+        let pixels = self.rgba_buffer_inner(None, context, width, height)?;
+        Ok((width, height, pixels))
     }
 
     /// Apply the current nonstroking color to a stencil's transparent coverage.
@@ -742,6 +901,8 @@ impl PdfImage {
         self.rgba_buffer_inner(
             Some(color),
             &crate::color::conversion::ColorConversionContext::default(),
+            self.width,
+            self.height,
         )
     }
 
@@ -749,6 +910,8 @@ impl PdfImage {
         &self,
         stencil_color: Option<&crate::color::value::ColorRgb>,
         context: &crate::color::conversion::ColorConversionContext,
+        width: u32,
+        height: u32,
     ) -> PdfResult<Vec<u8>> {
         if self.is_mask && stencil_color.is_none() {
             return Err(PdfError::ColorError(
@@ -782,17 +945,31 @@ impl PdfImage {
             ));
         }
         if let Some(mask) = &self.soft_mask {
-            let row_bytes = (self.width as usize)
+            let row_bytes = (mask.width as usize)
                 .checked_mul(mask.bits)
                 .and_then(|n| n.checked_add(7))
                 .map(|n| n / 8)
                 .ok_or_else(|| PdfError::ResourceLimit("SMask sample size".into()))?;
-            if row_bytes.checked_mul(self.height as usize) != Some(mask.data.len()) {
+            if row_bytes.checked_mul(mask.height as usize) != Some(mask.data.len()) {
                 return Err(PdfError::ObjectError("SMask alpha length mismatch".into()));
             }
         }
-        let output_size = self
-            .pixel_count
+        let pixel_count = (width as usize)
+            .checked_mul(height as usize)
+            .ok_or_else(|| PdfError::ResourceLimit("image render pixel count".into()))?;
+        let source_index = |index: usize| {
+            if (width, height) == (self.width, self.height) {
+                return index;
+            }
+            let x = index % width as usize;
+            let y = index / width as usize;
+            let sx =
+                ((x as u128 * 2 + 1) * u128::from(self.width) / (u128::from(width) * 2)) as usize;
+            let sy =
+                ((y as u128 * 2 + 1) * u128::from(self.height) / (u128::from(height) * 2)) as usize;
+            sy * self.width as usize + sx
+        };
+        let output_size = pixel_count
             .checked_mul(4)
             .filter(|n| *n <= self.max_rgba_bytes)
             .ok_or_else(|| PdfError::ResourceLimit("image RGBA byte budget".into()))?;
@@ -821,8 +998,11 @@ impl PdfImage {
             values.resize(components, 0.0);
             let mut color = crate::color::value::ColorValue::new(values);
             let maximum = ((1u32 << bits) - 1) as f64;
-            for row in self.data.chunks_exact(row_bytes) {
-                for pixel in 0..self.width as usize {
+            for y in 0..height as usize {
+                for x in 0..width as usize {
+                    let source = source_index(y * width as usize + x);
+                    let row = &self.data[source / self.width as usize * row_bytes..][..row_bytes];
+                    let pixel = source % self.width as usize;
                     for component in 0..components {
                         let offset = (pixel * components + component) * bits;
                         let sample = if bits == 16 {
@@ -840,7 +1020,7 @@ impl PdfImage {
                     if let Some(mask) = &self.soft_mask
                         && let Some(matte) = &mask.matte
                     {
-                        let alpha = mask.alpha(pixel_index, self.width as usize);
+                        let alpha = mask.alpha(pixel_index, width as usize, height as usize);
                         if alpha == 0.0 {
                             rgba.extend_from_slice(&[0, 0, 0, 0]);
                             continue;
@@ -854,7 +1034,8 @@ impl PdfImage {
         } else {
             match &self.colorspace {
                 ColorSpace::DeviceGray(_) => {
-                    for &g in self.data.iter() {
+                    for index in 0..pixel_count {
+                        let g = self.data[source_index(index)];
                         if let Some(color) = stencil_color {
                             rgba.extend_from_slice(&[color.r(), color.g(), color.b(), 255 - g]);
                         } else {
@@ -863,12 +1044,16 @@ impl PdfImage {
                     }
                 }
                 ColorSpace::DeviceRgb(_) => {
-                    for chunk in self.data.as_chunks::<3>().0 {
+                    for index in 0..pixel_count {
+                        let offset = source_index(index) * 3;
+                        let chunk = &self.data[offset..offset + 3];
                         rgba.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
                     }
                 }
                 ColorSpace::DeviceCmyk(_) => {
-                    for chunk in self.data.as_chunks::<4>().0 {
+                    for index in 0..pixel_count {
+                        let offset = source_index(index) * 4;
+                        let chunk = &self.data[offset..offset + 4];
                         let (c, m, y, k) = (
                             chunk[0] as f32 / 255.0,
                             chunk[1] as f32 / 255.0,
@@ -886,11 +1071,12 @@ impl PdfImage {
                     // entire table could fail on an unused tint-transform input.
                     // Fixed stack storage bounds the cache independently of image size.
                     let mut palette: [Option<[u8; 4]>; 256] = [None; 256];
-                    for (pixel_index, &index) in self.data.iter().enumerate() {
+                    for pixel_index in 0..pixel_count {
+                        let index = self.data[source_index(pixel_index)];
                         if let Some(mask) = &self.soft_mask
                             && let Some(matte) = &mask.matte
                         {
-                            let alpha = mask.alpha(pixel_index, self.width as usize);
+                            let alpha = mask.alpha(pixel_index, width as usize, height as usize);
                             if alpha == 0.0 {
                                 rgba.extend_from_slice(&[0, 0, 0, 0]);
                                 continue;
@@ -943,17 +1129,15 @@ impl PdfImage {
         }
         if let Some(mask) = &self.soft_mask {
             for (index, pixel) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-                pixel[3] = (mask.alpha(index, self.width as usize) * 255.0).round() as u8;
+                pixel[3] =
+                    (mask.alpha(index, width as usize, height as usize) * 255.0).round() as u8;
             }
         }
-        if let Some(alpha) = &self.hard_mask_alpha {
-            if alpha.len() != self.pixel_count {
-                return Err(PdfError::ObjectError(
-                    "image Mask alpha length mismatch".into(),
-                ));
-            }
-            for (pixel, alpha) in rgba.as_chunks_mut::<4>().0.iter_mut().zip(alpha) {
-                pixel[3] = ((u16::from(pixel[3]) * u16::from(*alpha) + 127) / 255) as u8;
+        if let Some(mask) = &self.hard_mask_alpha {
+            for (index, pixel) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let alpha =
+                    mask.alpha_at(index as u32 % width, index as u32 / width, width, height);
+                pixel[3] = ((u16::from(pixel[3]) * u16::from(alpha) + 127) / 255) as u8;
             }
         }
         Ok(rgba)
@@ -968,7 +1152,7 @@ fn image_mask_alpha<R: Read + Seek>(
     bits: usize,
     components: usize,
     ctx: &PDFContext<R>,
-) -> PdfResult<Vec<u8>> {
+) -> PdfResult<ImageHardMask> {
     let count = (width as usize)
         .checked_mul(height as usize)
         .ok_or_else(|| PdfError::ResourceLimit("image Mask pixels".into()))?;
@@ -1054,21 +1238,25 @@ fn image_mask_alpha<R: Read + Seek>(
                 "explicit Mask sample length mismatch".into(),
             ));
         }
-        for y in 0..height {
-            let sy = (((u128::from(y) * 2 + 1) * u128::from(stencil.height))
-                / (u128::from(height) * 2)) as usize;
-            for x in 0..width {
-                let sx = (((u128::from(x) * 2 + 1) * u128::from(stencil.width))
-                    / (u128::from(width) * 2)) as usize;
-                alpha.push(255 - stencil.data[sy * stencil.width as usize + sx]);
-            }
+        let mut alpha = stencil.data;
+        for value in &mut alpha {
+            *value = 255 - *value;
         }
+        return Ok(ImageHardMask {
+            width: stencil.width,
+            height: stencil.height,
+            alpha,
+        });
     } else {
         return Err(PdfError::ObjectError(
             "image Mask must be an array or stencil stream".into(),
         ));
     }
-    Ok(alpha)
+    Ok(ImageHardMask {
+        width,
+        height,
+        alpha,
+    })
 }
 
 fn component_range(space: &ColorSpace, component: usize) -> (f64, f64) {
@@ -1859,6 +2047,7 @@ mod tests {
             colorspace: ColorSpace::DeviceRgb(DeviceRgb::new()),
             data: vec![10, 20, 30],
             is_mask: false,
+            interpolate: false,
             is_inline: false,
             pixel_count: 1,
             max_rgba_bytes: 4,
@@ -1869,6 +2058,8 @@ mod tests {
         };
         assert_eq!(image.rgba_buffer().unwrap(), vec![10, 20, 30, 255]);
         image.soft_mask = Some(ImageSoftMask {
+            width: 1,
+            height: 1,
             data: vec![128],
             bits: 8,
             decode: [0.0, 1.0],
@@ -2056,6 +2247,113 @@ mod explicit_mask_tests {
             .rgba_buffer()
             .unwrap();
         assert_eq!((rgba[3], rgba[7]), (0, 255));
+    }
+    #[test]
+    fn soft_masks_keep_native_grid_packed_precision_and_matte() {
+        let ctx = PDFContext::<Cursor<Vec<u8>>>::new_without_source(
+            PdfDict::default(),
+            ParseOptions::default(),
+        );
+        let make = |base: &str, colors: Vec<u8>, mask: &str, alpha: Vec<u8>| {
+            let mut source = object(base, colors.clone())
+                .as_stream()
+                .unwrap()
+                .dict()
+                .clone();
+            source
+                .try_insert("SMask".into(), object(mask, alpha))
+                .unwrap();
+            PdfImage::try_new(
+                "masked".into(),
+                &PdfObject::PdfStream(PdfStream::new(source, colors)),
+                &ctx,
+            )
+        };
+        let mut image = make(
+            "<< /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceRGB >>", vec![255,0,0],
+            "<< /Subtype /Image /Width 3 /Height 2 /BitsPerComponent 1 /ColorSpace /DeviceGray /Decode [1 0] >>", vec![0b01000000, 0b10100000]).unwrap();
+        assert_eq!(image.rgba_buffer().unwrap().len(), 4);
+        let (w, h, rgba) = image
+            .rendering_rgba_with_context(&Default::default())
+            .unwrap();
+        assert_eq!((w, h), (3, 2));
+        assert_eq!(
+            rgba.chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>(),
+            [255, 0, 255, 0, 255, 0]
+        );
+        assert!(rgba.chunks_exact(4).all(|p| p[..3] == [255, 0, 0]));
+        image.max_rgba_bytes = 23;
+        assert!(matches!(
+            image.rendering_rgba_with_context(&Default::default()),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        let image = make(
+            "<< /Width 1 /Height 1 /BitsPerComponent 16 /ColorSpace /DeviceGray >>", vec![255,254],
+            "<< /Subtype /Image /Width 3 /Height 1 /BitsPerComponent 16 /ColorSpace /DeviceGray /Matte [1] >>", vec![0,0,0,1,255,255]).unwrap();
+        let (_, _, rgba) = image
+            .rendering_rgba_with_context(&Default::default())
+            .unwrap();
+        // 1/65535 opacity unblends to black before alpha rounds to zero.
+        assert_eq!(rgba, [0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255]);
+        let image = make(
+            "<< /Width 3 /Height 2 /BitsPerComponent 1 /ColorSpace [/Indexed /DeviceRGB 1 <FF00000000FF>] >>", vec![0b01000000,0b10100000],
+            "<< /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceGray >>", vec![128]).unwrap();
+        let (_, _, rgba) = image
+            .rendering_rgba_with_context(&Default::default())
+            .unwrap();
+        assert_eq!(
+            rgba,
+            [
+                255, 0, 0, 128, 0, 0, 255, 128, 255, 0, 0, 128, 0, 0, 255, 128, 255, 0, 0, 128, 0,
+                0, 255, 128
+            ]
+        );
+        for dimension in ["0", "-1", "0.5", "1000000"] {
+            assert!(make(
+                "<< /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceGray >>", vec![128],
+                &format!("<< /Subtype /Image /Width {dimension} /Height 1000000 /BitsPerComponent 8 /ColorSpace /DeviceGray >>"), vec![]).is_err());
+        }
+    }
+
+    #[test]
+    fn rendering_preserves_finer_stencil_and_enforces_combined_byte_budget() {
+        let ctx = PDFContext::<Cursor<Vec<u8>>>::new_without_source(
+            PdfDict::default(),
+            ParseOptions::default(),
+        );
+        for (decode, expected) in [
+            ("", vec![255, 0, 255, 0, 255, 0, 255, 0]),
+            ("/Decode [1 0]", vec![0, 255, 0, 255, 0, 255, 0, 255]),
+        ] {
+            let mask = object(
+                &format!("<< /Width 8 /Height 1 /ImageMask true {decode} >>"),
+                vec![0b01010101],
+            );
+            let mut base = object(
+                "<< /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceRGB >>",
+                vec![20, 40, 60],
+            );
+            let mut dict = base.as_stream().unwrap().dict().clone();
+            dict.try_insert("Mask".into(), mask).unwrap();
+            base = PdfObject::PdfStream(PdfStream::new(dict, vec![20, 40, 60]));
+            let mut image = PdfImage::try_new("fine-mask".into(), &base, &ctx).unwrap();
+            assert_eq!(image.pixel_dimensions(), (1, 1));
+            assert_eq!(image.rgba_buffer().unwrap().len(), 4);
+            let (w, h, pixels) = image
+                .rendering_rgba_with_context(&Default::default())
+                .unwrap();
+            assert_eq!((w, h), (8, 1));
+            assert_eq!(
+                pixels.chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>(),
+                expected
+            );
+            assert!(pixels.chunks_exact(4).all(|p| p[..3] == [20, 40, 60]));
+            image.max_rgba_bytes = 31;
+            assert!(matches!(
+                image.rendering_rgba_with_context(&Default::default()),
+                Err(PdfError::ResourceLimit(_))
+            ));
+        }
     }
     #[test]
     fn explicit_stencil_resamples_and_honours_decode() {

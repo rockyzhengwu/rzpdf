@@ -12,6 +12,7 @@ pub mod glyph_name;
 pub mod open_type;
 pub mod open_type_program;
 pub mod pdf_font;
+pub mod resolver;
 pub mod simple_font;
 pub mod to_unicode;
 pub mod truetype;

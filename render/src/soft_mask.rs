@@ -24,7 +24,7 @@ impl SkiaRender {
         let reserve = bytes
             .checked_mul(held as usize)
             .ok_or_else(|| PdfError::ResourceLimit("soft mask aggregate bytes".into()))?;
-        let mut limits = self.limits;
+        let mut limits = self.child_limits_with_clips()?;
         limits.max_render_bytes = limits
             .max_render_bytes
             .checked_sub(reserve)
@@ -38,11 +38,15 @@ impl SkiaRender {
             )
             .ok_or_else(|| PdfError::ResourceLimit("soft mask aggregate pixels".into()))?;
         let mut renderer = Self::with_limits(self.scale_x * 72., self.scale_y * 72., limits)?;
+        self.inherit_region(&mut renderer, 1)?;
         // Supported Luminosity groups declare RGB and are isolated. Evaluate
         // their members on transparent, then composite the group over BC below;
         // BC must not affect a member's internal Multiply/Screen operation.
         renderer.clear_color = Color::TRANSPARENT;
+        renderer.substitute_font = self.substitute_font.clone();
+        renderer.font_provider = self.font_provider.clone();
         mask.list.replay(&mut renderer)?;
+        self.curved_raster_paths |= renderer.curved_raster_paths;
         let source = renderer
             .surface
             .peek_pixels()
@@ -93,18 +97,7 @@ impl SkiaRender {
             self.page_width as usize * 4,
         )
         .ok_or_else(|| PdfError::ResourceLimit("soft mask image".into()))?;
-        let inverse = ctm.checked_inverse()?;
-        let matrix = skia_safe::Matrix::new_all(
-            inverse.a(),
-            inverse.c(),
-            inverse.e(),
-            inverse.b(),
-            inverse.d(),
-            inverse.f(),
-            0.,
-            0.,
-            1.,
-        );
+        let matrix = self.raster_shader_matrix(ctm)?;
         let mask = image
             .to_shader(
                 (skia_safe::TileMode::Decal, skia_safe::TileMode::Decal),

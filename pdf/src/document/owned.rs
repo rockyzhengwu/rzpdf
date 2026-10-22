@@ -343,6 +343,15 @@ impl Document {
     ) -> PdfResult<T> {
         self.inner.edit_transaction(|_| edit(self))
     }
+    /// Owned-facade transaction using the same bounded savepoint pool as core edits.
+    pub fn edit_transaction_with_budget<T>(
+        &self,
+        budget: &crate::budget::OperationBudget,
+        edit: impl FnOnce(&Document) -> PdfResult<T>,
+    ) -> PdfResult<T> {
+        self.inner
+            .edit_transaction_with_budget(budget, |_| edit(self))
+    }
 }
 
 impl Deref for Document {

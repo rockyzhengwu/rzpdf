@@ -1,0 +1,1 @@
+{"name":"@rzpdf/web-p0","version":"0.0.0","private":true,"type":"module","scripts":{"build":"tsc","test:browser":"node tests/browser.mjs"},"devDependencies":{"playwright-core":"1.46.1","typescript":"5.9.3"}}

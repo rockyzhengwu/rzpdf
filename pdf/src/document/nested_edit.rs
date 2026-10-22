@@ -354,7 +354,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         // separate nonempty invocation-chain validation.
         // Equal endpoint paths can still enclose a child Form invocation.
         // Only the explicit event-range API has single-program semantics.
-        let budget = self.ctx.limits().operation_budget();
+        let budget = self.ctx.operation_budget();
         self.replace_selected_text_span(page, root, range, text, preserve_advance, &budget)
     }
 
@@ -372,7 +372,7 @@ impl<R: Read + Seek> PdfDocument<R> {
                 "nested range source must anchor its start event".into(),
             ));
         }
-        let budget = self.ctx.limits().operation_budget();
+        let budget = self.ctx.operation_budget();
         let current_page = self.get_page_with_budget(page, &budget)?;
         let chain = current_page.prepare_form_chain_with_budget(root, source, &budget)?;
         let leaf = chain
@@ -426,7 +426,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         text: &str,
         preserve_advance: bool,
     ) -> PdfResult<()> {
-        let budget = self.ctx.limits().operation_budget();
+        let budget = self.ctx.operation_budget();
         let current_page = self.get_page_with_budget(page, &budget)?;
         let chain = current_page.prepare_form_chain_with_budget(root, source, &budget)?;
         let target = &chain

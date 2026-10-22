@@ -47,6 +47,9 @@ pub struct Interpreter<'a, R: Seek + Read> {
     path_start: Point,
     in_text_object: bool,
     marked_content_depth: usize,
+    language: Option<std::rc::Rc<str>>,
+    language_initialized: bool,
+    language_stack: Vec<Option<std::rc::Rc<str>>>,
     optional_content: Option<crate::document::optional_content::OptionalContentVisibility>,
     optional_visible: bool,
     optional_stack: Vec<bool>,
@@ -109,6 +112,9 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             path_start: Point::default(),
             in_text_object: false,
             marked_content_depth: 0,
+            language: None,
+            language_initialized: false,
+            language_stack: Vec::new(),
             optional_content: None,
             optional_visible: true,
             optional_stack: Vec::new(),
@@ -134,6 +140,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
     }
 
     fn run_content(&mut self, device: &mut dyn Device) -> PdfResult<()> {
+        self.initialize_language()?;
         let mut operations = 0usize;
         while let Some(op) = self.parser.read_operator()? {
             self.execution_budget.operation(&self.ctx.limits())?;
@@ -532,7 +539,22 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
 
             // Metadata does not change glyph painting. Logical replacements
             // are applied only by explicit marked-text capture.
+            "MP" | "DP" => {
+                let expected = if op.name() == "DP" { 2 } else { 1 };
+                if op.num_operands() != expected {
+                    return Err(PdfError::PageOperatorError(
+                        "marked-content point operands".into(),
+                    ));
+                }
+                op.get_as_name(0)?;
+                if op.name() == "DP" {
+                    self.validate_selected_properties(&op)?;
+                }
+                // A point has no content extent: never push a BMC/BDC frame or
+                // change optional visibility / replace subsequent glyph text.
+            }
             "BMC" => {
+                self.push_language_mark(&op)?;
                 self.begin_optional_mark(&op)?;
                 if self.semantic_capture.is_some() {
                     self.capture_mark(&op)?;
@@ -560,6 +582,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                         self.unsupported_operator(&op)?;
                     }
                 }
+                self.push_language_mark(&op)?;
                 self.marked_content_depth = self
                     .marked_content_depth
                     .checked_add(1)
@@ -576,6 +599,10 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                     self.marked_content_depth.checked_sub(1).ok_or_else(|| {
                         PdfError::PageOperatorError("EMC without matching BMC".into())
                     })?;
+                self.language = self
+                    .language_stack
+                    .pop()
+                    .ok_or_else(|| PdfError::PageOperatorError("language unmatched EMC".into()))?;
                 if self.semantic_capture.is_some() {
                     self.capture_mark(&op)?;
                 }
@@ -620,8 +647,15 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             .checked_add(prefix.len())
             .and_then(|n| n.checked_add(suffix.len()))
             .ok_or_else(|| PdfError::ResourceLimit("diagnostic size overflow".into()))?;
+        let source = self.nested_draw_source()?;
+        let source_bytes = source
+            .as_ref()
+            .map(|s| s.retained_bytes())
+            .transpose()?
+            .unwrap_or(0);
         let retained_bytes = message_bytes
             .checked_add(op.name().len())
+            .and_then(|n| n.checked_add(source_bytes))
             .ok_or_else(|| PdfError::ResourceLimit("diagnostic size overflow".into()))?;
         crate::filter::check_output_size(
             self.diagnostic_bytes,
@@ -663,6 +697,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             operator,
             byte_offset: op.byte_offset(),
             message,
+            source,
         });
         if let Some(error) = strict_error {
             return Err(error);
@@ -695,6 +730,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             let horz_scale = self.current_state.text_horz_scale;
             device.preflight_draw(&self.current_state.graphic_state, None)?;
             let mut textobj = TextObject::new(self.current_state.graphic_state.clone());
+            textobj.set_language(self.language.clone());
             textobj.horizontal_scale = horz_scale;
 
             let wmd = font.writting_mode();
@@ -704,6 +740,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             let matrix = matrix.checked_mul(&self.page.page_matrix)?;
 
             textobj.matrix = matrix.clone();
+            textobj.paint_matrix = self.current_state.ctm.checked_mul(&self.page.page_matrix)?;
             let ox = matrix.e();
             let oy = matrix.f();
             textobj.origin_x = ox;
@@ -830,6 +867,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
         let horz_scale = self.current_state.text_horz_scale;
         device.preflight_draw(&self.current_state.graphic_state, None)?;
         let mut textobj = TextObject::new(self.current_state.graphic_state.clone());
+        textobj.set_language(self.language.clone());
         textobj.horizontal_scale = horz_scale;
 
         let matrix = Matrix::new(1.0, 0.0, 0.0, 1.0, 0.0, self.current_state.text_rise)
@@ -837,6 +875,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             .checked_mul(&self.current_state.ctm)?;
         let matrix = matrix.checked_mul(&self.page.page_matrix)?;
         textobj.matrix = matrix.clone();
+        textobj.paint_matrix = self.current_state.ctm.checked_mul(&self.page.page_matrix)?;
         let ox = matrix.e();
         let oy = matrix.f();
         textobj.origin_x = ox;
@@ -922,12 +961,12 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                 ));
             }
             let general = &text.state.general_state;
-            if general.fill_alpha != 1.0
-                || general.stroke_alpha != 1.0
+            if general.fill_alpha != general.stroke_alpha
+                || general.soft_mask.is_some()
                 || general.blend_mode != super::general_state::BlendMode::Normal
             {
                 return Err(PdfError::UnsupportedFeature(
-                    "Type3 transparency outside opaque graphics baseline".into(),
+                    "Type3 unequal alpha, blend mode or soft mask outside baseline".into(),
                 ));
             }
             let limits = self.ctx.limits();
@@ -946,9 +985,21 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                     work.decoded(bytes, &limits)
                 })?;
                 if program.metrics().width[0] != font.width(code)? {
-                    return Err(PdfError::FontError(
-                        "Type3 CharProc width disagrees with Widths".into(),
-                    ));
+                    if matches!(
+                        self.ctx.read_provenance(),
+                        crate::parser::diagnostic::ReadProvenance::Parsed(
+                            crate::parser::syntax::ParseMode::Compatible
+                        )
+                    ) {
+                        // Advance remains governed by Widths, never the damaged d0/d1 metric.
+                        self.ctx.record_structure_recovery(
+                            crate::parser::diagnostic::StructureReason::FontWidths,
+                        )?;
+                    } else {
+                        return Err(PdfError::FontError(
+                            "Type3 CharProc width disagrees with Widths".into(),
+                        ));
+                    }
                 }
                 let mut child = Interpreter::new(
                     self.page,
@@ -960,6 +1011,8 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                         self.ctx.options(),
                     )),
                 );
+                child.language = self.language.clone();
+                child.language_initialized = true;
                 child.type3_depth = self.type3_depth + 1;
                 child.optional_content = self.optional_content.clone();
                 child.optional_visible = self.optional_visible;
@@ -1002,24 +1055,48 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                     ))?
                     .checked_mul(&baseline)?
                     .checked_mul(&self.page.page_matrix.checked_inverse()?)?;
-                for (index, operation) in program.program().operations().iter().enumerate().skip(1)
-                {
-                    child.execution_budget.operation(&limits)?;
-                    child.operation_index = index;
-                    child.operation_byte_offset = operation.operator.byte_offset();
-                    let visible = child.optional_visible;
-                    child.invoke_oeration(
-                        operation.operator.clone(),
-                        &mut crate::device::visibility::VisibilityDevice { device, visible },
-                    )?;
+                let grouped = general.fill_alpha != 1.;
+                if grouped {
+                    device.begin_group(super::transparency::GroupPaint {
+                        isolated: true,
+                        knockout: false,
+                        alpha: general.fill_alpha,
+                        blend_mode: super::general_state::BlendMode::Normal,
+                        clip: text.state.clip_path.clone(),
+                        soft_mask: None,
+                    })?;
+                    child.current_state.graphic_state.general_state.fill_alpha = 1.;
+                    child.current_state.graphic_state.general_state.stroke_alpha = 1.;
                 }
-                // Empty parser: applies the normal balanced q/Q/BT/marked-content checks.
-                child.run_content(device)?;
-                if !child.diagnostics.is_empty() {
-                    return Err(PdfError::UnsupportedFeature(
-                        "Type3 glyph diagnostics".into(),
-                    ));
-                }
+                let result = (|| -> PdfResult<()> {
+                    for (index, operation) in
+                        program.program().operations().iter().enumerate().skip(1)
+                    {
+                        child.execution_budget.operation(&limits)?;
+                        child.operation_index = index;
+                        child.operation_byte_offset = operation.operator.byte_offset();
+                        let visible = child.optional_visible;
+                        child.invoke_oeration(
+                            operation.operator.clone(),
+                            &mut crate::device::visibility::VisibilityDevice { device, visible },
+                        )?;
+                    }
+                    // Empty parser: applies the normal balanced q/Q/BT/marked-content checks.
+                    child.run_content(device)?;
+                    if !child.diagnostics.is_empty() {
+                        return Err(PdfError::UnsupportedFeature(
+                            "Type3 glyph diagnostics".into(),
+                        ));
+                    }
+                    Ok(())
+                })();
+                let cleanup = if grouped {
+                    device.end_group(result.is_ok())
+                } else {
+                    Ok(())
+                };
+                result?;
+                cleanup?;
             }
             return device.show_text(text.with_type3_metadata());
         }
@@ -1404,10 +1481,33 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                 .0;
             return self.unsupported_operator_reason(&op, Some(&format!("ExtGState field {key}")));
         }
-        // Neutral printer defaults have no effect on an RGB raster surface.
-        // Real functions/halftones remain explicit diagnostics, never silently
-        // treated as their neutral defaults. The *2 entries take precedence.
-        for (legacy, modern) in [("BG", "BG2"), ("UCR", "UCR2"), ("TR", "TR2"), ("HT", "HT")] {
+        // BG/UCR affect RGB -> CMYK printing, not conversion to an RGB raster.
+        // Parse and retain the scalar functions; do not pretend they are defaults.
+        // The *2 entry overrides its legacy counterpart, including /Default.
+        let mut print_functions = [None, None];
+        for (index, (legacy, modern)) in [("BG", "BG2"), ("UCR", "UCR2")].into_iter().enumerate() {
+            if let Some(value) = extgs.get(modern).or_else(|| extgs.get(legacy)) {
+                let resolved = self.ctx.resolve(value)?;
+                let function = if resolved.as_name().is_some_and(|n| n.name() == "Default") {
+                    None
+                } else {
+                    let function = crate::function::create_function(&resolved, self.ctx)?;
+                    if function.dimensions() != (1, 1) {
+                        return Err(PdfError::PageResourceError(format!(
+                            "ExtGState {modern} requires a scalar function"
+                        )));
+                    }
+                    let limits = self.ctx.limits();
+                    self.execution_budget
+                        .decoded(function.retained_payload_bytes(&limits)?, &limits)?;
+                    Some(std::sync::Arc::new(function))
+                };
+                print_functions[index] = Some(function);
+            }
+        }
+        // Transfer functions and halftones can affect visible RGB output and
+        // remain explicit unsupported features unless neutral.
+        for (legacy, modern) in [("TR", "TR2"), ("HT", "HT")] {
             let selected = extgs.get(modern).or_else(|| extgs.get(legacy));
             if let Some(value) = selected {
                 let value = self.ctx.resolve(value)?;
@@ -1637,6 +1737,19 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             let font = std::rc::Rc::new(self.load_font(dict)?);
             self.current_state.graphic_state.text_state.font = Some(font);
             self.current_state.graphic_state.text_state.font_size = size;
+        }
+        let [black, undercolor] = print_functions;
+        if let Some(function) = black {
+            self.current_state
+                .graphic_state
+                .general_state
+                .black_generation = function;
+        }
+        if let Some(function) = undercolor {
+            self.current_state
+                .graphic_state
+                .general_state
+                .undercolor_removal = function;
         }
         if let Some(mask) = mask {
             self.current_state.graphic_state.general_state.soft_mask = mask;
@@ -2398,6 +2511,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                         "Type3 transparency group".into(),
                     ));
                 }
+                let gray_only = group.as_ref().is_some_and(|g| g.gray_only);
                 let mut state = if group.is_some() {
                     form.group_invocation_state(
                         &self.current_state,
@@ -2434,6 +2548,8 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                 ));
                 let mut child =
                     Interpreter::new(self.page, self.ctx, parser).with_resource_scope(scope);
+                child.language = self.language.clone();
+                child.language_initialized = true;
                 child.execution_budget = budget;
                 child.semantic_capture = self.semantic_capture.clone();
                 child.optional_content = self.optional_content.clone();
@@ -2474,14 +2590,32 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                 if let Some(group) = group {
                     device.begin_group(group)?;
                 }
-                let result = child.run_content(device).and_then(|()| {
-                    if child.diagnostics.is_empty() {
-                        Ok(())
-                    } else {
-                        Err(PdfError::UnsupportedFeature(
-                            "Form diagnostics require nested source paths".into(),
-                        ))
-                    }
+                let run = if gray_only {
+                    child.run_content(&mut crate::device::gray_group::GrayGroupDevice(device))
+                } else {
+                    child.run_content(device)
+                };
+                let result = run.and_then(|()| {
+                    crate::filter::check_output_size(
+                        self.diagnostics.len(),
+                        child.diagnostics.len(),
+                        limits.max_content_diagnostics,
+                        "page content diagnostics",
+                    )?;
+                    crate::filter::check_output_size(
+                        self.diagnostic_bytes,
+                        child.diagnostic_bytes,
+                        limits.max_content_diagnostic_bytes,
+                        "page diagnostic bytes",
+                    )?;
+                    self.diagnostics
+                        .try_reserve(child.diagnostics.len())
+                        .map_err(|_| {
+                            PdfError::ResourceLimit("Form diagnostic allocation".into())
+                        })?;
+                    self.diagnostic_bytes += child.diagnostic_bytes;
+                    self.diagnostics.append(&mut child.diagnostics);
+                    Ok(())
                 });
                 let cleanup = if grouped {
                     device.end_group(result.is_ok())
@@ -2503,6 +2637,160 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
 
 #[cfg(test)]
 mod resource_scope_tests {
+    #[test]
+    fn marked_content_points_do_not_open_scopes_or_change_paint() {
+        use crate::{
+            document::PdfDocument, page::page_builder::PageBuilder, parser::syntax::ParseMode,
+        };
+        let doc = PdfDocument::new().unwrap();
+        doc.add_page_with_builder(0, PageBuilder::new().size(10., 10.))
+            .unwrap();
+        for source in [
+            "/App MP /App << /ActualText (not a replacement) >> DP 0 0 1 1 re f",
+            "/Outer BMC /App MP /App << /MCID 0 >> DP 0 0 1 1 re f EMC",
+        ] {
+            doc.replace_page_contents(0, source.as_bytes().to_vec())
+                .unwrap();
+            let reopened =
+                PdfDocument::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict)
+                    .unwrap();
+            let list = reopened.get_page(0).unwrap().display_list().unwrap();
+            assert_eq!(list.objects().len(), 1);
+            assert!(list.diagnostics().is_empty());
+        }
+        for source in ["MP", "(tag) MP", "/Tag <<>> MP", "/Tag DP", "/Tag 1 DP"] {
+            doc.replace_page_contents(0, source.as_bytes().to_vec())
+                .unwrap();
+            assert!(doc.get_page(0).unwrap().display_list().is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn printer_functions_are_retained_and_restore_without_affecting_rgb() {
+        use crate::{
+            document::PdfDocument,
+            io::stream_reader::StreamReader,
+            objects::pdf_stream::PdfStream,
+            page::{page_builder::PageBuilder, page_object::PageObject},
+            parser::syntax::{ParseMode, SyntaxParser},
+        };
+        use std::io::Cursor;
+        let parse = |s: &str| {
+            SyntaxParser::new(StreamReader::try_new(Cursor::new(s.as_bytes().to_vec())).unwrap())
+                .get_object()
+                .unwrap()
+                .into_dict()
+                .unwrap()
+        };
+        let doc = PdfDocument::new().unwrap();
+        let bg=doc.try_insert_object(PdfObject::PdfStream(PdfStream::from_decoded_data(parse("<< /FunctionType 0 /Domain [0 1] /Range [0 1] /Size [2] /BitsPerSample 8 >>"),vec![0,0]).unwrap())).unwrap();
+        let ucr=doc.try_insert_object(PdfObject::PdfStream(PdfStream::from_decoded_data(parse("<< /FunctionType 0 /Domain [0 1] /Range [-1 1] /Size [2] /BitsPerSample 8 >>"),vec![128,128]).unwrap())).unwrap();
+        let resources = parse(&format!(
+            "<< /ExtGState << /G << /BG {} 0 R /UCR {} 0 R >> /Reset << /BG /UnusableLegacy /BG2 /Default /UCR2 /Default >> >> >>",
+            bg.obj_num(),
+            ucr.obj_num()
+        ));
+        doc.add_page_with_builder(0, PageBuilder::new().size(10., 10.).resources(resources))
+            .unwrap();
+        doc.replace_page_contents(
+            0,
+            b"q /G gs 0 0 1 1 re f Q 0 0 1 1 re f /G gs /Reset gs 0 0 1 1 re f".to_vec(),
+        )
+        .unwrap();
+        let source = doc.save_to_bytes().unwrap();
+        for mode in [ParseMode::Strict, ParseMode::Compatible] {
+            let doc = PdfDocument::from_bytes_with_mode(source.clone(), mode).unwrap();
+            let list = doc.get_page(0).unwrap().display_list().unwrap();
+            assert!(list.diagnostics().is_empty());
+            let PageObject::Path(first) = &list.objects()[0] else {
+                panic!()
+            };
+            let state = &first.graphic_state().general_state;
+            assert_eq!(
+                state
+                    .black_generation
+                    .as_ref()
+                    .unwrap()
+                    .eval(&[0.5])
+                    .unwrap(),
+                vec![0.]
+            );
+            assert!(
+                (state
+                    .undercolor_removal
+                    .as_ref()
+                    .unwrap()
+                    .eval(&[0.5])
+                    .unwrap()[0]
+                    - 1. / 255.)
+                    .abs()
+                    < 1e-6
+            );
+            for object in &list.objects()[1..] {
+                let PageObject::Path(path) = object else {
+                    panic!()
+                };
+                assert!(
+                    path.graphic_state()
+                        .general_state
+                        .black_generation
+                        .is_none()
+                );
+                assert!(
+                    path.graphic_state()
+                        .general_state
+                        .undercolor_removal
+                        .is_none()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn extgstate_name_metadata_preserves_alpha_and_font_binding() {
+        use crate::{
+            document::PdfDocument,
+            io::stream_reader::StreamReader,
+            page::{page_builder::PageBuilder, page_object::PageObject},
+            parser::syntax::{ParseMode, SyntaxParser},
+        };
+        use std::io::Cursor;
+        for label in ["/GS1", "(producer label)"] {
+            let resources = SyntaxParser::new(StreamReader::try_new(Cursor::new(
+                format!("<< /Font << /F << /Type /Font /Subtype /Type1 /BaseFont /Courier >> >> /ExtGState << /G << /Name {label} /ca 0.5 /CA 0.25 >> >> >>").into_bytes(),
+            )).unwrap()).get_object().unwrap().into_dict().unwrap();
+            let doc = PdfDocument::new().unwrap();
+            doc.add_page_with_builder(0, PageBuilder::new().size(30., 30.).resources(resources))
+                .unwrap();
+            doc.replace_page_contents(
+                0,
+                b"q /G gs BT /F 10 Tf (A) Tj ET 0 0 10 10 re f Q 10 10 10 10 re f".to_vec(),
+            )
+            .unwrap();
+            let bytes = doc.save_to_bytes().unwrap();
+            for mode in [ParseMode::Strict, ParseMode::Compatible] {
+                let reopened = PdfDocument::from_bytes_with_mode(bytes.clone(), mode).unwrap();
+                let list = reopened.get_page(0).unwrap().display_list().unwrap();
+                assert!(list.diagnostics().is_empty());
+                assert_eq!(list.objects().len(), 3);
+                let PageObject::Text(text) = &list.objects()[0] else {
+                    panic!("missing text")
+                };
+                assert!(!text.items.is_empty());
+                assert_eq!(text.state.general_state.fill_alpha, 0.5);
+                assert_eq!(text.state.general_state.stroke_alpha, 0.25);
+                let PageObject::Path(path) = &list.objects()[1] else {
+                    panic!("missing path")
+                };
+                assert_eq!(path.graphic_state().general_state.fill_alpha, 0.5);
+                let PageObject::Path(restored) = &list.objects()[2] else {
+                    panic!("missing restored path")
+                };
+                assert_eq!(restored.graphic_state().general_state.fill_alpha, 1.0);
+            }
+        }
+    }
+
     #[test]
     fn print_device_state_is_typed_retained_and_restored() {
         use crate::{

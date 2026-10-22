@@ -146,3 +146,18 @@ The semantic basis is ISO 32000-1:2008 section 8.11, available from
 [Adobe](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf),
 with PDF 2.0 differences tracked separately in the
 [PDF Association graphics errata](https://pdf-issues.pdfa.org/32000-2-2020/clause08.html).
+
+The Web viewer and corpus/browser reference workers select the default View
+configuration; the core's ordinary paint-order APIs remain opt-in as described
+above. In a parsed Compatible document, a dictionary in place of the Configs
+array can represent one alternative configuration, with a structure diagnostic.
+It does not replace D or change the default selection; Strict and newly created
+models retain array validation.
+
+For parsed Compatible input, an underdeclared version below PDF 1.5 does not
+by itself prevent reading otherwise supported OCProperties. It records
+OptionalContentVersion and preserves the source version and layer states. The
+properties still receive full structural, reference and resource validation.
+Strict reads and newly created documents retain version requirements; saving
+still requires a sufficient output version. This exception does not enable
+later optional-content features that have their own version requirements.

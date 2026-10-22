@@ -98,6 +98,10 @@ pub struct GeneralState {
     pub overprint_mode: u8,
     pub stroke_adjustment: bool,
     pub smoothness: f32,
+    /// Printer conversion functions apply to RGB -> CMYK conversion, not RGB
+    /// raster output. Retain them so a print backend can evaluate them.
+    pub black_generation: Option<std::sync::Arc<crate::function::Function>>,
+    pub undercolor_removal: Option<std::sync::Arc<crate::function::Function>>,
     pub blend_mode: BlendMode,
     pub stroke_alpha: f32,
     pub fill_alpha: f32,
@@ -114,6 +118,8 @@ impl Default for GeneralState {
             overprint_mode: 0,
             stroke_adjustment: false,
             smoothness: 0.,
+            black_generation: None,
+            undercolor_removal: None,
             blend_mode: BlendMode::Normal,
             stroke_alpha: 1.0,
             fill_alpha: 1.0,

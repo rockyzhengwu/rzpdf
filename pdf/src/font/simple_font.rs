@@ -424,6 +424,32 @@ mod safety_tests {
     }
 
     #[test]
+    fn standard_undefined_codes_have_missing_width_and_notdef() {
+        let ctx = PDFContext::<Cursor<Vec<u8>>>::new_without_source(
+            PdfDict::default(),
+            Default::default(),
+        );
+        let dict = SyntaxParser::new(
+            StreamReader::try_new(Cursor::new(
+                b"<< /Type /Font /Subtype /Type1 /BaseFont /Times-Roman >>".to_vec(),
+            ))
+            .unwrap(),
+        )
+        .get_object()
+        .unwrap()
+        .into_dict()
+        .unwrap();
+        let font = SimpleFont::try_new(&dict, &ctx).unwrap();
+        for code in [0, 10, 13] {
+            assert_eq!(font.char_width(code).unwrap(), 0.);
+            assert!(matches!(
+                font.get_glyph(&CharCode::new(code as u32, 1, 0.)),
+                Some(GlyphDesc::Gid(0))
+            ));
+        }
+        assert!(font.char_width(b'A').unwrap() > 0.);
+    }
+    #[test]
     fn partial_widths_use_descriptor_missing_width_without_replacing_explicit_zero() {
         let ctx = PDFContext::<Cursor<Vec<u8>>>::new_without_source(
             PdfDict::default(),
@@ -460,9 +486,61 @@ mod safety_tests {
     }
 
     #[test]
+    fn short_widths_use_missing_width_only_in_compatible_mode() {
+        use crate::parser::{options::ParseOptions, syntax::ParseMode};
+        for mode in [ParseMode::Strict, ParseMode::Compatible] {
+            let ctx = PDFContext::<Cursor<Vec<u8>>>::new_without_source(
+                PdfDict::default(),
+                ParseOptions {
+                    mode,
+                    ..Default::default()
+                },
+            );
+            let dict = |body: &str| {
+                SyntaxParser::new(
+                    StreamReader::try_new(Cursor::new(body.as_bytes().to_vec())).unwrap(),
+                )
+                .get_object()
+                .unwrap()
+                .into_dict()
+                .unwrap()
+            };
+            let mut font = SimpleFont {
+                first_char: Some(65),
+                last_char: Some(67),
+                ..Default::default()
+            };
+            let result = font.load_width(&dict("<< /Widths [300 400] >>"), &ctx);
+            if mode == ParseMode::Compatible {
+                result.unwrap();
+                assert_eq!(font.char_width(65).unwrap(), 300.);
+                assert_eq!(font.char_width(66).unwrap(), 400.);
+                assert_eq!(
+                    font.char_width(67).unwrap(),
+                    font.descriptor.missing_width()
+                );
+                assert!(ctx.structure_diagnostics().unwrap().iter().any(|d|d.reason==crate::parser::diagnostic::StructureReason::FontWidths));
+            } else {
+                assert!(result.is_err());
+            }
+            let previous = font.widths;
+            assert!(
+                font.load_width(&dict("<< /Widths [1 2 3 4] >>"), &ctx)
+                    .is_err()
+            );
+            assert!(
+                font.load_width(&dict("<< /Widths [/Invalid] >>"), &ctx)
+                    .is_err()
+            );
+            assert_eq!(font.widths, previous);
+        }
+    }
+
+    #[test]
     fn width_arrays_and_unicode_are_checked() {
-        let parser = PdfParser::new(SyntaxParser::new(
+        let parser = PdfParser::new(SyntaxParser::with_mode(
             StreamReader::try_new(Cursor::new(Vec::<u8>::new())).unwrap(),
+            crate::parser::syntax::ParseMode::Strict,
         ));
         let ctx = PDFContext::try_new(
             parser,
@@ -610,6 +688,10 @@ impl EncodingMapping<'_> {
 }
 
 impl SimpleFont {
+    pub(crate) fn descriptor_flags(&self) -> Option<u32> {
+        self.descriptor.flags().copied()
+    }
+
     /// Reserve the existing encoder's output capacity before encoding starts.
     /// Internal mappings are not yet charged to this pool.
     pub(crate) fn encode_text_with_budget(
@@ -843,8 +925,22 @@ impl SimpleFont {
         if let Some(mut encoding_lease) = font.load_encoding_inner(dict, ctx, budget)? {
             lease.as_mut().unwrap().absorb(&mut encoding_lease)?;
         }
-        if let Some(mut unicode_lease) = font.load_to_unicode_inner(dict, ctx, budget)? {
-            lease.as_mut().unwrap().absorb(&mut unicode_lease)?;
+        match font.load_to_unicode_inner(dict, ctx, budget) {
+            Ok(Some(mut unicode_lease)) => lease.as_mut().unwrap().absorb(&mut unicode_lease)?,
+            Ok(None) => {}
+            Err(PdfError::FontError(_))
+                if matches!(
+                    ctx.read_provenance(),
+                    crate::parser::diagnostic::ReadProvenance::Parsed(
+                        crate::parser::syntax::ParseMode::Compatible
+                    )
+                ) =>
+            {
+                ctx.record_structure_recovery(
+                    crate::parser::diagnostic::StructureReason::FontUnicode,
+                )?;
+            }
+            Err(error) => return Err(error),
         }
         if let Some(mut afm_lease) = font.load_width_inner(dict, ctx, budget)? {
             lease.as_mut().unwrap().absorb(&mut afm_lease)?;
@@ -1059,7 +1155,14 @@ impl SimpleFont {
             let last = self
                 .last_char
                 .ok_or_else(|| PdfError::FontError("Widths requires LastChar".to_string()))?;
-            if first > last || last > 255 || wsa.len() != (last - first + 1) as usize {
+            let short_widths = first <= last
+                && last <= 255
+                && wsa.len() < (last - first + 1) as usize
+                && ctx.options().mode == crate::parser::syntax::ParseMode::Compatible;
+            if first > last
+                || last > 255
+                || (!short_widths && wsa.len() != (last - first + 1) as usize)
+            {
                 return Err(PdfError::FontError(
                     "Widths length does not match FirstChar/LastChar".to_string(),
                 ));
@@ -1074,6 +1177,11 @@ impl SimpleFont {
                 widths[index] = number.as_f32().filter(|v| v.is_finite()).ok_or_else(|| {
                     PdfError::FontError("Widths must contain finite numbers".to_string())
                 })?;
+            }
+            if short_widths {
+                ctx.record_structure_recovery(
+                    crate::parser::diagnostic::StructureReason::FontWidths,
+                )?;
             }
             self.widths = Some(widths);
         }
@@ -1214,7 +1322,15 @@ impl SimpleFont {
         {
             return Ok(w);
         }
-        Err(PdfError::FontError("Font width is erro".to_string()))
+        // An undefined code in a standard font selects .notdef. Its absent
+        // AFM metric uses MissingWidth (default zero), rather than aborting a
+        // whole text show containing a control byte.
+        if self.afm.is_some() {
+            return Ok(self.descriptor.missing_width());
+        }
+        Err(PdfError::FontError(
+            "simple font has no width metrics".to_string(),
+        ))
     }
 
     pub fn unicode_mapping(&self, ch: &CharCode) -> PdfResult<Option<String>> {
@@ -1311,9 +1427,15 @@ impl SimpleFont {
         if let Some(gid) = self.code_to_gid.get(&c) {
             return Some(GlyphDesc::Gid(gid.to_owned()));
         }
+        if self.afm.is_some()
+            && self
+                .encoding
+                .as_ref()
+                .is_some_and(|encoding| encoding.get_glyph_name(c).is_none())
+        {
+            return Some(GlyphDesc::Gid(0));
+        }
         None
-
-        // encoding 获取 glypn_name ,用 name 去查 glyph
     }
 
     pub fn fontfile(&self) -> Option<&[u8]> {

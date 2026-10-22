@@ -3,11 +3,77 @@ use crate::page::marked_text::{Capture, Mark, TextContentLocation};
 use std::{cell::RefCell, rc::Rc};
 
 impl<R: Read + Seek> Interpreter<'_, R> {
+    pub(super) fn initialize_language(&mut self) -> PdfResult<()> {
+        if self.language_initialized {
+            return Ok(());
+        }
+        self.language_initialized = true;
+        if !self.ctx.trailer().contains_key("Root") {
+            return Ok(());
+        }
+        let root = self.ctx.get_root()?;
+        if let Some(value) = root.get("Lang") {
+            let value = self.ctx.resolve(value)?;
+            if let Some(text) = value.as_string().filter(|s| s.bytes().len() <= 130) {
+                let text = match text.text_content_with_limits(&self.ctx.limits()) {
+                    Ok(text) => text,
+                    Err(error @ PdfError::ResourceLimit(_)) => return Err(error),
+                    Err(_) => return Ok(()),
+                };
+                self.execution_budget
+                    .semantic_bytes(text.len(), &self.ctx.limits())?;
+                if crate::font::resolver::valid_language(&text) {
+                    self.language = Some(Rc::from(text));
+                }
+            }
+        }
+        Ok(())
+    }
+    pub(super) fn push_language_mark(&mut self, op: &Operator) -> PdfResult<()> {
+        if self.language_stack.len() >= self.ctx.limits().max_content_operations {
+            return Err(PdfError::ResourceLimit(
+                "language marked-content stack".into(),
+            ));
+        }
+        self.execution_budget
+            .semantic_bytes(std::mem::size_of::<Option<Rc<str>>>(), &self.ctx.limits())?;
+        self.language_stack
+            .try_reserve(1)
+            .map_err(|_| PdfError::ResourceLimit("language stack allocation".into()))?;
+        self.language_stack.push(self.language.clone());
+        if op.name() != "BDC" || op.get_as_name(0)?.name() == "OC" {
+            return Ok(());
+        }
+        let value = op.operand(1)?;
+        let value = if let Some(name) = value.as_name() {
+            self.named_resource("Properties", name.name())?
+        } else {
+            self.ctx.resolve(value)?
+        };
+        if let Some(value) = value.as_dict().and_then(|d| d.get("Lang")) {
+            let value = self.ctx.resolve(value)?;
+            let string = value
+                .as_string()
+                .ok_or_else(|| PdfError::PageOperatorError("marked language string".into()))?;
+            if string.bytes().len() > 130 {
+                self.language = None;
+                return Ok(());
+            }
+            let text = string.text_content_with_limits(&self.ctx.limits())?;
+            self.language = if crate::font::resolver::valid_language(&text) {
+                Some(Rc::from(text))
+            } else {
+                None
+            };
+        }
+        Ok(())
+    }
+
     /// Painting and paint-order extraction retain glyphs, not logical metadata
     /// replacements. Validate standard properties without rejecting custom tags.
     pub(super) fn validate_selected_properties(&self, op: &Operator) -> PdfResult<()> {
         let tag = op.get_as_name(0)?.name();
-        if tag == "OC" {
+        if tag == "OC" && op.name() == "BDC" {
             return Ok(());
         } // membership already evaluated by begin_optional_mark
         let value = op.operand(1)?;
@@ -17,7 +83,7 @@ impl<R: Read + Seek> Interpreter<'_, R> {
             self.ctx.resolve(value)?
         };
         let dict = value.as_dict().ok_or_else(|| {
-            PdfError::PageOperatorError("BDC properties must be a dictionary".into())
+            PdfError::PageOperatorError("marked-content properties must be a dictionary".into())
         })?;
         for (key, value) in dict {
             match key.as_str() {
@@ -102,7 +168,7 @@ impl<R: Read + Seek> Interpreter<'_, R> {
                 self.ctx.resolve(properties)?
             };
             let dict = properties.as_dict().ok_or_else(|| {
-                PdfError::PageOperatorError("BDC properties must be a dictionary".into())
+                PdfError::PageOperatorError("marked-content properties must be a dictionary".into())
             })?;
             for (key, value) in dict {
                 match key.as_str() {

@@ -5,7 +5,7 @@ use pdf::{
     parser::syntax::ParseMode,
 };
 use std::io::Cursor;
-fn document(content: &str) -> PdfDocument<Cursor<Vec<u8>>> {
+pub(super) fn document(content: &str) -> PdfDocument<Cursor<Vec<u8>>> {
     let source = PdfDocument::from_bytes_with_mode(
         include_bytes!("../../pdf/tests/fixtures/v07/fonts.pdf").to_vec(),
         ParseMode::Strict,

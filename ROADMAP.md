@@ -4,6 +4,8 @@
 
 ## 当前目标
 
+2026-10-22 新增用户已授权的 [WebAssembly PDF 专题](docs/webassembly/spec.md)：按 [WA-00～12 计划](docs/webassembly/plan.md) 与 [验收矩阵](docs/webassembly/acceptance.md) 推进，首条路线为 Emscripten + Skia/FreeType。当前 WA-00～03/P0 已在 Chromium 完成 19 页像素对照，下一步 WA-04 稳定接口；完整字体服务、Worker 和其他浏览器尚未验收；本专题不改变下列原生版本的冻结范围，不自动开启 v0.15/v1.0。
+
 v0.14 的 V14-00～09／阶段 A、B、C 已完成限定验收：完整工作区 93 组／1633 项、联合 189 项、十二组独立门禁、162 页目视和 30 条基线通过；654 输入、十四驱动及 2069 产物一致。交付 Catalog／page AF 读取、创建、绑定／解除、页面操作与保存保护，见[验收记录](docs/releases/v0.14-acceptance.md)及[边界](docs/releases/v0.14-boundaries.md)。仅 macOS x86_64 验证，本版已提交 `64be233`，未推送或发布；不自动进入下一版或 v1.0。v0.13 检查点 `6be4cc3`，v0.14 计划基线 `222c0c8`；下方旧状态保留历史。
 
 基于 v0.12 检查点 `57f338f` 的[v0.13 图层创建与编辑](docs/releases/v0.13.md)已完成 V13-00～08／阶段 A、B、C：完整工作区 92 组／1609 项、联合 23 组／273 项、十一组必选独立门禁及补充审计通过，432 页目视复核和 9 条预算基线完成；645 项输入、十三个驱动及 1676 项产物前后一致。范围限定为 OCG／OCMD、简单配置、新段及顶层单次调用绑定，不开放迁移／扁平化／动作执行。证据见[验收记录](docs/releases/v0.13-acceptance.md)，限制见[矩阵](docs/releases/v0.13-support.md)。仅 macOS x86_64 已验证，可另行提交检查点／盘点下一版，不自动进入 v1.0。v0.13 未提交或推送，未改包版本或发布；下方旧状态保留验收时快照。

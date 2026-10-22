@@ -38,7 +38,6 @@ fn cubic(points: [[f64; 2]; 4], t: f64) -> [f64; 2] {
     mix(mix(a, b), mix(b, c))
 }
 
-#[cfg(test)]
 type TensorControls = [[[f64; 2]; 4]; 4];
 
 /// Parameter-space corner interpolation with uncertain roots/components.
@@ -1911,7 +1910,6 @@ pub(crate) fn tensor_jacobian_bounds(controls: &TensorControls) -> Option<[f64; 
     }
 }
 
-#[cfg(test)]
 fn split_cubic_half(p: [[f64; 2]; 4]) -> ([[f64; 2]; 4], [[f64; 2]; 4]) {
     // Multiplying before adding avoids overflow for large finite controls.
     let midpoint =
@@ -1962,7 +1960,6 @@ pub(crate) fn tensor_derivative_bounds(controls: &TensorControls) -> Option<[[[f
 
 /// Exact midpoint subdivision, ordered low-v/low-u, low-v/high-u,
 /// high-v/low-u, high-v/high-u. No sampling or dynamic allocation.
-#[cfg(test)]
 #[expect(
     clippy::needless_range_loop,
     reason = "explicit control-net indices preserve PDF geometry formulas and reference checks"
@@ -2213,7 +2210,7 @@ impl CoonsPatch {
 
     /// Exact control identities prove one coordinate is a strictly monotone
     /// cubic of v alone. Roots of the same device point therefore share v.
-    fn proves_common_v(&self) -> bool {
+    pub(crate) fn proves_common_v(&self) -> bool {
         // A tensor patch needs an identity over its entire control net, not
         // merely the boundary. An exact, strictly monotone coordinate that
         // depends only on v proves that all roots have a common v.
@@ -2403,7 +2400,6 @@ impl CoonsPatch {
 
     /// Exact bicubic Bernstein representation, indexed [v][u].
     /// Unlike corner bounds, its convex hull contains folded interiors too.
-    #[cfg(test)]
     pub(crate) fn tensor_controls(&self) -> Option<[[[f64; 2]; 4]; 4]> {
         let p = &self.points;
         if let Some((q, _)) = self.tensor_interior {

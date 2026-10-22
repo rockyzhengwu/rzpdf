@@ -14,6 +14,7 @@ pub struct PostScriptFunction {
     max_nodes: usize,
     max_bytes: usize,
     max_depth: usize,
+    allow_extra_outputs: bool,
 }
 
 impl PostScriptFunction {
@@ -98,6 +99,7 @@ impl PostScriptFunction {
             max_nodes: limits.max_objects,
             max_bytes: limits.max_decoded_bytes,
             max_depth: limits.max_depth,
+            allow_extra_outputs: ctx.options().mode == crate::parser::syntax::ParseMode::Compatible,
         })
     }
 
@@ -125,16 +127,22 @@ impl PostScriptFunction {
             self.max_bytes,
             self.max_depth,
         )?;
-        if stack.len() != self.range.len() / 2 {
+        let outputs = self.range.len() / 2;
+        if stack.len() < outputs || (!self.allow_extra_outputs && stack.len() != outputs) {
             return Err(PdfError::FunctionError(
                 "Type4 output component count mismatch".into(),
             ));
         }
         let mut output = Vec::new();
         output
-            .try_reserve_exact(stack.len())
+            .try_reserve_exact(outputs)
             .map_err(|_| PdfError::ResourceLimit("Type4 output allocation".into()))?;
-        for (value, bounds) in stack.into_iter().zip(self.range.as_chunks::<2>().0) {
+        let skipped = stack.len() - outputs;
+        for (value, bounds) in stack
+            .into_iter()
+            .skip(skipped)
+            .zip(self.range.as_chunks::<2>().0)
+        {
             let number = match value {
                 super::calculator::Value::Integer(value) => f64::from(value),
                 super::calculator::Value::Real(value) => value,
@@ -180,7 +188,11 @@ mod tests {
 
     #[test]
     fn type4_public_eval_clips_and_requires_exact_numeric_outputs() {
-        let doc = PdfDocument::new().unwrap();
+        let doc = PdfDocument::new_with_options(ParseOptions {
+            mode: ParseMode::Strict,
+            ..Default::default()
+        })
+        .unwrap();
         let make = |code: &[u8]| {
             PostScriptFunction::try_new(
                 &stream("<< /Domain [0 1] /Range [0.25 0.75] >>", code),
@@ -219,6 +231,32 @@ mod tests {
             PostScriptFunction::default().eval(&[]),
             Err(PdfError::FunctionError(_))
         ));
+    }
+
+    #[test]
+    fn compatible_type4_reads_only_required_top_numeric_results() {
+        for mode in [ParseMode::Strict, ParseMode::Compatible] {
+            let doc = PdfDocument::new_with_options(ParseOptions {
+                mode,
+                ..Default::default()
+            })
+            .unwrap();
+            let make = |code: &[u8]| {
+                PostScriptFunction::try_new(
+                    &stream("<< /Domain [0 1] /Range [0 1 0 1] >>", code),
+                    doc.ctx(),
+                )
+                .unwrap()
+            };
+            let result = make(b"{ pop true 0.25 0.75 }").eval(&[0.]);
+            if mode == ParseMode::Compatible {
+                assert_eq!(result.unwrap(), vec![0.25, 0.75]);
+            } else {
+                assert!(result.is_err());
+            }
+            assert!(make(b"{ pop 0.5 }").eval(&[0.]).is_err());
+            assert!(make(b"{ pop 0.5 true }").eval(&[0.]).is_err());
+        }
     }
 
     #[test]

@@ -1,6 +1,5 @@
 use pdf::{
     document::{PdfDocument, resource_manager::StandardFont},
-    page::diagnostic::DiagnosticKind,
     parser::syntax::ParseMode,
 };
 
@@ -47,7 +46,7 @@ fn plain_marked_content_is_balanced_without_hiding_text() {
 }
 
 #[test]
-fn property_marked_content_stays_diagnostic() {
+fn property_marked_content_preserves_painting_without_semantic_replacement() {
     let doc = PdfDocument::new().unwrap();
     doc.add_page(0).unwrap();
     doc.replace_page_contents(0, b"/Span << /ActualText (replacement) >> BDC EMC".to_vec())
@@ -59,12 +58,8 @@ fn property_marked_content_stays_diagnostic() {
         .unwrap()
         .extract_characters_paint_order_report()
         .unwrap();
-    assert_eq!(report.diagnostics.len(), 1);
-    assert_eq!(report.diagnostics[0].operator, "BDC");
-    assert_eq!(
-        report.diagnostics[0].kind,
-        DiagnosticKind::UnsupportedOperator
-    );
+    assert!(report.diagnostics.is_empty());
+    assert!(report.characters.is_empty());
     let strict = PdfDocument::from_bytes_with_mode(bytes, ParseMode::Strict).unwrap();
-    assert!(strict.get_page(0).unwrap().display_list().is_err());
+    assert!(strict.get_page(0).unwrap().display_list().is_ok());
 }

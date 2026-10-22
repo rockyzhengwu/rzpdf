@@ -17,11 +17,21 @@ pub enum StructureReason {
     DuplicateDictionaryKey,
     StreamBoundarySearch,
     StreamStartWhitespace,
+    StreamEndKeywords,
     RebuiltObjectIndex,
     ImageTailRecovery,
     ImageTrailingBytes,
+    PatternResources,
+    FontWidths,
+    FontUnicode,
+    FilterParameters,
+    MissingEndobj,
+    OptionalContentConfig,
+    OptionalContentVersion,
     ContentStreamBoundary,
     RepairedObjectOffset,
+    OlderHybridSupplement,
+    PageTreeCount,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

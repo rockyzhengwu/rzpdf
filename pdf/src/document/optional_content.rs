@@ -187,7 +187,18 @@ impl OptionalContent {
         };
         let properties = dict(ctx, properties)?;
         if effective_version(ctx)? < PdfVersion::V1_5 {
-            return Err(unsupported("OCProperties requires PDF 1.5 or later"));
+            if matches!(
+                ctx.read_provenance(),
+                crate::parser::diagnostic::ReadProvenance::Parsed(
+                    crate::parser::syntax::ParseMode::Compatible
+                )
+            ) {
+                ctx.record_structure_recovery(
+                    crate::parser::diagnostic::StructureReason::OptionalContentVersion,
+                )?;
+            } else {
+                return Err(unsupported("OCProperties requires PDF 1.5 or later"));
+            }
         }
         let values = array(
             ctx,
@@ -246,7 +257,21 @@ impl OptionalContent {
         )?;
         let mut configurations = Vec::new();
         if let Some(values) = properties.get("Configs") {
-            let values = array(ctx, values)?;
+            let resolved = ctx.resolve(values)?;
+            let values = if resolved.as_dict().is_some()
+                && matches!(
+                    ctx.read_provenance(),
+                    crate::parser::diagnostic::ReadProvenance::Parsed(
+                        crate::parser::syntax::ParseMode::Compatible
+                    )
+                ) {
+                ctx.record_structure_recovery(
+                    crate::parser::diagnostic::StructureReason::OptionalContentConfig,
+                )?;
+                vec![resolved]
+            } else {
+                array(ctx, &resolved)?
+            };
             charge(ctx, &work, values.len())?;
             if groups.len().saturating_add(values.len()) > ctx.limits().max_objects {
                 return Err(PdfError::ResourceLimit(

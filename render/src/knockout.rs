@@ -39,7 +39,8 @@ impl SkiaRender {
             Self::skia_blend_mode(mode)
         }
     }
-    pub(super) fn empty_object_surface(&self) -> PdfResult<Surface> {
+    pub(super) fn empty_object_surface(&mut self) -> PdfResult<Surface> {
+        self.clip_image_usage()?;
         let mut surface = surfaces::raster_n32_premul((self.page_width, self.page_height))
             .ok_or_else(|| PdfError::ResourceLimit("knockout object surface".into()))?;
         surface.canvas().clear(Color::TRANSPARENT);
@@ -61,6 +62,7 @@ impl SkiaRender {
             .and_then(|v| v.checked_mul(4))
             .ok_or_else(|| PdfError::ResourceLimit("knockout bytes".into()))?;
         let old_limits = self.limits;
+        let (clip_bytes, clip_pixels) = self.clip_image_usage()?;
         // Two member rasters, possible independent opacity raster, output Vec
         // and native copy; accumulated group rasters were charged at begin.
         let count = if knockout { 5usize } else { 1 };
@@ -71,13 +73,13 @@ impl SkiaRender {
         limits.max_render_bytes = limits
             .max_render_bytes
             .checked_sub(reserve)
-            .filter(|v| *v >= bytes)
+            .filter(|v| v.checked_sub(clip_bytes).is_some_and(|n| n >= bytes))
             .ok_or_else(|| PdfError::ResourceLimit("knockout peak bytes".into()))?;
         let pixels = self.page_width as u64 * self.page_height as u64;
         limits.max_render_pixels = limits
             .max_render_pixels
             .checked_sub(pixels * count as u64)
-            .filter(|v| *v >= pixels)
+            .filter(|v| v.checked_sub(clip_pixels).is_some_and(|n| n >= pixels))
             .ok_or_else(|| PdfError::ResourceLimit("knockout peak pixels".into()))?;
         let shape = self.empty_object_surface()?;
         let previous = std::mem::replace(&mut self.surface, shape);

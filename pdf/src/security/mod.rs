@@ -1,7 +1,8 @@
-//! Bounded Standard AES-256 / revision 6 document protection.
+//! Standard AES-256/R6 protection and read-only AES-128/R4 interoperability.
 //! Permissions are advisory PDF policy, not DRM. Ciphertext is not authenticated
 //! content; signatures are a separate API. Controlled secret buffers are cleared,
 //! but caller input, persistent plaintext caches and every temporary cannot be.
+mod r4;
 mod r6;
 pub(crate) mod transform;
 pub use r6::SecurityHandler;
@@ -85,6 +86,8 @@ impl Permissions {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SecurityReport {
+    /// Authenticated Standard handler revision (currently 4 or 6).
+    pub revision: u32,
     pub authentication: Authentication,
     pub permissions: Permissions,
     pub encrypt_metadata: bool,

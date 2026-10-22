@@ -161,3 +161,40 @@ fn renamed_latin_font_preserves_composite_glyph_after_subset_edit() -> PdfResult
     assert_eq!(text(&reopened, 0), "Café");
     Ok(())
 }
+
+#[test]
+fn next_subset_tag_covers_nested_names_and_packed_source_without_mutation() -> PdfResult<()> {
+    use pdf::document::save_options::SaveLayout;
+    use pdf::objects::{PdfObject, pdf_array::PdfArray, pdf_dict::PdfDict, pdf_name::PdfName};
+    let doc = PdfDocument::new()?;
+    doc.add_page(0)?;
+    doc.try_insert_object(PdfObject::PdfName(PdfName::new("AAAAAA+One".into())))?;
+    let mut dict = PdfDict::default();
+    dict.try_insert(
+        "FontName".into(),
+        PdfObject::PdfName(PdfName::new("AAAAAB+Two".into())),
+    )?;
+    let mut array = PdfArray::default();
+    array.try_add_obj(PdfObject::PdfDict(dict))?;
+    doc.try_insert_object(PdfObject::PdfArray(array))?;
+    let pool = OperationBudget::new(8 * 1024 * 1024);
+    let stamp = doc.stamp();
+    assert_eq!(
+        doc.resources().next_subset_tag_with_budget(&pool)?,
+        *b"AAAAAC"
+    );
+    assert!(doc.is_stamp_current(&stamp));
+    assert_eq!(pool.live_bytes(), 0);
+    let tiny = OperationBudget::new(1);
+    assert!(doc.resources().next_subset_tag_with_budget(&tiny).is_err());
+    assert_eq!(tiny.live_bytes(), 0);
+    let bytes =
+        doc.save_to_bytes_with_layout(Default::default(), SaveLayout::XrefStreamWithObjectStreams)?;
+    let reopened = PdfDocument::from_bytes_with_mode(bytes, ParseMode::Strict)?;
+    assert_eq!(
+        reopened.resources().next_subset_tag_with_budget(&pool)?,
+        *b"AAAAAC"
+    );
+    assert_eq!(pool.live_bytes(), 0);
+    Ok(())
+}

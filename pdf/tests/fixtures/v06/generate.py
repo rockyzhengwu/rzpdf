@@ -145,5 +145,12 @@ for name, width, height, bpc, color in [
 buf = io.BytesIO()
 pdf.save(buf, deterministic_id=True, compress_streams=False, min_version="1.5")
 store("external-codecs.pdf", buf.getvalue())
+# The channel fixtures have a separate, pinned producer; retain verified entries.
+for name in ("gray-alpha.jp2", "rgb-alpha.jp2", "cmyk-lossless.jp2", "gray-indices-2bit.jp2"):
+    if name in old_manifest:
+        digest = hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
+        if digest != old_manifest[name]:
+            raise RuntimeError(f"changed channel fixture: {name}")
+        outputs[name] = digest
 store("manifest.json", (json.dumps(outputs, indent=2, sort_keys=True) + "\n").encode())
 print(json.dumps(outputs, indent=2, sort_keys=True))

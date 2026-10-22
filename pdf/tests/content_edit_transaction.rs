@@ -222,3 +222,78 @@ fn mixed_content_edits_rollback_errors_and_panics_after_nested_commits() {
         }
     }
 }
+
+#[test]
+fn convenience_unicode_edits_join_outer_budget_and_rollback_without_pool_mismatch() {
+    use pdf::budget::OperationBudget;
+    let doc = Document::new().unwrap();
+    doc.add_page(0).unwrap();
+    let font = doc
+        .resources()
+        .register_standard_font(0, StandardFont::Helvetica)
+        .unwrap();
+    doc.replace_page_contents(
+        0,
+        format!("BT /{font} 12 Tf 10 30 Td (Old) Tj (Tail) Tj ET").into_bytes(),
+    )
+    .unwrap();
+    let original = doc
+        .get_page(0)
+        .unwrap()
+        .content_program()
+        .unwrap()
+        .source_bytes()
+        .to_vec();
+    let pool = OperationBudget::new(8 * 1024 * 1024);
+    let neighbor = pool.reserve(17).unwrap();
+    let before_commit = doc.commit_revision();
+    let failed: PdfResult<()> = doc.edit_transaction_with_budget(&pool, |editing| {
+        let source = editing.get_page(0)?.content_program()?;
+        let operation = source
+            .operations()
+            .iter()
+            .position(|o| o.operator.name() == "Tj")
+            .unwrap();
+        editing.replace_page_text_preserving_advance(0, &source, operation, "New")?;
+        Err(PdfError::DocumentError(
+            "rollback after successful legacy editor".into(),
+        ))
+    });
+    assert!(
+        matches!(failed,Err(PdfError::DocumentError(ref s)) if s=="rollback after successful legacy editor")
+    );
+    assert_eq!(doc.commit_revision(), before_commit);
+    assert_eq!(pool.live_bytes(), 17);
+    assert_eq!(
+        doc.get_page(0)
+            .unwrap()
+            .content_program()
+            .unwrap()
+            .source_bytes(),
+        original
+    );
+    doc.edit_transaction_with_budget(&pool, |editing| {
+        let source = editing.get_page(0)?.content_program()?;
+        let operation = source
+            .operations()
+            .iter()
+            .position(|o| o.operator.name() == "Tj")
+            .unwrap();
+        editing.replace_page_text_preserving_advance(0, &source, operation, "New")
+    })
+    .unwrap();
+    assert_eq!(pool.live_bytes(), 17);
+    drop(neighbor);
+    assert_eq!(pool.live_bytes(), 0);
+    let saved = doc.save_to_bytes().unwrap();
+    let reopened = Document::from_bytes_with_mode(saved, ParseMode::Strict).unwrap();
+    let text = reopened
+        .get_page(0)
+        .unwrap()
+        .extract_characters_paint_order()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c.unicode.clone())
+        .collect::<String>();
+    assert_eq!(text, "NewTail");
+}

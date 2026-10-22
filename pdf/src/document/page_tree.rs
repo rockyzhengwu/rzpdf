@@ -8,6 +8,48 @@ use std::{
     io::{Read, Seek},
 };
 
+fn declared_page_count<R: Read + Seek>(
+    ctx: &PDFContext<R>,
+    id: ObjectId,
+    dict: &PdfDict,
+    actual: usize,
+) -> PdfResult<u64> {
+    if dict.get("Count").is_none()
+        && ctx.options().mode == crate::parser::syntax::ParseMode::Compatible
+        && ctx.is_unmodified_source_object(id)
+    {
+        ctx.record_structure_recovery(crate::parser::diagnostic::StructureReason::PageTreeCount)?;
+        return Ok(actual as u64);
+    }
+    dict.get("Count")
+        .and_then(PdfObject::as_number)
+        .ok_or_else(|| PdfError::DocumentError("Pages Count must be an integer".into()))?
+        .as_u64_checked()
+}
+
+fn validate_page_count<R: Read + Seek>(
+    ctx: &PDFContext<R>,
+    id: ObjectId,
+    declared: u64,
+    actual: usize,
+) -> PdfResult<()> {
+    if declared == actual as u64 {
+        return Ok(());
+    }
+    if ctx.options().mode == crate::parser::syntax::ParseMode::Compatible
+        && ctx.is_unmodified_source_object(id)
+    {
+        // The traversal already enumerated and validated every child with its
+        // depth/object/cycle limits. Never allocate from an untrusted Count.
+        ctx.record_structure_recovery(crate::parser::diagnostic::StructureReason::PageTreeCount)?;
+        Ok(())
+    } else {
+        Err(PdfError::DocumentError(format!(
+            "incorrect Pages Count for {id:?}: declared {declared}, found {actual}"
+        )))
+    }
+}
+
 #[derive(Debug)]
 pub struct PageTree;
 
@@ -17,6 +59,54 @@ mod budget_tests {
     use crate::{
         budget::OperationBudget, document::owned::Document, objects::pdf_reference::PdfReference,
     };
+
+    #[test]
+    fn missing_source_count_is_computed_from_validated_children() {
+        use crate::parser::syntax::ParseMode;
+        let source = Document::new().unwrap();
+        source.add_page(0).unwrap();
+        let mut bytes = source.save_to_bytes().unwrap();
+        let offset = bytes.windows(6).position(|b| b == b"/Count").unwrap();
+        bytes[offset + 1] = b'K';
+        for mode in [ParseMode::Strict, ParseMode::Compatible] {
+            let doc = Document::from_bytes_with_mode(bytes.clone(), mode).unwrap();
+            if mode == ParseMode::Strict {
+                assert!(doc.try_page_count().is_err());
+                continue;
+            }
+            assert_eq!(doc.try_page_count().unwrap(), 1);
+            let pool = OperationBudget::new(1024 * 1024);
+            assert!(PageTree::page_at_with_budget(doc.ctx(), 0, &pool).is_ok());
+            let entry = PageTree::entries(doc.ctx()).unwrap().remove(0);
+            let parent = doc.resolve_object(entry.parent_id).unwrap();
+            doc.update_object(entry.parent_id, parent).unwrap();
+            assert!(doc.try_page_count().is_err());
+            assert_eq!(pool.live_bytes(), 0);
+        }
+    }
+
+    #[test]
+    fn compatible_count_uses_validated_source_children_but_keeps_mutations_rejected() {
+        use crate::parser::syntax::ParseMode;
+        let original = Document::new().unwrap();
+        original.add_page(0).unwrap();
+        let mut bytes = original.save_to_bytes().unwrap();
+        let position = bytes.windows(8).position(|b| b == b"/Count 1").unwrap();
+        bytes[position + 7] = b'9';
+        let strict = Document::from_bytes_with_mode(bytes.clone(), ParseMode::Strict).unwrap();
+        assert!(strict.try_page_count().is_err());
+        let doc = Document::from_bytes_with_mode(bytes, ParseMode::Compatible).unwrap();
+        assert_eq!(PageTree::entries(doc.ctx()).unwrap().len(), 1);
+        let pool = OperationBudget::new(1024 * 1024);
+        assert!(PageTree::page_at_with_budget(doc.ctx(), 0, &pool).is_ok());
+        let entry = PageTree::entries(doc.ctx()).unwrap().remove(0);
+        let branch = doc.resolve_object(entry.parent_id).unwrap();
+        // The same malformed Count supplied by an edit must be rejected.
+        doc.update_object(entry.parent_id, branch).unwrap();
+        assert!(PageTree::entries(doc.ctx()).is_err());
+        assert!(PageTree::page_at_with_budget(doc.ctx(), 0, &pool).is_err());
+        assert_eq!(pool.live_bytes(), 0);
+    }
 
     #[test]
     fn budgeted_page_location_validates_whole_tree_and_retains_target() {
@@ -429,16 +519,8 @@ impl BudgetedTreeWalk<'_> {
             }
         }
         self.ancestors.data.pop();
-        let declared = dict
-            .get("Count")
-            .and_then(PdfObject::as_number)
-            .ok_or_else(|| PdfError::DocumentError("Pages Count must be an integer".into()))?
-            .as_u64_checked()?;
-        if declared != count as u64 {
-            return Err(PdfError::DocumentError(format!(
-                "incorrect Pages Count for {id:?}: declared {declared}, found {count}"
-            )));
-        }
+        let declared = declared_page_count(ctx, id, &dict, count)?;
+        validate_page_count(ctx, id, declared, count)?;
         Ok(count)
     }
 }
@@ -660,17 +742,8 @@ impl PageTree {
             }
         }
         ancestors.pop();
-        let declared_count = dict
-            .get("Count")
-            .and_then(PdfObject::as_number)
-            .ok_or_else(|| PdfError::DocumentError("Pages Count must be an integer".into()))?
-            .as_u64_checked()?;
-        if declared_count != (entries.len() - initial_count) as u64 {
-            return Err(PdfError::DocumentError(format!(
-                "incorrect Pages Count for {id:?}: declared {declared_count}, found {}",
-                entries.len() - initial_count
-            )));
-        }
+        let declared_count = declared_page_count(ctx, id, &dict, entries.len() - initial_count)?;
+        validate_page_count(ctx, id, declared_count, entries.len() - initial_count)?;
         Ok(())
     }
 }

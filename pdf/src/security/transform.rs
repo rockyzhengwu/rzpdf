@@ -9,6 +9,7 @@ use crate::{
     error::{PdfError, PdfResult},
     objects::{
         PdfObject,
+        object_id::ObjectId,
         pdf_array::PdfArray,
         pdf_dict::{BudgetedDictBuilder, PdfDict},
         pdf_name::PdfName,
@@ -68,16 +69,28 @@ fn crypt_bytes(
         let (iv, payload) = output.split_at_mut(16);
         random(iv)?;
         payload[..input.len()].copy_from_slice(input);
+        if method != Method::Aes256 {
+            return Err(PdfError::UnsupportedSecurity(
+                "R4 AES-128 is read-only".into(),
+            ));
+        }
         cbc::Encryptor::<aes::Aes256>::new_from_slices(key, iv)
             .map_err(|_| malformed("AES key or IV"))?
             .encrypt_padded_mut::<Pkcs7>(payload, input.len())
             .map_err(|_| malformed("AES encryption buffer"))?;
     } else {
         output.copy_from_slice(&input[16..]);
-        let result = cbc::Decryptor::<aes::Aes256>::new_from_slices(key, &input[..16])
-            .map_err(|_| malformed("AES key or IV"))?
-            .decrypt_padded_mut::<Pkcs7>(&mut output)
-            .map(|data| data.len());
+        let result = if method == Method::Aes128 {
+            cbc::Decryptor::<aes::Aes128>::new_from_slices(key, &input[..16])
+                .map_err(|_| malformed("AES-128 key or IV"))?
+                .decrypt_padded_mut::<Pkcs7>(&mut output)
+                .map(|data| data.len())
+        } else {
+            cbc::Decryptor::<aes::Aes256>::new_from_slices(key, &input[..16])
+                .map_err(|_| malformed("AES key or IV"))?
+                .decrypt_padded_mut::<Pkcs7>(&mut output)
+                .map(|data| data.len())
+        };
         match result {
             Ok(length) => output.truncate(length),
             Err(_) => {
@@ -287,8 +300,28 @@ impl SecurityHandler {
         limit: usize,
         budget: &OperationBudget,
     ) -> PdfResult<BudgetedBytes> {
+        if self.revision != 6 {
+            return Err(PdfError::UnsupportedSecurity(
+                "R4 AES-128 is read-only".into(),
+            ));
+        }
         let (data, lease) = crypt_bytes(self.streams, &*self.key, input, true, limit, budget)?;
         BudgetedBytes::from_reserved_vec(data, lease)
+    }
+
+    pub(crate) fn transform_source<R: Read + Seek>(
+        &self,
+        ctx: &PDFContext<R>,
+        object: &PdfObject,
+        id: ObjectId,
+        budget: &OperationBudget,
+    ) -> PdfResult<(PdfObject, MemoryLease)> {
+        if self.revision == 4 {
+            let key = super::r4::object_key(&*self.key, id);
+            self.transform_inner(ctx, &*key, object, false, budget, 0, &mut 0)
+        } else {
+            self.transform(ctx, object, false, budget)
+        }
     }
 
     pub(crate) fn transform<R: Read + Seek>(
@@ -298,12 +331,18 @@ impl SecurityHandler {
         encrypt: bool,
         budget: &OperationBudget,
     ) -> PdfResult<(PdfObject, MemoryLease)> {
-        self.transform_inner(ctx, object, encrypt, budget, 0, &mut 0)
+        if self.revision != 6 {
+            return Err(PdfError::UnsupportedSecurity(
+                "R4 AES-128 is read-only; decryption requires an object ID".into(),
+            ));
+        }
+        self.transform_inner(ctx, &*self.key, object, encrypt, budget, 0, &mut 0)
     }
 
     fn transform_dict<R: Read + Seek>(
         &self,
         ctx: &PDFContext<R>,
+        cipher_key: &[u8],
         dict: &PdfDict,
         encrypt: bool,
         budget: &OperationBudget,
@@ -314,7 +353,7 @@ impl SecurityHandler {
         for (key, value) in dict {
             let (key, key_lease) = crate::budget::copy_string(key, budget)?;
             let (value, lease) =
-                self.transform_inner(ctx, value, encrypt, budget, depth + 1, nodes)?;
+                self.transform_inner(ctx, cipher_key, value, encrypt, budget, depth + 1, nodes)?;
             builder.insert(key, value, key_lease, lease)?;
         }
         builder.finish()
@@ -323,6 +362,7 @@ impl SecurityHandler {
     fn transform_inner<R: Read + Seek>(
         &self,
         ctx: &PDFContext<R>,
+        cipher_key: &[u8],
         object: &PdfObject,
         encrypt: bool,
         budget: &OperationBudget,
@@ -340,7 +380,7 @@ impl SecurityHandler {
             PdfObject::PdfString(string) => {
                 let (bytes, lease) = crypt_bytes(
                     self.strings,
-                    &*self.key,
+                    cipher_key,
                     string.bytes(),
                     encrypt,
                     limits.max_token_bytes,
@@ -364,7 +404,7 @@ impl SecurityHandler {
                     ));
                 }
                 let (dict, lease) =
-                    self.transform_dict(ctx, dict, encrypt, budget, depth, nodes)?;
+                    self.transform_dict(ctx, cipher_key, dict, encrypt, budget, depth, nodes)?;
                 Ok((PdfObject::PdfDict(dict), lease))
             }
             PdfObject::PdfArray(items) => {
@@ -380,8 +420,15 @@ impl SecurityHandler {
                     .map_err(|_| PdfError::ResourceLimit("security array allocation".into()))?;
                 lease.resize(values.capacity() * std::mem::size_of::<PdfObject>())?;
                 for value in items {
-                    let (value, mut child) =
-                        self.transform_inner(ctx, value, encrypt, budget, depth + 1, nodes)?;
+                    let (value, mut child) = self.transform_inner(
+                        ctx,
+                        cipher_key,
+                        value,
+                        encrypt,
+                        budget,
+                        depth + 1,
+                        nodes,
+                    )?;
                     lease.absorb(&mut child)?;
                     values.push(value);
                 }
@@ -439,10 +486,10 @@ impl SecurityHandler {
                     .map(|(dict, _)| dict)
                     .unwrap_or(stream.dict());
                 let (dict, mut lease) =
-                    self.transform_dict(ctx, dict, encrypt, budget, depth, nodes)?;
+                    self.transform_dict(ctx, cipher_key, dict, encrypt, budget, depth, nodes)?;
                 let (data, mut data_lease) = crypt_bytes(
                     method,
-                    &*self.key,
+                    cipher_key,
                     stream.raw_data(),
                     encrypt,
                     limits.max_raw_stream_bytes,

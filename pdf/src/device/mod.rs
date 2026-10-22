@@ -1,3 +1,4 @@
+pub(crate) mod gray_group;
 pub(crate) mod painting;
 pub mod trace;
 pub(crate) mod visibility;

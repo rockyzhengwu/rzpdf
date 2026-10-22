@@ -289,6 +289,15 @@ impl Font {
         }
     }
 
+    pub fn substitution_request(&self, character: char) -> super::resolver::FontRequest<'_> {
+        let flags = match self {
+            Self::Simple(f) => f.descriptor_flags(),
+            Self::Type0(f) => f.descriptor_flags(),
+            Self::Type3(_) => None,
+        };
+        super::resolver::FontRequest::new(self.name(), character, flags)
+    }
+
     pub fn name(&self) -> &str {
         match self {
             Font::Simple(f) => f.base_font(),

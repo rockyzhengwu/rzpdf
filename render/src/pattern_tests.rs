@@ -13,10 +13,15 @@ fn parse(s: &str) -> PdfObject {
         .get_object()
         .unwrap()
 }
-fn document(extra: &str, cell: &str, shape: &str) -> PdfDocument<Cursor<Vec<u8>>> {
+pub(super) fn document(extra: &str, cell: &str, shape: &str) -> PdfDocument<Cursor<Vec<u8>>> {
     document_sized(40., extra, cell, shape)
 }
-fn document_sized(size: f32, extra: &str, cell: &str, shape: &str) -> PdfDocument<Cursor<Vec<u8>>> {
+pub(super) fn document_sized(
+    size: f32,
+    extra: &str,
+    cell: &str,
+    shape: &str,
+) -> PdfDocument<Cursor<Vec<u8>>> {
     let doc = PdfDocument::new().unwrap();
     doc.add_page_with_builder(0, PageBuilder::new().size(size, size))
         .unwrap();
@@ -50,7 +55,7 @@ fn rgba(renderer: &mut SkiaRender) -> Vec<u8> {
             .surface
             .read_pixels(&info, &mut pixels, 160, (0, 0))
     );
-    pixels
+    super::white_test_output(pixels)
 }
 #[test]
 fn internal_multiply_reads_current_backdrop_at_nonuniform_dpi() {

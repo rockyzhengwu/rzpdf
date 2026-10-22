@@ -341,7 +341,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         text: &str,
         preserve_advance: bool,
     ) -> PdfResult<()> {
-        let budget = self.ctx.limits().operation_budget();
+        let budget = self.ctx.operation_budget();
         self.commit_page_content_edit_with_budget(page, expected, &budget, || {
             let current_page = self.get_page_with_budget(page, &budget)?;
             self.build_text_event_edit_plan(

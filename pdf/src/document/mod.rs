@@ -279,6 +279,15 @@ impl<R: Seek + Read> PdfDocument<R> {
         version: save_options::PdfVersion,
         budget: &crate::budget::OperationBudget,
     ) -> PdfResult<()> {
+        if self.ctx.source_security().is_some_and(|h| h.revision == 4) {
+            return if version >= save_options::PdfVersion::V1_6 {
+                Ok(())
+            } else {
+                Err(PdfError::UnsupportedSecurity(
+                    "AESV2 requires PDF 1.6 or later".into(),
+                ))
+            };
+        }
         if version >= save_options::PdfVersion::V2_0 {
             return Ok(());
         }

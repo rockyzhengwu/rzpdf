@@ -12,7 +12,7 @@ fn parse(s: &str) -> PdfObject {
         .get_object()
         .unwrap()
 }
-fn document(bad: bool) -> PdfDocument<Cursor<Vec<u8>>> {
+pub(super) fn document(bad: bool) -> PdfDocument<Cursor<Vec<u8>>> {
     let doc = PdfDocument::new().unwrap();
     let resources = parse("<< /ExtGState << /Half << /ca 0.5 >> >> >>")
         .into_dict()

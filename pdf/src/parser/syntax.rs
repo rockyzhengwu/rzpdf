@@ -520,12 +520,37 @@ impl<R: Seek + Read> SyntaxParser<R> {
             } else {
                 (None, self.get_object()?)
             };
+            let end_position = self.pos;
             let end_word = self.get_next_word_inner(budget)?;
             if !end_word.is_equal(b"endobj") {
-                self.set_pos(saved_pos)?;
-                return Err(PdfError::ParserError(
-                    "get_indirect_object endobj keyword is expected".to_string(),
-                ));
+                let next_object = if self.mode == ParseMode::Compatible
+                    && end_word.is_number()
+                    && end_word.as_u32_checked().is_ok_and(|n| n > 0)
+                {
+                    let generation = self.get_next_word_inner(budget)?;
+                    let marker = self.get_next_word_inner(budget)?;
+                    generation.is_number()
+                        && generation.as_u16_checked().is_ok()
+                        && marker.is_equal(b"obj")
+                } else {
+                    false
+                };
+                if next_object {
+                    // A complete direct value followed immediately by another
+                    // valid object header has an unambiguous boundary. Leave
+                    // that header unread; do not search or skip arbitrary bytes.
+                    self.set_pos(end_position)?;
+                    self.report(
+                        end_position,
+                        self.diagnostic_object,
+                        super::diagnostic::StructureReason::MissingEndobj,
+                    )?;
+                } else {
+                    self.set_pos(saved_pos)?;
+                    return Err(PdfError::ParserError(format!(
+                        "object {objnum} {gennum}: endobj keyword is expected at byte {end_position}"
+                    )));
+                }
             }
             Ok((PdfIndirect::new(objnum, gennum, obj), lease))
         })();
@@ -802,7 +827,7 @@ impl<R: Seek + Read> SyntaxParser<R> {
             // leave endobj unread for the enclosing indirect-object parser.
             let marker_pos = self.pos;
             let marker = self.get_next_word_inner(budget)?;
-            if !marker.is_equal(b"endstream") {
+            if !self.consume_endstream_word(&marker)? {
                 self.set_pos(marker_pos)?;
             }
             return Ok((PdfStream::new(dict, data), lease));
@@ -884,16 +909,39 @@ impl<R: Seek + Read> SyntaxParser<R> {
         let saved_pos = self.pos;
         self.consume_optional_single_eol()?;
         let next_word = self.get_next_word_inner(budget)?;
-        if next_word.is_equal(b"endstream") {
+        if self.consume_endstream_word(&next_word)? {
             return Ok(true);
         }
         self.set_pos(saved_pos)?;
         drop(next_word);
         let next_word = self.get_next_word_inner(budget)?;
-        if next_word.is_equal(b"endstream") {
+        if self.consume_endstream_word(&next_word)? {
             return Ok(true);
         }
         self.set_pos(saved_pos)?;
+        Ok(false)
+    }
+
+    // Some source writers omit the separator between the two stream-ending
+    // keywords. Split only the exact complete token, only inside an indirect
+    // object, and leave endobj for its owner. No search or suffix guessing.
+    fn consume_endstream_word(&mut self, word: &PdfWord) -> PdfResult<bool> {
+        if word.is_equal(b"endstream") {
+            return Ok(true);
+        }
+        if self.mode == ParseMode::Compatible
+            && self.diagnostic_object.is_some()
+            && word.is_equal(b"endstreamendobj")
+        {
+            let endobj_position = self.pos - b"endobj".len() as u64;
+            self.report(
+                endobj_position,
+                self.diagnostic_object,
+                super::diagnostic::StructureReason::StreamEndKeywords,
+            )?;
+            self.set_pos(endobj_position)?;
+            return Ok(true);
+        }
         Ok(false)
     }
 
@@ -2881,6 +2929,111 @@ mod trailing_header_space_tests {
                 ParseMode::Compatible,
             );
             assert!(parser.read_header().is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod missing_endobj_tests {
+    use super::*;
+    use std::io::Cursor;
+    #[test]
+    fn concatenated_stream_end_keywords_recover_only_the_exact_indirect_token() {
+        for length in ["/Length 3", "/Length 1", ""] {
+            for budgeted in [false, true] {
+                let bytes = format!(
+                    "1 0 obj << {length} >> stream\nabc\r\nendstreamendobj\n2 0 obj 42 endobj"
+                )
+                .into_bytes();
+                for mode in [ParseMode::Strict, ParseMode::Compatible] {
+                    let mut parser = SyntaxParser::with_mode(
+                        StreamReader::try_new(Cursor::new(bytes.clone())).unwrap(),
+                        mode,
+                    );
+                    let pool = crate::budget::OperationBudget::new(65536);
+                    if budgeted {
+                        let result = parser.get_indirect_object_with_budget(&pool);
+                        if mode == ParseMode::Strict {
+                            assert!(result.is_err());
+                        } else {
+                            let (object, lease) = result.unwrap();
+                            assert_eq!(object.obj().as_stream().unwrap().raw_data(), b"abc");
+                            drop((object, lease));
+                            assert_eq!(parser.get_indirect_object().unwrap().id().obj_num(), 2);
+                        }
+                    } else {
+                        let result = parser.get_indirect_object();
+                        if mode == ParseMode::Strict {
+                            assert!(result.is_err());
+                        } else {
+                            assert_eq!(
+                                result.unwrap().obj().as_stream().unwrap().raw_data(),
+                                b"abc"
+                            );
+                            assert_eq!(parser.get_indirect_object().unwrap().id().obj_num(), 2);
+                        }
+                    }
+                    assert_eq!(pool.live_bytes(), 0);
+                }
+            }
+        }
+        for ending in [
+            "endstreamendobjJUNK",
+            "endstreamendobject",
+            "endstreamgarbageendobj",
+        ] {
+            let bytes = format!("1 0 obj << /Length 3 >> stream\nabc\n{ending}").into_bytes();
+            let mut parser = SyntaxParser::new(StreamReader::try_new(Cursor::new(bytes)).unwrap());
+            assert!(parser.get_indirect_object().is_err(), "{ending}");
+        }
+        let mut parser = SyntaxParser::new(
+            StreamReader::try_new(Cursor::new(
+                b"1 0 obj << /Length 3 >> stream\nabc\nendstreamendobj".to_vec(),
+            ))
+            .unwrap(),
+        );
+        let pool = crate::budget::OperationBudget::new(1);
+        assert!(matches!(
+            parser.get_indirect_object_with_budget(&pool),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(pool.live_bytes(), 0);
+    }
+
+    #[test]
+    fn compatible_object_boundary_requires_an_immediate_valid_next_header() {
+        for mode in [ParseMode::Strict, ParseMode::Compatible] {
+            let mut parser = SyntaxParser::with_mode(
+                StreamReader::try_new(Cursor::new(
+                    b"1 0 obj << /Value 2 >>\n2 0 obj 3 endobj".to_vec(),
+                ))
+                .unwrap(),
+                mode,
+            );
+            let first = parser.get_indirect_object();
+            if mode == ParseMode::Strict {
+                assert!(first.is_err());
+                continue;
+            }
+            assert_eq!(first.unwrap().id().obj_num(), 1);
+            assert_eq!(parser.get_indirect_object().unwrap().id().obj_num(), 2);
+        }
+        for suffix in [
+            "garbage 2 0 obj 3 endobj",
+            "2 -1 obj 3 endobj",
+            "0 0 obj 3 endobj",
+            "2 65536 obj 3 endobj",
+            "2 0 notobj",
+            "",
+        ] {
+            let bytes = format!("1 0 obj << /Value 2 >> {suffix}").into_bytes();
+            let mut parser = SyntaxParser::new(StreamReader::try_new(Cursor::new(bytes)).unwrap());
+            let pool = crate::budget::OperationBudget::new(65536);
+            assert!(
+                parser.get_indirect_object_with_budget(&pool).is_err(),
+                "{suffix}"
+            );
+            assert_eq!(pool.live_bytes(), 0);
         }
     }
 }

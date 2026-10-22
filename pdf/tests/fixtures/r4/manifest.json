@@ -1,0 +1,13 @@
+{
+  "producer": "PyMuPDF 1.28.0",
+  "license": "AGPL-3.0-only project-authored content; no third-party font program embedded",
+  "owner_password": "synthetic-owner",
+  "user_passwords": {
+    "empty-user.pdf": "",
+    "password-user.pdf": "synthetic-user"
+  },
+  "sha256": {
+    "empty-user.pdf": "5d9dab95525b7b9341ab4f30278eb09a97e43f56a5dabac1bd6761754a652c06",
+    "password-user.pdf": "a1a3b0a526d2bca8dd65ca68348dd50cbdac04bd03ff9170e62b5fe8627f72bc"
+  }
+}

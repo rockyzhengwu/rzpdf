@@ -59,6 +59,17 @@ fn decode_native(
 ) -> PdfResult<Vec<u8>> {
     let d = mozjpeg::Decompress::new_mem(input)
         .map_err(|e| PdfError::FilterError(format!("DCT create decoder error:{:?}", e)))?;
+    if let Some(dict) = context.stream_dict {
+        for (key, actual) in [("Width", d.width()), ("Height", d.height())] {
+            if let Some(value) = dict.get(key) {
+                if value.as_u32().map(|v| v as usize) != Some(actual) {
+                    return Err(PdfError::FilterError(
+                        "JPEG dimensions disagree with image dictionary".into(),
+                    ));
+                }
+            }
+        }
+    }
     let pixels = d
         .width()
         .checked_mul(d.height())
@@ -104,6 +115,36 @@ fn decode_native(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn inconsistent_jpeg_dimensions_reject_before_pixel_allocation() {
+        use crate::{
+            budget::OperationBudget,
+            filter::FilterContext,
+            objects::{PdfObject, pdf_dict::PdfDict, pdf_number::PdfNumber},
+        };
+        let mut encoder = mozjpeg::Compress::new(mozjpeg::ColorSpace::JCS_RGB);
+        encoder.set_size(2, 2);
+        let mut encoder = encoder.start_compress(Vec::new()).unwrap();
+        encoder.write_scanlines(&[128; 12]).unwrap();
+        let input = encoder.finish().unwrap();
+        let mut dict = PdfDict::default();
+        dict.insert("Width".into(), PdfObject::PdfNumber(PdfNumber::new(999.)));
+        dict.insert("Height".into(), PdfObject::PdfNumber(PdfNumber::new(999.)));
+        let pool = OperationBudget::new(1);
+        assert!(matches!(
+            super::dct_decode_with_budget(
+                &input,
+                FilterContext {
+                    stream_dict: Some(&dict),
+                    ..Default::default()
+                },
+                &pool
+            ),
+            Err(crate::error::PdfError::FilterError(_))
+        ));
+        assert_eq!(pool.live_bytes(), 0);
+    }
+
     #[test]
     fn malformed_jpeg_returns_filter_error_without_leaking_neighbor_budget() {
         use crate::{budget::OperationBudget, error::PdfError, filter::FilterContext};

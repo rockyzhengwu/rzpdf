@@ -19,6 +19,10 @@ pub struct Type0 {
 }
 
 impl Type0 {
+    pub(crate) fn descriptor_flags(&self) -> Option<u32> {
+        self.descent_font.descriptor_flags()
+    }
+
     /// Reserve output capacity before encoding; internal tables are untracked.
     pub(crate) fn encode_text_with_budget(
         &self,
@@ -351,19 +355,40 @@ impl Type0 {
         };
         font.descent_font = cid_font;
         if let Some(tu) = dict.get("ToUnicode") {
-            let (tu_obj, _temporary) = resolve(tu)?;
-            let stream = tu_obj
-                .as_stream()
-                .ok_or_else(|| PdfError::FontError("ToUnicode must be a stream".to_string()))?;
-            let tu_cmap = if let Some(pool) = budget {
-                let (cmap, mut cmap_lease) = Cmap::from_stream_with_budget(stream, ctx, pool)?;
-                lease.as_mut().unwrap().absorb(&mut cmap_lease)?;
-                cmap
-            } else {
-                Cmap::from_stream(stream, ctx)?
-            };
-            font.to_unicode = Some(tu_cmap);
-        } else if let Some(info) = descendant_dict.get("CIDSystemInfo") {
+            let result = (|| -> PdfResult<Cmap> {
+                let (tu_obj, _temporary) = resolve(tu)?;
+                let stream = tu_obj
+                    .as_stream()
+                    .ok_or_else(|| PdfError::FontError("ToUnicode must be a stream".to_string()))?;
+                let tu_cmap = if let Some(pool) = budget {
+                    let (cmap, mut cmap_lease) = Cmap::from_stream_with_budget(stream, ctx, pool)?;
+                    lease.as_mut().unwrap().absorb(&mut cmap_lease)?;
+                    cmap
+                } else {
+                    Cmap::from_stream(stream, ctx)?
+                };
+                Ok(tu_cmap)
+            })();
+            match result {
+                Ok(cmap) => font.to_unicode = Some(cmap),
+                Err(PdfError::FontError(_))
+                    if matches!(
+                        ctx.read_provenance(),
+                        crate::parser::diagnostic::ReadProvenance::Parsed(
+                            crate::parser::syntax::ParseMode::Compatible
+                        )
+                    ) =>
+                {
+                    ctx.record_structure_recovery(
+                        crate::parser::diagnostic::StructureReason::FontUnicode,
+                    )?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if font.to_unicode.is_none()
+            && let Some(info) = descendant_dict.get("CIDSystemInfo")
+        {
             // ISO 32000 text extraction fallback: source code -> CID through
             // Encoding, then CID -> Unicode through the registered collection.
             // Identity/custom collections are not assumed to contain Unicode.
@@ -953,9 +978,67 @@ mod tests {
     }
 
     #[test]
+    fn malformed_unicode_does_not_replace_cids_or_hide_budget_failures() {
+        use crate::{
+            budget::OperationBudget, objects::pdf_stream::PdfStream, parser::syntax::ParseMode,
+        };
+        for mode in [ParseMode::Strict, ParseMode::Compatible] {
+            let syntax = SyntaxParser::with_mode(
+                StreamReader::try_new(Cursor::new(Vec::<u8>::new())).unwrap(),
+                mode,
+            );
+            let ctx =
+                PDFContext::try_new(PdfParser::new(syntax), CrossRefTable::default()).unwrap();
+            let source=b"<< /Subtype /Type0 /BaseFont /Test /Encoding /Identity-H /DescendantFonts [<< /Subtype /CIDFontType2 /BaseFont /Test /DW 500 >>] >>";
+            let mut dict =
+                SyntaxParser::new(StreamReader::try_new(Cursor::new(source.to_vec())).unwrap())
+                    .get_object()
+                    .unwrap()
+                    .into_dict()
+                    .unwrap();
+            dict.insert(
+                "ToUnicode".into(),
+                PdfObject::PdfStream(PdfStream::new(
+                    PdfDict::default(),
+                    b"99 beginbfchar <0041> <0042> endbfchar".to_vec(),
+                )),
+            );
+            let pool = OperationBudget::new(2 * 1024 * 1024);
+            let result = Type0::try_new_with_budget(&dict, &ctx, &pool);
+            if mode == ParseMode::Compatible {
+                let (font, lease) = result.unwrap();
+                let chars = font.chars(&[0, 65]).unwrap();
+                assert_eq!((chars[0].code(), chars[0].width), (65, 500.));
+                assert!(matches!(
+                    font.get_glyph(&chars[0]),
+                    Some(GlyphDesc::Gid(65))
+                ));
+                assert_eq!(font.unicode_mapping(&chars[0]), None);
+                assert!(
+                    ctx.structure_diagnostics().unwrap().iter().any(
+                        |d| d.reason == crate::parser::diagnostic::StructureReason::FontUnicode
+                    )
+                );
+                drop((font, lease));
+            } else {
+                assert!(result.is_err());
+            }
+            assert_eq!(pool.live_bytes(), 0);
+            let tiny = OperationBudget::new(32);
+            assert!(matches!(
+                Type0::try_new_with_budget(&dict, &ctx, &tiny),
+                Err(PdfError::ResourceLimit(_))
+            ));
+            assert_eq!(tiny.live_bytes(), 0);
+        }
+    }
+
+    #[test]
     fn malformed_type0_and_descendant_dictionaries_return_errors() {
-        let syntax =
-            SyntaxParser::new(StreamReader::try_new(Cursor::new(Vec::<u8>::new())).unwrap());
+        let syntax = SyntaxParser::with_mode(
+            StreamReader::try_new(Cursor::new(Vec::<u8>::new())).unwrap(),
+            crate::parser::syntax::ParseMode::Strict,
+        );
         let ctx = PDFContext::try_new(
             PdfParser::new(syntax),
             CrossRefTable::new(HashMap::new(), PdfDict::default()),

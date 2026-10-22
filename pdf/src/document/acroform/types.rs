@@ -309,37 +309,72 @@ impl<R: Read + Seek> PdfDocument<R> {
             .nodes
             .iter()
             .filter(|n| n.children.is_empty() && !n.widgets.is_empty())
+            .map(|n| self.field_details(n))
+            .collect()
+    }
+    fn field_details(&self, n: &FieldNode) -> PdfResult<FormFieldDetails> {
+        let kind = self.field_kind(n)?;
+        let buttons = matches!(kind, FormFieldKind::Checkbox | FormFieldKind::Radio { .. });
+        Ok(FormFieldDetails {
+            handle: self.object_handle(n.id)?,
+            name: n.name.clone(),
+            kind: kind.clone(),
+            value: self.field_value(n)?,
+            options: if matches!(kind, FormFieldKind::Choice { .. }) {
+                self.choice_options(n)?
+            } else {
+                Vec::new()
+            },
+            button_states: if buttons {
+                self.button_states(n)?
+            } else {
+                Vec::new()
+            },
+            button_exports: if buttons {
+                n.effective
+                    .get("Opt")
+                    .map(|_| {
+                        self.form_array(&n.effective, "Opt")?
+                            .into_iter()
+                            .map(|v| self.field_string(v))
+                            .collect()
+                    })
+                    .transpose()?
+            } else {
+                None
+            },
+        })
+    }
+
+    /// Read each terminal independently; unsupported types/flags retain a record.
+    /// Invalid ownership, malformed data and resource errors still fail the query.
+    pub fn form_field_records(&self) -> PdfResult<Vec<FormFieldRecord>> {
+        self.field_graph()?
+            .nodes
+            .iter()
+            .filter(|n| n.children.is_empty())
             .map(|n| {
-                let kind = self.field_kind(n)?;
-                let buttons = matches!(kind, FormFieldKind::Checkbox | FormFieldKind::Radio { .. });
-                Ok(FormFieldDetails {
+                let (details, unsupported_reason) = match self.field_details(n) {
+                    Ok(value) => (Some(value), None),
+                    Err(PdfError::UnsupportedFeature(reason)) => (None, Some(reason)),
+                    Err(error) => return Err(error),
+                };
+                Ok(FormFieldRecord {
                     handle: self.object_handle(n.id)?,
                     name: n.name.clone(),
-                    kind: kind.clone(),
-                    value: self.field_value(n)?,
-                    options: if matches!(kind, FormFieldKind::Choice { .. }) {
-                        self.choice_options(n)?
-                    } else {
-                        Vec::new()
-                    },
-                    button_states: if buttons {
-                        self.button_states(n)?
-                    } else {
-                        Vec::new()
-                    },
-                    button_exports: if buttons {
-                        n.effective
-                            .get("Opt")
-                            .map(|_| {
-                                self.form_array(&n.effective, "Opt")?
-                                    .into_iter()
-                                    .map(|v| self.field_string(v))
-                                    .collect()
-                            })
-                            .transpose()?
-                    } else {
-                        None
-                    },
+                    field_type: n
+                        .effective
+                        .get("FT")
+                        .map(|v| {
+                            v.as_name()
+                                .map(|n| n.name().to_owned())
+                                .ok_or_else(|| invalid("field FT must be a name"))
+                        })
+                        .transpose()?,
+                    flags: self.form_flags(&n.effective, "Ff")?,
+                    widgets: n.widgets.clone(),
+                    details,
+                    unsupported_reason,
                 })
             })
             .collect()

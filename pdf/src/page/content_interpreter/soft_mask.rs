@@ -64,28 +64,32 @@ impl<R: Read + Seek> Interpreter<'_, R> {
             PdfError::PageResourceError("SMask G must have a transparency Group".into())
         })?;
         let parameters = GroupParameters::parse(group, self.ctx)?;
-        if matches!(kind, SoftMaskKind::Luminosity) {
-            let space = group
-                .get("CS")
-                .map(|value| self.ctx.resolve(value))
-                .transpose()?;
-            if space
-                .as_ref()
-                .and_then(PdfObject::as_name)
-                .map(|name| name.name())
-                != Some("DeviceRGB")
-            {
-                return Err(PdfError::UnsupportedFeature(
-                    "luminosity mask requires explicit DeviceRGB group CS".into(),
-                ));
-            }
+        let space = group
+            .get("CS")
+            .map(|value| self.ctx.resolve(value))
+            .transpose()?;
+        let color_name = space
+            .as_ref()
+            .and_then(PdfObject::as_name)
+            .map(|n| n.name());
+        let gray_only = parameters.gray_only || color_name == Some("DeviceGray");
+        if matches!(kind, SoftMaskKind::Luminosity)
+            && !matches!(color_name, Some("DeviceRGB" | "DeviceGray"))
+        {
+            return Err(PdfError::UnsupportedFeature(
+                "luminosity mask requires explicit DeviceRGB/DeviceGray group CS".into(),
+            ));
         }
         let mut background = [0.; 3];
         if let Some(value) = dict.get("BC") {
             let value = self.ctx.resolve(value)?;
-            let array = value.as_array().filter(|a| a.len() == 3).ok_or_else(|| {
-                PdfError::PageResourceError("RGB soft mask BC requires three components".into())
-            })?;
+            let count = if gray_only { 1 } else { 3 };
+            let array = value
+                .as_array()
+                .filter(|a| a.len() == count)
+                .ok_or_else(|| {
+                    PdfError::PageResourceError("soft mask BC component count".into())
+                })?;
             for (component, value) in background.iter_mut().zip(array) {
                 *component = self
                     .ctx
@@ -96,6 +100,9 @@ impl<R: Read + Seek> Interpreter<'_, R> {
                         PdfError::PageResourceError("soft mask BC must be finite".into())
                     })?
                     .clamp(0., 1.);
+            }
+            if gray_only {
+                background = [background[0]; 3];
             }
         }
         let transfer = if let Some(value) = dict.get("TR") {
@@ -142,6 +149,8 @@ impl<R: Read + Seek> Interpreter<'_, R> {
         let page_resources = self.page.resource()?;
         let mut child = Interpreter::new(self.page, self.ctx, parser)
             .with_resource_scope(form.resource_scope(&page_resources).clone());
+        child.language = self.language.clone();
+        child.language_initialized = true;
         child.form_depth = self.form_depth + 1;
         child.optional_content = self.optional_content.clone();
         child.pattern_depth = self.pattern_depth;
@@ -170,7 +179,11 @@ impl<R: Read + Seek> Interpreter<'_, R> {
                 soft_mask: None,
             })?;
         }
-        child.run_content(&mut trace)?;
+        if gray_only {
+            child.run_content(&mut crate::device::gray_group::GrayGroupDevice(&mut trace))?;
+        } else {
+            child.run_content(&mut trace)?;
+        }
         if parameters.knockout {
             trace.end_group(true)?;
         }

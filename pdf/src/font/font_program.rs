@@ -14,10 +14,18 @@ pub enum FontProgram {
 }
 
 pub fn load_freetype_face(fontfile: Vec<u8>) -> PdfResult<Face> {
-    let lib = Library::init()
-        .map_err(|e| PdfError::FontError(format!("Freetype library init error:{:?}", e)))?;
+    let lib = Library::init().map_err(|e| {
+        if e == freetype::Error::OutOfMemory {
+            PdfError::ResourceLimit("FreeType library allocation".into())
+        } else {
+            PdfError::FontError(format!("Freetype library init error:{:?}", e))
+        }
+    })?;
     match lib.new_memory_face(fontfile, 0) {
         Ok(face) => Ok(face),
+        Err(freetype::Error::OutOfMemory) => {
+            Err(PdfError::ResourceLimit("FreeType face allocation".into()))
+        }
         Err(e) => Err(PdfError::FontError(format!(
             "Load Freetype face error{:?}",
             e

@@ -210,8 +210,18 @@ impl<R: Seek + Read> PDFContext<R> {
                     PdfError::MalformedSecurity("Encrypt must be a dictionary".into())
                 })?;
                 // Authenticate before Catalog/source objects are published.
-                let handler = crate::security::SecurityHandler::authenticate(
-                    dict, password, limits, &budget,
+                let handler = crate::security::SecurityHandler::authenticate_with_file_id(
+                    dict,
+                    password,
+                    cross_ref_table
+                        .trailer()
+                        .get("ID")
+                        .and_then(PdfObject::as_array)
+                        .and_then(|a| a.get(0))
+                        .and_then(PdfObject::as_string)
+                        .map(|s| s.bytes()),
+                    limits,
+                    &budget,
                 )?;
                 let ids = cross_ref_table
                     .trailer()
@@ -369,6 +379,10 @@ impl<R: Seek + Read> PDFContext<R> {
             })
     }
 
+    pub(crate) fn is_unmodified_source_object(&self, id: ObjectId) -> bool {
+        self.parser.is_some() && self.state.store.borrow().entry(id).is_none()
+    }
+
     pub fn revision(&self) -> u64 {
         self.state.revision.get()
     }
@@ -459,6 +473,14 @@ impl<R: Seek + Read> PDFContext<R> {
         self.state.next_revision()
     }
 
+    /// Legacy convenience editors join an enclosing transaction's pool. Explicit
+    /// caller-budget APIs still reject a genuinely different pool.
+    pub(crate) fn operation_budget(&self) -> crate::budget::OperationBudget {
+        self.state
+            .active_operation_budget()
+            .unwrap_or_else(|| self.limits.operation_budget())
+    }
+
     pub(crate) fn require_unsigned_source(&self) -> PdfResult<()> {
         let budget = self
             .state
@@ -506,7 +528,7 @@ impl<R: Seek + Read> PDFContext<R> {
                         .as_ref()
                         .map(|handler| {
                             self.with_source_resolution(|| {
-                                handler.transform(self, &object, false, budget)
+                                handler.transform_source(self, &object, info.object_id(), budget)
                             })
                         })
                         .transpose()?;
@@ -631,7 +653,8 @@ impl<R: Seek + Read> PDFContext<R> {
         if Some(id) != self.encryption_dictionary_id
             && let Some(handler) = &self.security
         {
-            return self.with_source_resolution(|| handler.transform(self, &object, false, budget));
+            return self
+                .with_source_resolution(|| handler.transform_source(self, &object, id, budget));
         }
         Ok((object, lease))
     }
@@ -875,8 +898,9 @@ impl<R: Seek + Read> PDFContext<R> {
         let mut _decrypted_lease = None;
         let source = if Some(id) != self.encryption_dictionary_id {
             if let Some(handler) = &self.security {
-                let (object, lease) = self
-                    .with_source_resolution(|| handler.transform(self, &source, false, budget))?;
+                let (object, lease) = self.with_source_resolution(|| {
+                    handler.transform_source(self, &source, id, budget)
+                })?;
                 _decrypted_lease = Some(lease);
                 object
             } else {
@@ -1116,7 +1140,7 @@ impl<R: Seek + Read> PDFContext<R> {
         let obj = if Some(expected) != self.encryption_dictionary_id {
             if let Some(handler) = &self.security {
                 let (object, lease) = self.with_source_resolution(|| {
-                    handler.transform(self, &obj, false, &self.limits.operation_budget())
+                    handler.transform_source(self, &obj, expected, &self.limits.operation_budget())
                 })?;
                 _decrypted_lease = Some(lease);
                 object

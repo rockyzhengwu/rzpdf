@@ -298,6 +298,7 @@ fn contents_and_annotation_provenance_and_visibility_are_separate() {
             intent: AnnotationRenderIntent::Print,
             include_widgets: false,
             view_zoom: 1.,
+            ..Default::default()
         })
         .unwrap();
     assert_eq!(print.appearance_count(), 2);

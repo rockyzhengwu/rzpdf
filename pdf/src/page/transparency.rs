@@ -36,6 +36,7 @@ pub struct GroupPaint {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct GroupParameters {
+    pub gray_only: bool,
     pub isolated: bool,
     pub knockout: bool,
 }
@@ -66,15 +67,21 @@ impl GroupParameters {
         let knockout = flag("K")?;
         // Nonisolated Form groups inherit their backdrop's blending space.
         // Their CS entry does not select a new space (ISO 32000, table 146).
+        let mut gray_only = false;
         if let Some(space) = group.get("CS").filter(|_| isolated) {
             let space = ctx.resolve(space)?;
-            if space.as_name().map(|n| n.name()) != Some("DeviceRGB") {
+            gray_only = space.as_name().map(|n| n.name()) == Some("DeviceGray");
+            if !gray_only && space.as_name().map(|n| n.name()) != Some("DeviceRGB") {
                 return Err(PdfError::UnsupportedFeature(
                     "transparency group blending space other than DeviceRGB".into(),
                 ));
             }
         }
-        Ok(Self { isolated, knockout })
+        Ok(Self {
+            isolated,
+            knockout,
+            gray_only,
+        })
     }
 }
 

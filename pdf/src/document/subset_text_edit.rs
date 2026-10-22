@@ -425,7 +425,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         text: &str,
         options: SubsetTextEditOptions<'_>,
     ) -> PdfResult<()> {
-        let budget = self.ctx.limits().operation_budget();
+        let budget = self.ctx.operation_budget();
         self.replace_page_text_string_with_subset_and_budget(
             page, expected, operation, range, text, options, &budget,
         )

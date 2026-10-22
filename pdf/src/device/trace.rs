@@ -199,6 +199,9 @@ impl Device for TraceDevice {
         self.reserve_object()?;
         let segments = self.next_retained_segments(None, &textobject.state)?;
         let mut total = self.next_draw_bytes(textobject.nested_source(), &textobject.state)?;
+        total = total
+            .checked_add(textobject.language().map_or(0, str::len))
+            .ok_or_else(|| PdfError::ResourceLimit("display language bytes overflow".into()))?;
         for item in &textobject.items {
             total = total
                 .checked_add(item.unicode().map_or(0, |text| text.len()))

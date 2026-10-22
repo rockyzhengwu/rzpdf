@@ -1,5 +1,8 @@
+#[path = "shading_patch_raster.rs"]
+mod patch_raster;
 use super::shading_mesh::TriangleMesh;
 use super::shading_patch::{Interval, PatchMesh, SearchError};
+pub use patch_raster::PatchRasterOptions;
 use std::io::{Read, Seek};
 
 use crate::{
@@ -994,6 +997,42 @@ mod tests {
         let cone = make(3, "[0 0 0 10 0 10]", "[true true]", "");
         assert_eq!(cone.color_at_point(5.0, 2.0).unwrap().unwrap().r(), 74);
         assert!(cone.color_at_point(-5.0, 0.0).unwrap().is_none());
+    }
+
+    #[test]
+    fn almost_tangent_radial_cones_keep_the_sign_of_the_geometry() {
+        let doc = PdfDocument::new().unwrap();
+        let make = |coords: &str| {
+            Shading::try_new(&parse(&format!(
+            "<< /ShadingType 3 /ColorSpace /DeviceGray /Coords {coords} /Extend [true true] /Function << /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [0.5] /N 1 >> >>"
+        )), doc.ctx()).unwrap()
+        };
+        // These are geometric assertions, independent of the quadratic solver:
+        // with a zero starting radius outside the unit circle, points further
+        // along that outward ray are outside every nonnegative-radius circle.
+        let outside = make("[-.223151 -.974784 0 0 0 1]");
+        let x = f64::from(-0.223151_f32);
+        let y = f64::from(-0.974784_f32);
+        assert!(x.hypot(y) > 1.);
+        for distance in [1.01, 2., 10., 100.] {
+            assert!(
+                outside
+                    .color_at_point(x * distance, y * distance)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        // The end center is inside the cone and is repainted by a circle with
+        // t > 1. Clamping tiny positive A to zero would select a different root.
+        assert_eq!(outside.color_at_point(0., 0.).unwrap().unwrap().r(), 128);
+        for (start, covered) in [("1.0000001", false), ("1", false), ("0.9999999", true)] {
+            let cone = make(&format!("[{start} 0 0 0 0 1]"));
+            let color = cone.color_at_point(2., 0.).unwrap();
+            assert_eq!(color.is_some(), covered, "start={start}");
+            if let Some(color) = color {
+                assert_eq!(color.r(), 128);
+            }
+        }
     }
 
     #[test]

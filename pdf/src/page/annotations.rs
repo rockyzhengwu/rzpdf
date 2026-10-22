@@ -21,6 +21,9 @@ pub struct AnnotationRenderOptions {
     /// Viewer magnification, separate from device pixel density. The caller
     /// scales its output device accordingly; NoZoom compensates this factor.
     pub view_zoom: f32,
+    /// Clockwise viewer rotation, composed outside the page display list.
+    /// NoRotate appearances counter this angle as well as the page rotation.
+    pub view_rotation: u16,
 }
 impl Default for AnnotationRenderOptions {
     fn default() -> Self {
@@ -28,6 +31,7 @@ impl Default for AnnotationRenderOptions {
             intent: AnnotationRenderIntent::Screen,
             include_widgets: true,
             view_zoom: 1.,
+            view_rotation: 0,
         }
     }
 }
@@ -94,6 +98,9 @@ impl<R: Read + Seek> PdfPage<'_, R> {
     ) -> PdfResult<AnnotatedDisplayList> {
         if !options.view_zoom.is_finite() || options.view_zoom <= 0. {
             return Err(invalid("annotation view zoom must be finite and positive"));
+        }
+        if !matches!(options.view_rotation, 0 | 90 | 180 | 270) {
+            return Err(invalid("annotation view rotation must be a quarter turn"));
         }
         let geometry = self.geometry()?;
         let work = super::execution_budget::ExecutionBudget::new();
@@ -263,11 +270,12 @@ impl<R: Read + Seek> PdfPage<'_, R> {
             );
             let no_zoom = flags & 8 != 0 && options.intent == AnnotationRenderIntent::Screen;
             let no_rotate = flags & 16 != 0;
-            if (no_rotate && geometry.rotation != 0) || no_zoom {
+            let rotation = (geometry.rotation + i32::from(options.view_rotation)) % 360;
+            if (no_rotate && rotation != 0) || no_zoom {
                 let anchor = geometry
                     .user_to_display
                     .checked_transform(&crate::geom::point::Point::new(rect.llx(), rect.ury()))?;
-                let (mut c, mut s) = match if no_rotate { geometry.rotation } else { 0 } {
+                let (mut c, mut s) = match if no_rotate { rotation } else { 0 } {
                     0 => (1., 0.),
                     90 => (0., -1.),
                     180 => (-1., 0.),

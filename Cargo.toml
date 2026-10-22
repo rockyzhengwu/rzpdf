@@ -1,5 +1,5 @@
 [workspace]
-members = ["pdf","render","font-data"]
+members = ["pdf","render","font-data","web-wasm"]
 resolver = "3"
 
 [workspace.package]

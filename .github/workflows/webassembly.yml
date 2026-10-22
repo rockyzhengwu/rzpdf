@@ -1,0 +1,89 @@
+name: WebAssembly regression
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.15.1'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install native and fixture dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libfontconfig1-dev libfreetype6-dev libgl1-mesa-dev nasm ninja-build pkg-config
+          python3 -m pip install Pillow==11.3.0 fonttools==4.62.1
+          npm --prefix web ci --ignore-scripts
+          cd web
+          npx playwright-core install --with-deps chromium
+      - uses: Swatinem/rust-cache@v2
+      - name: Prepare locked Wasm tools
+        run: |
+          rustup toolchain install nightly-2026-08-26 --profile minimal --component rust-src
+          git clone https://github.com/emscripten-core/emsdk.git output/webassembly/toolchains/emsdk
+          git -C output/webassembly/toolchains/emsdk checkout d7b4130688bfa348392b921ab04015aa15c4f154
+          python3 output/webassembly/toolchains/emsdk/emsdk.py install 3.1.64
+          python3 output/webassembly/toolchains/emsdk/emsdk.py activate 3.1.64
+      - name: Build native reference and browser module
+        run: |
+          cargo build --locked -p render --example rgba_reference
+          python3 scripts/build_webassembly.py --package web-wasm --output output/webassembly/wa03-build.json
+          npm --prefix web run build
+          node web/tests/text.mjs
+          node web/tests/geometry.mjs
+          node web/tests/viewport-raster.mjs
+          node web/tests/worker.mjs
+          node web/tests/font-resources.mjs
+          python3 scripts/prepare_webassembly_fixtures.py
+          python3 scripts/prepare_web_font_matrix.py
+          node web/tests/package-assets.mjs
+          python3 scripts/prepare_web_region_fixtures.py
+      - name: Compare all browser fixture pages with native pixels
+        run: |
+          export RZPDF_CHROMIUM="$(cd web && node --input-type=module -e "import {chromium} from 'playwright-core'; process.stdout.write(chromium.executablePath())")"
+          node web/tests/browser.mjs
+          node web/tests/interaction.mjs
+          node web/tests/viewer.mjs
+          node web/tests/viewport-browser.mjs
+          node web/tests/viewport-parity.mjs
+          node web/tests/content.mjs
+          node web/tests/import.mjs
+          node web/tests/font-write.mjs
+          node web/tests/font-service.mjs
+          node web/tests/font-resources-browser.mjs
+          node web/tests/assets-browser.mjs
+          node web/tests/language.mjs
+          node web/tests/font-matrix.mjs
+          node web/tests/regions.mjs
+          python3 -c 'import json; r=json.load(open("output/webassembly/wa03-browser/report.json")); assert r["status"] == "passed" and len(r["cases"]) >= 40 and r["worker"]["status"] == "passed" and len(r["worker"]["pages"]) >= 40 and r["reader_ui"]["cancel_clears_late_results"], "incomplete browser/Worker regression"'
+      - name: Preserve build and pixel evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-regression-${{ github.run_id }}
+          path: |
+            output/webassembly/wa03-build*
+            output/webassembly/wa03-browser/
+            output/webassembly/interaction-browser/
+            output/webassembly/viewer-browser/
+            output/webassembly/viewport-browser/
+            output/webassembly/viewport-parity/
+            output/webassembly/content-browser/
+            output/webassembly/import-browser/
+            output/webassembly/font-write-browser
+            output/webassembly/font-service-browser/
+            output/webassembly/font-resources-browser/
+            output/webassembly/assets-browser/
+            output/webassembly/language-browser/
+            output/webassembly/font-matrix-browser/
+            output/webassembly/region-browser/
+          if-no-files-found: ignore

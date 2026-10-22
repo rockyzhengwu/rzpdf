@@ -96,3 +96,15 @@ pub struct FormFieldDetails {
     pub button_states: Vec<String>,
     pub button_exports: Option<Vec<String>>,
 }
+
+/// Inspectable terminal fields; unsupported profiles remain visible and read-only.
+#[derive(Debug, Clone)]
+pub struct FormFieldRecord {
+    pub handle: ObjectHandle,
+    pub name: String,
+    pub field_type: Option<String>,
+    pub flags: u32,
+    pub widgets: Vec<super::FormWidget>,
+    pub details: Option<FormFieldDetails>,
+    pub unsupported_reason: Option<String>,
+}

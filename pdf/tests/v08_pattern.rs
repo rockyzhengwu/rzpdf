@@ -30,7 +30,11 @@ fn pattern(
 }
 
 fn document() -> PdfDocument<Cursor<Vec<u8>>> {
-    let doc = PdfDocument::new().unwrap();
+    let doc = PdfDocument::new_with_options(ParseOptions {
+        mode: ParseMode::Strict,
+        ..Default::default()
+    })
+    .unwrap();
     doc.add_page_with_builder(0, PageBuilder::new().size(40., 40.))
         .unwrap();
     doc
@@ -142,7 +146,7 @@ fn uncoloured_pattern_uses_tint_and_rejects_colour_in_cell() {
 }
 
 #[test]
-fn tiny_steps_hit_tile_budget_and_retry_is_independent() {
+fn compact_cell_operation_budget_and_retry_are_independent() {
     let doc = document();
     let id = pattern(&doc, "", b"0 0 4 4 re f");
     let name = doc
@@ -160,7 +164,7 @@ fn tiny_steps_hit_tile_budget_and_retry_is_independent() {
         ParseOptions {
             mode: ParseMode::Strict,
             limits: Limits {
-                max_content_operations: 20,
+                max_content_operations: 3,
                 ..Limits::default()
             },
         },
@@ -280,8 +284,11 @@ fn form_local_pattern_scope_and_default_matrix_do_not_use_body_cm() {
     let PageObject::Path(cell) = &space.paint().unwrap().list.objects()[0] else {
         panic!()
     };
-    assert_eq!((cell.matrix().e() - 7.) % 10., 0.);
-    assert_eq!((40. - cell.matrix().f() - 8.) % 10., 0.);
+    // Compact cells use local coordinates; the separate placement retains
+    // the Form default transform and excludes the body's later cm (3,5).
+    assert_eq!((cell.matrix().e(), cell.matrix().f()), (0., 0.));
+    let placement = space.paint().unwrap().tile_matrix.as_ref().unwrap();
+    assert_eq!((placement.e(), placement.f()), (7., 32.));
     // Empty local Pattern table cannot borrow the page Pattern resource.
     let bad_dict = parse("<< /Subtype /Form /BBox [0 0 20 20] /Resources << >> >>")
         .into_dict()

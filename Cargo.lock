@@ -156,6 +156,7 @@ checksum = "773f3b9af64447d2ce9850330c473515014aa235e6a783b02db81ff39e4a3dad"
 dependencies = [
  "crypto-common",
  "inout",
+ "zeroize",
 ]
 
 [[package]]
@@ -673,6 +674,7 @@ dependencies = [
  "freetype-rs",
  "getrandom 0.4.3",
  "hashbrown",
+ "hayro-ccitt",
  "hayro-jbig2",
  "hayro-jpeg2000",
  "lazy_static",
@@ -681,6 +683,7 @@ dependencies = [
  "mozjpeg",
  "png",
  "quick-xml",
+ "rc4",
  "ring",
  "sha2",
  "stringprep",
@@ -778,6 +781,15 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
+name = "rc4"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f1256e23efe6097f27aa82d6ca6889361c001586ae0f6917cbad072f05eb275"
+dependencies = [
+ "cipher",
+]
 
 [[package]]
 name = "redox_syscall"
@@ -1146,6 +1158,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9517f9239f02c069db75e65f174b3da828fe5f5b945c4dd26bd25d89c03ebcf5"
 dependencies = [
  "wit-bindgen",
+]
+
+[[package]]
+name = "web-wasm"
+version = "0.1.0"
+dependencies = [
+ "pdf",
+ "render",
+ "serde_json",
+ "zeroize",
 ]
 
 [[package]]

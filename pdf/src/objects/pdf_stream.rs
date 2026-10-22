@@ -198,6 +198,38 @@ impl PdfStream {
         })
     }
 
+    pub(crate) fn decode_jpx_image_data<R: Seek + Read>(
+        &self,
+        ctx: &PDFContext<R>,
+        preserve_indices: bool,
+    ) -> PdfResult<Vec<u8>> {
+        ctx.with_decode_depth(|| {
+            self.decode_data_using(
+                ctx,
+                true,
+                None,
+                |filter, params, input, mut context| {
+                    context.jpx_preserve_indices = preserve_indices;
+                    apply_filters(filter, params, input, context)
+                },
+                || self.copy_unfiltered_data(ctx),
+            )
+        })
+    }
+
+    pub(crate) fn encoded_jpx_payload<R: Seek + Read>(
+        &self,
+        ctx: &PDFContext<R>,
+    ) -> PdfResult<Vec<u8>> {
+        ctx.with_decode_depth(|| {
+            self.decode_data_using(ctx, false, None, crate::filter::encoded_jpx_payload, || {
+                Err(PdfError::FilterError(
+                    "JPX requires an encoded filter stage".into(),
+                ))
+            })
+        })
+    }
+
     /// Return separately owned decoded bytes charged to the caller's pool.
     /// Resolved Filter/DecodeParms copies share the pool during decoding.
     /// Stored source bytes and first source loading/native state are excluded.
@@ -273,6 +305,14 @@ impl PdfStream {
                 .any(|f| f.as_name().is_some_and(|n| n.name() == "JBIG2Decode")),
             _ => false,
         });
+        let has_dct = filter.as_ref().is_some_and(|filter| match filter {
+            PdfObject::PdfName(name) => matches!(name.name(), "DCT" | "DCTDecode"),
+            PdfObject::PdfArray(array) => array.into_iter().any(|f| {
+                f.as_name()
+                    .is_some_and(|n| matches!(n.name(), "DCT" | "DCTDecode"))
+            }),
+            _ => false,
+        });
         let globals_with_budget = if let Some(budget) = budget.filter(|_| has_jbig2) {
             resolve_jbig2_globals_with_budget(params.as_ref(), ctx, budget)?
         } else {
@@ -284,7 +324,7 @@ impl PdfStream {
             None
         };
         let local = ctx.limits().operation_budget();
-        let normalized = if has_jbig2
+        let normalized = if (has_jbig2 || has_dct)
             && ["Width", "Height", "BitsPerComponent"].iter().any(|key| {
                 self.dict
                     .get(key)
@@ -310,11 +350,13 @@ impl PdfStream {
             .filter(|obj| !matches!(obj, PdfObject::PdfNull))
         {
             let recovered = std::cell::Cell::new(false);
+            let recovered_parameters = std::cell::Cell::new(false);
             let result = decode(
                 filter,
                 params.as_ref(),
                 self.data.as_slice(),
                 FilterContext {
+                    jpx_preserve_indices: false,
                     stream_dict: Some(
                         normalized
                             .as_ref()
@@ -330,8 +372,14 @@ impl PdfStream {
                     crypt_already_processed: self.crypt_processed,
                     compatible: ctx.options().mode == crate::parser::syntax::ParseMode::Compatible,
                     recovered: Some(&recovered),
+                    recovered_filter_parameters: Some(&recovered_parameters),
                 },
             );
+            if recovered_parameters.get() {
+                ctx.record_structure_recovery(
+                    crate::parser::diagnostic::StructureReason::FilterParameters,
+                )?;
+            }
             if recovered.get() {
                 ctx.record_structure_recovery(
                     crate::parser::diagnostic::StructureReason::ImageTailRecovery,

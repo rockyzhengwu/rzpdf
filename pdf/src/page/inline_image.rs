@@ -310,7 +310,13 @@ pub(crate) fn read<R: Read + Seek>(
         .map(|n| n.name());
     let mut payload = Vec::new();
     let mut payload_lease = budget.reserve(0)?;
-    let mut next = |syntax: &mut SyntaxParser<R>| -> PdfResult<u8> {
+    fn next<R: Read + Seek>(
+        syntax: &mut SyntaxParser<R>,
+        payload: &mut Vec<u8>,
+        payload_lease: &mut MemoryLease,
+        budget: &OperationBudget,
+        limits: Limits,
+    ) -> PdfResult<u8> {
         if payload.len() >= limits.max_raw_stream_bytes {
             return Err(limit("inline encoded bytes"));
         }
@@ -326,16 +332,16 @@ pub(crate) fn read<R: Read + Seek>(
                 .try_reserve_exact(capacity)
                 .map_err(|_| limit("inline allocation"))?;
             lease.resize(replacement.capacity())?;
-            replacement.append(&mut payload);
-            payload = replacement;
-            payload_lease = lease;
+            replacement.append(payload);
+            *payload = replacement;
+            *payload_lease = lease;
         }
         let byte = syntax
             .get_next_char()
             .map_err(|_| invalid("truncated inline image data"))?;
         payload.push(byte);
         Ok(byte)
-    };
+    }
     match filter {
         None => {
             let dimension = |key| {
@@ -398,14 +404,16 @@ pub(crate) fn read<R: Read + Seek>(
                 .filter(|n| *n <= limits.max_raw_stream_bytes)
                 .ok_or_else(|| limit("inline sample bytes"))?;
             for _ in 0..count {
-                next(syntax)?;
+                next(syntax, &mut payload, &mut payload_lease, budget, limits)?;
             }
         }
-        Some("AHx" | "ASCIIHexDecode") => while next(syntax)? != b'>' {},
+        Some("AHx" | "ASCIIHexDecode") => {
+            while next(syntax, &mut payload, &mut payload_lease, budget, limits)? != b'>' {}
+        }
         Some("A85" | "ASCII85Decode") => {
             let mut previous = 0;
             loop {
-                let b = next(syntax)?;
+                let b = next(syntax, &mut payload, &mut payload_lease, budget, limits)?;
                 if previous == b'~' && b == b'>' {
                     break;
                 }
@@ -413,7 +421,7 @@ pub(crate) fn read<R: Read + Seek>(
             }
         }
         Some("RL" | "RunLengthDecode") => loop {
-            let control = next(syntax)?;
+            let control = next(syntax, &mut payload, &mut payload_lease, budget, limits)?;
             if control == 128 {
                 break;
             }
@@ -423,14 +431,14 @@ pub(crate) fn read<R: Read + Seek>(
                 1
             };
             for _ in 0..count {
-                next(syntax)?;
+                next(syntax, &mut payload, &mut payload_lease, budget, limits)?;
             }
         },
         Some("Fl" | "FlateDecode") => {
             let mut decoder = flate2::Decompress::new(true);
             let mut output = [0u8; 4096];
             'encoded: loop {
-                let byte = next(syntax)?;
+                let byte = next(syntax, &mut payload, &mut payload_lease, budget, limits)?;
                 let input = [byte];
                 let mut offset = 0;
                 loop {
@@ -455,22 +463,60 @@ pub(crate) fn read<R: Read + Seek>(
                 }
             }
         }
+        Some("CCF" | "CCITTFaxDecode") => {
+            let params = parameter(&dict, "DecodeParms")
+                .and_then(|p| p.as_array().and_then(|a| a.get(0)).or(Some(p)))
+                .and_then(PdfObject::as_dict);
+            let width = parameter(&dict, "Width")
+                .and_then(PdfObject::as_u32)
+                .ok_or_else(|| invalid("inline CCITT Width missing"))?;
+            let height = parameter(&dict, "Height")
+                .and_then(PdfObject::as_u32)
+                .ok_or_else(|| invalid("inline CCITT Height missing"))?;
+            let mut target = 64usize.min(limits.max_raw_stream_bytes);
+            loop {
+                while payload.len() < target && !syntax.is_eof() {
+                    next(syntax, &mut payload, &mut payload_lease, budget, limits)?;
+                }
+                match crate::filter::ccittfax::encoded_length(
+                    &payload, params, width, height, limits, budget,
+                ) {
+                    Ok(consumed) => {
+                        payload.truncate(consumed);
+                        syntax.set_pos(start + consumed as u64)?;
+                        break;
+                    }
+                    Err(error @ (PdfError::ResourceLimit(_) | PdfError::UnsupportedFeature(_))) => {
+                        return Err(error);
+                    }
+                    Err(error) if syntax.is_eof() => return Err(error),
+                    Err(_) => {
+                        if target == limits.max_raw_stream_bytes {
+                            return Err(limit("inline CCITT encoded bytes"));
+                        }
+                        target = target.saturating_mul(2).min(limits.max_raw_stream_bytes);
+                    }
+                }
+            }
+        }
         Some("DCT" | "DCTDecode") => {
-            if next(syntax)? != 255 || next(syntax)? != 216 {
+            if next(syntax, &mut payload, &mut payload_lease, budget, limits)? != 255
+                || next(syntax, &mut payload, &mut payload_lease, budget, limits)? != 216
+            {
                 return Err(invalid("invalid inline JPEG signature"));
             }
             let mut entropy = false;
             loop {
-                let first = next(syntax)?;
+                let first = next(syntax, &mut payload, &mut payload_lease, budget, limits)?;
                 if entropy && first != 255 {
                     continue;
                 }
                 if first != 255 {
                     return Err(invalid("invalid inline JPEG marker"));
                 }
-                let mut marker = next(syntax)?;
+                let mut marker = next(syntax, &mut payload, &mut payload_lease, budget, limits)?;
                 while marker == 255 {
-                    marker = next(syntax)?;
+                    marker = next(syntax, &mut payload, &mut payload_lease, budget, limits)?;
                 }
                 if marker == 217 {
                     break;
@@ -481,12 +527,25 @@ pub(crate) fn read<R: Read + Seek>(
                 if marker == 0 || marker == 216 {
                     return Err(invalid("invalid inline JPEG marker"));
                 }
-                let length = usize::from(next(syntax)?) * 256 + usize::from(next(syntax)?);
+                let length = usize::from(next(
+                    syntax,
+                    &mut payload,
+                    &mut payload_lease,
+                    budget,
+                    limits,
+                )?) * 256
+                    + usize::from(next(
+                        syntax,
+                        &mut payload,
+                        &mut payload_lease,
+                        budget,
+                        limits,
+                    )?);
                 if length < 2 {
                     return Err(invalid("invalid inline JPEG segment length"));
                 }
                 for _ in 2..length {
-                    next(syntax)?;
+                    next(syntax, &mut payload, &mut payload_lease, budget, limits)?;
                 }
                 entropy = marker == 218;
             }
@@ -509,7 +568,14 @@ pub(crate) fn read<R: Read + Seek>(
             let mut previous = false;
             loop {
                 while available < width {
-                    bits = (bits << 8) | u32::from(next(syntax)?);
+                    bits = (bits << 8)
+                        | u32::from(next(
+                            syntax,
+                            &mut payload,
+                            &mut payload_lease,
+                            budget,
+                            limits,
+                        )?);
                     available += 8;
                 }
                 available -= width;
@@ -542,7 +608,6 @@ pub(crate) fn read<R: Read + Seek>(
             ));
         }
     }
-    drop(next);
     let end = syntax.position();
     if !whitespace(syntax.get_next_char()?) {
         return Err(invalid("inline image data must be separated from EI"));

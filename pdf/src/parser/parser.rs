@@ -74,8 +74,22 @@ fn load_xref_chain<R: Seek + Read>(
             if !visited.insert(stream_offset) {
                 return Err(PdfError::InvalidReference("cycle in hybrid xref".into()));
             }
-            // Supplemental stream overrides table entries in the same revision.
-            revision.merge(parse_xref_stream(syntax, stream_offset)?);
+            let supplemental = parse_xref_stream(syntax, stream_offset)?;
+            // Some incremental producers reattach a supplement from before
+            // /Prev. Compatible mode preserves explicit newer table updates;
+            // Strict retains same-revision stream precedence.
+            if syntax.mode() == crate::parser::syntax::ParseMode::Compatible
+                && next.is_some_and(|previous| stream_offset < previous)
+            {
+                syntax.report(
+                    offset,
+                    None,
+                    crate::parser::diagnostic::StructureReason::OlderHybridSupplement,
+                )?;
+                revision.merge_older(supplemental);
+            } else {
+                revision.merge(supplemental);
+            }
         }
         if let Some(current) = &mut result {
             current.merge_older(revision);
@@ -214,6 +228,7 @@ pub fn parse_xref_stream<R: Seek + Read>(
             dict.get("DecodeParms"),
             raw_data,
             FilterContext {
+                jpx_preserve_indices: false,
                 stream_dict: Some(dict),
                 jbig2_globals: None,
                 max_decoded_bytes: syntax.limits().max_decoded_bytes,
@@ -221,6 +236,7 @@ pub fn parse_xref_stream<R: Seek + Read>(
                 crypt_already_processed: false,
                 compatible: false,
                 recovered: None,
+                recovered_filter_parameters: None,
             },
         )
         .map_err(|e| PdfError::ParserError(format!("xref stream filter decode failed: {e}")))?,
@@ -774,6 +790,26 @@ mod tests {
             ObjectState::Compressed
         ));
         assert_eq!(xref.lookup(&1).unwrap().offset(), 7);
+    }
+
+    #[test]
+    fn compatible_incremental_table_preserves_update_over_reused_old_supplement() {
+        use crate::parser::syntax::ParseMode;
+        let mut pdf = b"%PDF-1.7\n".to_vec();
+        let stream_offset = pdf.len();
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /XRef /Size 3 /Index [1 1] /W [1 1 1] /Length 3 >>\nstream\n\x01\x0b\x00\nendstream\nendobj\n");
+        let previous = pdf.len();
+        pdf.extend_from_slice(
+            b"xref\n0 2\n0000000000 65535 f\n0000000011 00000 n\ntrailer\n<< /Size 3 >>\n",
+        );
+        let latest = pdf.len();
+        pdf.extend_from_slice(format!("xref\n1 1\n0000000099 00000 n\ntrailer\n<< /Size 3 /Prev {previous} /XRefStm {stream_offset} >>\nstartxref\n{latest}\n%%EOF\n").as_bytes());
+        for (mode, expected) in [(ParseMode::Strict, 11), (ParseMode::Compatible, 99)] {
+            let reader = StreamReader::try_new(Cursor::new(pdf.clone())).unwrap();
+            let mut syntax = SyntaxParser::with_mode(reader, mode);
+            let table = parse_xref(&mut syntax).unwrap();
+            assert_eq!(table.lookup(&1).unwrap().offset(), expected);
+        }
     }
 
     #[test]

@@ -97,6 +97,8 @@ impl<R: Read + Seek> Interpreter<'_, R> {
             ));
             let mut child =
                 Interpreter::new(self.page, self.ctx, parser).with_resource_scope(scope);
+            child.language = self.language.clone();
+            child.language_initialized = true;
             child.execution_budget = work;
             child.optional_content = self.optional_content.clone();
             let mut trace = TraceDevice::for_display_list(limits);
@@ -254,6 +256,8 @@ impl<R: Read + Seek> Interpreter<'_, R> {
                 ));
                 let mut child = Interpreter::new(self.page, self.ctx, parser)
                     .with_resource_scope(pattern.resources.clone());
+                child.language = self.language.clone();
+                child.language_initialized = true;
                 child.execution_budget = budget.clone();
                 child.optional_content = self.optional_content.clone();
                 child.pattern_depth = self.pattern_depth + 1;

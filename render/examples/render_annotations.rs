@@ -42,6 +42,7 @@ fn main() -> PdfResult<()> {
                 intent,
                 include_widgets: true,
                 view_zoom: zoom,
+                ..Default::default()
             },
         )?;
         device.save(

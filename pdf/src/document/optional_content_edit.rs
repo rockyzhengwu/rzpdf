@@ -234,7 +234,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         self.validate_layer_content(source, true, budget)?;
         self.edit_transaction_with_budget(budget, |doc| {
             let property = doc.register_layer_property(page, membership, budget)?;
-            let mut bytes = format!("q\n/OC /{property} BDC\n").into_bytes();
+            let mut bytes = format!("\nq\n/OC /{property} BDC\n").into_bytes();
             bytes.extend_from_slice(source);
             bytes.extend_from_slice(b"\nEMC\nQ\n");
             doc.append_page_contents_inner(page, bytes)?;

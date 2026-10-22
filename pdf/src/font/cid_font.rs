@@ -23,6 +23,10 @@ pub struct CidFont {
 }
 
 impl CidFont {
+    pub(crate) fn descriptor_flags(&self) -> Option<u32> {
+        self.descriptor.as_ref().and_then(|d| d.flags().copied())
+    }
+
     /// TrueType glyph selection; CID-keyed CFF requires a separate charset lookup.
     pub fn glyph_id(&self, cid: u32) -> Option<u32> {
         if self.sub_type == "CIDFontType0" {

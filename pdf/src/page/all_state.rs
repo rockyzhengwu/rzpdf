@@ -11,6 +11,9 @@ pub(crate) fn supported_ext_gs_key(key: &str) -> bool {
     matches!(
         key,
         "Type"
+            // Producer-supplied state label, not a painting parameter. Ignore
+            // its value rather than rejecting gs (or resolving metadata refs).
+            | "Name"
             | "Font"
             | "LW"
             | "LC"

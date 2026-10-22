@@ -463,7 +463,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         expected: &ContentProgram,
         replacements: &[crate::page::content_program::OperationReplacement<'_>],
     ) -> PdfResult<()> {
-        let budget = self.ctx.limits().operation_budget();
+        let budget = self.ctx.operation_budget();
         self.commit_page_content_edit_with_budget(page, expected, &budget, || {
             expected.with_replaced_operation_sequences_with_budget(
                 replacements,
@@ -485,7 +485,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         range: std::ops::Range<(usize, usize)>,
         text: &str,
     ) -> PdfResult<()> {
-        let budget = self.ctx.limits().operation_budget();
+        let budget = self.ctx.operation_budget();
         let mut retained_state = None;
         let mut retained_replacements = None;
         self.commit_page_content_edit_with_budget(page, expected, &budget, || {
@@ -557,7 +557,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         range: std::ops::Range<(usize, usize)>,
         text: &str,
     ) -> PdfResult<()> {
-        let budget = self.ctx.limits().operation_budget();
+        let budget = self.ctx.operation_budget();
         let mut retained_replacements = None;
         let mut retained_font = None;
         self.commit_page_content_edit_with_budget(page, expected, &budget, || {
@@ -779,7 +779,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         range: std::ops::Range<usize>,
         text: &str,
     ) -> PdfResult<()> {
-        let budget = self.ctx.limits().operation_budget();
+        let budget = self.ctx.operation_budget();
         // Keep the actual buffer and its lease together through content commit.
         let mut retained_replacement = None;
         let mut retained_font = None;
@@ -1091,7 +1091,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         operation: usize,
         text: &str,
     ) -> PdfResult<()> {
-        let budget = self.ctx.limits().operation_budget();
+        let budget = self.ctx.operation_budget();
         let mut retained_codes = None;
         self.commit_page_content_edit_with_budget(page, expected, &budget, || {
             let codes = self
@@ -1119,7 +1119,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         operation: usize,
         text: &str,
     ) -> PdfResult<()> {
-        let budget = self.ctx.limits().operation_budget();
+        let budget = self.ctx.operation_budget();
         let mut retained_state = None;
         let mut retained_codes = None;
         self.commit_page_content_edit_with_budget(page, expected, &budget, || {
@@ -1169,7 +1169,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         item: usize,
         text: &str,
     ) -> PdfResult<()> {
-        let budget = self.ctx.limits().operation_budget();
+        let budget = self.ctx.operation_budget();
         let mut retained_state = None;
         let mut retained_codes = None;
         self.commit_page_content_edit_with_budget(page, expected, &budget, || {
@@ -1221,7 +1221,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         item: usize,
         text: &str,
     ) -> PdfResult<()> {
-        let budget = self.ctx.limits().operation_budget();
+        let budget = self.ctx.operation_budget();
         let mut retained_codes = None;
         self.commit_page_content_edit_with_budget(page, expected, &budget, || {
             let target = &expected

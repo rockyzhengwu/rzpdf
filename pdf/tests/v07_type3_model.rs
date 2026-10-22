@@ -913,3 +913,38 @@ fn type3_metadata_is_retained_for_extraction_but_not_painted_twice() {
         assert!(matches!(painted.objects()[0], PageObject::Path(_)));
     }
 }
+
+#[test]
+fn compatible_charproc_width_mismatch_preserves_font_text_advances() {
+    use pdf::parser::syntax::ParseMode;
+    let (doc, name, _) = document(FONT, b"500 0 d0 0 0 600 700 re f", Default::default());
+    doc.replace_page_contents(0, format!("BT /{name} 12 Tf (AA) Tj ET").into_bytes())
+        .unwrap();
+    let bytes = doc.save_to_bytes().unwrap();
+    for mode in [ParseMode::Strict, ParseMode::Compatible] {
+        let document = Document::from_bytes_with_mode(bytes.clone(), mode).unwrap();
+        let result = document
+            .get_page(0)
+            .unwrap()
+            .extract_characters_paint_order();
+        if mode == ParseMode::Strict {
+            assert!(result.is_err());
+        } else {
+            let chars = result.unwrap();
+            assert_eq!(chars.len(), 2);
+            let font = document
+                .get_page(0)
+                .unwrap()
+                .inspect_type3_font(&name)
+                .unwrap();
+            assert_eq!(font.width(65).unwrap(), 600.);
+            assert!(
+                document
+                    .structure_diagnostics()
+                    .unwrap()
+                    .iter()
+                    .any(|d| d.reason == pdf::parser::diagnostic::StructureReason::FontWidths)
+            );
+        }
+    }
+}

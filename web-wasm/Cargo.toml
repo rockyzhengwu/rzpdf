@@ -1,0 +1,15 @@
+[package]
+name = "web-wasm"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+pdf = { path = "../pdf" }
+render = { path = "../render" }
+serde_json = "=1.0.149"
+zeroize = "1.9.0"
+
+[[bin]]
+name = "rzpdf_web"
+path = "src/main.rs"

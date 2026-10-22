@@ -53,14 +53,14 @@ No runtime system-tool subprocess is used for production decoding.
 The legacy CCITT filter exposes expanded 0/255 samples. The common image
 adapter converts these to row-padded one-bit samples before applying Decode
 and stencil semantics. Inline Group 4 with an ASCIIHex wrapper is covered,
-including widths not divisible by eight; direct CCITT inline framing is not.
+including widths not divisible by eight. Direct Group 4 inline framing also uses decoded row/EOB boundaries through a counting sink, with bounded geometric lookahead and scratch reservations; it never searches encoded bytes for EI. Group 3 direct inline framing remains unsupported.
 
 ## Image soft masks and Matte
 
-Image `SMask` accepts matching-size, non-stencil `DeviceGray` images with
+Image `SMask` accepts independently sized, non-stencil `DeviceGray` images with
 1/2/4/8/16-bit samples and a valid `Decode` array. Packed mask samples retain
 their precision until conversion; the final RGBA buffer has 8-bit alpha.
-Nested `Mask`/`SMask` and mismatched dimensions remain unsupported.
+Nested `Mask`/`SMask` remain unsupported. Masks retain their own packed dimensions and pixel limits. Extraction samples opacity at base-image pixel centers; rendering uses the larger width/height of image and masks, samples source colors and alpha independently, and unblends Matte before color conversion. The combined render grid has a checked RGBA byte limit; it does not allocate an intermediate base RGBA image.
 
 An optional `Matte` array describes preblended colour. The image adapter
 inverts `c' = m + alpha * (c - m)` after sample decoding, **in the source colour
@@ -92,10 +92,44 @@ process isolation and independent resource/time limits for untrusted-file
 services; these APIs are not a sandbox. Legacy image interpretation still has
 the untracked/native allocation exclusions of the existing image pipeline.
 
-The default build pins hayro-jpeg2000 0.4.1, hayro-jbig2 0.3.1 and hayro-ccitt
-0.4.0, using `std` without optional image integration or SIMD. Their upstream
+The default build pins hayro-jpeg2000 0.4.1 and hayro-jbig2 0.3.1 with `std`, and hayro-ccitt
+0.4.0 without optional features; optional image integration and SIMD remain disabled. Their upstream
 license is MIT OR Apache-2.0; [the MIT notice](licenses/Hayro-MIT.txt) is retained
 for distributors using that license option. Project AGPL-3.0-only and bundled
 font/CMap licenses remain unchanged. Rust 1.92 or newer is required by these
 codec dependencies. There is no runtime "backend disabled" branch in the
 default build; a missing dependency is a build error, not blank-image success.
+
+## Corpus compatibility follow-up
+
+A terminal JPX stage may be preceded by bounded byte filters (ASCIIHex, ASCII85, Flate, LZW, RunLength and authenticated Crypt). Header inspection runs after those wrappers, with the ordinary filter/DecodeParms validation retained. A bounded palette extension supports one unsigned 8-bit codestream index component, up to 256 unsigned 8-bit Gray/RGB entries, and explicit sequential component mapping. Sequential channel definitions support straight Gray/RGB/CMYK opacity. `SMaskInData 1` extracts the trailing opacity channel; absent/zero ignores it. CMYK samples use the existing source-color conversion. Premultiplied opacity (`SMaskInData 2`), conflicting explicit masks, ICC specifications and other unsupported JPX coding envelopes remain rejected. Channel-separation buffers are checked against the decoded-byte limit. Explicit stencil masks retain their native sample resolution for rendering; extraction retains the original base-image dimensions. Combined mask/base RGBA allocations remain bounded.
+
+The renderer honors the image Interpolate flag (false by default): nearest sampling when false, linear sampling and bounded minification mipmaps when true. Mask extraction keeps base-image dimensions; rendering may use a finer mask grid. This does not promise identical minification to other rasterizers.
+
+
+The single-tile JPX envelope permits a nominal tile larger than the image, with
+zero image/tile origins. The backend clips tile work to the image bounds; sample
+and scratch reservations continue to use the image dimensions. Component coding
+(COC) is accepted only when its component index is valid and all coding settings
+exactly equal the main COD settings. Different settings, nonzero origins and
+multiple tiles remain unsupported. This extension does not raise resource limits.
+
+PDF Indexed JPX images keep the original indices and use the PDF palette in
+preference to the JP2 palette. Unsigned full-resolution 1/2/4/8-bit source index
+planes are accepted, with indices retained as bytes without gray scaling. JPX
+Decode remains ignored. Other explicit PDF color spaces require a matching
+source color-channel count; incompatible counts remain errors.
+
+Compatible mode may remove a single CR, LF or CRLF surplus after the exact image
+or soft-mask sample count, recording an image trailing-byte diagnostic. It never
+pads missing samples or drops non-line-ending bytes; Strict retains exact length
+validation. The bounded recovery also applies after byte-wrapper filter chains.
+
+JPEG header dimensions are checked against provided image dimensions before
+reserving or decoding the pixel buffer, including indirectly referenced fields.
+A large or contradictory JPEG does not allocate pixels before that check.
+
+A malformed document can still be rejected after a codec limitation is fixed.
+Dictionary sample geometry, color counts, Matte dimensions, and actual decoded
+row lengths remain independently validated; successful header decoding never
+permits truncated or contradictory pixel data.

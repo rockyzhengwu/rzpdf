@@ -24,7 +24,7 @@ def check(path, args):
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         try:
             process = subprocess.run(
-                [str(args.binary), str(path), args.mode], stdout=out, stderr=err,
+                getattr(args, "command_prefix", []) + [str(args.binary), str(path), args.mode], stdout=out, stderr=err,
                 timeout=args.timeout, check=False,
             )
             code = process.returncode

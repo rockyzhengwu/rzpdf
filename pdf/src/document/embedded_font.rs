@@ -201,6 +201,93 @@ impl<'a> MetricArrayBuilder<'a> {
 }
 
 impl<R: Read + Seek> ResourceManager<'_, R> {
+    /// Choose an unused six-letter subset tag without decoding stream payloads.
+    /// The caller keeps selection and registration in one edit transaction.
+    pub fn next_subset_tag_with_budget(
+        &self,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<[u8; 6]> {
+        fn visit(
+            object: &PdfObject,
+            depth: usize,
+            nodes: &mut usize,
+            tags: &mut Vec<[u8; 6]>,
+            lease: &mut crate::budget::MemoryLease,
+            limits: crate::parser::options::Limits,
+        ) -> PdfResult<()> {
+            *nodes = nodes
+                .checked_add(1)
+                .ok_or_else(|| PdfError::ResourceLimit("subset tag scan nodes".into()))?;
+            if depth > limits.max_depth || *nodes > limits.max_objects.saturating_mul(16) {
+                return Err(PdfError::ResourceLimit("subset tag scan complexity".into()));
+            }
+            match object {
+                PdfObject::PdfName(name) => {
+                    let bytes = name.name().as_bytes();
+                    if bytes.len() > 7
+                        && bytes[6] == b'+'
+                        && bytes[..6].iter().all(u8::is_ascii_uppercase)
+                    {
+                        if tags.len() >= limits.max_objects {
+                            return Err(PdfError::ResourceLimit("subset tag scan names".into()));
+                        }
+                        if tags.len() == tags.capacity() {
+                            let capacity = (tags.len().max(8) * 2).min(limits.max_objects);
+                            lease.resize(capacity * 6)?;
+                            tags.try_reserve_exact(capacity - tags.len()).map_err(|_| {
+                                PdfError::ResourceLimit("subset tag scan allocation".into())
+                            })?;
+                            lease.resize(tags.capacity() * 6)?;
+                        }
+                        tags.push(bytes[..6].try_into().unwrap());
+                    }
+                }
+                PdfObject::PdfArray(array) => {
+                    for value in array.into_iter() {
+                        visit(value, depth + 1, nodes, tags, lease, limits)?;
+                    }
+                }
+                PdfObject::PdfDict(dict) => {
+                    for (_, value) in dict.into_iter() {
+                        visit(value, depth + 1, nodes, tags, lease, limits)?;
+                    }
+                }
+                PdfObject::PdfStream(stream) => {
+                    for (_, value) in stream.dict().into_iter() {
+                        visit(value, depth + 1, nodes, tags, lease, limits)?;
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+        let ctx = &self.document.ctx;
+        let (ids, _ids_lease) = ctx.object_ids_with_budget(true, budget)?;
+        let mut tags = Vec::new();
+        let mut lease = budget.reserve(0)?;
+        let mut nodes = 0;
+        for id in ids {
+            if let Some((object, _object_lease)) = ctx.object_for_write_with_budget(id, budget)? {
+                visit(&object, 0, &mut nodes, &mut tags, &mut lease, ctx.limits())?;
+            }
+        }
+        tags.sort_unstable();
+        tags.dedup();
+        for mut number in 0..=tags.len() {
+            let mut tag = [b'A'; 6];
+            for letter in tag.iter_mut().rev() {
+                *letter += u8::try_from(number % 26).unwrap();
+                number /= 26;
+            }
+            if tags.binary_search(&tag).is_err() {
+                return Ok(tag);
+            }
+        }
+        Err(PdfError::ResourceLimit(
+            "subset tag namespace exhausted".into(),
+        ))
+    }
+
     /// Embed a fixed-repertoire static TrueType subset. The caller supplies a
     /// document-unique six-uppercase-letter subset tag and reviews the license.
     /// The budget tracks subset buffers and W/W2 array/token capacity through

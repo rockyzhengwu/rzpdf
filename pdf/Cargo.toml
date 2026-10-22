@@ -13,6 +13,7 @@ bitstream-io = "4.10.0"
 cbc = "0.1.2"
 fax = "0.2.7"
 flate2 = "1.1.9"
+hayro-ccitt = { version = "=0.4.0", default-features = false }
 hayro-jpeg2000 = { version = "=0.4.1", default-features = false, features = ["std"] }
 hayro-jbig2 = { version = "=0.3.1", default-features = false, features = ["std"] }
 moxcms = { version = "=0.9.1", default-features = false, features = ["lut"] }
@@ -34,6 +35,12 @@ stringprep = "0.1.5"
 cms = "0.2.3"
 der = { version = "0.7.10", features = ["alloc", "std"] }
 ring = "0.17.14"
+# Legacy R4 password authentication only; new output remains R6 AES-256.
+rc4 = { version = "=0.1.0", features = ["zeroize"] }
+
+[target.'cfg(target_os = "emscripten")'.dependencies]
+# Cross compilation must never resolve the host's system FreeType via pkg-config.
+freetype-rs = { version = "0.38.0", features = ["bundled"] }
 
 [build-dependencies]
 cc = "=1.2.56"

@@ -52,3 +52,33 @@ target/debug/examples/v012_recovery damaged.pdf NEW_IMAGE_DIRECTORY recover
 The example checks input size before reading and creates its output directory only after successful interpretation. It writes PNGs, never a recovered PDF. Compare with `strict` on the undamaged source. The [offline gate](check-v012-recovery.py) produces original pikepdf/qpdf/MuPDF samples, paired mutations, Strict refusals, exact same-renderer before/after pixels and independent MuPDF references. It records producers, public synthetic provenance and hashes. No Poppler or network access is required.
 
 See also [advanced saving](advanced-saving.md), [object preservation](object-preservation.md) and the [version boundary](releases/v0.12-boundaries.md). Lexical and file-structure references: [ISO 32000-2 corrections, clause 7](https://pdf-issues.pdfa.org/32000-2-2020/clause07.html). Recovery limits are implementation policy, not standard-prescribed limits.
+
+## Incremental hybrid supplements
+
+Compatible mode preserves explicit newer table entries when an incremental trailer reuses an XRefStm located before its Prev revision, and emits OlderHybridSupplement. Strict mode retains supplemental-stream precedence. This bounded compatibility rule does not scan for guessed replacement objects or relax xref-cycle checks.
+
+Compatible page-tree Count recovery only applies to unmodified source nodes after full bounded child validation. Created or edited nodes with an incorrect Count remain errors; cycles and invalid child references remain rejected.
+
+For unmodified source page-tree branches, Compatible mode can also derive a
+missing Count from the same bounded, cycle-checked traversal used to verify an
+incorrect declared Count. Counts supplied by edits and malformed numeric Counts
+remain errors. The source bytes are preserved and recovery is diagnosed.
+
+A DecodeParms dictionary paired with a filter array can be recovered only when
+the chain consists of parameter-free ASCIIHex/ASCII85/RunLength wrappers and
+one supported terminal parameter consumer (Flate, LZW, DCT or CCITT). The
+dictionary is applied to that terminal stage and recovery is diagnosed. Multiple
+parameter consumers, unknown prefixes and Strict mode retain rejection.
+
+Compatible mode can recover a missing endobj only after a complete direct value
+when the next tokens are an immediate, positive object number, a valid generation
+and obj keyword. It rewinds to leave that object header unread and diagnoses the
+boundary; it never scans arbitrary bytes to find a convenient terminator. EOF,
+invalid object headers and Strict mode remain errors.
+
+Compatible mode also splits the exact token `endstreamendobj` inside an indirect
+stream object, diagnoses `StreamEndKeywords`, and leaves `endobj` for the object
+parser. It accepts neither keyword suffixes nor arbitrary bytes between them.
+The declared-Length path and bounded stream-boundary recovery share this rule;
+Strict mode still requires separated keywords. Object-termination errors identify
+the object number, generation and byte offset for reproducible diagnosis.

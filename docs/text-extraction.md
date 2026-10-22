@@ -27,3 +27,27 @@ for index in order {
 索引结果保留对原事件的引用，不复制文字/字体负载；分配受字符数与索引字节额度限制。负/零/非有限字号不适用此策略，明确拒绝。基线分组以每行最上方基线为固定锚点，不通过相邻字符差值连锁扩大；容差0只合并相同基线。诊断必须由调用方检查，排序不会修复跳过的操作或缺失 Unicode。
 
 当前不处理注释外观、完整字体回退、ActualText/结构树语义；提取和容器峰值仍待统一预算。`cargo test -p pdf --test overlay_workflow --locked` 覆盖构建、保存严格读回、字距/抬升/方向及空间顺序专项；不代表完整 P2-01 验收。
+
+
+## Compatible font metadata recovery
+
+In parsed Compatible documents, malformed ToUnicode font mappings may be
+reported as a structure diagnostic instead of preventing glyph painting. CID,
+GID and PDF advances are retained; existing Encoding/registered collection
+fallbacks still apply, and an unprovable Unicode value remains absent. Resource
+limit, decoding/authentication and unrelated reference errors are not swallowed.
+An unembedded font with no proven Unicode mapping still cannot use an arbitrary
+substitute font's GID ordering. Strict retains mapping validation.
+
+A short simple-font Widths array may use the FontDescriptor MissingWidth
+(default zero) for its missing tail in Compatible mode. Supplied widths and
+explicit zero values retain their meaning; oversized tables, invalid bounds
+and nonnumeric widths remain errors. The recovery records a diagnostic.
+
+Compatible content diagnostics inside Form XObjects retain an optional nested
+source: the outer-to-inner Form invocation chain plus the leaf operation index
+and decoded-stream byte offset. The ordinary byte_offset is local to that leaf,
+not a page or file offset. Repeated calls have distinct invocation paths; their
+warnings propagate into page display-list and text-extraction reports. Global
+page diagnostic limits include every invocation and the retained source paths.
+Strict unsupported-operator handling and fatal errors are unchanged.

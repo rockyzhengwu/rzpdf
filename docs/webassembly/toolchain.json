@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "rust_toolchain": "nightly-2026-08-26",
+  "rust_commit": "787af2b8c80638c51a4fc8e44f84e6891f243ec7",
+  "rust_std": "build-std=std,panic_abort",
+  "emsdk_commit": "d7b4130688bfa348392b921ab04015aa15c4f154",
+  "emscripten_version": "3.1.64",
+  "emscripten_release": "fd61bacaf40131f74987e649a135f1dd559aff60",
+  "skia_bindings": "0.93.1",
+  "cflags": "-O2 -sUSE_ZLIB=1",
+  "rustflags": "-Ctarget-feature=-exception-handling -Cpanic=abort -Clink-arg=-sUSE_ZLIB=1 -Clink-arg=-sALLOW_MEMORY_GROWTH=1 -Clink-arg=-sWASM_BIGINT=1 -Clink-arg=-fno-exceptions -Clink-arg=-sSTACK_SIZE=8388608 -Clink-arg=-sINITIAL_MEMORY=33554432 -Clink-arg=-sMAXIMUM_MEMORY=268435456 -Clink-arg=-sSTACK_OVERFLOW_CHECK=2",
+  "skia_freetype": "external: same freetype-sys bundled library as PDF core",
+  "runtime_node_version": "v22.15.1",
+  "emsdk_node_version": "v24.19.0",
+  "skia_source": "m145-0.92.0",
+  "skia_opt_level": 2,
+  "skia_source_commit": "37e26f9cc16e89c8f28d386e6748e43475f7e4a9",
+  "skia_deps_sha256": "4c72ae6384f642d0c19b32c41489f60b302f709d5d01ce1a13f61f64b63365ab",
+  "web_link_args": [
+    "-sMODULARIZE=1",
+    "-sEXPORT_ES6=1",
+    "-sEXPORT_NAME=createRzpdfModule",
+    "-sENVIRONMENT=web,worker",
+    "-sEXPORTED_FUNCTIONS=[\"_main\",\"_rz_abi_version\",\"_rz_alloc\",\"_rz_buffer_ptr\",\"_rz_buffer_len\",\"_rz_open\",\"_rz_page_count\",\"_rz_render\",\"_rz_image_width\",\"_rz_image_height\",\"_rz_release\",\"_rz_error_ptr\",\"_rz_error_len\",\"_rz_set_substitute_font\",\"_rz_open_with_options\",\"_rz_query\",\"_rz_error_code\",\"_rz_dispose\",\"_rz_handle_count\",\"_rz_retained_bytes\",\"_rz_apply\",\"_rz_apply_asset\",\"_rz_save\",\"_rz_render_page\",\"_rz_render_region\",\"_rz_register_font\",\"_rz_clear_fonts\"]"
+  ]
+}

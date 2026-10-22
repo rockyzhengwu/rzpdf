@@ -27,7 +27,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(path) = std::env::var_os("RZPDF_SUBSTITUTE_FONT") {
         renderer.set_substitute_font(&std::fs::read(path)?, 0)?;
     }
-    document.get_page(index)?.display(&mut renderer)?;
+    if document.optional_content()?.is_some() {
+        let visibility = document.optional_content_visibility(&Default::default())?;
+        document
+            .get_page(index)?
+            .display_list_with_optional_content(&visibility)?
+            .replay(&mut renderer)?;
+    } else {
+        document.get_page(index)?.display(&mut renderer)?;
+    }
     renderer.save(output.to_str().ok_or("Output path must be UTF-8")?)?;
     println!("page={number}");
     Ok(())

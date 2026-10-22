@@ -20,10 +20,12 @@ use zeroize::{Zeroize, Zeroizing};
 pub(crate) enum Method {
     Identity,
     Aes256,
+    Aes128,
 }
 
 pub struct SecurityHandler {
     pub(crate) dictionary: PdfDict,
+    pub(crate) revision: u32,
     pub(crate) key: Zeroizing<[u8; 32]>,
     pub(crate) strings: Method,
     pub(crate) streams: Method,
@@ -34,7 +36,7 @@ pub struct SecurityHandler {
 impl std::fmt::Debug for SecurityHandler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SecurityHandler")
-            .field("revision", &6)
+            .field("revision", &self.revision)
             .field("key", &"[REDACTED]")
             .field("report", &self.report)
             .finish()
@@ -148,15 +150,20 @@ fn bytes<const N: usize>(dict: &PdfDict, field: &str) -> PdfResult<[u8; N]> {
         .ok_or_else(|| malformed(field))
 }
 
-fn method(dict: &PdfDict, selector: &str, default: Option<&str>) -> PdfResult<Method> {
+pub(super) fn method(
+    dict: &PdfDict,
+    selector: &str,
+    default: Option<&str>,
+    revision: u32,
+) -> PdfResult<Method> {
     let selected = match dict.get(selector) {
         None | Some(PdfObject::PdfNull) => default.unwrap_or("Identity"),
         Some(value) => value.as_name().ok_or_else(|| malformed(selector))?.name(),
     };
-    method_named(dict, selected)
+    method_named(dict, selected, revision)
 }
 
-fn method_named(dict: &PdfDict, selected: &str) -> PdfResult<Method> {
+fn method_named(dict: &PdfDict, selected: &str, revision: u32) -> PdfResult<Method> {
     if selected == "Identity" {
         return Ok(Method::Identity);
     }
@@ -178,7 +185,13 @@ fn method_named(dict: &PdfDict, selected: &str) -> PdfResult<Method> {
     }
     match algorithm {
         "None" => Ok(Method::Identity),
-        "AESV3" => {
+        "AESV2" if revision == 4 => {
+            if filter.get("Length").is_some_and(|v| v.as_u32() != Some(16)) {
+                return Err(malformed("AESV2 filter Length must be 16 bytes"));
+            }
+            Ok(Method::Aes128)
+        }
+        "AESV3" if revision == 6 => {
             if filter
                 .get("Length")
                 .is_some_and(|length| length.as_u32() != Some(32))
@@ -188,32 +201,43 @@ fn method_named(dict: &PdfDict, selected: &str) -> PdfResult<Method> {
             Ok(Method::Aes256)
         }
         _ => Err(unsupported(
-            "crypt-filter method (only AESV3 and Identity supported)",
+            "crypt-filter method incompatible with security revision",
         )),
     }
 }
 
 impl SecurityHandler {
     pub(crate) fn named_method(&self, name: &str) -> PdfResult<Method> {
-        method_named(&self.dictionary, name)
+        method_named(&self.dictionary, name, self.revision)
     }
     /// Compatibility entry point for the old security-handler stub. R=6 key
     /// derivation does not use the file ID, but the document validates its ID.
-    pub fn try_new(encrypt: &PdfDict, _ids: PdfArray, password: Option<&[u8]>) -> PdfResult<Self> {
-        Self::authenticate(
+    pub fn try_new(encrypt: &PdfDict, ids: PdfArray, password: Option<&[u8]>) -> PdfResult<Self> {
+        Self::authenticate_with_file_id(
             encrypt,
             password,
+            ids.get(0).and_then(PdfObject::as_string).map(|v| v.bytes()),
             Limits::default(),
             &Limits::default().operation_budget(),
         )
     }
 
-    pub(crate) fn authenticate(
+    pub(crate) fn authenticate_with_file_id(
         dict: &PdfDict,
         password: Option<&[u8]>,
+        id: Option<&[u8]>,
         limits: Limits,
         budget: &OperationBudget,
     ) -> PdfResult<Self> {
+        if dict
+            .get("Filter")
+            .and_then(PdfObject::as_name)
+            .is_some_and(|n| n.name() == "Standard")
+            && dict.get("V").and_then(PdfObject::as_u32) == Some(4)
+            && dict.get("R").and_then(PdfObject::as_u32) == Some(4)
+        {
+            return super::r4::authenticate(dict, password, id, limits, budget);
+        }
         if dict
             .get("Filter")
             .and_then(PdfObject::as_name)
@@ -221,7 +245,21 @@ impl SecurityHandler {
             || dict.get("V").and_then(PdfObject::as_u32) != Some(5)
             || dict.get("R").and_then(PdfObject::as_u32) != Some(6)
         {
-            return Err(unsupported("requires Standard handler V=5 / R=6"));
+            return Err(unsupported(&format!(
+                "unsupported handler: Filter={}, V={}, R={}; supported: Standard V=4/R=4 AES-128 (read-only) or V=5/R=6 AES-256",
+                dict.get("Filter")
+                    .and_then(PdfObject::as_name)
+                    .map(|n| n.name().chars().take(80).collect::<String>())
+                    .unwrap_or_else(|| "missing/invalid".into()),
+                dict.get("V")
+                    .and_then(PdfObject::as_u32)
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "missing/invalid".into()),
+                dict.get("R")
+                    .and_then(PdfObject::as_u32)
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "missing/invalid".into())
+            )));
         }
         if dict.get("SubFilter").is_some() {
             return Err(unsupported("security SubFilter"));
@@ -229,13 +267,13 @@ impl SecurityHandler {
         if dict.get("Length").and_then(PdfObject::as_u32) != Some(256) {
             return Err(malformed("R6 Length must be 256 bits"));
         }
-        let strings = method(dict, "StrF", None)?;
-        let streams = method(dict, "StmF", None)?;
+        let strings = method(dict, "StrF", None, 6)?;
+        let streams = method(dict, "StmF", None, 6)?;
         let stream_name = dict
             .get("StmF")
             .and_then(PdfObject::as_name)
             .map(|name| name.name());
-        let embedded_files = method(dict, "EFF", stream_name)?;
+        let embedded_files = method(dict, "EFF", stream_name, 6)?;
         let o = bytes::<48>(dict, "O")?;
         let u = bytes::<48>(dict, "U")?;
         let oe = bytes::<32>(dict, "OE")?;
@@ -286,11 +324,13 @@ impl SecurityHandler {
         let (dictionary, _lease) = crate::objects::clone_dict_with_budget(dict, budget, limits, 0)?;
         Ok(Self {
             dictionary,
+            revision: 6,
             key,
             strings,
             streams,
             embedded_files,
             report: SecurityReport {
+                revision: 6,
                 authentication,
                 permissions,
                 encrypt_metadata,
@@ -402,11 +442,13 @@ impl SecurityHandler {
         Ok((
             Self {
                 dictionary,
+                revision: 6,
                 key,
                 strings: Method::Aes256,
                 streams: Method::Aes256,
                 embedded_files: Method::Aes256,
                 report: SecurityReport {
+                    revision: 6,
                     authentication: Authentication::Owner,
                     permissions: options.permissions,
                     encrypt_metadata: options.encrypt_metadata,

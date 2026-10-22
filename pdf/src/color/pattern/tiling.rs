@@ -68,9 +68,18 @@ impl TilingPattern {
             .transpose()?
             .unwrap_or_else(Matrix::identity);
         matrix.checked_inverse()?;
-        let resources = required("Resources")?
-            .into_dict()
-            .ok_or_else(|| invalid("Resources must be a dictionary"))?;
+        let resources = if stream.dict().get("Resources").is_none()
+            && ctx.options().mode == crate::parser::syntax::ParseMode::Compatible
+        {
+            ctx.record_structure_recovery(
+                crate::parser::diagnostic::StructureReason::PatternResources,
+            )?;
+            PdfDict::default()
+        } else {
+            required("Resources")?
+                .into_dict()
+                .ok_or_else(|| invalid("Resources must be a dictionary"))?
+        };
         Ok(Self {
             paint_type,
             tiling_type,
@@ -85,4 +94,52 @@ impl TilingPattern {
 
 fn invalid(message: &str) -> PdfError {
     PdfError::ColorError(format!("tiling pattern {message}"))
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+    #[test]
+    fn missing_pattern_resources_recover_as_empty_without_inheriting() {
+        use crate::{
+            io::stream_reader::StreamReader,
+            objects::pdf_stream::PdfStream,
+            parser::{
+                options::ParseOptions,
+                syntax::{ParseMode, SyntaxParser},
+            },
+        };
+        use std::io::Cursor;
+        for mode in [ParseMode::Strict, ParseMode::Compatible] {
+            let ctx = PDFContext::<Cursor<Vec<u8>>>::new_without_source(
+                PdfDict::default(),
+                ParseOptions {
+                    mode,
+                    ..Default::default()
+                },
+            );
+            for (entry, valid) in [
+                ("", mode == ParseMode::Compatible),
+                ("/Resources << >>", true),
+                ("/Resources null", false),
+            ] {
+                let source = format!(
+                    "<< /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 4 4] /XStep 4 /YStep 4 {entry} >>"
+                );
+                let dict = SyntaxParser::new(
+                    StreamReader::try_new(Cursor::new(source.into_bytes())).unwrap(),
+                )
+                .get_object()
+                .unwrap()
+                .into_dict()
+                .unwrap();
+                let stream = PdfStream::new(dict, b"0 0 4 4 re f".to_vec());
+                let result = TilingPattern::try_new(&PdfObject::PdfStream(stream), &ctx);
+                assert_eq!(result.is_ok(), valid, "{mode:?} {entry}");
+                if let Ok(pattern) = result {
+                    assert_eq!((&pattern.resources).into_iter().count(), 0);
+                }
+            }
+        }
+    }
 }

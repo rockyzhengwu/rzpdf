@@ -10,12 +10,15 @@ use crate::{
 pub enum JpxColorSpace {
     Gray,
     Rgb,
+    Cmyk,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JpxInfo {
     pub width: u32,
     pub height: u32,
+    /// Interleaved sample channels, including a declared trailing opacity channel.
     pub components: usize,
+    pub has_alpha: bool,
     pub bits_per_component: u8,
     pub color_space: JpxColorSpace,
 }
@@ -45,15 +48,19 @@ fn u32be(b: &[u8], p: usize) -> PdfResult<u32> {
     ))
 }
 
-fn codestream(data: &[u8]) -> PdfResult<&[u8]> {
+fn codestream(data: &[u8]) -> PdfResult<(&[u8], Option<usize>, Option<&[u8]>, Option<u32>)> {
     if data.starts_with(&[255, 79]) {
-        return Ok(data);
+        return Ok((data, None, None, None));
     }
     if !data.starts_with(b"\0\0\0\x0cjP  \r\n\x87\n") {
         return Err(error("invalid JP2 signature"));
     }
     let mut p = 0;
     let mut stream = None;
+    let mut palette = None;
+    let mut mapping = None;
+    let mut definitions = None;
+    let mut enumerated_color = None;
     while p < data.len() {
         let n = u32be(data, p)? as usize;
         let tag = data
@@ -84,18 +91,81 @@ fn codestream(data: &[u8]) -> PdfResult<&[u8]> {
                     return Err(error("invalid header box"));
                 }
                 let kind = &data[c + 4..c + 8];
-                if matches!(kind, b"pclr" | b"cmap" | b"cdef") {
-                    return Err(unsupported("palette/component mapping/alpha boxes"));
+                let body = &data[c + 8..c + length];
+                if kind == b"pclr" {
+                    if palette.is_some() || body.len() < 3 {
+                        return Err(error("invalid palette box"));
+                    }
+                    let entries = usize::from(u16be(body, 0)?);
+                    let columns = usize::from(body[2]);
+                    if entries == 0
+                        || entries > 256
+                        || !matches!(columns, 1 | 3)
+                        || body
+                            .get(3..3 + columns)
+                            .is_none_or(|bits| bits.iter().any(|b| *b != 7))
+                    {
+                        return Err(unsupported(
+                            "palette requires up to 256 unsigned 8-bit Gray/RGB entries",
+                        ));
+                    }
+                    if body.len() != 3 + columns + entries * columns {
+                        return Err(error("palette length mismatch"));
+                    }
+                    palette = Some(columns);
                 }
-                if kind == b"colr" && data.get(c + 8) != Some(&1) {
-                    return Err(unsupported("ICC colour specification"));
+                if kind == b"cmap" {
+                    if mapping.is_some() {
+                        return Err(error("duplicate component mapping"));
+                    }
+                    mapping = Some(body);
+                }
+                if kind == b"cdef" {
+                    if definitions.is_some() || body.len() < 2 {
+                        return Err(error("invalid channel definitions"));
+                    }
+                    let count = usize::from(u16be(body, 0)?);
+                    if count == 0 || count > 5 || body.len() != 2 + count * 6 {
+                        return Err(error("channel definition length/count"));
+                    }
+                    definitions = Some(body);
+                }
+                if kind == b"colr" {
+                    if body.first() != Some(&1) {
+                        return Err(unsupported("ICC colour specification"));
+                    }
+                    if body.len() != 7 {
+                        return Err(error("enumerated color specification length"));
+                    }
+                    if enumerated_color.is_some() {
+                        return Err(unsupported("multiple color specifications"));
+                    }
+                    enumerated_color = Some(u32be(body, 3)?);
                 }
                 c += length;
             }
         }
         p = end;
     }
-    stream.ok_or_else(|| error("missing codestream"))
+    if let Some(columns) = palette {
+        let mapping = mapping.ok_or_else(|| error("palette requires component mapping"))?;
+        if mapping.len() != columns * 4
+            || mapping
+                .chunks_exact(4)
+                .enumerate()
+                .any(|(index, m)| m != [0, 0, 1, index as u8])
+        {
+            return Err(unsupported("nonsequential palette component mapping"));
+        }
+    } else if mapping.is_some() {
+        return Err(unsupported("component mapping without palette"));
+    }
+    Ok((
+        stream.ok_or_else(|| error("missing codestream"))?,
+        palette,
+        definitions,
+        enumerated_color,
+    ))
 }
 
 /// Inspect dimensions and coding envelope before backend header/pixel allocation.
@@ -103,14 +173,14 @@ pub fn inspect(data: &[u8], context: FilterContext<'_>) -> PdfResult<JpxInfo> {
     if data.len() > context.max_decoded_bytes {
         return Err(limit("encoded input bytes"));
     }
-    let stream = codestream(data)?;
+    let (stream, palette, definitions, enumerated_color) = codestream(data)?;
     if !stream.starts_with(&[255, 79, 255, 81]) {
         return Err(error("SOC/SIZ header missing"));
     }
     let length = u16be(stream, 4)? as usize;
     let components = u16be(stream, 40)? as usize;
-    if !matches!(components, 1 | 3) {
-        return Err(unsupported("only Gray/RGB components are supported"));
+    if !(1..=5).contains(&components) {
+        return Err(unsupported("at most five image components"));
     }
     if length != 38 + 3 * components {
         return Err(error("SIZ length mismatch"));
@@ -127,8 +197,10 @@ pub fn inspect(data: &[u8], context: FilterContext<'_>) -> PdfResult<JpxInfo> {
         || u32be(stream, 20)? != 0
         || u32be(stream, 32)? != 0
         || u32be(stream, 36)? != 0
-        || u32be(stream, 24)? != width
-        || u32be(stream, 28)? != height
+        // The final tile is clipped to the image bounds. A larger nominal
+        // tile still describes one tile, and its padding is not decoded.
+        || u32be(stream, 24)? < width
+        || u32be(stream, 28)? < height
     {
         return Err(unsupported("nonzero origins or multiple tiles"));
     }
@@ -140,8 +212,14 @@ pub fn inspect(data: &[u8], context: FilterContext<'_>) -> PdfResult<JpxInfo> {
         .and_then(|n| n.checked_mul(components))
         .filter(|n| *n <= context.max_decoded_bytes)
         .ok_or_else(|| limit("sample bytes"))?;
+    let bits_per_component = stream.get(42).copied().unwrap_or(255).wrapping_add(1);
+    let indexed_bits = context.jpx_preserve_indices
+        && components == 1
+        && matches!(bits_per_component, 1 | 2 | 4 | 8);
     for i in 0..components {
-        if stream.get(42 + 3 * i..45 + 3 * i) != Some(&[7, 1, 1]) {
+        if stream.get(42 + 3 * i..45 + 3 * i) != Some(&[bits_per_component.wrapping_sub(1), 1, 1])
+            || (!indexed_bits && bits_per_component != 8)
+        {
             return Err(unsupported("signed, non-8-bit or subsampled components"));
         }
     }
@@ -149,6 +227,7 @@ pub fn inspect(data: &[u8], context: FilterContext<'_>) -> PdfResult<JpxInfo> {
     let mut p = 2;
     let mut tile_end = None;
     let mut saw_cod = false;
+    let mut coding = None;
     let mut parts = 0;
     let mut headers = 0;
     loop {
@@ -227,8 +306,22 @@ pub fn inspect(data: &[u8], context: FilterContext<'_>) -> PdfResult<JpxInfo> {
                     return Err(error("COD precinct length mismatch"));
                 }
                 saw_cod = true;
+                coding = Some(payload);
             }
-            0xff53 | 0xff5e | 0xff5f | 0xff60 | 0xff61 => {
+            0xff53 => {
+                // An identical component override does not change the work
+                // estimated from COD. Component indices fit in one byte in
+                // this decoder's bounded component envelope.
+                let cod = coding.ok_or_else(|| error("COC before COD"))?;
+                if payload.len() != cod.len() - 3
+                    || usize::from(payload[0]) >= components
+                    || payload[1] != cod[0]
+                    || payload[2..] != cod[5..]
+                {
+                    return Err(unsupported("non-equivalent component coding override"));
+                }
+            }
+            0xff5e | 0xff5f | 0xff60 | 0xff61 => {
                 return Err(unsupported(
                     "component overrides, ROI or packed packet headers",
                 ));
@@ -242,16 +335,70 @@ pub fn inspect(data: &[u8], context: FilterContext<'_>) -> PdfResult<JpxInfo> {
     if !saw_cod || parts == 0 {
         return Err(error("missing coding/tile headers"));
     }
+    if palette.is_some() && components != 1 {
+        return Err(unsupported(
+            "palette requires one codestream index component",
+        ));
+    }
+    let preserve_palette = context.jpx_preserve_indices && palette.is_some();
+    let components = if preserve_palette {
+        components
+    } else {
+        palette.unwrap_or(components)
+    };
+    let mut has_alpha = false;
+    if let Some(definitions) = definitions.filter(|_| !preserve_palette) {
+        let count = usize::from(u16be(definitions, 0)?);
+        if count != components {
+            return Err(error("channel definitions disagree with sample count"));
+        }
+        for index in 0..count {
+            let p = 2 + index * 6;
+            let channel = usize::from(u16be(definitions, p)?);
+            let kind = u16be(definitions, p + 2)?;
+            let association = u16be(definitions, p + 4)?;
+            if channel != index {
+                return Err(unsupported("nonsequential channel definitions"));
+            }
+            if index + 1 == count && kind == 1 && association == 0 {
+                has_alpha = true;
+            } else if kind != 0 || association != index as u16 + 1 {
+                return Err(unsupported("channel association or premultiplied opacity"));
+            }
+        }
+    }
+    let color_components = components - usize::from(has_alpha);
+    if let Some(enumerated) = enumerated_color.filter(|_| !preserve_palette) {
+        let expected = match enumerated {
+            17 => 1,
+            16 | 18 => 3,
+            12 => 4,
+            _ => return Err(unsupported("enumerated color specification")),
+        };
+        if color_components != expected {
+            return Err(error("color specification disagrees with sample channels"));
+        }
+    }
+
+    let color_space = match color_components {
+        1 => JpxColorSpace::Gray,
+        3 => JpxColorSpace::Rgb,
+        4 => JpxColorSpace::Cmyk,
+        _ => return Err(unsupported("image color component count")),
+    };
+
+    (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(components))
+        .filter(|n| *n <= context.max_decoded_bytes)
+        .ok_or_else(|| limit("expanded palette sample bytes"))?;
     Ok(JpxInfo {
         width,
         height,
         components,
-        bits_per_component: 8,
-        color_space: if components == 1 {
-            JpxColorSpace::Gray
-        } else {
-            JpxColorSpace::Rgb
-        },
+        has_alpha,
+        bits_per_component,
+        color_space,
     })
 }
 
@@ -259,7 +406,7 @@ pub fn inspect(data: &[u8], context: FilterContext<'_>) -> PdfResult<JpxInfo> {
 // 128 bytes for every output sample. Account separately for small code-blocks
 // and decomposition boundaries so ordinary multi-megapixel RGB scans fit.
 fn scratch_envelope(input: &[u8], info: JpxInfo) -> PdfResult<usize> {
-    let stream = codestream(input)?;
+    let (stream, _, _, _) = codestream(input)?;
     let mut p = 2;
     let mut blocks = None;
     while p + 4 <= stream.len() {
@@ -339,6 +486,7 @@ pub fn decode_with_budget(
     let _scratch = budget.reserve(scratch)?;
     let settings = hayro_jpeg2000::DecodeSettings {
         strict: true,
+        resolve_palette_indices: !context.jpx_preserve_indices,
         ..Default::default()
     };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
@@ -347,8 +495,8 @@ pub fn decode_with_budget(
                 .map_err(|_| error("invalid image headers"))?;
             if image.width() != info.width
                 || image.height() != info.height
-                || image.original_bit_depth() != 8
-                || image.has_alpha()
+                || image.original_bit_depth() != info.bits_per_component
+                || image.has_alpha() != info.has_alpha
             {
                 return Err(unsupported("metadata or alpha outside baseline"));
             }
@@ -356,6 +504,7 @@ pub fn decode_with_budget(
                 (image.color_space(), info.color_space),
                 (hayro_jpeg2000::ColorSpace::Gray, JpxColorSpace::Gray)
                     | (hayro_jpeg2000::ColorSpace::RGB, JpxColorSpace::Rgb)
+                    | (hayro_jpeg2000::ColorSpace::CMYK, JpxColorSpace::Cmyk)
             );
             if !matches_color {
                 return Err(unsupported("colour specification outside Gray/RGB"));
@@ -372,14 +521,24 @@ pub fn decode_with_budget(
                 .decode(&mut decoder)
                 .map_err(|_| error("invalid compressed samples"))?;
             if decoded.components().len() != info.components
-                || decoded
-                    .components()
-                    .iter()
-                    .any(|c| c.samples().len() != samples / info.components || c.bit_depth() != 8)
+                || decoded.components().iter().any(|c| {
+                    c.samples().len() != samples / info.components
+                        || c.bit_depth() != info.bits_per_component
+                })
             {
                 return Err(error("decoded component shape mismatch"));
             }
-            decoded.store_u8_into(&mut output);
+            if context.jpx_preserve_indices {
+                if info.components != 1 {
+                    return Err(unsupported("Indexed requires one sample channel"));
+                }
+                let maximum = ((1u32 << info.bits_per_component) - 1) as f32;
+                for (target, sample) in output.iter_mut().zip(decoded.components()[0].samples()) {
+                    *target = sample.round().clamp(0., maximum) as u8;
+                }
+            } else {
+                decoded.store_u8_into(&mut output);
+            }
             BudgetedBytes::from_reserved_vec(output, lease)
         },
     ));
