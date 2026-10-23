@@ -2,7 +2,7 @@ import {normalizeRasterRegion,type RasterRegion} from "./raster.js";
 export type {RasterRegion} from "./raster.js";
 import {normalizeFontRegistration,normalizeFontStamp,type FontRegistration,type FontIdentity,type FontStamp,type FontRequirements} from "./fonts.js";
 export type {FontRegistration,FontIdentity,FontStamp,FontRequirements} from "./fonts.js";
-import {normalizeRenderOptions,snapshotMutation,mutationAssetLimit,type DocumentStamp,type InteractionState,type AnnotationSnapshot,type FormSnapshot,type MutationRequest,type MutationResult,type SavedPdf,type RenderOptions,type ContentSnapshot} from "./interaction.js";
+import {BUFFER_BUDGET,normalizeRenderOptions,snapshotMutation,mutationAssetLimit,type DocumentStamp,type InteractionState,type AnnotationSnapshot,type FormSnapshot,type MutationRequest,type MutationResult,type SavedPdf,type RenderOptions,type ContentSnapshot} from "./interaction.js";
 export type * from "./interaction.js";
 import { searchPage, validateQuery, type TextMatch } from "./text.js";
 /** WA-04/05 adapter. Every returned byte array owns its memory. */
@@ -162,8 +162,8 @@ export class PdfEngine {
     });}finally{bytes.fill(0);}
   }
   open(bytes: Uint8Array, options: OpenOptions = {}): PdfDocument {
-    if (!Number.isSafeInteger(bytes.length) || bytes.length < 1 || bytes.length > 8 * 1024 * 1024)
-      throw new PdfApiError("resource_limit", "Input must contain 1 byte to 8 MiB", "open");
+    if (!Number.isSafeInteger(bytes.length) || bytes.length < 1 || bytes.length > BUFFER_BUDGET)
+      throw new PdfApiError("resource_limit", "PDF input is empty or exceeds the shared buffer budget", "open");
     if (options.mode !== undefined && options.mode !== "strict" && options.mode !== "compatible") throw new PdfApiError("invalid_argument", "Invalid parse mode", "open");
     if (options.password !== undefined && (typeof options.password !== "string" || new TextEncoder().encode(options.password).length > 1024)) throw new PdfApiError("invalid_argument", "Invalid password length", "open");
     const settings = new TextEncoder().encode(JSON.stringify(options));
@@ -235,8 +235,8 @@ export class PdfDocument {
   formFields():FormSnapshot {return this.interaction("formFields");}
   content(page:number):ContentSnapshot {this.checkPage(page);return this.interaction("content",page);}
   apply(request:MutationRequest,asset?:Uint8Array):MutationResult {this.check();return this.engine.apply(this.handle,request,asset);}
-  save(maxBytes=8*1024*1024):SavedPdf {
-    this.check();if(!Number.isInteger(maxBytes)||maxBytes<1||maxBytes>8*1024*1024)throw new PdfApiError("resource_limit","Save limit must be 1 byte to 8 MiB","save");
+  save(maxBytes=BUFFER_BUDGET):SavedPdf {
+    this.check();if(!Number.isInteger(maxBytes)||maxBytes<1||maxBytes>BUFFER_BUDGET)throw new PdfApiError("resource_limit","Save limit exceeds the shared buffer budget","save");
     const stamp=this.state().stamp,output=this.engine.invoke(()=>this.engine.module._rz_save(this.handle,maxBytes));
     if(!output)throw this.engine.error("save");
     try {return {bytes:this.engine.readBuffer(output),stamp};}finally{this.engine.release(output);}

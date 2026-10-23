@@ -6,7 +6,7 @@ import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 const repo=fileURLToPath(new URL('../../',import.meta.url)),out=resolve(repo,'output/webassembly/content-browser');await mkdir(out,{recursive:true});
-const server=createServer(async(req,res)=>{const path=decodeURIComponent(new URL(req.url,'http://localhost').pathname);const file=path.startsWith('/fixtures/')?resolve(repo,'output/webassembly',path.slice(1)):resolve(repo,'web',path==='/'?'index.html':path.slice(1));if(!file.startsWith(repo)){res.writeHead(403).end();return;}try{res.setHeader('Content-Type',({'.js':'text/javascript','.mjs':'text/javascript','.wasm':'application/wasm','.html':'text/html','.pdf':'application/pdf'})[extname(file)]??'application/octet-stream');res.end(await readFile(file));}catch{res.writeHead(404).end();}});
+const server=createServer(async(req,res)=>{const path=decodeURIComponent(new URL(req.url,'http://localhost').pathname);const file=path.startsWith('/fixtures/')?resolve(repo,'output/webassembly',path.slice(1)):resolve(repo,'web',path==='/'?'index.html':path.slice(1));if(!file.startsWith(repo)){res.writeHead(403).end();return;}try{res.setHeader('Content-Type',({'.css':'text/css','.js':'text/javascript','.mjs':'text/javascript','.wasm':'application/wasm','.html':'text/html','.pdf':'application/pdf'})[extname(file)]??'application/octet-stream');res.end(await readFile(file));}catch{res.writeHead(404).end();}});
 await new Promise(done=>server.listen(0,'127.0.0.1',done));let browser,page;
 const report={status:'failed',checks:[],errors:[]};
 try{
@@ -14,7 +14,7 @@ try{
   for(const name of ['content-edit.pdf','content-edit-rotated.pdf','content-edit-inline.pdf','content-edit-denied.pdf','content-edit-no-copy.pdf','content-edit-encrypted.pdf','content-edit-metadata-limit.pdf','content-replacement.png','content-replacement.jpg'])report.fixture_sha256[name]=digest(await readFile(resolve(repo,'output/webassembly/fixtures',name)));
   report.artifacts={};for(const name of ['rzpdf_web.mjs','rzpdf_web.wasm','client.js','worker-client.js','protocol.js','pdf-worker.js','interaction.js','editor.js','content-editor.js','geometry.js','demo.js'])report.artifacts[name]=digest(await readFile(resolve(repo,'web/dist',name)));
   report.source=JSON.parse(await readFile(resolve(repo,'output/webassembly/wa03-build.json'))).source;
-  browser=await chromium.launch({executablePath:process.env.RZPDF_CHROMIUM,headless:true,args:['--no-sandbox']});page=await browser.newPage();page.on('pageerror',error=>report.errors.push(error.stack));await page.goto(`http://127.0.0.1:${server.address().port}`);
+  browser=await chromium.launch({executablePath:process.env.RZPDF_CHROMIUM,headless:true,args:['--no-sandbox']});page=await browser.newPage();page.on('pageerror',error=>report.errors.push(error.stack));await page.goto(`http://127.0.0.1:${server.address().port}`);await page.locator('.edit-toggle').click();
   const result=await page.evaluate(async()=>{
     const {createWorkerEngine}=await import('/dist/worker-client.js'),{createEngine}=await import('/dist/client.js');
     const bytes=async(name)=>new Uint8Array(await(await fetch('/fixtures/'+name)).arrayBuffer());
@@ -79,7 +79,7 @@ try{
   report.checks=result.checks;for(const artifact of result.artifacts){await writeFile(resolve(out,`content-${artifact.kind}.pdf`),new Uint8Array(artifact.bytes));for(const [index,pixels] of artifact.pixels.entries())await writeFile(resolve(out,`content-${artifact.kind}-${index}.rgba`),new Uint8Array(pixels));}
   await page.locator('#pdf').setInputFiles(resolve(repo,'output/webassembly/fixtures/content-edit.pdf'));await page.waitForFunction(()=>document.querySelector('#status').textContent.startsWith('第 1 /')&&!!document.querySelector('#save-pdf'));
   const ready=()=>page.waitForFunction(()=>!!document.querySelector('#save-pdf')&&!document.querySelector('#save-pdf').disabled&&document.querySelector('#status').textContent.startsWith('第'));
-  await page.locator('#query').fill('Alpha');await page.locator('#find').click();await page.waitForFunction(()=>document.querySelectorAll('#results button').length===1);
+  await page.locator('[data-tab=search]').click();await page.locator('#query').fill('Alpha');await page.locator('#find').click();await page.waitForFunction(()=>document.querySelectorAll('#results button').length===1);
   await page.getByLabel('编辑文字段',{exact:true}).selectOption({label:'Alpha'});await page.getByLabel('替换文字',{exact:true}).fill('UI text');await page.getByRole('button',{name:'替换选中文字',exact:true}).click();await ready();assert.ok((await page.locator('#text-layer').textContent()).startsWith('UI textTail'));assert.equal(await page.locator('#results button').count(),0);
   await page.evaluate(()=>{[...document.querySelectorAll('button')].find(b=>b.textContent==='复制当前页').click();document.querySelector('#page').value='2';document.querySelector('#render').click();});
   await ready();assert.equal(await page.locator('#page').getAttribute('max'),'3');

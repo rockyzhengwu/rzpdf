@@ -121,6 +121,18 @@ impl RasterRegion {
     }
 }
 
+#[derive(Clone)]
+struct ClipMask {
+    image: skia_safe::Image,
+    origin: (i32, i32),
+}
+impl std::ops::Deref for ClipMask {
+    type Target = skia_safe::Image;
+    fn deref(&self) -> &Self::Target {
+        &self.image
+    }
+}
+
 pub struct SkiaRender {
     surface: Surface,
     pathbuilder: PathBuilder,
@@ -136,6 +148,7 @@ pub struct SkiaRender {
     raster_path_budget: usize,
     curved_raster_paths: bool,
     clip_images: Vec<skia_safe::Image>,
+    clip_cache: Vec<(skia_safe::Path, ClipMask, usize)>,
     limits: Limits,
     clear_color: Color,
     held_pattern_surfaces: u64,
@@ -362,6 +375,7 @@ impl SkiaRender {
             raster_path_budget: limits.max_operation_bytes / 16,
             curved_raster_paths: false,
             clip_images: Vec::new(),
+            clip_cache: Vec::new(),
             limits,
             clear_color: Color::WHITE,
             substitute_font: None,
@@ -389,6 +403,7 @@ impl SkiaRender {
                 "cannot change region within a group".into(),
             ));
         }
+        self.clip_cache.clear();
         self.region = region;
         self.requested_region = region;
         self.region_padding = 2;
@@ -717,15 +732,98 @@ impl SkiaRender {
         Ok(limits)
     }
 
+    // Repeated text/paint objects commonly share an identical clip. Keep a
+    // small page-local LRU of the exact canonical mask, including its global
+    // path/fill rule. Cache references stay in the live-image ledger, so child
+    // surfaces and allocation peaks continue to account for their backing bytes.
+    fn cached_clip_image(&mut self, path: &skia_safe::Path) -> PdfResult<ClipMask> {
+        let comparison_work = path
+            .points()
+            .len()
+            .max(1)
+            .saturating_mul(self.clip_cache.len() + 1);
+        self.raster_path_budget = self
+            .raster_path_budget
+            .checked_sub(comparison_work)
+            .ok_or_else(|| PdfError::ResourceLimit("clip cache comparison work".into()))?;
+        if let Some(index) = self.clip_cache.iter().position(|(key, _, _)| key == path) {
+            let (held_bytes, held_pixels) = self.clip_image_usage()?;
+            let parent = (self.page_width as u64 * self.page_height as u64)
+                .saturating_mul(self.held_pattern_surfaces + 1);
+            if parent.saturating_add(held_pixels) > self.limits.max_render_pixels
+                || parent.saturating_mul(4).saturating_add(held_bytes as u64)
+                    > self.limits.max_render_bytes as u64
+            {
+                return Err(PdfError::ResourceLimit("cached clip peak".into()));
+            }
+            let entry = self.clip_cache.remove(index);
+            let image = entry.1.clone();
+            self.clip_cache.push(entry);
+            return Ok(image);
+        }
+        let (_, _, width, height) = self.clip_mask_bounds(path, true);
+        let bytes = (width as usize)
+            .saturating_mul(height as usize)
+            .saturating_add(
+                path.points()
+                    .len()
+                    .saturating_mul(std::mem::size_of::<skia_safe::Point>()),
+            )
+            .saturating_add(path.verbs().len());
+        let maximum = (2 * 1024 * 1024)
+            .min(self.limits.max_render_bytes / 8)
+            .min(usize::try_from(self.limits.max_render_pixels / 2).unwrap_or(usize::MAX));
+        while !self.clip_cache.is_empty()
+            && (self.clip_cache.len() >= 4
+                || self
+                    .clip_cache
+                    .iter()
+                    .map(|v| v.2)
+                    .sum::<usize>()
+                    .saturating_add(bytes)
+                    > maximum)
+        {
+            self.clip_cache.remove(0);
+        }
+        let image = self.canonical_clip_mask(path, true)?;
+        // canonical_clip_mask reserved the next ledger slot before allocating.
+        self.clip_images.push(image.image.clone());
+        if bytes <= maximum && self.clip_cache.try_reserve(1).is_ok() {
+            self.clip_cache.push((path.clone(), image.clone(), bytes));
+        }
+        Ok(image)
+    }
+
+    fn clip_mask_bounds(&self, path: &skia_safe::Path, crop: bool) -> (i32, i32, i32, i32) {
+        let origin = self.region.map_or((0, 0), |r| (r.x as i32, r.y as i32));
+        if !crop {
+            return (origin.0, origin.1, self.page_width, self.page_height);
+        }
+        let b = path.bounds();
+        let left = (b.left.floor() as i32).max(origin.0);
+        let top = (b.top.floor() as i32).max(origin.1);
+        let right = (b.right.ceil() as i32).min(origin.0 + self.page_width);
+        let bottom = (b.bottom.ceil() as i32).min(origin.1 + self.page_height);
+        if right <= left || bottom <= top {
+            (origin.0, origin.1, 1, 1)
+        } else {
+            (left, top, right - left, bottom - top)
+        }
+    }
+    #[cfg(test)]
     fn canonical_clip_image(&mut self, path: &skia_safe::Path) -> PdfResult<skia_safe::Image> {
+        self.canonical_clip_mask(path, false).map(|mask| mask.image)
+    }
+    fn canonical_clip_mask(&mut self, path: &skia_safe::Path, crop: bool) -> PdfResult<ClipMask> {
         const CELL: i32 = 64;
         const HALO: i32 = 2;
         const SIDE: i32 = CELL + 2 * HALO;
         let (held_bytes, held_pixels) = self.clip_image_usage()?;
-        let pixels = self.page_width as u64 * self.page_height as u64;
+        let (mask_left, mask_top, mask_width, mask_height) = self.clip_mask_bounds(path, crop);
+        let pixels = mask_width as u64 * mask_height as u64;
         let length = usize::try_from(pixels)
             .map_err(|_| PdfError::ResourceLimit("clip backing length".into()))?;
-        let parent = pixels
+        let parent = (self.page_width as u64 * self.page_height as u64)
             .checked_mul(self.held_pattern_surfaces + 1)
             .ok_or_else(|| PdfError::ResourceLimit("clip parent surfaces".into()))?;
         let scratch = (SIDE * SIDE) as u64;
@@ -805,13 +903,13 @@ impl SkiaRender {
                     let bytes = source
                         .bytes()
                         .ok_or_else(|| PdfError::ResourceLimit("clip cell bytes".into()))?;
-                    let x0 = x.max(origin.0);
-                    let x1 = (x + CELL).min(origin.0 + self.page_width);
-                    for yy in y.max(origin.1)..(y + CELL).min(origin.1 + self.page_height) {
+                    let x0 = x.max(mask_left);
+                    let x1 = (x + CELL).min(mask_left + mask_width);
+                    for yy in y.max(mask_top)..(y + CELL).min(mask_top + mask_height) {
                         let start = (yy - y + HALO) as usize * source.row_bytes()
                             + (x0 - x + HALO) as usize;
-                        let target = (yy - origin.1) as usize * self.page_width as usize
-                            + (x0 - origin.0) as usize;
+                        let target = (yy - mask_top) as usize * mask_width as usize
+                            + (x0 - mask_left) as usize;
                         output[target..target + (x1 - x0) as usize]
                             .copy_from_slice(&bytes[start..start + (x1 - x0) as usize]);
                     }
@@ -819,7 +917,7 @@ impl SkiaRender {
             }
         }
         let info = skia_safe::ImageInfo::new(
-            (self.page_width, self.page_height),
+            (mask_width, mask_height),
             skia_safe::ColorType::Alpha8,
             skia_safe::AlphaType::Premul,
             None,
@@ -827,8 +925,12 @@ impl SkiaRender {
         skia_safe::images::raster_from_data(
             &info,
             skia_safe::Data::new_copy(&output),
-            self.page_width as usize,
+            mask_width as usize,
         )
+        .map(|image| ClipMask {
+            image,
+            origin: (mask_left, mask_top),
+        })
         .ok_or_else(|| PdfError::ResourceLimit("clip image allocation".into()))
     }
 
@@ -917,8 +1019,11 @@ impl SkiaRender {
                     self.pdf_to_skia_m44(1., 0., 0., 1., -(origin.0 as f32), -(origin.1 as f32));
                 self.surface.canvas().set_matrix(&transform);
                 if !axis_aligned || path.is_rect().is_none() {
-                    let image = self.canonical_clip_image(&path)?;
-                    let local = skia_safe::Matrix::translate((origin.0 as f32, origin.1 as f32));
+                    let image = self.cached_clip_image(&path)?;
+                    let local = skia_safe::Matrix::translate((
+                        image.origin.0 as f32,
+                        image.origin.1 as f32,
+                    ));
                     let shader = image
                         .to_shader(
                             (skia_safe::TileMode::Decal, skia_safe::TileMode::Decal),
@@ -927,7 +1032,6 @@ impl SkiaRender {
                         )
                         .ok_or_else(|| PdfError::ResourceLimit("canonical clip shader".into()))?;
                     self.surface.canvas().clip_shader(shader, None);
-                    self.clip_images.push(image);
                 } else {
                     self.surface
                         .canvas()
@@ -1781,6 +1885,7 @@ impl Device for SkiaRender {
         let surface = surfaces::raster_n32_premul((width, height))
             .ok_or_else(|| PdfError::ResourceLimit("unable to allocate render surface".into()))?;
         self.surface = surface;
+        self.clip_cache.clear();
         self.clip_images.clear();
         self.region = effective;
         if self.region_padding == 0 {
@@ -6806,7 +6911,7 @@ mod cid_cff_backend_tests {
             )))
             .unwrap();
         let source = format!(
-            "<< /Type /Font /Subtype /Type0 /BaseFont /RzpdfSyntheticCID /Encoding /Identity-H /DescendantFonts [ << /Subtype /CIDFontType0 /BaseFont /RzpdfSyntheticCID /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor << /FontFile3 {} 0 R >> >> ] >>",
+            "<< /Type /Font /Subtype /Type0 /BaseFont /RzpdfSyntheticCID /Encoding /Identity-H /DescendantFonts [ << /Subtype /CIDFontType0 /BaseFont /RzpdfSyntheticCID /CIDToGIDMap /Identity /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor << /FontFile3 {} 0 R >> >> ] >>",
             program.obj_num()
         );
         let font = SyntaxParser::new(

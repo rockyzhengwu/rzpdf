@@ -1187,11 +1187,22 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             if self.font_cache.len() >= self.ctx.limits().max_objects {
                 return Err(PdfError::ResourceLimit("font cache entries".into()));
             }
-            let font_resource = self.named_resource("Font", font_name.name())?;
-            let font =
-                std::rc::Rc::new(self.load_font(font_resource.as_dict().ok_or_else(|| {
-                    PdfError::PageResourceError("Font resource must be a dictionary".into())
-                })?)?);
+            let entry = self.resource_entry("Font", font_name.name())?;
+            let identity = entry.as_object_id();
+            let shared = identity.and_then(|id| self.ctx.cached_font(id));
+            let font = if let Some(font) = shared {
+                font
+            } else {
+                let resource = self.ctx.resolve(&entry)?;
+                let font =
+                    std::rc::Rc::new(self.load_font(resource.as_dict().ok_or_else(|| {
+                        PdfError::PageResourceError("Font resource must be a dictionary".into())
+                    })?)?);
+                if let Some(id) = identity {
+                    self.ctx.retain_font(id, font.clone());
+                }
+                font
+            };
             self.font_cache
                 .insert(font_name.name().to_owned(), font.clone());
             font

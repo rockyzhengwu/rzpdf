@@ -19,6 +19,28 @@ pub struct Type0 {
 }
 
 impl Type0 {
+    pub(crate) fn cache_bytes(&self) -> usize {
+        self.base_font
+            .as_ref()
+            .map_or(0, String::capacity)
+            .saturating_add(self.encoding.as_ref().map_or(0, Cmap::cache_bytes))
+            .saturating_add(self.to_unicode.as_ref().map_or(0, Cmap::cache_bytes))
+            .saturating_add(self.cid_unicode.as_ref().map_or(0, Cmap::cache_bytes))
+            .saturating_add(self.descent_font.cache_bytes())
+            .saturating_add(
+                self.glyph_unicode
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<Option<String>>()),
+            )
+            .saturating_add(
+                self.glyph_unicode
+                    .iter()
+                    .flatten()
+                    .map(String::capacity)
+                    .sum::<usize>(),
+            )
+    }
+
     pub(crate) fn descriptor_flags(&self) -> Option<u32> {
         self.descent_font.descriptor_flags()
     }

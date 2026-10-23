@@ -31,10 +31,10 @@ def sdk_environment(sdk):
     return dict(entry.decode().split("=", 1) for entry in result.split(b"\0") if entry)
 
 
-def archive_inventory(root, env):
+def archive_inventory(root, env, profile="debug"):
     """Check a member of every native archive, recording precisely that scope."""
     result = []
-    for path in sorted(root.glob(f"{EMSCRIPTEN}/debug/build/**/*.a")):
+    for path in sorted(root.glob(f"{EMSCRIPTEN}/{profile}/build/**/*.a")):
         members = capture(["emar", "t", str(path)], env).splitlines()
         member = next((name for name in members if name.endswith(".o")), None)
         if member is None:
@@ -58,6 +58,8 @@ def main():
                         help="installed toolchain name; its exact rustc commit is checked")
     parser.add_argument("--package", choices=["pdf", "render", "web-wasm"], default="render")
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--profile", choices=["dev", "wasm-release"], default="wasm-release",
+                        help="optimized browser build by default; dev is for diagnostics")
     parser.add_argument("--run", action="store_true", help="run the linked example under Node")
     parser.add_argument("--example", help="link a named example instead of building the library")
     args = parser.parse_args()
@@ -66,6 +68,7 @@ def main():
     if args.package == "web-wasm" and (args.run or args.example):
         parser.error("web-wasm builds its browser binary; --run/--example are probe-only")
     output = args.output.resolve()
+    artifact_profile = "debug" if args.profile == "dev" else args.profile
     lock = json.loads((REPO / "docs/webassembly/toolchain.json").read_text())
     report = dict(task="WA-03" if args.package == "web-wasm" else "WA-02", schema_version=1, target=EMSCRIPTEN,
                   status="blocked", p0_complete=False, browser="not_run",
@@ -93,6 +96,8 @@ def main():
                    CFLAGS_wasm32_unknown_emscripten=lock["cflags"],
                    CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS=lock["rustflags"],
                    CARGO_TARGET_DIR=str(REPO / "output/webassembly/target"))
+        if args.profile == "wasm-release":
+            env["CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS"] += " -Clink-arg=-O2"
         if args.package == "web-wasm":
             env["CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS"] += " " + " ".join(
                 "-Clink-arg=" + value for value in lock["web_link_args"])
@@ -115,9 +120,9 @@ def main():
                                "skia_system_freetype2_include_path=" + json.dumps(ft_include))
         report["skia_gn_args"] = env["SKIA_GN_ARGS"]
         command = ["rustup", "run", args.toolchain, "cargo", "--config",
-                   "profile.dev.package.skia-bindings.opt-level=" + str(lock["skia_opt_level"]), "build",
+                   f"profile.{args.profile}.package.skia-bindings.opt-level=" + str(lock["skia_opt_level"]), "build",
                    "-Zbuild-std=std,panic_abort", "--locked", "--target", EMSCRIPTEN,
-                   "-p", args.package]
+                   "-p", args.package, "--profile", args.profile]
         command += (["--example", args.example] if args.example else
                     ["--bin", "rzpdf_web"] if args.package == "web-wasm" else ["--lib"])
         log_path = output.with_suffix(".build.log")
@@ -127,7 +132,7 @@ def main():
             raise ValueError("locked Skia version differs from toolchain.json")
         report.update(source=inventory, rustc=rust, emcc=emcc,
                       node=node, emsdk_node=sdk_node,
-                      command=command, log=str(log_path))
+                      command=command, profile=args.profile, log=str(log_path))
         start = time.monotonic()
         with log_path.open("wb") as log:
             code = subprocess.call(command, cwd=REPO, env=env, stdout=log, stderr=subprocess.STDOUT)
@@ -141,12 +146,12 @@ def main():
                     raise ValueError("Skia DEPS differs from toolchain.json")
                 report["skia_deps_sha256"] = deps_hash
             report["native_archive_scope"] = "one object member from each cached target native archive"
-            report["native_archives"] = archive_inventory(Path(env["CARGO_TARGET_DIR"]), env)
+            report["native_archives"] = archive_inventory(Path(env["CARGO_TARGET_DIR"]), env, artifact_profile)
             if args.package == "web-wasm":
                 import shutil
                 destination = REPO / "web/dist"
                 destination.mkdir(parents=True, exist_ok=True)
-                artifact_root = Path(env["CARGO_TARGET_DIR"]) / EMSCRIPTEN / "debug"
+                artifact_root = Path(env["CARGO_TARGET_DIR"]) / EMSCRIPTEN / artifact_profile
                 report["artifacts"] = {}
                 for ext in ["js", "wasm"]:
                     source = artifact_root / ("rzpdf_web." + ext)
@@ -154,7 +159,7 @@ def main():
                     shutil.copyfile(source, target)
                     report["artifacts"][str(target)] = hashlib.sha256(target.read_bytes()).hexdigest()
             if args.example:
-                artifact = Path(env["CARGO_TARGET_DIR"]) / EMSCRIPTEN / "debug/examples" / (args.example + ".js")
+                artifact = Path(env["CARGO_TARGET_DIR"]) / EMSCRIPTEN / artifact_profile / "examples" / (args.example + ".js")
                 report["artifacts"] = {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
                                        for p in [artifact, artifact.with_suffix(".wasm")]}
                 if args.run:

@@ -44,6 +44,18 @@ pub struct AnnotatedDisplayList {
     appearances: Vec<DisplayList>,
 }
 impl AnnotatedDisplayList {
+    pub(crate) fn cache_bytes(&self) -> Option<usize> {
+        let mut bytes = self.contents.cache_bytes()?.saturating_add(
+            self.appearances
+                .capacity()
+                .saturating_mul(std::mem::size_of::<DisplayList>()),
+        );
+        for list in &self.appearances {
+            bytes = bytes.saturating_add(list.cache_bytes()?);
+        }
+        Some(bytes)
+    }
+
     pub fn contents(&self) -> &DisplayList {
         &self.contents
     }

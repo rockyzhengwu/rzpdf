@@ -10,14 +10,14 @@ const server=createServer(async(req,res)=>{
   const path=decodeURIComponent(new URL(req.url,'http://localhost').pathname);
   const file=path.startsWith('/fixtures/')?resolve(repo,'output/webassembly',path.slice(1)):resolve(repo,'web',path==='/'?'index.html':path.slice(1));
   if(!file.startsWith(repo)){res.writeHead(403).end();return;}
-  try{const data=await readFile(file);res.setHeader('Content-Type',({'.js':'text/javascript','.mjs':'text/javascript','.wasm':'application/wasm','.html':'text/html','.pdf':'application/pdf'})[extname(file)]??'application/octet-stream');res.end(data);}catch{res.writeHead(404).end();}
+  try{const data=await readFile(file);res.setHeader('Content-Type',({'.css':'text/css','.js':'text/javascript','.mjs':'text/javascript','.wasm':'application/wasm','.html':'text/html','.pdf':'application/pdf'})[extname(file)]??'application/octet-stream');res.end(data);}catch{res.writeHead(404).end();}
 });
 await new Promise(done=>server.listen(0,'127.0.0.1',done));
 let browser,page;
 const report={status:'failed',checks:[],errors:[]};
 try {
   browser=await chromium.launch({executablePath:process.env.RZPDF_CHROMIUM,headless:true,args:['--no-sandbox']});
-  page=await browser.newPage();await page.goto(`http://127.0.0.1:${server.address().port}`);
+  page=await browser.newPage();await page.goto(`http://127.0.0.1:${server.address().port}`);await page.locator('.edit-toggle').click();
 
   await page.waitForFunction(()=>!document.querySelector('#pdf').disabled);
   const apiChecks=await page.evaluate(async()=>{
@@ -117,7 +117,7 @@ try {
   assert.equal(await page.evaluate(()=>window.getSelection().toString()),'Web text');
   await page.evaluate(()=>window.getSelection().removeAllRanges());
   assert.equal(await page.locator('#links a').count(),2);
-  await page.locator('#query').fill('Web');await page.locator('#find').click();await page.locator('#results button').click();
+  await page.locator('[data-tab=search]').click();await page.locator('#query').fill('Web');await page.locator('#find').click();await page.locator('#results button').click();
   await page.waitForFunction(()=>document.querySelectorAll('#highlights polygon').length===3);
   await page.locator('#links a[aria-label="转到第 2 页"]').click();
   await page.waitForFunction(()=>document.querySelector('#status').textContent.startsWith('第 2 / 2')&&document.querySelector('#page-view').dataset.rotation==='90');

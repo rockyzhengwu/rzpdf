@@ -145,7 +145,7 @@ try {
         if (!file.startsWith(root+sep)) throw Error('invalid path');
       }
       const bytes = await readFile(file);
-      const type = {'.html':'text/html','.js':'text/javascript','.mjs':'text/javascript','.wasm':'application/wasm','.json':'application/json'}[extname(file)] || 'application/octet-stream';
+      const type = {'.html':'text/html','.css':'text/css','.js':'text/javascript','.mjs':'text/javascript','.wasm':'application/wasm','.json':'application/json'}[extname(file)] || 'application/octet-stream';
       response.writeHead(200,{'Content-Type':type,'Cache-Control':'no-store'}); response.end(bytes);
     } catch { response.writeHead(404); response.end(); }
   });
@@ -251,7 +251,7 @@ try {
       if(owned.some((v,i)=>v!==snapshot[i]))throw Error('owned pixels changed after memory growth');
     }finally { for(const h of handles)fresh.release(h); }
     doc.render();doc.close();
-    if(f._rz_alloc(32*1024*1024+1)!==0)throw Error('oversized input accepted');
+    if(f._rz_alloc(64*1024*1024+1)!==0)throw Error('oversized input accepted');
     const slots=[];
     try {
       for(let i=0;i<8;i++){const h=f._rz_alloc(1);if(!h)throw Error('slot leak');slots.push(h);}
@@ -368,10 +368,10 @@ try {
   await page.evaluate(()=>window.getSelection().removeAllRanges());
   if(await page.locator('#links a').count()!==2)throw Error('unsafe URI was not filtered');
   console.log('checking reader UI: outline');
-  await page.locator('#outline button').click();
+  await page.locator('[data-tab=outline]').click();await page.locator('#outline button').click();
   await page.waitForFunction(()=>document.querySelector('#page').value==='2' && document.querySelector('#status').textContent.startsWith('第 2 /'));
   console.log('checking reader UI: search');
-  await page.locator('#query').fill('Web');await page.locator('#find').click();
+  await page.locator('[data-tab=search]').click();await page.locator('#query').fill('Web');await page.locator('#find').click();
   await page.locator('#results button').click();
   await page.waitForFunction(()=>document.querySelector('#page').value==='1' && document.querySelectorAll('#highlights polygon').length===3);
   console.log('checking reader UI: links');

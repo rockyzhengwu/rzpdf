@@ -51,6 +51,21 @@ pub(crate) fn encoding_character_count(
 }
 
 impl Font {
+    /// Conservative owned Rust storage estimate. Type3 keeps its operation-local
+    /// accounting and revision guards and is deliberately not retained here.
+    pub(crate) fn cache_bytes(&self) -> Option<usize> {
+        let bytes = match self {
+            Self::Simple(v) => v.cache_bytes(),
+            Self::Type0(v) => v.cache_bytes(),
+            Self::Type3(_) => return None,
+        };
+        Some(
+            bytes
+                .saturating_add(std::mem::size_of::<Self>())
+                .saturating_add(32),
+        )
+    }
+
     pub(crate) fn text_advance(
         &self,
         ch: &CharCode,

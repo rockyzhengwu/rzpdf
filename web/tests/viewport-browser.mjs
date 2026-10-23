@@ -11,14 +11,14 @@ const server=createServer(async(req,res)=>{
   const path=decodeURIComponent(new URL(req.url,'http://localhost').pathname);
   const file=path.startsWith('/fixtures/')?resolve(repo,'output/webassembly',path.slice(1)):resolve(repo,'web',path==='/'?'index.html':path.slice(1));
   if(!file.startsWith(repo)){res.writeHead(403).end();return;}
-  try{const data=await readFile(file);res.setHeader('Content-Type',({'.js':'text/javascript','.mjs':'text/javascript','.wasm':'application/wasm','.html':'text/html','.pdf':'application/pdf'})[extname(file)]??'application/octet-stream');res.end(data);}catch{res.writeHead(404).end();}
+  try{const data=await readFile(file);res.setHeader('Content-Type',({'.css':'text/css','.js':'text/javascript','.mjs':'text/javascript','.wasm':'application/wasm','.html':'text/html','.pdf':'application/pdf'})[extname(file)]??'application/octet-stream');res.end(data);}catch{res.writeHead(404).end();}
 });
 await new Promise(done=>server.listen(0,'127.0.0.1',done));
 let browser,page;
 const report={status:'failed',checks:[],errors:[]};
 try {
   browser=await chromium.launch({executablePath:process.env.RZPDF_CHROMIUM,headless:true,args:['--no-sandbox']});
-  page=await browser.newPage();await page.goto(`http://127.0.0.1:${server.address().port}`);
+  page=await browser.newPage();await page.goto(`http://127.0.0.1:${server.address().port}`);await page.locator('.edit-toggle').click();
 
 
   report.browser=await browser.version();report.generated_at=new Date().toISOString();report.measurements=[];report.artifacts={};

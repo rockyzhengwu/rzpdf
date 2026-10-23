@@ -15,7 +15,7 @@ use render::render_device::{RasterRegion, RgbaImage, SkiaRender, SubstituteFont}
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 use zeroize::Zeroize;
 
-const INPUT_LIMIT: usize = 8 * 1024 * 1024;
+const SAVE_LIMIT: usize = BUFFER_LIMIT;
 const FONT_LIMIT: usize = 32 * 1024 * 1024;
 const BUFFER_LIMIT: usize = 64 * 1024 * 1024;
 fn limits() -> Limits {
@@ -27,7 +27,7 @@ fn limits() -> Limits {
         max_image_pixels: 4_000_000,
         max_render_pixels: 4_000_000,
         max_render_bytes: 16_000_000,
-        max_raw_stream_bytes: INPUT_LIMIT,
+        max_raw_stream_bytes: BUFFER_LIMIT,
         max_cached_stream_bytes: 16 * 1024 * 1024,
         max_content_operations: 100_000,
         max_text_chars: 100_000,
@@ -134,7 +134,7 @@ pub extern "C" fn rz_abi_version() -> u32 {
 pub extern "C" fn rz_alloc(length: u32) -> u32 {
     call(|s| {
         let n = length as usize;
-        if n == 0 || n > FONT_LIMIT || s.retained() + n > BUFFER_LIMIT {
+        if n == 0 || n > BUFFER_LIMIT || s.retained() + n > BUFFER_LIMIT {
             return Err(ApiError::resource("invalid input length or buffer limit"));
         }
         let mut bytes = Vec::new();
@@ -296,31 +296,10 @@ fn render(
         renderer.set_substitute_program(program);
     }
     renderer.set_font_provider(s.font_provider.clone());
-    let display = if let Some(options) = annotations {
-        if d.optional_content().map_err(ApiError::from)?.is_some() {
-            let visibility = d
-                .optional_content_visibility(&Default::default())
-                .map_err(ApiError::from)?;
-            d.get_page(page)
-                .and_then(|mut p| {
-                    p.display_list_with_annotations_and_optional_content(options, &visibility)
-                })
-                .and_then(|list| list.replay(&mut renderer))
-        } else {
-            d.get_page(page)
-                .and_then(|mut p| p.display_with_annotations(&mut renderer, options))
-        }
-    } else if d.optional_content().map_err(ApiError::from)?.is_some() {
-        let visibility = d
-            .optional_content_visibility(&Default::default())
-            .map_err(ApiError::from)?;
-        d.get_page(page)
-            .and_then(|mut p| p.display_list_with_optional_content(&visibility))
-            .and_then(|list| list.replay(&mut renderer))
-    } else {
-        d.get_page(page).and_then(|mut p| p.display(&mut renderer))
-    };
-    display.map_err(ApiError::from)?;
+    // Interpretation is document/revision scoped; DPI and tile rectangles only
+    // affect replay. NoZoom/NoRotate annotation inputs remain part of the key.
+    let prepared = d.prepare_page(page, annotations).map_err(ApiError::from)?;
+    prepared.replay(d, &mut renderer).map_err(ApiError::from)?;
     s.insert(Resource::Image(renderer.to_rgba().map_err(ApiError::from)?))
 }
 
@@ -340,6 +319,11 @@ pub extern "C" fn rz_set_substitute_font(input: u32, index: u32) -> u32 {
         let Some(Resource::Input(bytes)) = s.resources.get(&input) else {
             return Err(ApiError::handle("invalid font input handle"));
         };
+        if bytes.is_empty() || bytes.len() > FONT_LIMIT {
+            return Err(ApiError::resource(
+                "font input must contain 1 byte to 32 MiB",
+            ));
+        }
         let previous = s
             .substitute_font
             .as_ref()
@@ -537,10 +521,68 @@ mod tests {
     }
 
     #[test]
+    fn pdf_larger_than_eight_mib_opens_renders_and_saves_within_buffer_budget() {
+        let mut bytes = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n".to_vec();
+        let bodies = [
+            "<< /Type /Catalog /Pages 2 0 R /RzPadding 5 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 20 20] /Contents 4 0 R >>",
+            "<< /Length 23 >>\nstream\n1 0 0 rg 0 0 20 20 re f\nendstream",
+        ];
+        let mut offsets = vec![0];
+        for (index, body) in bodies.iter().enumerate() {
+            offsets.push(bytes.len());
+            bytes.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", index + 1).as_bytes());
+        }
+        offsets.push(bytes.len());
+        bytes.extend_from_slice(
+            format!("5 0 obj\n<< /Length {} >>\nstream\n", 9 * 1024 * 1024).as_bytes(),
+        );
+        bytes.resize(bytes.len() + 9 * 1024 * 1024, b'X');
+        bytes.extend_from_slice(b"\nendstream\nendobj\n");
+        let xref = bytes.len();
+        bytes.extend_from_slice(b"xref\n0 6\n0000000000 65535 f \n");
+        for offset in &offsets[1..] {
+            bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        bytes.extend_from_slice(
+            format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+        );
+        let input = rz_alloc(bytes.len() as u32);
+        assert_ne!(input, 0);
+        STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            let Resource::Input(data) = s.resources.get_mut(&input).unwrap() else {
+                panic!("input")
+            };
+            data.copy_from_slice(&bytes);
+        });
+        let document = rz_open(input);
+        assert_ne!(document, 0, "{}", STATE.with(|s| s.borrow().error.clone()));
+        assert_eq!(rz_release(input), 1);
+        let image = rz_render(document, 0, 72.);
+        assert_ne!(image, 0);
+        assert_eq!(rz_release(image), 1);
+        let saved = interaction::rz_save(document, SAVE_LIMIT as u32);
+        assert_ne!(saved, 0, "{}", STATE.with(|s| s.borrow().error.clone()));
+        assert!(rz_buffer_len(saved) > 8 * 1024 * 1024);
+        assert_eq!(rz_release(saved), 1);
+        assert_eq!(rz_release(document), 1);
+        assert_eq!(rz_retained_bytes(), 0);
+        // Input allocation remains governed by the aggregate buffer budget.
+        let large = rz_alloc(33 * 1024 * 1024);
+        assert_ne!(large, 0);
+        assert_eq!(rz_open(large), 0);
+        assert_eq!(api::rz_error_code(), 7);
+        assert_eq!(rz_set_substitute_font(large, 0), 0);
+        assert_eq!(api::rz_error_code(), 7);
+        assert_eq!(rz_release(large), 1);
+    }
+    #[test]
     fn input_and_render_parameters_are_bounded() {
         assert_eq!(rz_alloc(0), 0);
-        assert_eq!(rz_alloc(FONT_LIMIT as u32 + 1), 0);
-        let oversized = rz_alloc(INPUT_LIMIT as u32 + 1);
+        assert_eq!(rz_alloc(BUFFER_LIMIT as u32 + 1), 0);
+        let oversized = rz_alloc(8 * 1024 * 1024 + 1);
         assert_ne!(oversized, 0);
         assert_eq!(rz_open(oversized), 0);
         assert_eq!(rz_release(oversized), 1);

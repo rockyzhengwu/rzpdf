@@ -1,3 +1,5 @@
+import {BUFFER_BUDGET} from './interaction.js';
+import {ReaderShell} from './reader-shell.js';
 import {FontControls} from './font-controls.js';
 import {EditorPanel} from './editor.js';
 import {PdfApiError,type PageInfo,type PageTarget,type TextPage,type OpenOptions} from './client.js';
@@ -14,6 +16,7 @@ const mode=$<HTMLSelectElement>('mode'),zoom=$<HTMLInputElement>('zoom'),layer=$
 const rotation=$<HTMLSelectElement>('view-rotation'),content=$<HTMLDivElement>('page-content');
 const fit=$<HTMLSelectElement>('fit'),viewport=$<HTMLDivElement>('viewport');
 const links=$<HTMLDivElement>('links'),outline=$<HTMLDivElement>('outline'),results=$<HTMLDivElement>('results');
+const outlineWarning=$<HTMLParagraphElement>('outline-warning');
 const marks=$<SVGSVGElement>('highlights'),view=$<HTMLDivElement>('page-view');
 const cancel=$<HTMLButtonElement>('cancel'),reopen=$<HTMLButtonElement>('reopen'),find=$<HTMLButtonElement>('find');
 let doc:WorkerPdfDocument|undefined,generation=0,fontGeneration=0,drawing=0,searching=0,opening=0,pending:Uint8Array|undefined;
@@ -38,19 +41,20 @@ let fontResources:FontControls|undefined;
 let refreshEditor:(doc:WorkerPdfDocument)=>Promise<unknown>=async()=>false;
 let openImportSource:(bytes:Uint8Array,options:OpenOptions)=>Promise<WorkerPdfDocument>=async()=>{throw Error('引擎尚未就绪');};
 const editor=new EditorPanel($<HTMLElement>('editor'),$<HTMLElement>('widgets'),target=>refreshEditor(target),showError,(bytes,options)=>openImportSource(bytes,options));
-function showError(error:unknown) {status.textContent=error instanceof Error?error.message:String(error);}
+const shell=new ReaderShell(()=>button.click());
+function showError(error:unknown) {shell.error(error instanceof Error?error.message:String(error));}
 function externalUri(uri:string):string|undefined {
   try {const url=new URL(uri);return ['http:','https:','mailto:'].includes(url.protocol)?url.href:undefined;}catch{return undefined;}
 }
 function clearView():void {
-  stopRaster(true);editor.clear();
+  stopRaster(true);editor.clear();shell.reset();outlineWarning.hidden=true;outlineWarning.textContent='';outlineWarning.title='';
   canvas.width=canvas.height=1;view.style.width=view.style.height='1px';content.style.width=content.style.height='1px';content.style.transform='none';
   layer.replaceChildren();links.replaceChildren();marks.replaceChildren();outline.replaceChildren();results.replaceChildren();currentInfo=undefined;
 }
 try {
   let engine=await createWorkerEngine();
   openImportSource=(bytes,options)=>engine.open(bytes,options);
-  status.textContent='请选择本地 PDF（最多 8 MiB）';input.disabled=false;fontInput.disabled=false;
+  status.textContent='请选择本地 PDF';input.disabled=false;fontInput.disabled=false;
   function bindEngine():void {
   const target=engine;
   target.addEventListener('queuechange',()=>{if(target===engine)cancel.disabled=!(engine.busy||fontResources?.busy);});
@@ -87,12 +91,13 @@ try {
     stopRaster();editor.clear();currentInfo=undefined;layer.replaceChildren();links.replaceChildren();marks.replaceChildren();
     const target=doc,stamp=generation,drawId=++drawing,index=Number(page.value)-1,viewRotation=Number(rotation.value);
     let scale=Number(zoom.value)/100;
+    status.textContent=`正在显示第 ${index+1} 页…`;
     const current=()=>doc===target&&stamp===generation&&drawId===drawing;
     try {
       const info=await target.pageInfo(index);if(!current())return false;
       if(fit.value!=='manual'){
         const css=getComputedStyle(viewport),availableWidth=viewport.clientWidth-parseFloat(css.paddingLeft)-parseFloat(css.paddingRight);
-        const availableHeight=parseFloat(css.maxHeight)-parseFloat(css.paddingTop)-parseFloat(css.paddingBottom);
+        const availableHeight=viewport.clientHeight-parseFloat(css.paddingTop)-parseFloat(css.paddingBottom);
         const rotated=viewTransform(info.width,info.height,viewRotation);
         const ratio=fit.value==='page'?Math.min(availableWidth/rotated.width,availableHeight/rotated.height):availableWidth/rotated.width;
         scale=Math.min(4,Math.max(.1,ratio));zoom.value=String(scale*100);
@@ -116,7 +121,7 @@ try {
       const [{text,copyDenied},pageLinks,ready]=await Promise.all([textResult,target.links(index),rendered]);
       if(!ready)return false;
       if(!current())return false;
-      currentInfo=info;page.value=String(index+1);
+      currentInfo=info;shell.page(index+1);
       layer.replaceChildren();links.replaceChildren();marks.replaceChildren();marks.setAttribute('viewBox',`0 0 ${info.width} ${info.height}`);
       find.disabled=copyDenied;
       const measure=document.createElement('canvas').getContext('2d')!;
@@ -149,7 +154,7 @@ try {
       await editor.show(target,index,info,scale,viewRotation);
       if(!current())return false;
       const missing=text.characters.filter(c=>c.unicode===null).length;
-      status.textContent=`第 ${index+1} / ${target.pageCount} 页${copyDenied?'；此文档不允许复制或搜索文字':''}${missing?`；${missing} 个字符缺少文字映射`:''}${text.diagnostics.length?`；${text.diagnostics.length} 条兼容诊断`:''}`;
+      status.textContent=`第 ${index+1} / ${target.pageCount} 页${copyDenied?'；此文档不允许复制或搜索文字':''}${missing?`；${missing} 个字符缺少文字映射`:''}${text.diagnostics.length?`；${text.diagnostics.length} 条兼容诊断`:''}${outlineWarning.hidden?'':'；书签不可用（详见书签栏）'}`;
       return true;
     }catch(error){if(current()){stopRaster();showError(error);}return false;}
   }
@@ -158,13 +163,23 @@ try {
     drawing++;searching++;stopRaster(true);editor.clear();results.replaceChildren();marks.replaceChildren();outline.replaceChildren();links.replaceChildren();layer.replaceChildren();
     window.getSelection()?.removeAllRanges();status.textContent='正在更新页面…';
     try {
-      page.max=String(target.pageCount);page.value=String(Math.min(target.pageCount,Math.max(1,Number(page.value)||1)));
+      shell.opened(target.pageCount);page.max=String(target.pageCount);page.value=String(Math.min(target.pageCount,Math.max(1,Number(page.value)||1)));
       await loadOutline(target,stamp);if(target===doc&&stamp===generation)return await draw();
     }catch(error){if(target===doc&&stamp===generation)showError(error);}
     return false;
   };
   async function loadOutline(target:WorkerPdfDocument,stamp:number):Promise<void> {
-    const items=await target.outlines();if(doc!==target||stamp!==generation)return;
+    let items:Awaited<ReturnType<WorkerPdfDocument['outlines']>>;
+    try { items=await target.outlines(); }
+    catch(error) {
+      if(doc!==target||stamp!==generation)return;
+      if(!(error instanceof PdfApiError)||!['format','unsupported'].includes(error.code))throw error;
+      outline.replaceChildren();outlineWarning.hidden=false;
+      outlineWarning.textContent=error.code==='format'?'书签数据损坏，暂时无法显示。正文仍可正常阅读。':'此文档的书签类型暂不支持。正文仍可正常阅读。';
+      outlineWarning.title=error.message;return;
+    }
+    if(doc!==target||stamp!==generation)return;
+    outlineWarning.hidden=true;outlineWarning.textContent='';outlineWarning.title='';
     outline.replaceChildren();const depths=new Map<string,number>();
     for(const item of items) {
       const depth=item.parent?(depths.get(item.parent.join(':'))??0)+1:0;depths.set(item.id.join(':'),depth);
@@ -180,12 +195,12 @@ try {
       const pass=password.value;password.value='';
       const candidate=await engine.open(bytes,{mode:mode.value==='compatible'?'compatible':'strict',...(pass?{password:pass}:{})});
       if(!current()){await candidate.close();return;}
-      doc=candidate;pending=undefined;unlock.hidden=true;reopen.disabled=false;
+      doc=candidate;pending=undefined;unlock.hidden=true;reopen.disabled=false;shell.opened(candidate.pageCount);
       page.value='1';page.max=String(candidate.pageCount);button.disabled=false;find.disabled=false;
       await loadOutline(candidate,stamp);if(current())await draw();
     }catch(error){
       if(!current())return;
-      if(error instanceof PdfApiError&&['password_required','password_invalid'].includes(error.code)){unlock.hidden=false;password.focus();}
+      if(error instanceof PdfApiError&&['password_required','password_invalid'].includes(error.code)){unlock.hidden=false;shell.panel('settings');password.focus();}
       else pending=undefined;
       showError(error);
     }finally {if(current())unlock.disabled=false;}
@@ -197,7 +212,7 @@ try {
     button.disabled=find.disabled=true;unlock.hidden=true;unlock.disabled=false;clearView();status.textContent='正在打开文件…';
     try {
       await previous?.close();const file=input.files?.[0];if(!file)return;
-      if(file.size>8*1024*1024)throw Error('文件超过 8 MiB');
+      if(file.size>BUFFER_BUDGET)throw Error('文件超过当前引擎的内存预算');
       const bytes=new Uint8Array(await file.arrayBuffer());if(current!==generation)return;
       const font=fontInput.files?.[0];
       if(font&&font.size>32*1024*1024)throw Error('字体文件超过 32 MiB');

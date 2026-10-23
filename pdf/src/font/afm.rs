@@ -17,6 +17,29 @@ pub struct Afm {
     budget_metrics: Option<Vec<(String, CharMetrics)>>,
 }
 impl Afm {
+    pub(crate) fn cache_bytes(&self) -> usize {
+        self.font_name
+            .capacity()
+            .saturating_add(self.family_name.capacity())
+            .saturating_add(
+                self.char_metrics
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<(String, CharMetrics)>() + 16)
+                    .saturating_mul(2),
+            )
+            .saturating_add(
+                self.char_metrics
+                    .keys()
+                    .map(String::capacity)
+                    .sum::<usize>(),
+            )
+            .saturating_add(self.budget_metrics.as_ref().map_or(0, |v| {
+                v.capacity()
+                    .saturating_mul(std::mem::size_of::<(String, CharMetrics)>())
+                    .saturating_add(v.iter().map(|(k, _)| k.capacity()).sum::<usize>())
+            }))
+    }
+
     pub fn get_char_width(&self, name: &str) -> Option<f32> {
         if let Some(entries) = &self.budget_metrics {
             return entries

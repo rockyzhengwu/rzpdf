@@ -6,12 +6,12 @@ import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 import assert from 'node:assert/strict';
 const repo=fileURLToPath(new URL('../../',import.meta.url)),out=resolve(repo,'output/webassembly/import-browser');await mkdir(out,{recursive:true});
-const server=createServer(async(req,res)=>{const path=decodeURIComponent(new URL(req.url,'http://localhost').pathname),file=path.startsWith('/fixtures/')?resolve(repo,'output/webassembly',path.slice(1)):resolve(repo,'web',path==='/'?'index.html':path.slice(1));if(!file.startsWith(repo)){res.writeHead(403).end();return;}try{res.setHeader('Content-Type',({'.js':'text/javascript','.mjs':'text/javascript','.wasm':'application/wasm','.html':'text/html','.pdf':'application/pdf'})[extname(file)]??'application/octet-stream');res.end(await readFile(file));}catch{res.writeHead(404).end();}});await new Promise(done=>server.listen(0,'127.0.0.1',done));
+const server=createServer(async(req,res)=>{const path=decodeURIComponent(new URL(req.url,'http://localhost').pathname),file=path.startsWith('/fixtures/')?resolve(repo,'output/webassembly',path.slice(1)):resolve(repo,'web',path==='/'?'index.html':path.slice(1));if(!file.startsWith(repo)){res.writeHead(403).end();return;}try{res.setHeader('Content-Type',({'.css':'text/css','.js':'text/javascript','.mjs':'text/javascript','.wasm':'application/wasm','.html':'text/html','.pdf':'application/pdf'})[extname(file)]??'application/octet-stream');res.end(await readFile(file));}catch{res.writeHead(404).end();}});await new Promise(done=>server.listen(0,'127.0.0.1',done));
 let browser,page;const report={status:'failed',checks:[],errors:[]};
 try{
  const hash=data=>createHash('sha256').update(data).digest('hex');report.source=JSON.parse(await readFile(resolve(repo,'output/webassembly/wa03-build.json'))).source;report.artifacts={};
  for(const name of ['rzpdf_web.mjs','rzpdf_web.wasm','client.js','worker-client.js','protocol.js','interaction.js','pdf-worker.js','editor.js','demo.js'])report.artifacts[name]=hash(await readFile(resolve(repo,'web/dist',name)));
- browser=await chromium.launch({executablePath:process.env.RZPDF_CHROMIUM,headless:true,args:['--no-sandbox']});page=await browser.newPage();page.on('pageerror',e=>report.errors.push(e.stack));await page.goto(`http://127.0.0.1:${server.address().port}`);
+ browser=await chromium.launch({executablePath:process.env.RZPDF_CHROMIUM,headless:true,args:['--no-sandbox']});page=await browser.newPage();page.on('pageerror',e=>report.errors.push(e.stack));await page.goto(`http://127.0.0.1:${server.address().port}`);await page.locator('.edit-toggle').click();
  const result=await page.evaluate(async()=>{
   const {createEngine}=await import('/dist/client.js'),{createWorkerEngine}=await import('/dist/worker-client.js');const bytes=async(name)=>new Uint8Array(await(await fetch('/fixtures/'+name+'.pdf')).arrayBuffer());
   const check=(v,message)=>{if(!v)throw Error(message);},reject=async(action,codes)=>{try{await action();}catch(e){check(codes.includes(e.code),`Expected ${codes}, got ${e.code}: ${e.message}`);return;}throw Error('Expected rejection '+codes);};
@@ -51,7 +51,7 @@ try{
  const ready=()=>page.waitForFunction(()=>document.querySelector('#status').textContent.startsWith('第')&&!!document.querySelector('#save-pdf')&&!document.querySelector('#save-pdf').disabled);
  await page.locator('#pdf').setInputFiles(resolve(repo,'output/webassembly/fixtures/content-edit.pdf'));await ready();
  await page.getByLabel('导入 PDF 文件',{exact:true}).setInputFiles(resolve(repo,'output/webassembly/fixtures/interaction.pdf'));await page.getByLabel('导入名称前缀',{exact:true}).fill('ui');await page.getByRole('button',{name:'导入选定页面',exact:true}).click();
- await page.waitForFunction(()=>document.querySelector('#page').max==='3'&&!document.querySelector('#save-pdf')?.disabled);
+ await page.waitForFunction(()=>document.querySelector('#page').max==='3'&&!!document.querySelector('#save-pdf')&&!document.querySelector('#save-pdf').disabled&&document.querySelector('#status').textContent.startsWith('第 1 / 3'));
  await page.locator('#page').fill('2');await page.locator('#render').click();await ready();assert.equal(await page.getByLabel('name',{exact:true}).count(),0);assert.equal(await page.getByLabel('ui_name',{exact:true}).inputValue(),'Old');
  const field=page.getByLabel('ui_name',{exact:true});await field.fill('UI imported');await field.dispatchEvent('change');await ready();
  const download=page.waitForEvent('download');await page.locator('#save-pdf').click();await(await download).saveAs(resolve(out,'import-reader.pdf'));assert.equal(report.errors.length,0);report.checks.push('reader local import, navigation to imported page, field filling and download');

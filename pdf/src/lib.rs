@@ -16,3 +16,5 @@ pub mod pdf_context;
 pub mod security;
 pub mod signatures;
 pub mod writer;
+
+mod derived_cache;

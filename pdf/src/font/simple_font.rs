@@ -688,6 +688,15 @@ impl EncodingMapping<'_> {
 }
 
 impl SimpleFont {
+    pub(crate) fn cache_bytes(&self) -> usize {
+        self.base_font
+            .capacity()
+            .saturating_add(self.descriptor.cache_bytes())
+            .saturating_add(self.to_unicode.as_ref().map_or(0, Cmap::cache_bytes))
+            .saturating_add(self.encoding.as_ref().map_or(0, Encoding::cache_bytes))
+            .saturating_add(self.afm.as_ref().map_or(0, Afm::cache_bytes))
+    }
+
     pub(crate) fn descriptor_flags(&self) -> Option<u32> {
         self.descriptor.flags().copied()
     }

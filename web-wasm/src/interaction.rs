@@ -576,8 +576,10 @@ pub extern "C" fn rz_apply_asset(document: u32, input: u32, asset: u32) -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn rz_save(document: u32, max_bytes: u32) -> u32 {
     call(|s| {
-        if max_bytes == 0 || max_bytes as usize > INPUT_LIMIT {
-            return Err(ApiError::resource("save limit must be 1 byte to 8 MiB"));
+        if max_bytes == 0 || max_bytes as usize > SAVE_LIMIT {
+            return Err(ApiError::resource(
+                "save limit exceeds the shared buffer budget",
+            ));
         }
         if s.resources.len() >= 8 {
             return Err(ApiError::resource("release buffers before saving"));
@@ -844,7 +846,7 @@ mod tests {
             0
         );
         assert_eq!(crate::api::rz_error_code(), 5);
-        let saved = rz_save(d, INPUT_LIMIT as u32);
+        let saved = rz_save(d, SAVE_LIMIT as u32);
         assert_ne!(saved, 0);
         let data = bytes(saved);
         rz_release(saved);
@@ -862,7 +864,7 @@ mod tests {
         let source_doc = open(&source(), None);
         let target_state = query(target, "state", None);
         let source_state = query(source_doc, "state", None);
-        let before = rz_save(target, INPUT_LIMIT as u32);
+        let before = rz_save(target, SAVE_LIMIT as u32);
         let before_bytes = bytes(before);
         rz_release(before);
         assert_eq!(
@@ -874,7 +876,7 @@ mod tests {
         );
         let failed = query(target, "state", None);
         assert_eq!(failed["commitRevision"], target_state["commitRevision"]);
-        let after = rz_save(target, INPUT_LIMIT as u32);
+        let after = rz_save(target, SAVE_LIMIT as u32);
         assert_eq!(bytes(after), before_bytes);
         rz_release(after);
         let result = json(mutate(
@@ -910,7 +912,7 @@ mod tests {
         let rendered = rz_render_page(target, 1, 72., 3, 1.);
         assert_ne!(rendered, 0);
         rz_release(rendered);
-        let saved = rz_save(target, INPUT_LIMIT as u32);
+        let saved = rz_save(target, SAVE_LIMIT as u32);
         let output = bytes(saved);
         rz_release(saved);
         let reopened = open(&output, None);
@@ -983,7 +985,7 @@ mod tests {
             query(document, "content", Some(1))["characters"][0]["unicode"],
             "你"
         );
-        let saved = rz_save(document, INPUT_LIMIT as u32);
+        let saved = rz_save(document, SAVE_LIMIT as u32);
         let saved_bytes = bytes(saved);
         rz_release(saved);
         let request = message(
@@ -994,7 +996,7 @@ mod tests {
         assert_eq!(crate::api::rz_error_code(), 6);
         rz_release(request);
         rz_release(bad);
-        let unchanged = rz_save(document, INPUT_LIMIT as u32);
+        let unchanged = rz_save(document, SAVE_LIMIT as u32);
         assert_eq!(bytes(unchanged), saved_bytes);
         rz_release(unchanged);
         let reopened = open(&saved_bytes, None);
@@ -1041,7 +1043,7 @@ mod tests {
         let without = rz_render(d, 0, 72.);
         assert_ne!(without, 0);
         rz_release(without);
-        let saved = rz_save(d, INPUT_LIMIT as u32);
+        let saved = rz_save(d, SAVE_LIMIT as u32);
         assert_ne!(saved, 0);
         let saved_bytes = bytes(saved);
         assert_eq!(rz_open(saved), 0);
@@ -1119,7 +1121,7 @@ mod tests {
         assert_eq!(rz_save(d, 1), 0);
         assert_eq!(crate::api::rz_error_code(), 7);
         assert_eq!(query(d, "state", None)["stamp"], after["stamp"]);
-        let saved = rz_save(d, INPUT_LIMIT as u32);
+        let saved = rz_save(d, SAVE_LIMIT as u32);
         assert_ne!(saved, 0);
         rz_release(saved);
         rz_dispose();
@@ -1153,7 +1155,7 @@ mod tests {
         );
         assert_eq!(crate::api::rz_error_code(), 4);
         assert_eq!(query(d, "state", None)["stamp"], result["stamp"]);
-        let saved = rz_save(d, INPUT_LIMIT as u32);
+        let saved = rz_save(d, SAVE_LIMIT as u32);
         assert_ne!(saved, 0);
         let protected = bytes(saved);
         rz_release(saved);
@@ -1176,7 +1178,7 @@ mod tests {
             0
         );
         assert_eq!(crate::api::rz_error_code(), 5);
-        assert_eq!(rz_save(r4, INPUT_LIMIT as u32), 0);
+        assert_eq!(rz_save(r4, SAVE_LIMIT as u32), 0);
         assert_eq!(crate::api::rz_error_code(), 5);
         rz_dispose();
     }

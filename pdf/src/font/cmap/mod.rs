@@ -30,6 +30,16 @@ impl<T, K> From<HashMap<K, T>> for MappingTable<T, K> {
 }
 
 impl<T, K: Copy + Ord + std::hash::Hash> MappingTable<T, K> {
+    pub(crate) fn storage_bytes(&self) -> usize {
+        self.hash
+            .capacity()
+            .saturating_mul(std::mem::size_of::<(K, T)>().saturating_add(16))
+            .saturating_mul(2)
+            .saturating_add(self.sorted.as_ref().map_or(0, |v| {
+                v.capacity().saturating_mul(std::mem::size_of::<(K, T)>())
+            }))
+    }
+
     pub(super) fn new_budgeted() -> Self {
         Self {
             hash: HashMap::new(),
@@ -197,6 +207,20 @@ pub struct Cmap {
 }
 
 impl Cmap {
+    pub(crate) fn cache_bytes(&self) -> usize {
+        self.code_space_range
+            .capacity()
+            .saturating_mul(std::mem::size_of::<CodeSpaceRange>())
+            .saturating_add(self.code_to_cids.storage_bytes())
+            .saturating_add(self.cid_to_unicode.storage_bytes())
+            .saturating_add(
+                self.cid_to_unicode
+                    .iter()
+                    .map(|(_, s)| s.capacity())
+                    .sum::<usize>(),
+            )
+    }
+
     /// Load a PDF CMap stream, including a named dictionary UseCMap base.
     /// Stream-valued dictionary bases remain unsupported rather than ignored.
     pub fn from_stream<R: std::io::Read + std::io::Seek>(

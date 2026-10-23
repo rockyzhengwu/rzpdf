@@ -34,6 +34,20 @@ class BuildTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "non-Wasm"):
                     build.archive_inventory(root, {})
 
+    def test_optimized_archives_use_selected_profile(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            archive = root / build.EMSCRIPTEN / "wasm-release/build/test/out/libtest.a"
+            archive.parent.mkdir(parents=True)
+            archive.write_bytes(b"archive")
+            with patch.object(build, "capture", return_value="test.o"), \
+                 patch.object(build.subprocess, "check_output", return_value=b"\0asmtest"):
+                items = build.archive_inventory(root, {}, "wasm-release")
+            self.assertEqual(len(items), 1)
+            self.assertIn("/wasm-release/", items[0]["path"])
+            with self.assertRaisesRegex(ValueError, "no native archives"):
+                build.archive_inventory(root, {}, "debug")
+
     def test_missing_archives_rejected(self):
         with tempfile.TemporaryDirectory() as folder:
             with self.assertRaisesRegex(ValueError, "no native archives"):

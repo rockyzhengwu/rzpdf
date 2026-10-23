@@ -1,6 +1,6 @@
 import {normalizeRasterRegion,type RasterRegion} from "./raster.js";
 import {normalizeFontRegistration,normalizeFontStamp,type FontRegistration,type FontIdentity,type FontStamp,type FontRequirements} from "./fonts.js";
-import {normalizeRenderOptions,snapshotMutation,type RenderOptions,type InteractionState,type AnnotationSnapshot,type FormSnapshot,type MutationRequest,type MutationResult,type SavedPdf,type ContentSnapshot} from "./interaction.js";
+import {BUFFER_BUDGET,normalizeRenderOptions,snapshotMutation,type RenderOptions,type InteractionState,type AnnotationSnapshot,type FormSnapshot,type MutationRequest,type MutationResult,type SavedPdf,type ContentSnapshot} from "./interaction.js";
 import {PdfApiError,type OpenOptions,type PageInfo,type TextPage,type OutlineItem,type PageLink,type RgbaPage,type SearchReport,type ErrorCode} from './client.js';
 import {WORKER_PROTOCOL,validateArguments,type WorkerOperation,type WorkerRequest,type WorkerResponse,type OpenedDocument} from './protocol.js';
 export interface TaskOptions { signal?:AbortSignal; }
@@ -17,7 +17,7 @@ function sessionIdentity():string {
   return Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');
 }
 
-const MAX_TASKS=32,MAX_BYTES=64*1024*1024;
+const MAX_TASKS=32,MAX_BYTES=BUFFER_BUDGET;
 function validateTask(task:TaskOptions):void {
   if(!task||typeof task!=='object'||Object.keys(task).some(k=>k!=='signal'))throw new PdfApiError('invalid_argument','Invalid task options','task');
   const signal=task.signal;
@@ -144,7 +144,7 @@ export class WorkerPdfEngine extends EventTarget {
   }
   async open(bytes:Uint8Array,options:OpenOptions={},task:TaskOptions={}):Promise<WorkerPdfDocument> {
     this.valid();validateTask(task);
-    if(!(bytes instanceof Uint8Array)||!bytes.length||bytes.length>8*1024*1024)throw new PdfApiError('resource_limit','PDF input must contain 1 byte to 8 MiB','open');
+    if(!(bytes instanceof Uint8Array)||!bytes.length||bytes.length>BUFFER_BUDGET)throw new PdfApiError('resource_limit','PDF input is empty or exceeds the shared buffer budget','open');
     if(task.signal?.aborted)throw new PdfApiError('cancelled','Open was cancelled','open');
     try {validateArguments('open',[bytes,options]);}catch{throw new PdfApiError('invalid_argument','Invalid open options','open');}
     this.admit(bytes.length,"open",task);
@@ -248,7 +248,7 @@ export class WorkerPdfDocument {
   }
   save(options:{maxBytes?:number}={},task:TaskOptions={}):Promise<SavedPdf>{
     if(!options||typeof options!=="object"||Object.keys(options).some(k=>k!=="maxBytes"))return Promise.reject(new PdfApiError('invalid_argument','Invalid save options','save'));
-    return this.call('save',[options.maxBytes??8*1024*1024],task);
+    return this.call('save',[options.maxBytes??BUFFER_BUDGET],task);
   }
   searchText(query:string,options:{caseSensitive?:boolean;maxResults?:number}={},task:TaskOptions={}):Promise<SearchReport>{return this.call('search',[query,options],task);}
   outlines(task:TaskOptions={}):Promise<OutlineItem[]>{return this.call('outlines',[],task);}

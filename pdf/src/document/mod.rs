@@ -44,6 +44,7 @@ pub mod optional_content_edit;
 pub mod outlines;
 pub mod owned;
 pub mod page_labels;
+pub mod prepared_page;
 pub mod recovery;
 mod span_tree;
 pub mod subset_text_edit;
@@ -67,6 +68,12 @@ pub mod structure;
 use page_tree::PageTreeEntry;
 
 pub struct PdfDocument<R: Seek + Read> {
+    prepared_pages: std::cell::RefCell<
+        crate::derived_cache::DerivedCache<
+            prepared_page::PageKey,
+            std::rc::Rc<prepared_page::PreparedPage>,
+        >,
+    >,
     ctx: PDFContext<R>,
     catalog: Catalog,
     // A merged xref table alone cannot identify the latest revision address.
@@ -199,6 +206,10 @@ impl<R: Seek + Read> PdfDocument<R> {
             ctx,
             catalog,
             source_xref_offset: None,
+            prepared_pages: std::cell::RefCell::new(crate::derived_cache::DerivedCache::new(
+                options.limits.max_operation_bytes.min(32 * 1024 * 1024),
+                2,
+            )),
         })
     }
 
@@ -259,6 +270,10 @@ impl<R: Seek + Read> PdfDocument<R> {
             ctx,
             catalog,
             source_xref_offset: Some(source_xref_offset),
+            prepared_pages: std::cell::RefCell::new(crate::derived_cache::DerivedCache::new(
+                options.limits.max_operation_bytes.min(32 * 1024 * 1024),
+                2,
+            )),
         };
         if document.ctx.source_security().is_some() {
             let budget = document.ctx.limits().operation_budget();

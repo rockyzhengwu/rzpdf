@@ -4,3 +4,11 @@ resolver = "3"
 
 [workspace.package]
 license = "AGPL-3.0-only"
+
+# Browser builds optimize Rust as well as the native raster backend.
+[profile.wasm-release]
+inherits = "release"
+opt-level = 2
+debug = false
+strip = "debuginfo"
+lto = false

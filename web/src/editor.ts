@@ -1,3 +1,4 @@
+import {BUFFER_BUDGET} from './interaction.js';
 import {contentControls} from './content-editor.js';
 import {PdfApiError} from './client.js';
 import {widgetPlacement,displayToUser,inverseViewPoint} from './geometry.js';
@@ -116,7 +117,8 @@ export class EditorPanel {
     const button=document.createElement('button');button.textContent='导入选定页面';button.disabled=!state.permissions.modify||!state.permissions.assemble;
     button.addEventListener('click',async()=>{
       const selected=file.files?.[0],pass=password.value;password.value='';
-      if(!selected||!selected.size||selected.size>8*1024*1024){this.error(Error('请选择最多 8 MiB 的 PDF'));return;}
+      if(!selected||!selected.size){this.error(Error('请选择有效的 PDF 文件'));return;}
+      if(selected.size>BUFFER_BUDGET){this.error(Error('文件超过当前引擎的内存预算'));return;}
       const target=Number(insertion.value)-1;if(!Number.isInteger(target)||target<0||target>state.pageCount){this.error(Error('请输入有效插入位置'));return;}
       const selectedPages=pages.value.trim(),namePrefix=prefix.value,includeNavigation=navigation.checked;
       button.disabled=true;let source:WorkerPdfDocument|undefined;

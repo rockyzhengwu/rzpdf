@@ -27,7 +27,7 @@ python3 scripts/build_webassembly.py --package render --example wasm_build_probe
 
 驱动覆盖目标专用 `CC/CXX/AR`，避免全局宿主编译器抢占；Emscripten 目标启用 FreeType `bundled`，C 编译和最终链接启用 SDK zlib。原生目标仍使用原有系统 FreeType 配置。
 
-Skia 通过 `FORCE_SKIA_BUILD=1` 从源码构建，GN 显式启用 external FreeType，头文件取自锁定 freetype-sys 的源码目录；实际链接由核心的 bundled FreeType 提供。C 依赖使用 `-O2`，Skia 通过本次 Cargo 命令的 profile 配置固定 opt-level=2，避免 dev 模式下未优化的色彩转换函数超过旧版 Binaryen 的局部变量数限制；不修改原生 profile。GN 参数名含 system，但不会探测或链接宿主 FreeType。这避免预构建 Skia 的裁剪版 FreeType 与核心完整 FreeType 的同名符号发生混用。
+Skia 通过 `FORCE_SKIA_BUILD=1` 从源码构建，GN 显式启用 external FreeType，头文件取自锁定 freetype-sys 的源码目录；实际链接由核心的 bundled FreeType 提供。C 依赖使用 `-O2`；默认 `wasm-release` profile 对 Rust 和 Skia 使用 opt-level=2，关闭调试信息与调试断言，最终 Emscripten 链接使用 O2。需要诊断时可显式传 `--profile dev`，此时仍固定 Skia opt-level=2，避免未优化的色彩转换函数超过旧版 Binaryen 的局部变量数限制。原生默认 profile 不变。锁定的 Rust/LLVM 还需关闭 `bulk-memory-opt` 和 `call-indirect-overlong` 两个旧版 Binaryen 不识别的目标特性标记，才能执行最终 O2 优化；不修改第三方工具源码。GN 参数名含 system，但不会探测或链接宿主 FreeType。这避免预构建 Skia 的裁剪版 FreeType 与核心完整 FreeType 的同名符号发生混用。
 
 当前 Rust 的链接器默认参数启用 Wasm 异常处理，而本组合的 C 依赖使用 Emscripten 的 setjmp/longjmp 模式。因此固定 Rust `panic=abort`、关闭目标 exception-handling，并在最终链接显式 `-fno-exceptions`，保持 C 库已有的 longjmp 支持。未定义符号仍是链接错误。固定 nightly 对该目标特性发出 unstable 警告，后续调整 Rust/SDK/Skia 时必须重跑探针，不能直接去掉参数。
 
@@ -55,7 +55,7 @@ npm --prefix web run build
 python3 -m http.server 8000 --bind 127.0.0.1 --directory web
 ```
 
-在浏览器访问 `http://127.0.0.1:8000`，选择本地 PDF。构建产物和 TS 输出位于 ignored `web/dist/`，本地处理，不上传输入。当前严格解析，支持 Standard AES-128/R4 空用户密码读取；输入文件仍最多 8 MiB。文件/图像/句柄/DPI 上限见 spec。需要继续使用已有 nightly 别名时，在构建命令加上 WA-02 中的 `--toolchain` 参数。
+在浏览器访问 `http://127.0.0.1:8000`，选择本地 PDF。构建产物和 TS 输出位于 ignored `web/dist/`，本地处理，不上传输入。当前严格解析，支持 Standard AES-128/R4 空用户密码读取；PDF 不再设置独立的 8 MiB 文件大小上限；实际可打开大小受共享缓冲预算和浏览器内存约束。文件/图像/句柄/DPI 上限见 spec。需要继续使用已有 nightly 别名时，在构建命令加上 WA-02 中的 `--toolchain` 参数。
 
 Web 构建仅在该目标命令追加 ES module、模块化和导出符号参数；不修改原生 profile。浏览器包装使用 owned Uint8ClampedArray，RGBA8/sRGB/straight alpha/逐行紧密排列。关闭文档可重复调用；模块 trap 后必须重建。缺少内嵌字体时，可选择本地 TTF/OTF/TTC 替代程序（最多 32 MiB）；程序仅在浏览器内使用，不打包或上传。仅有可靠 Unicode 映射的字符可替代，且替代字体必须实际覆盖这些字符。P0 演示在主线程同步执行，Worker 与取消在 WA-08 实现。
 
@@ -149,3 +149,14 @@ node scripts/package_web_assets.mjs --config /absolute/path/to/config.json --out
 该包验证元数据、格式头、字节身份和复制，不代替字体注册时的
 face／覆盖检查，也不表示所有第三方依赖许可、SDK 或发布已验收。
 生成过程不覆盖已有目录，验证失败不留下已提交资源包。
+
+
+### 页面缓存性能复测
+
+默认构建会更新本地阅读器所用的优化模块。准备现有字体矩阵 fixture 后运行：
+
+```sh
+node web/tests/render-cache.mjs
+```
+
+如已在独立目录保留修改前的 `rzpdf_web.mjs` 与 `rzpdf_web.wasm`，可设置 `RZPDF_BASELINE_DIR` 对同一组区域做优化前后精确像素比较和耗时记录。`RZPDF_PERF_PDF` 可指定本地复测文件，`RZPDF_PERF_PAGE` 指定从 0 开始的页号；需要替代字体时显式设置 `RZPDF_PERF_FONT` 和 `RZPDF_PERF_FONT_INDEX`，对照两版始终使用同一字体；不设置时使用项目的嵌入 CID 字体 fixture。报告将引擎启动和渲染操作耗时分开，保存在 ignored 输出目录；耗时不是跨机器的固定 CI 阈值。原始用户文档不作为仓库 fixture 提交。

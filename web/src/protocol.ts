@@ -1,6 +1,6 @@
 import {normalizeRasterRegion} from "./raster.js";
 import {normalizeFontRegistration,normalizeFontStamp,type FontRegistration,type FontStamp} from "./fonts.js";
-import {normalizeRenderOptions,snapshotMutation,mutationAssetLimit} from "./interaction.js";
+import {BUFFER_BUDGET,normalizeRenderOptions,snapshotMutation,mutationAssetLimit} from "./interaction.js";
 import type { ErrorCode, OpenOptions } from './client.js';
 export const WORKER_PROTOCOL=2;
 export type WorkerOperation='open'|'font'|'registerFont'|'registerDocumentFont'|'fontRequirements'|'clearFonts'|'pageInfo'|'text'|'render'|'renderRegion'|'search'|'outlines'|'links'|'capabilities'|'diagnostics'|'close'|'statistics'|'state'|'annotations'|'formFields'|'apply'|'save'|'content';
@@ -30,9 +30,9 @@ export function validateArguments(operation:WorkerRequest['operation'],args:unkn
     const maximum=mutationAssetLimit(command);
     if((maximum>0)!==(args[1]!==undefined)||args[1]!==undefined&&(!(args[1] instanceof Uint8Array)||!args[1].length||args[1].length>maximum))invalid();
   }
-  if(operation==='save'&&(!integer(args[0])||(args[0] as number)<1||(args[0] as number)>8*1024*1024))invalid();
+  if(operation==='save'&&(!integer(args[0])||(args[0] as number)<1||(args[0] as number)>BUFFER_BUDGET))invalid();
   if(operation==='open') {
-    if(!(args[0] instanceof Uint8Array)||!args[0].length||args[0].length>8*1024*1024)invalid();
+    if(!(args[0] instanceof Uint8Array)||!args[0].length||args[0].length>BUFFER_BUDGET)invalid();
     const options=args[1];
     if(!record(options)||Object.keys(options).some(k=>!['mode','password'].includes(k)))invalid();
     const opts=options as Record<string,unknown>;

@@ -26,7 +26,7 @@ const server=createServer(async(req,res)=>{
     const relative=path.startsWith('/assets/')?path.slice(8):path.startsWith('/fixtures/')?path.slice(1):path==='/'?'index.html':path.slice(1);
     const file=resolve(base,relative);if(!file.startsWith(base+'/')){res.writeHead(403).end();return;}
     if(path.startsWith('/assets/'))requests.push(path);
-    const data=await readFile(file);res.setHeader('Content-Type',({'.js':'text/javascript','.mjs':'text/javascript','.wasm':'application/wasm','.html':'text/html','.json':'application/json','.txt':'text/plain'})[extname(file)]??'application/octet-stream');res.setHeader('Content-Length',data.length);res.end(data);
+    const data=await readFile(file);res.setHeader('Content-Type',({'.css':'text/css','.js':'text/javascript','.mjs':'text/javascript','.wasm':'application/wasm','.html':'text/html','.json':'application/json','.txt':'text/plain'})[extname(file)]??'application/octet-stream');res.setHeader('Content-Length',data.length);res.end(data);
   }catch{res.writeHead(404).end();}
 });
 await new Promise(done=>server.listen(0,'127.0.0.1',done));

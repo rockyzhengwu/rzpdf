@@ -8,7 +8,7 @@
   "emscripten_release": "fd61bacaf40131f74987e649a135f1dd559aff60",
   "skia_bindings": "0.93.1",
   "cflags": "-O2 -sUSE_ZLIB=1",
-  "rustflags": "-Ctarget-feature=-exception-handling -Cpanic=abort -Clink-arg=-sUSE_ZLIB=1 -Clink-arg=-sALLOW_MEMORY_GROWTH=1 -Clink-arg=-sWASM_BIGINT=1 -Clink-arg=-fno-exceptions -Clink-arg=-sSTACK_SIZE=8388608 -Clink-arg=-sINITIAL_MEMORY=33554432 -Clink-arg=-sMAXIMUM_MEMORY=268435456 -Clink-arg=-sSTACK_OVERFLOW_CHECK=2",
+  "rustflags": "-Ctarget-feature=-exception-handling,-bulk-memory-opt,-call-indirect-overlong -Cpanic=abort -Clink-arg=-sUSE_ZLIB=1 -Clink-arg=-sALLOW_MEMORY_GROWTH=1 -Clink-arg=-sWASM_BIGINT=1 -Clink-arg=-fno-exceptions -Clink-arg=-sSTACK_SIZE=8388608 -Clink-arg=-sINITIAL_MEMORY=33554432 -Clink-arg=-sMAXIMUM_MEMORY=268435456 -Clink-arg=-sSTACK_OVERFLOW_CHECK=2",
   "skia_freetype": "external: same freetype-sys bundled library as PDF core",
   "runtime_node_version": "v22.15.1",
   "emsdk_node_version": "v24.19.0",

@@ -36,6 +36,20 @@ impl Differences {
 }
 
 impl Encoding {
+    pub(crate) fn cache_bytes(&self) -> usize {
+        self.differences
+            .0
+            .capacity()
+            .saturating_mul(std::mem::size_of::<(u8, String)>())
+            .saturating_add(
+                self.differences
+                    .0
+                    .iter()
+                    .map(|(_, s)| s.capacity())
+                    .sum::<usize>(),
+            )
+    }
+
     pub(crate) fn try_new_with_context_and_budget<R: std::io::Read + std::io::Seek>(
         enc: &PdfDict,
         ctx: &crate::pdf_context::PDFContext<R>,

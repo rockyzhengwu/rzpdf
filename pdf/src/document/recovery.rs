@@ -244,10 +244,15 @@ impl RecoveredDocument {
         let parser = PdfParser::new(syntax.with_xref_table(xref.clone()));
         let ctx = PDFContext::try_new_with_version(parser, xref, version)?;
         let catalog = Catalog::try_new(&ctx)?;
+        let maximum_cache_bytes = ctx.limits().max_operation_bytes.min(32 * 1024 * 1024);
         let inner = PdfDocument {
             ctx,
             catalog,
             source_xref_offset: None,
+            prepared_pages: std::cell::RefCell::new(crate::derived_cache::DerivedCache::new(
+                maximum_cache_bytes,
+                2,
+            )),
         };
         inner.try_page_count()?;
         Ok(Self {

@@ -65,8 +65,8 @@ pub(crate) fn open(
     let Some(Resource::Input(bytes)) = s.resources.get(&input) else {
         return Err(ApiError::handle("invalid PDF input handle"));
     };
-    if bytes.is_empty() || bytes.len() > INPUT_LIMIT {
-        return Err(ApiError::resource("PDF input must contain 1 byte to 8 MiB"));
+    if bytes.is_empty() {
+        return Err(ApiError::resource("PDF input must not be empty"));
     }
     if s.resources.len() >= 8 || s.retained().saturating_add(bytes.len()) > BUFFER_LIMIT {
         return Err(ApiError::resource(
@@ -220,7 +220,7 @@ fn query(d: &Document, document: u32, request: &Value) -> ApiResult<Value> {
     match request.get("operation").and_then(Value::as_str).ok_or("operation is required")? {
         "capabilities" => Ok(json!({"abi":2,"text":true,"navigation":true,"passwordOpen":true,
             "annotations":true,"forms":true,"editing":true,"save":true,"renderRegion":true,"maxRegionSide":1024,"maxRasterSide":32768,"regionRasterStatus":"experimental",
-            "textOrder":"paint","maxInputBytes":INPUT_LIMIT,"maxJsonBytes":OUTPUT_LIMIT,
+            "textOrder":"paint","maxInputBytes":null,"maxBufferBytes":BUFFER_LIMIT,"maxJsonBytes":OUTPUT_LIMIT,
             "revision":d.revision()})),
         "state" | "annotations" | "formFields" | "content" => crate::interaction::query(d,document,request),
         "pageInfo" => {

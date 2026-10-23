@@ -1,3 +1,5 @@
+/** Shared transfer/output budget; PDF input has no separate 8 MiB cap. */
+export const BUFFER_BUDGET=64*1024*1024;
 export type ObjectId=[number,number];
 export interface DocumentStamp { readonly engine:string;readonly document:number;readonly revision:string; }
 export interface InteractionState { stamp:DocumentStamp;commitRevision:string;pageCount:number;permissions:{annotate:boolean;fillForms:boolean;modify:boolean;assemble:boolean;copy:boolean;save:boolean;securityRevision:number|null}; }

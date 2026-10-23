@@ -17,6 +17,83 @@ pub struct DisplayList {
 }
 
 impl DisplayList {
+    /// Conservative cache weight, including shared fonts and nested paint lists.
+    /// This is intentionally not advertised as allocator-exact/native accounting.
+    pub(crate) fn cache_bytes(&self) -> Option<usize> {
+        fn visit(
+            list: &DisplayList,
+            fonts: &mut std::collections::HashSet<usize>,
+            depth: usize,
+        ) -> Option<usize> {
+            if depth > 64 {
+                return None;
+            }
+            let mut bytes = std::mem::size_of::<DisplayList>()
+                .saturating_add(
+                    list.objects
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<PageObject>()),
+                )
+                .saturating_add(list.retained_payload_bytes.saturating_mul(2))
+                .saturating_add(
+                    list.retained_path_segments
+                        .saturating_mul(std::mem::size_of::<crate::path::pdf_path::Segment>())
+                        .saturating_mul(2),
+                )
+                .saturating_add(list.diagnostics.capacity().saturating_mul(
+                    std::mem::size_of::<crate::page::diagnostic::ContentDiagnostic>() + 1024,
+                ));
+            for object in &list.objects {
+                let state = match object {
+                    PageObject::Text(text) => {
+                        bytes =
+                            bytes.saturating_add(text.items.capacity().saturating_mul(
+                                std::mem::size_of::<super::text_object::CharItem>(),
+                            ));
+                        Some(&text.state)
+                    }
+                    PageObject::Path(path) => Some(path.graphic_state()),
+                    PageObject::Image(image) => Some(&image.graphic_state),
+                    PageObject::Shading(shading) => Some(&shading.graphic_state),
+                    PageObject::GroupBegin(group) => {
+                        if let Some(mask) = &group.soft_mask {
+                            bytes = bytes.saturating_add(visit(&mask.list, fonts, depth + 1)?);
+                        }
+                        None
+                    }
+                    _ => None,
+                };
+                if let Some(state) = state {
+                    if let Some(font) = &state.text_state.font {
+                        let identity = std::rc::Rc::as_ptr(font) as usize;
+                        if !fonts.contains(&identity) {
+                            if fonts.try_reserve(1).is_err() {
+                                return None;
+                            }
+                            fonts.insert(identity);
+                            bytes = bytes.saturating_add(font.cache_bytes()?);
+                        }
+                    }
+                    if let Some(mask) = &state.general_state.soft_mask {
+                        bytes = bytes.saturating_add(visit(&mask.list, fonts, depth + 1)?);
+                    }
+                    for space in [
+                        &state.color_state.fill_color_space,
+                        &state.color_state.stroke_color_space,
+                    ] {
+                        if let crate::color::colorspace::ColorSpace::Pattern(space) = space {
+                            if let Some(paint) = space.paint() {
+                                bytes = bytes.saturating_add(visit(&paint.list, fonts, depth + 1)?);
+                            }
+                        }
+                    }
+                }
+            }
+            Some(bytes)
+        }
+        visit(self, &mut Default::default(), 0)
+    }
+
     /// Source stamps alone do not distinguish two configurations of one PDF.
     pub fn optional_content_selection(
         &self,

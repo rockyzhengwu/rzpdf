@@ -52,6 +52,10 @@ jobs:
           export RZPDF_CHROMIUM="$(cd web && node --input-type=module -e "import {chromium} from 'playwright-core'; process.stdout.write(chromium.executablePath())")"
           node web/tests/browser.mjs
           node web/tests/interaction.mjs
+          node web/tests/render-cache.mjs
+          node web/tests/large-input.mjs
+          node web/tests/outline-recovery.mjs
+          node web/tests/reader-shell.mjs
           node web/tests/viewer.mjs
           node web/tests/viewport-browser.mjs
           node web/tests/viewport-parity.mjs
@@ -74,6 +78,10 @@ jobs:
             output/webassembly/wa03-build*
             output/webassembly/wa03-browser/
             output/webassembly/interaction-browser/
+            output/webassembly/render-cache/
+            output/webassembly/large-input/
+            output/webassembly/outline-recovery/
+            output/webassembly/reader-shell/
             output/webassembly/viewer-browser/
             output/webassembly/viewport-browser/
             output/webassembly/viewport-parity/

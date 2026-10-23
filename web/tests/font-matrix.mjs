@@ -36,7 +36,7 @@ try{
   const path=new URL(req.url,'http://localhost').pathname;
   const file=routes.get(path)??(path==='/'?resolve(repo,'web/index.html'):path.startsWith('/dist/')&&basename(path)===path.slice(6)?resolve(repo,'web/dist',basename(path)):undefined);
   if(!file){res.writeHead(404).end();return;}
-  res.setHeader('Content-Type',({'.js':'text/javascript','.mjs':'text/javascript','.wasm':'application/wasm','.html':'text/html'})[extname(file)]??'application/octet-stream');res.end(await readFile(file));
+  res.setHeader('Content-Type',({'.css':'text/css','.js':'text/javascript','.mjs':'text/javascript','.wasm':'application/wasm','.html':'text/html'})[extname(file)]??'application/octet-stream');res.end(await readFile(file));
  }catch{res.writeHead(404).end();}});
  await new Promise(done=>server.listen(0,'127.0.0.1',done));
  browser=await chromium.launch({executablePath:process.env.RZPDF_CHROMIUM,headless:true,args:['--no-sandbox']});report.browser=browser.version();

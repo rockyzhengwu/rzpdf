@@ -538,3 +538,110 @@ fn region_allocation_fits_budget_when_full_page_cannot_and_invalid_updates_are_a
     list.replay(&mut renderer).unwrap();
     assert_eq!(renderer.to_rgba().unwrap().pixels, pixels.pixels);
 }
+
+#[test]
+fn repeated_canonical_clips_reuse_bounded_masks_and_reset_at_page_boundary() {
+    let mut renderer = SkiaRender::new(72., 72.).unwrap();
+    renderer.start_page(160., 140.).unwrap();
+    let mut builder = PathBuilder::new();
+    builder
+        .move_to((10., 50.))
+        .cubic_to((10., 5.), (120., 5.), (120., 50.))
+        .line_to((30., 100.))
+        .close();
+    let path = raster_path::normalized(&builder.snapshot(), &mut 10000).unwrap();
+    let first = renderer.cached_clip_image(&path).unwrap();
+    let identity = first.unique_id();
+    // A cache hit must not charge another full-page rasterization or duplicate
+    // the live image's backing allocation in the ledger.
+    renderer.raster_path_budget = path.points().len().max(1) * 201;
+    for _ in 0..100 {
+        assert_eq!(
+            renderer.cached_clip_image(&path).unwrap().unique_id(),
+            identity
+        );
+    }
+    let pixels = first.width() as usize * first.height() as usize;
+    assert!(pixels < 22400);
+    assert_eq!(
+        renderer.clip_image_usage().unwrap(),
+        (pixels, pixels as u64)
+    );
+    assert_eq!(renderer.clip_cache.len(), 1);
+    renderer.limits.max_render_bytes = 1;
+    assert!(renderer.cached_clip_image(&path).is_err());
+    renderer.limits = Limits::default();
+    renderer.raster_path_budget = 1_000_000;
+    let even_odd = path.with_fill_type(PathFillType::EvenOdd);
+    assert_ne!(
+        renderer.cached_clip_image(&even_odd).unwrap().unique_id(),
+        identity
+    );
+    for index in 0..12 {
+        let next = path.with_transform(&skia_safe::Matrix::translate((index as f32 + 1., 0.)));
+        renderer.cached_clip_image(&next).unwrap();
+        assert!(renderer.clip_cache.len() <= 4);
+        assert!(renderer.clip_cache.iter().map(|e| e.2).sum::<usize>() <= 2 * 1024 * 1024);
+    }
+    drop(first);
+    renderer.start_page(80., 70.).unwrap();
+    assert!(renderer.clip_cache.is_empty());
+    assert_eq!(renderer.clip_image_usage().unwrap(), (0, 0));
+    let next = renderer.cached_clip_image(&path).unwrap();
+    assert!(next.width() <= 80 && next.height() <= 70);
+    assert_ne!(next.unique_id(), identity);
+}
+
+#[test]
+fn tight_clip_masks_match_full_mask_alpha_in_global_coordinates() {
+    for region in [
+        None,
+        Some(RasterRegion {
+            x: 50,
+            y: 40,
+            width: 80,
+            height: 70,
+        }),
+    ] {
+        let mut renderer = SkiaRender::new(72., 72.).unwrap();
+        renderer.set_region(region).unwrap();
+        renderer.start_page(160., 140.).unwrap();
+        let mut builder = PathBuilder::new();
+        builder
+            .move_to((55.3, 45.7))
+            .cubic_to((55.3, 20.5), (100.8, 20.5), (100.8, 45.7))
+            .line_to((80.4, 80.6))
+            .close();
+        let path = raster_path::normalized(&builder.snapshot(), &mut 10000).unwrap();
+        for path in [
+            path.clone(),
+            path.with_fill_type(PathFillType::EvenOdd),
+            path.with_transform(&skia_safe::Matrix::translate((1000., 1000.))),
+        ] {
+            let full = renderer.canonical_clip_image(&path).unwrap();
+            let tight = renderer.canonical_clip_mask(&path, true).unwrap();
+            let a = full.peek_pixels().unwrap();
+            let b = tight.peek_pixels().unwrap();
+            let ap = a.bytes().unwrap();
+            let bp = b.bytes().unwrap();
+            let origin = renderer.region.map_or((0, 0), |r| (r.x as i32, r.y as i32));
+            for y in 0..full.height() {
+                for x in 0..full.width() {
+                    let tx = origin.0 + x - tight.origin.0;
+                    let ty = origin.1 + y - tight.origin.1;
+                    let expected =
+                        if tx >= 0 && ty >= 0 && tx < tight.width() && ty < tight.height() {
+                            bp[ty as usize * b.row_bytes() + tx as usize]
+                        } else {
+                            0
+                        };
+                    assert_eq!(
+                        ap[y as usize * a.row_bytes() + x as usize],
+                        expected,
+                        "global clip coverage ({x},{y})"
+                    );
+                }
+            }
+        }
+    }
+}

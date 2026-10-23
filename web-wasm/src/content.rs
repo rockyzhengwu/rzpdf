@@ -265,7 +265,7 @@ impl Command {
             Self::Image {
                 edit: ImageEdit::Replace(_),
                 ..
-            } => Some(INPUT_LIMIT),
+            } => Some(8 * 1024 * 1024),
             _ => None,
         }
     }

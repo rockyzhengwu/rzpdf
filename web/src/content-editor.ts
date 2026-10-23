@@ -7,7 +7,7 @@ export function contentControls(snapshot:ContentSnapshot|null,state:InteractionS
   const button=(label:string,disabled:boolean,action:()=>void)=>{const b=document.createElement('button');b.textContent=label;b.disabled=disabled;b.addEventListener('click',action);return b;};
   title('页面');
   const pages=row();pages.append(button('顺时针旋转页面',!state.permissions.modify,()=>{void apply({operation:'rotatePage',stamp:state.stamp,page,degrees:90});}));
-  const prefix=document.createElement('input');prefix.placeholder='复制字段名称前缀';prefix.setAttribute('aria-label','复制名称前缀');prefix.value='copy_'+Date.now().toString(36);pages.append(prefix);
+  const prefix=document.createElement('input');prefix.placeholder='复制字段名称前缀';prefix.setAttribute('aria-label','复制名称前缀');prefix.value='copy_'+Date.now().toString(36);const copyOptions=document.createElement('details'),copySummary=document.createElement('summary');copySummary.textContent='复制页面选项';copyOptions.append(copySummary,prefix);pages.append(copyOptions);
   pages.append(button('复制当前页',!state.permissions.modify||!state.permissions.assemble,()=>{void apply({operation:'copyPage',stamp:state.stamp,page,insertion:page+1,namePrefix:prefix.value});}));
   pages.append(button('删除当前页',state.pageCount<=1||!state.permissions.modify||!state.permissions.assemble,()=>{void apply({operation:'deletePage',stamp:state.stamp,page});}));
   for(const [label,delta] of [['页面前移',-1],['页面后移',1]] as const)pages.append(button(label,!state.permissions.modify||!state.permissions.assemble||page+delta<0||page+delta>=state.pageCount,()=>{const order=Array.from({length:state.pageCount},(_,i)=>i);[order[page],order[page+delta]]=[order[page+delta],order[page]];void apply({operation:'reorderPages',stamp:state.stamp,order});}));
@@ -60,5 +60,9 @@ export function contentControls(snapshot:ContentSnapshot|null,state:InteractionS
     });void apply(request,asset);
   });images.append(file,replace);
   const note=document.createElement('small');note.textContent='文字使用原字体编码，不自动重排。删除绘制内容不等于安全脱敏。图片移动距离使用页面显示单位。';root.append(note);
+  for(const control of Array.from(root.querySelectorAll<HTMLInputElement|HTMLSelectElement|HTMLTextAreaElement>('input[aria-label],select[aria-label],textarea[aria-label]'))){
+    if(control.closest('label'))continue;
+    const label=document.createElement('label');label.className='field';const caption=document.createElement('span');caption.textContent=control.getAttribute('aria-label');control.before(label);label.append(caption,control);
+  }
   return root;
 }

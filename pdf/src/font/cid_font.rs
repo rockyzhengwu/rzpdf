@@ -23,6 +23,22 @@ pub struct CidFont {
 }
 
 impl CidFont {
+    pub(crate) fn cache_bytes(&self) -> usize {
+        self.sub_type
+            .capacity()
+            .saturating_add(self.base_font.capacity())
+            .saturating_add(self.w.as_ref().map_or(0, MappingTable::storage_bytes))
+            .saturating_add(self.w2.as_ref().map_or(0, MappingTable::storage_bytes))
+            .saturating_add(self.descriptor.as_ref().map_or(0, Descriptor::cache_bytes))
+            .saturating_add(self.cid_to_gid.as_ref().map_or(0, Vec::capacity))
+            .saturating_add(
+                self.cff_cid_to_gid
+                    .capacity()
+                    .saturating_mul(24)
+                    .saturating_mul(2),
+            )
+    }
+
     pub(crate) fn descriptor_flags(&self) -> Option<u32> {
         self.descriptor.as_ref().and_then(|d| d.flags().copied())
     }
@@ -130,12 +146,12 @@ impl CidFont {
             font.sub_type = sub_type.to_string();
             font.base_font = base_font.to_string();
         }
-        if let Some(mapping) = dict.get("CIDToGIDMap") {
-            if sub_type != "CIDFontType2" {
-                return Err(PdfError::FontError(
-                    "CIDToGIDMap requires CIDFontType2".into(),
-                ));
-            }
+        // CIDToGIDMap defines TrueType glyph indices only. Some producers also
+        // emit /Identity on CIDFontType0 OpenType/CFF fonts. This redundant entry
+        // must not reject the font or replace its embedded CFF charset mapping.
+        if sub_type == "CIDFontType2"
+            && let Some(mapping) = dict.get("CIDToGIDMap")
+        {
             let (mapping, _temporary) = resolve(mapping)?;
             match mapping {
                 PdfObject::PdfName(name) if name.name() == "Identity" => {}
@@ -845,12 +861,36 @@ mod cff_charset_tests {
         assert_eq!(parsed.glyph_id(7), Some(1));
         assert_eq!(parsed.glyph_id(42), Some(2));
         assert_eq!(parsed.glyph_id(2), None);
+        // WeasyPrint emits this redundant TrueType-only entry on CFF fonts.
+        // CIDs 7 and 42 are deliberately different from glyph indices 1 and 2.
+        font.insert(
+            "CIDToGIDMap".into(),
+            PdfObject::PdfName(PdfName::new("Identity".into())),
+        );
+        let identity = CidFont::try_new(&font, doc.ctx()).unwrap();
+        assert_eq!(identity.glyph_id(7), Some(1));
+        assert_eq!(identity.glyph_id(42), Some(2));
+        assert_eq!(identity.glyph_id(2), None);
         let pool = crate::budget::OperationBudget::new(65536);
         let (parsed, lease) = CidFont::try_new_with_budget(&font, doc.ctx(), &pool).unwrap();
         assert_eq!(parsed.glyph_id(42), Some(2));
         assert_eq!(pool.live_bytes(), lease.bytes());
         drop(parsed);
         drop(lease);
+        assert_eq!(pool.live_bytes(), 0);
+        // An irrelevant stream mapping is not parsed as a TrueType map either.
+        // A real CIDFontType2 still rejects odd-length mappings in its own tests.
+        font.insert(
+            "CIDToGIDMap".into(),
+            PdfObject::PdfStream(PdfStream::new(Default::default(), vec![0])),
+        );
+        assert_eq!(
+            CidFont::try_new(&font, doc.ctx()).unwrap().glyph_id(42),
+            Some(2)
+        );
+        let (parsed, lease) = CidFont::try_new_with_budget(&font, doc.ctx(), &pool).unwrap();
+        assert_eq!(parsed.glyph_id(42), Some(2));
+        drop((parsed, lease));
         assert_eq!(pool.live_bytes(), 0);
     }
 }

@@ -23,6 +23,10 @@ pub struct Descriptor {
 }
 
 impl Descriptor {
+    pub(crate) fn cache_bytes(&self) -> usize {
+        self.fontfile.as_ref().map_or(0, Vec::capacity)
+    }
+
     pub fn try_new<R: Seek + Read>(dict: &PdfDict, ctx: &PDFContext<R>) -> PdfResult<Self> {
         Self::try_new_inner(dict, ctx, None).map(|(descriptor, _)| descriptor)
     }

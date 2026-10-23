@@ -14,6 +14,9 @@ use crate::{
 
 #[derive(Debug)]
 pub struct PDFContext<R: Seek + Read> {
+    derived_fonts: RefCell<
+        crate::derived_cache::DerivedCache<ObjectId, std::rc::Rc<crate::font::pdf_font::Font>>,
+    >,
     structure_diagnostics: crate::parser::diagnostic::DiagnosticLog,
     parser: Option<RefCell<PdfParser<R>>>,
     mode: crate::parser::syntax::ParseMode,
@@ -61,6 +64,27 @@ impl Drop for BudgetedLoadingGuard<'_> {
 }
 
 impl<R: Seek + Read> PDFContext<R> {
+    pub(crate) fn cached_font(
+        &self,
+        id: ObjectId,
+    ) -> Option<std::rc::Rc<crate::font::pdf_font::Font>> {
+        self.derived_fonts.borrow_mut().get(self.revision(), &id)
+    }
+    pub(crate) fn retain_font(&self, id: ObjectId, font: std::rc::Rc<crate::font::pdf_font::Font>) {
+        if let Some(bytes) = font.cache_bytes() {
+            self.derived_fonts
+                .borrow_mut()
+                .insert(self.revision(), id, font, bytes);
+        }
+    }
+    pub fn font_cache_statistics(&self) -> (u64, u64, usize, usize) {
+        let c = self.derived_fonts.borrow();
+        (c.hits, c.misses, c.len(), c.bytes())
+    }
+    pub(crate) fn clear_font_cache(&self) {
+        self.derived_fonts.borrow_mut().clear();
+    }
+
     fn begin_loading_with_budget(
         &self,
         id: ObjectId,
@@ -139,6 +163,10 @@ impl<R: Seek + Read> PDFContext<R> {
             encryption_dictionary_id: None,
             form_edit_depth: Cell::new(0),
             source_has_signatures: OnceCell::new(),
+            derived_fonts: RefCell::new(crate::derived_cache::DerivedCache::new(
+                options.limits.max_operation_bytes.min(16 * 1024 * 1024),
+                32,
+            )),
         }
     }
 
@@ -298,6 +326,10 @@ impl<R: Seek + Read> PDFContext<R> {
             encryption_dictionary_id,
             form_edit_depth: Cell::new(0),
             source_has_signatures: OnceCell::new(),
+            derived_fonts: RefCell::new(crate::derived_cache::DerivedCache::new(
+                limits.max_operation_bytes.min(16 * 1024 * 1024),
+                32,
+            )),
         })
     }
 
