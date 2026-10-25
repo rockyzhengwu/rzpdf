@@ -297,9 +297,11 @@ impl<R: Read + Seek> PdfPage<'_, R> {
     }
 
     /// Interpret once, preserving warnings alongside paint-order character events.
-    /// Missing Unicode stays None; diagnostics do not repair unsupported content.
+    /// Missing Unicode stays None. Group blending spaces and soft-mask graphics
+    /// are not evaluated; fonts, content syntax and invocation geometry are.
     pub fn extract_characters_paint_order_report(&mut self) -> PdfResult<TextExtractionReport> {
-        let list = self.display_list()?;
+        let ctx = self.ctx;
+        let list = ctx.with_text_geometry(|| self.display_list())?;
         self.extract_characters_from_list(list)
     }
 
@@ -309,7 +311,9 @@ impl<R: Read + Seek> PdfPage<'_, R> {
         &mut self,
         visibility: &crate::document::optional_content::OptionalContentVisibility,
     ) -> PdfResult<TextExtractionReport> {
-        let list = self.display_list_with_optional_content(visibility)?;
+        let ctx = self.ctx;
+        let list =
+            ctx.with_text_geometry(|| self.display_list_with_optional_content(visibility))?;
         self.extract_characters_from_list(list)
     }
 

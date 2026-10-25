@@ -242,7 +242,8 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    struct Provider(Vec<(FontMetadata, FontIdentity, Vec<(char, u16)>)>);
+    type TestFace = (FontMetadata, FontIdentity, Vec<(char, u16)>);
+    struct Provider(Vec<TestFace>);
     impl FontProvider for Provider {
         fn len(&self) -> usize {
             self.0.len()
@@ -257,11 +258,7 @@ mod tests {
             self.0[i].2.iter().find(|(ch, _)| *ch == c).map(|(_, g)| *g)
         }
     }
-    fn face(
-        name: &str,
-        bytes: &[u8],
-        chars: Vec<(char, u16)>,
-    ) -> (FontMetadata, FontIdentity, Vec<(char, u16)>) {
+    fn face(name: &str, bytes: &[u8], chars: Vec<(char, u16)>) -> TestFace {
         (
             FontMetadata {
                 family: name.into(),

@@ -125,7 +125,7 @@ impl Shading {
             && let Some(color) = &self.background
         {
             let rgb = self.colorspace.rgb_with_context(color, context)?;
-            for (index, pixel) in output.chunks_exact_mut(4).enumerate() {
+            for (index, pixel) in output.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 if in_bbox(index) {
                     pixel.copy_from_slice(&[rgb.r(), rgb.g(), rgb.b(), 255]);
                 }
@@ -465,7 +465,9 @@ mod tests {
             let expected = if function { 16u8 } else { 64u8 };
             assert!(
                 output
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .all(|p| p[0].abs_diff(expected) <= 1 && p[3] == 255)
             );
         }

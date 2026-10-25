@@ -443,10 +443,8 @@ impl<R: Seek + Read> SyntaxParser<R> {
                     "xref recovery crosses validated boundary".into(),
                 ));
             }
-            if object.id() == expected {
-                if found.replace(offset).is_some() {
-                    return Err(PdfError::InvalidReference("ambiguous xref recovery".into()));
-                }
+            if object.id() == expected && found.replace(offset).is_some() {
+                return Err(PdfError::InvalidReference("ambiguous xref recovery".into()));
             }
             count += 1;
             if count > self.limits().max_objects {

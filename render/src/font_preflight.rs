@@ -122,12 +122,11 @@ impl<'a> FontPreflight<'a> {
             (fill, &state.color_state.fill_color_space),
             (stroke, &state.color_state.stroke_color_space),
         ] {
-            if used {
-                if let pdf::color::colorspace::ColorSpace::Pattern(pattern) = space {
-                    if let Some(paint) = pattern.paint() {
-                        self.walk(&paint.list)?;
-                    }
-                }
+            if used
+                && let pdf::color::colorspace::ColorSpace::Pattern(pattern) = space
+                && let Some(paint) = pattern.paint()
+            {
+                self.walk(&paint.list)?;
             }
         }
         Ok(())

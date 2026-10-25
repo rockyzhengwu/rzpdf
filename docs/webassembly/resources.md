@@ -100,6 +100,16 @@ Not enabled for reduction:
 
 ## Cache observation and release
 
+Decoded ICC profiles share parsed data and compiled transforms within a document
+revision. Cache clearing also releases cache-owned ICC references; held display
+lists can retain them. `maxIccTransformEstimatedBytes` reports the additional
+32 MiB transform-table estimate ceiling per Wasm module, shared across its open
+documents and both fixed resource profiles. It is not part of the page/font
+cache byte statistics or a measurement of live process memory. A preflight
+failure uses reason `icc_transform_bytes`, stage `color_conversion`, and numeric
+`limit`/`actual`, so the application can release cached pages and try a lighter
+page without recreating the engine. See [transparency](../transparency.md).
+
 `doc.cacheStatistics()` and `doc.clearRenderCaches()` work through both SDKs.
 Replies include page/font hits, misses, entries, estimated owned bytes and Skia
 font/resource cache usage/limits. On Wasm, clearing also purges unused module-level

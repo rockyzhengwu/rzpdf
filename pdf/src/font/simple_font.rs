@@ -1383,10 +1383,10 @@ impl SimpleFont {
                 "SimpleFont character code exceeds 255".to_string(),
             ));
         }
-        if self.to_unicode.is_none() {
-            if let Some(value) = self.unicode_mapping(ch)? {
-                return Ok(value);
-            }
+        if self.to_unicode.is_none()
+            && let Some(value) = self.unicode_mapping(ch)?
+        {
+            return Ok(value);
         }
         // TODO handle simple font to_unicode is None
         match &self.to_unicode {

@@ -463,7 +463,8 @@ mod stream_seam_tests {
         }
         // Qq inside one stream remains an unknown operator.
         let mut source = b"q Qq Q".to_vec();
-        let mut ranges = [0..source.len()];
+        let content_range = 0..source.len();
+        let mut ranges = [content_range];
         assert!(
             !separate_graphics_stream_seams(
                 &mut source,

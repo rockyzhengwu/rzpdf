@@ -231,7 +231,7 @@ pub(super) fn decode(
         let source =
             unsafe { std::slice::from_raw_parts(image.data.add(y * image.stride as usize), row) };
         data.extend(source.iter().map(|b| !b));
-        if width % 8 != 0 {
+        if !width.is_multiple_of(8) {
             *data.last_mut().unwrap() &= 0xff << (8 - width % 8);
         }
     }

@@ -1058,6 +1058,12 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                 let grouped = general.fill_alpha != 1.;
                 if grouped {
                     device.begin_group(super::transparency::GroupPaint {
+                        blending_profile: None,
+                        rendering_intent: self
+                            .current_state
+                            .graphic_state
+                            .general_state
+                            .rendering_intent,
                         isolated: true,
                         knockout: false,
                         alpha: general.fill_alpha,
@@ -2571,6 +2577,8 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                 let group = group.map(|group| {
                     let general = &self.current_state.graphic_state.general_state;
                     let paint = super::transparency::GroupPaint {
+                        blending_profile: group.blending_profile,
+                        rendering_intent: general.rendering_intent,
                         isolated: group.isolated,
                         knockout: group.knockout,
                         alpha: general.fill_alpha,

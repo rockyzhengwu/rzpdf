@@ -70,8 +70,9 @@ fn segment(
     last[count - 1] = triangle[count - 1];
     for level in 1..count {
         for i in 0..count - level {
-            for axis in 0..3 {
-                triangle[i][axis] = (triangle[i][axis] + triangle[i + 1][axis]) * 0.5;
+            let next = triangle[i + 1];
+            for (value, next) in triangle[i].iter_mut().zip(next) {
+                *value = (*value + next) * 0.5;
             }
         }
         first[level] = triangle[0];
@@ -108,8 +109,8 @@ pub(super) fn normalized(path: &skia_safe::Path, left: &mut usize) -> PdfResult<
                 }
                 if verb == Verb::Conic {
                     let weight = f64::from(iter.conic_weight().unwrap_or(1.));
-                    for axis in 0..3 {
-                        controls[1][axis] *= weight;
+                    for value in &mut controls[1] {
+                        *value *= weight;
                     }
                 }
                 segment(&mut builder, controls, points.len(), 0, left)?;

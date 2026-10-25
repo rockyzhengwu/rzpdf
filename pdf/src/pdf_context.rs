@@ -14,6 +14,9 @@ use crate::{
 
 #[derive(Debug)]
 pub struct PDFContext<R: Seek + Read> {
+    derived_icc: RefCell<
+        crate::derived_cache::DerivedCache<[u8; 32], crate::color::icc_profile::ICCProfile>,
+    >,
     derived_fonts: RefCell<
         crate::derived_cache::DerivedCache<ObjectId, std::rc::Rc<crate::font::pdf_font::Font>>,
     >,
@@ -26,7 +29,9 @@ pub struct PDFContext<R: Seek + Read> {
     loading_objects: RefCell<Vec<ObjectId>>,
     decoding_depth: Cell<usize>,
     color_depth: Cell<usize>,
+    active_color_spaces: RefCell<Vec<ObjectId>>,
     render_image_dpi: Cell<Option<f32>>,
+    text_geometry_only: Cell<bool>,
     cached_stream_bytes: Cell<usize>,
     source_resolution_depth: Cell<usize>,
     security: Option<crate::security::SecurityHandler>,
@@ -65,6 +70,50 @@ impl Drop for BudgetedLoadingGuard<'_> {
 }
 
 impl<R: Seek + Read> PDFContext<R> {
+    pub(crate) fn text_geometry_only(&self) -> bool {
+        self.text_geometry_only.get()
+    }
+
+    /// Character extraction needs invocation geometry, not group colour
+    /// conversion or mask rasters. Never publish these lists as render caches.
+    pub(crate) fn with_text_geometry<T>(
+        &self,
+        action: impl FnOnce() -> PdfResult<T>,
+    ) -> PdfResult<T> {
+        struct Restore<'a>(&'a Cell<bool>, bool);
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                self.0.set(self.1);
+            }
+        }
+        let _restore = Restore(
+            &self.text_geometry_only,
+            self.text_geometry_only.replace(true),
+        );
+        action()
+    }
+    pub(crate) fn icc_profile(
+        &self,
+        data: &[u8],
+    ) -> PdfResult<crate::color::icc_profile::ICCProfile> {
+        use sha2::{Digest, Sha256};
+        let key: [u8; 32] = Sha256::digest(data).into();
+        if let Some(profile) = self.derived_icc.borrow_mut().get(self.revision(), &key) {
+            return Ok(profile);
+        }
+        let profile =
+            crate::color::icc_profile::ICCProfile::try_new_with_limits(data, self.limits())?;
+        // Include a conservative allowance for parsed tables/compiled transforms,
+        // not just the tiny compressed profile stream. This is not an RSS cap.
+        let weight = data
+            .len()
+            .saturating_mul(32)
+            .saturating_add(16 * 1024 * 1024);
+        self.derived_icc
+            .borrow_mut()
+            .insert(self.revision(), key, profile.clone(), weight);
+        Ok(profile)
+    }
     pub(crate) fn render_image_dpi(&self) -> Option<f32> {
         self.render_image_dpi.get()
     }
@@ -103,7 +152,8 @@ impl<R: Seek + Read> PDFContext<R> {
         let c = self.derived_fonts.borrow();
         (c.hits, c.misses, c.len(), c.bytes())
     }
-    pub(crate) fn clear_font_cache(&self) {
+    pub(crate) fn clear_derived_caches(&self) {
+        self.derived_icc.borrow_mut().clear();
         self.derived_fonts.borrow_mut().clear();
     }
 
@@ -167,6 +217,10 @@ impl<R: Seek + Read> PDFContext<R> {
         version: crate::document::save_options::PdfVersion,
     ) -> Self {
         Self {
+            derived_icc: RefCell::new(crate::derived_cache::DerivedCache::new(
+                options.limits.max_operation_bytes.min(64 * 1024 * 1024),
+                4,
+            )),
             parser: None,
             structure_diagnostics: crate::parser::diagnostic::DiagnosticLog::new(
                 options.limits.max_operation_bytes,
@@ -179,7 +233,9 @@ impl<R: Seek + Read> PDFContext<R> {
             loading_objects: RefCell::new(Vec::new()),
             decoding_depth: Cell::new(0),
             color_depth: Cell::new(0),
+            active_color_spaces: RefCell::new(Vec::new()),
             render_image_dpi: Cell::new(None),
+            text_geometry_only: Cell::new(false),
             cached_stream_bytes: Cell::new(0),
             source_resolution_depth: Cell::new(0),
             security: None,
@@ -329,6 +385,10 @@ impl<R: Seek + Read> PDFContext<R> {
         );
         let trailer = cross_ref_table.take_trailer();
         Ok(PDFContext {
+            derived_icc: RefCell::new(crate::derived_cache::DerivedCache::new(
+                limits.max_operation_bytes.min(64 * 1024 * 1024),
+                4,
+            )),
             structure_diagnostics: parser.diagnostic_log(),
             parser: Some(RefCell::new(parser)),
             mode,
@@ -343,7 +403,9 @@ impl<R: Seek + Read> PDFContext<R> {
             loading_objects: RefCell::new(Vec::new()),
             decoding_depth: Cell::new(0),
             color_depth: Cell::new(0),
+            active_color_spaces: RefCell::new(Vec::new()),
             render_image_dpi: Cell::new(None),
+            text_geometry_only: Cell::new(false),
             cached_stream_bytes: Cell::new(0),
             source_resolution_depth: Cell::new(0),
             security,
@@ -755,11 +817,30 @@ impl<R: Seek + Read> PDFContext<R> {
 
     pub(crate) fn with_color_depth<T>(
         &self,
+        source: Option<ObjectId>,
         construct: impl FnOnce() -> PdfResult<T>,
     ) -> PdfResult<T> {
-        if self.color_depth.get() >= self.limits.max_depth {
+        // Recursive constructors have large debug frames. The PDF syntax
+        // depth alone must not decide whether the native thread can survive.
+        const IMPLEMENTATION_DEPTH: usize = 16;
+        if self.color_depth.get() >= self.limits.max_depth.min(IMPLEMENTATION_DEPTH) {
             return Err(PdfError::ResourceLimit("color space nesting".into()));
         }
+        let _reference = if let Some(id) = source {
+            let mut active = self.active_color_spaces.borrow_mut();
+            if active.contains(&id) {
+                return Err(PdfError::ResourceLimit(
+                    "cyclic color space reference".into(),
+                ));
+            }
+            active
+                .try_reserve(1)
+                .map_err(|_| PdfError::ResourceLimit("color space reference stack".into()))?;
+            active.push(id);
+            Some(LoadingGuard(&self.active_color_spaces))
+        } else {
+            None
+        };
         self.color_depth.set(self.color_depth.get() + 1);
         let _guard = DecodeGuard(&self.color_depth);
         construct()

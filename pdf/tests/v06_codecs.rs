@@ -476,7 +476,7 @@ fn wrapped_jpx_image_headers_and_samples_use_the_decoded_codestream() {
     let encoded: Vec<u8> = RGB
         .iter()
         .flat_map(|b| format!("{b:02X}").into_bytes())
-        .chain([b'>'])
+        .chain(*b">")
         .collect();
     let dict = parse(
         "<< /Subtype /Image /Width 16 /Height 16 /Filter [/ASCIIHexDecode /JPXDecode] /DecodeParms [null null] >>",
@@ -838,9 +838,9 @@ fn jpx_pdf_indexed_samples_bypass_embedded_palette_and_keep_low_bit_indices() {
         .collect::<String>();
     let image = make(input, 4, &palette);
     let rgba = image.rgba_buffer().unwrap();
-    for (i, pixel) in rgba.chunks_exact(4).enumerate() {
+    for (i, pixel) in rgba.as_chunks::<4>().0.iter().enumerate() {
         let index = (i % 4) as u8;
-        assert_eq!(pixel, [index, 0, 255 - index, 255]);
+        assert_eq!(pixel, &[index, 0, 255 - index, 255]);
     }
     let boxed = |tag: &[u8], body: &[u8]| {
         let mut b = ((body.len() + 8) as u32).to_be_bytes().to_vec();
@@ -871,10 +871,12 @@ fn jpx_pdf_indexed_samples_bypass_embedded_palette_and_keep_low_bit_indices() {
     for (pixel, &index) in image
         .rgba_buffer()
         .unwrap()
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .zip(include_bytes!("fixtures/v06/gray.samples"))
     {
-        assert_eq!(pixel, [index, 0, 255 - index, 255]);
+        assert_eq!(pixel, &[index, 0, 255 - index, 255]);
     }
 }
 

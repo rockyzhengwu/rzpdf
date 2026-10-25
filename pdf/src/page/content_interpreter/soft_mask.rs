@@ -7,6 +7,11 @@ impl<R: Read + Seek> Interpreter<'_, R> {
         &self,
         value: &PdfObject,
     ) -> PdfResult<Option<Arc<SoftMaskPaint>>> {
+        // Masks change opacity, not character positions or source addresses.
+        // Do not execute their graphics while answering a character query.
+        if self.ctx.text_geometry_only() {
+            return Ok(None);
+        }
         let value = self.ctx.resolve(value)?;
         if let Some(name) = value.as_name() {
             return if name.name() == "None" {
@@ -72,6 +77,14 @@ impl<R: Read + Seek> Interpreter<'_, R> {
             .as_ref()
             .and_then(PdfObject::as_name)
             .map(|n| n.name());
+        if space
+            .as_ref()
+            .is_some_and(|space| space.as_name().is_none())
+        {
+            return Err(PdfError::UnsupportedFeature(
+                "ICC soft-mask group working space".into(),
+            ));
+        }
         let gray_only = parameters.gray_only || color_name == Some("DeviceGray");
         if matches!(kind, SoftMaskKind::Luminosity)
             && !matches!(color_name, Some("DeviceRGB" | "DeviceGray"))
@@ -171,6 +184,12 @@ impl<R: Read + Seek> Interpreter<'_, R> {
         trace.start_page(self.page.page_width, self.page.page_height)?;
         if parameters.knockout {
             trace.begin_group(crate::page::transparency::GroupPaint {
+                blending_profile: parameters.blending_profile.clone(),
+                rendering_intent: self
+                    .current_state
+                    .graphic_state
+                    .general_state
+                    .rendering_intent,
                 isolated: true,
                 knockout: true,
                 alpha: 1.,

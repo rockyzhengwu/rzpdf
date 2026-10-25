@@ -2,6 +2,28 @@
 
 本文件只记录交付变化，不替代长期任务池或原始测试日志。版本范围见 [ROADMAP](ROADMAP.md)。
 
+## Unreleased — ICC 透明组与浏览器内存兼容修复
+
+后续收口：颜色空间构造加入引用循环检测和 16 层实现上限，默认测试线程栈
+不再溢出；CFF 绘制按默认字体后端区分 GID／standalone FreeType CID，修复
+macOS 稀疏 CID 字体缺字。清理 61 处项目 lint，整理 JPX／加密遍历私有记录，
+全目标严格 Clippy 通过。最终完整目标清单及文档共 1797 项通过，0 failed，
+1 项另需本地文件的测试 ignored；用户 PDF 全部 92 页通过原生和浏览器检查，
+源文件的 16 次未知 Unicode 事件及其他验证边界见[记录](docs/testing.md)。
+
+隔离 Form 透明组通过普通颜色空间解析支持间接 ICCBased RGB matrix/TRC profile，
+在组工作空间中绘制／混合，再将未预乘的组颜色转换到父级空间，保留 alpha，
+之后应用组透明度与混合模式。嵌套显式 DeviceRGB 和继承工作空间分别处理，
+不把任意三通道 ICC 当作 DeviceRGB；未支持的 ICC Gray／CMYK／LUT-only
+组及 ICC 图形软遮罩仍返回明确错误。详见[透明度说明](docs/transparency.md)。
+
+修复相同 ICC profile 在大量文字颜色状态中重复解析、重复构造 CMS gamma 表，
+导致 WASM 内存耗尽并 trap 的问题：增加修订感知的有界 profile 共享缓存，
+浏览器转换表构建增加 32 MiB 估算预留上限，超过时返回带数字详情的
+`icc_transform_bytes` 资源错误。公开能力字段，清缓存同时释放 cache-owned ICC 引用。
+字符查询跳过组混合空间和软遮罩绘制，仍校验字体、坐标、内容语法；
+组合 `content()` 的图片查询及语义提取维持图形支持边界。
+
 ## Unreleased — 浏览器渲染资源策略（限定范围已验收）
 
 新增打开前能力查询、打开时选择 default／conservative 固定资源档位、文档缓存统计／清理及可贯穿 ABI／SDK／Worker 的资源错误详情。分块 DPI 上限为 1152，整页仍为 288，单块／逻辑尺寸与像素／字节限制保持；演示按实际能力选择分辨率，不创建整页高倍画布。

@@ -110,15 +110,14 @@ impl<R: Read + Seek> PdfDocument<R> {
         page: u32,
         annotations: Option<AnnotationRenderOptions>,
     ) -> PdfResult<Rc<PreparedPage>> {
-        if let Some(options) = annotations {
-            if !options.view_zoom.is_finite()
+        if let Some(options) = annotations
+            && (!options.view_zoom.is_finite()
                 || options.view_zoom <= 0.
-                || !matches!(options.view_rotation, 0 | 90 | 180 | 270)
-            {
-                return Err(PdfError::PageResourceError(
-                    "invalid prepared-page view options".into(),
-                ));
-            }
+                || !matches!(options.view_rotation, 0 | 90 | 180 | 270))
+        {
+            return Err(PdfError::PageResourceError(
+                "invalid prepared-page view options".into(),
+            ));
         }
         let key = PageKey {
             page,
@@ -172,7 +171,7 @@ impl<R: Read + Seek> PdfDocument<R> {
     /// the next edit and remain the caller's responsibility.
     pub fn clear_render_caches(&self) {
         self.prepared_pages.borrow_mut().clear();
-        self.ctx.clear_font_cache();
+        self.ctx.clear_derived_caches();
     }
     pub fn render_cache_statistics(&self) -> RenderCacheStatistics {
         let p = self.prepared_pages.borrow();

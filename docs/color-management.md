@@ -4,9 +4,12 @@
 `PdfImage::rgba_buffer_with_context` accept a `ColorConversionContext`. The
 existing methods use a default sRGB output and RelativeColorimetric intent.
 `with_output_profile` accepts an RGB `ICCProfile`; the context exposes an explicit
-intent and `IccFallback` policy. These are numeric output APIs. Skia currently
-renders only to the canonical sRGB/nominal DeviceRGB display model; it does not
-write a caller-selected output ICC into PNG or implement arbitrary group spaces.
+intent and `IccFallback` policy. These are numeric output APIs. Skia's final
+display output uses canonical sRGB/nominal DeviceRGB; it does not write a
+caller-selected output ICC into PNG. Isolated Form groups can use an actual
+RGB matrix/TRC ICC working space and convert their composed colours back to the
+parent space; this does not implement arbitrary group spaces. See
+[transparency](transparency.md).
 
 ```rust,ignore
 use pdf::color::{conversion::ColorConversionContext, icc_profile::ICCProfile};
@@ -58,8 +61,22 @@ selection/print-proof production is not added by this API.
 
 ## Bounded retention
 
+Colour-space construction tracks active indirect references and rejects cycles
+before recursively following the same space again. The recursive implementation
+also caps colour nesting at 16, or the configured `max_depth` if smaller. This
+implementation bound applies to direct definitions too, so a larger syntax limit
+cannot exhaust the native default thread stack first. Both depth and reference
+scopes restore on errors and native unwinding. It is not a promise to accept
+arbitrarily nested alternate spaces.
+
 One profile shares parsed data and an at-most-eight-entry output/intent transform
 cache across clones/threads; profiles are not cached in an unbounded global map.
+Document colour-space lookups intern identical decoded profile bytes in a
+revision-scoped, bounded LRU. Cache clearing releases its owned references;
+existing display lists can retain shared profiles. The Wasm build additionally
+preflights transform-table storage against a module-wide 32 MiB conservative
+estimate, returning a structured resource error on refusal; see
+[browser resources](webassembly/resources.md#cache-observation-and-release).
 Encoded profiles/tags are capped at the lesser of the configured decoded limit
 and 16 MiB, CLUT input at 1 MiB, TRC elements at 40,000. Invalid tag extents are
 rejected before backend parsing. Profile source bytes participate in logical

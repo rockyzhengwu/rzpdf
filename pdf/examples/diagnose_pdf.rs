@@ -94,8 +94,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let PageObject::Image(image) = object {
                     println!("image name={} dimensions={:?} matrix={:?} clip={} alpha={} softmask={} mask={}",image.image.name(),image.image.pixel_dimensions(),image.matrix,image.graphic_state.clip_path.elements.len(),image.graphic_state.general_state.fill_alpha,image.graphic_state.general_state.soft_mask.is_some(),image.image.has_explicit_mask());
                 }
-                if let PageObject::Text(text) = object {
-                    if let Some(font) = &text.state.text_state.font {
+                if let PageObject::Text(text) = object
+                    && let Some(font) = &text.state.text_state.font {
                         let count = fonts.entry(font.name().to_string()).or_insert(0usize);
                         *count += 1;
                         if *count == 1 {
@@ -105,7 +105,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
-                }
             }
             println!("unique_fonts={} text_objects={}", fonts.len(),fonts.values().sum::<usize>());
         }

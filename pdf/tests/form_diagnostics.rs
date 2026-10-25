@@ -104,7 +104,6 @@ fn nested_form_diagnostic_limits_are_shared_across_all_invocations() {
                     max_content_diagnostic_bytes: byte_limit,
                     ..Default::default()
                 },
-                ..Default::default()
             },
         )
         .unwrap();

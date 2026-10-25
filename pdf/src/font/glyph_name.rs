@@ -4474,13 +4474,12 @@ pub fn adobe_glyph_list_to_unicode(glyph_name: &str) -> Option<u32> {
             return None;
         }
         hex
-    } else if let Some(hex) = name.strip_prefix('u') {
+    } else {
+        let hex = name.strip_prefix('u')?;
         if !(4..=6).contains(&hex.len()) {
             return None;
         }
         hex
-    } else {
-        return None;
     };
     if !hex
         .bytes()

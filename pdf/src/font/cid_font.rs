@@ -251,39 +251,40 @@ impl CidFont {
             };
             font.descriptor = Some(descriptor);
         }
-        if sub_type == "CIDFontType0" {
-            if let Some(bytes) = font.fontfile() {
-                let face = super::font_program::load_face_for_operation(bytes, budget)?;
-                let count = usize::try_from(face.num_glyphs())
-                    .map_err(|_| PdfError::FontError("invalid CFF glyph count".into()))?;
-                if count > ctx.limits().max_objects {
-                    return Err(PdfError::ResourceLimit("CFF charset entries".into()));
-                }
-                // FreeType exposes the CFF charset, which maps glyph indices to
-                // CIDs (not Unicode). Invert it once for PDF glyph selection.
-                let mut retained =
-                    budget
-                        .map(|pool| {
-                            pool.reserve(count.checked_mul(32).ok_or_else(|| {
-                                PdfError::ResourceLimit("CFF charset bytes".into())
-                            })?)
-                        })
-                        .transpose()?;
-                let mut mappings = std::collections::HashMap::new();
-                mappings
-                    .try_reserve(count)
-                    .map_err(|_| PdfError::ResourceLimit("CFF charset allocation".into()))?;
-                if let Some(retained) = &mut retained {
-                    retained.resize(mappings.capacity().saturating_mul(16))?;
-                    lease.as_mut().unwrap().absorb(retained)?;
-                }
-                for gid in 0..count as u32 {
-                    if let Some(cid) = super::font_program::cff_cid(&face, gid) {
-                        mappings.entry(cid).or_insert(gid);
-                    }
-                }
-                font.cff_cid_to_gid = mappings;
+        if sub_type == "CIDFontType0"
+            && let Some(bytes) = font.fontfile()
+        {
+            let face = super::font_program::load_face_for_operation(bytes, budget)?;
+            let count = usize::try_from(face.num_glyphs())
+                .map_err(|_| PdfError::FontError("invalid CFF glyph count".into()))?;
+            if count > ctx.limits().max_objects {
+                return Err(PdfError::ResourceLimit("CFF charset entries".into()));
             }
+            // FreeType exposes the CFF charset, which maps glyph indices to
+            // CIDs (not Unicode). Invert it once for PDF glyph selection.
+            let mut retained = budget
+                .map(|pool| {
+                    pool.reserve(
+                        count
+                            .checked_mul(32)
+                            .ok_or_else(|| PdfError::ResourceLimit("CFF charset bytes".into()))?,
+                    )
+                })
+                .transpose()?;
+            let mut mappings = std::collections::HashMap::new();
+            mappings
+                .try_reserve(count)
+                .map_err(|_| PdfError::ResourceLimit("CFF charset allocation".into()))?;
+            if let Some(retained) = &mut retained {
+                retained.resize(mappings.capacity().saturating_mul(16))?;
+                lease.as_mut().unwrap().absorb(retained)?;
+            }
+            for gid in 0..count as u32 {
+                if let Some(cid) = super::font_program::cff_cid(&face, gid) {
+                    mappings.entry(cid).or_insert(gid);
+                }
+            }
+            font.cff_cid_to_gid = mappings;
         }
 
         Ok((font, lease))

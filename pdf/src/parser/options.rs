@@ -630,7 +630,12 @@ mod tests {
         let image = PdfObject::PdfStream(PdfStream::new(dict, Vec::new()));
         assert!(matches!(
             crate::page::pdf_image::PdfImage::try_new("image".into(), &image, doc.ctx()),
-            Err(PdfError::ResourceLimit(_))
+            Err(PdfError::ResourceLimitExceeded {
+                reason: "image_pixels",
+                stage: "image_decode",
+                limit: 16,
+                actual: 25,
+            })
         ));
     }
 

@@ -83,7 +83,7 @@ pub(crate) fn query(d: &Document, document: u32, request: &Value) -> ApiResult<V
         "state" => Ok(
             json!({"stamp":stamp(d,document),"commitRevision":d.commit_revision().to_string(),"pageCount":d.try_page_count()?,"permissions":permissions(d)}),
         ),
-        "content" => return crate::content::query(d, document, uint(&request["page"])?),
+        "content" => crate::content::query(d, document, uint(&request["page"])?),
         "annotations" => {
             let page = uint(&request["page"])?;
             let records = d.page_annotations(page)?;

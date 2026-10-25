@@ -166,7 +166,7 @@ impl IccBased {
             ));
         }
         let data = color_stream.decode_data(ctx)?;
-        let profile = ICCProfile::try_new_with_limits(&data, ctx.limits())?;
+        let profile = ctx.icc_profile(&data)?;
         if profile.number_of_components() != usize::from(color.n) {
             return Err(PdfError::ColorError(
                 "ICCBased N disagrees with embedded ICC profile".into(),

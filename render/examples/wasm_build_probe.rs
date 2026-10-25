@@ -51,15 +51,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pixels = vec![0u8; 96 * 96 * 4];
     assert!(image.read_pixels(&info, &mut pixels, 96 * 4, (0, 0), CachingHint::Disallow));
     let red = pixels
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .filter(|p| p[0] > 240 && p[1] < 16 && p[2] < 16)
         .count();
     let mixed = pixels
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .filter(|p| (110..145).contains(&p[0]) && p[1] < 16 && (110..145).contains(&p[2]))
         .count();
     let ink = pixels[..30 * 96 * 4]
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .filter(|p| p[0] < 64 && p[1] < 64 && p[2] < 64)
         .count();
     assert!(red > 500, "missing red geometry: {red}");

@@ -315,14 +315,18 @@ mod unicode_fallback_tests {
             glyph_unicode_map(&face, crate::parser::options::Limits::default(), None).unwrap();
         assert_eq!(mapping[2].as_deref(), Some("×"));
         assert_eq!(mapping[0], None);
-        let mut limits = crate::parser::options::Limits::default();
-        limits.max_objects = 1;
+        let limits = crate::parser::options::Limits {
+            max_objects: 1,
+            ..Default::default()
+        };
         assert!(matches!(
             glyph_unicode_map(&face, limits, None),
             Err(PdfError::ResourceLimit(_))
         ));
-        limits = crate::parser::options::Limits::default();
-        limits.max_decoded_bytes = 1;
+        let limits = crate::parser::options::Limits {
+            max_decoded_bytes: 1,
+            ..Default::default()
+        };
         assert!(matches!(
             glyph_unicode_map(&face, limits, None),
             Err(PdfError::ResourceLimit(_))

@@ -12,6 +12,7 @@ pub fn capabilities(limits: Limits) -> Value {
         "maxRenderPixels":limits.max_render_pixels,"maxRenderBytes":limits.max_render_bytes,
         "maxImagePixels":limits.max_image_pixels,"maxDecodedBytes":limits.max_decoded_bytes,
         "maxOperationBytes":limits.max_operation_bytes,"maxCachedStreamBytes":limits.max_cached_stream_bytes,
+        "maxIccTransformEstimatedBytes":pdf::color::icc_profile::MAX_WASM_ICC_TRANSFORM_ESTIMATED_BYTES,
         "maxHandles":8,"maxPreparedPages":2,
         "maxPreparedPageEstimatedBytes":limits.max_operation_bytes.min(32*1024*1024),
         "maxFontCacheEstimatedBytes":limits.max_operation_bytes.min(16*1024*1024),

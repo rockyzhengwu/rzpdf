@@ -114,8 +114,10 @@ fn stitched_grid(
     let tolerance = u8::from((xdpi / 72.).fract() != 0. || (ydpi / 72.).fract() != 0.);
     if curves {
         for (i, (a, b)) in assembled
-            .chunks_exact(4)
-            .zip(expected.pixels.chunks_exact(4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(expected.pixels.as_chunks::<4>().0.iter())
             .enumerate()
         {
             if a == b {
@@ -141,8 +143,10 @@ fn stitched_grid(
     }
     if maximum > tolerance {
         let worst: Vec<_> = assembled
-            .chunks_exact(4)
-            .zip(expected.pixels.chunks_exact(4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(expected.pixels.as_chunks::<4>().0.iter())
             .enumerate()
             .filter(|(_, (a, b))| a.iter().zip(*b).any(|(a, b)| a.abs_diff(*b) > 1))
             .take(20)
@@ -384,6 +388,8 @@ fn canonical_clip_masks_track_nested_canvas_lifetimes_and_reject_before_allocati
     install(&mut renderer);
     renderer
         .begin_group(pdf::page::transparency::GroupPaint {
+            blending_profile: None,
+            rendering_intent: Default::default(),
             isolated: true,
             knockout: false,
             alpha: 1.,
@@ -519,7 +525,14 @@ fn region_allocation_fits_budget_when_full_page_cannot_and_invalid_updates_are_a
     list.replay(&mut renderer).unwrap();
     let pixels = renderer.to_rgba().unwrap();
     assert_eq!(pixels.pixels.len(), 3072);
-    assert!(pixels.pixels.chunks_exact(4).all(|p| p == [255, 0, 0, 255]));
+    assert!(
+        pixels
+            .pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| *p == [255, 0, 0, 255])
+    );
     for bad in [
         RasterRegion { width: 0, ..region },
         RasterRegion {

@@ -31,6 +31,76 @@ struct CachedTransform {
     target: u64,
     intent: RenderingIntent,
     transform: Arc<moxcms::TransformF32Executor>,
+    _reservation: TransformReservation,
+}
+
+// Per-module guard for backend tables: moxcms uses infallible allocations for
+// 65536-entry gamma tables. Exhaustion must be reported before building them.
+pub const MAX_WASM_ICC_TRANSFORM_ESTIMATED_BYTES: usize = 32 * 1024 * 1024;
+#[cfg(target_os = "emscripten")]
+static TRANSFORM_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+struct TransformReservation {
+    #[cfg(any(test, target_os = "emscripten"))]
+    counter: Option<&'static std::sync::atomic::AtomicUsize>,
+    #[cfg(any(test, target_os = "emscripten"))]
+    bytes: usize,
+}
+impl TransformReservation {
+    #[cfg(any(test, target_os = "emscripten"))]
+    fn reserve(
+        counter: &'static std::sync::atomic::AtomicUsize,
+        bytes: usize,
+        limit: usize,
+    ) -> PdfResult<Self> {
+        let mut old = counter.load(Ordering::Acquire);
+        loop {
+            let next = old.checked_add(bytes).filter(|n| *n <= limit).ok_or(
+                PdfError::ResourceLimitExceeded {
+                    reason: "icc_transform_bytes",
+                    stage: "color_conversion",
+                    limit: limit as u64,
+                    actual: old.saturating_add(bytes) as u64,
+                },
+            )?;
+            match counter.compare_exchange_weak(old, next, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => break,
+                Err(current) => old = current,
+            }
+        }
+        Ok(Self {
+            counter: Some(counter),
+            bytes,
+        })
+    }
+
+    fn new(bytes: usize) -> PdfResult<Self> {
+        #[cfg(target_os = "emscripten")]
+        {
+            Self::reserve(
+                &TRANSFORM_BYTES,
+                bytes,
+                MAX_WASM_ICC_TRANSFORM_ESTIMATED_BYTES,
+            )
+        }
+        #[cfg(not(target_os = "emscripten"))]
+        {
+            let _ = bytes;
+            Ok(Self {
+                #[cfg(test)]
+                counter: None,
+                #[cfg(test)]
+                bytes: 0,
+            })
+        }
+    }
+}
+impl Drop for TransformReservation {
+    fn drop(&mut self) {
+        #[cfg(any(test, target_os = "emscripten"))]
+        if let Some(counter) = self.counter {
+            counter.fetch_sub(self.bytes, Ordering::AcqRel);
+        }
+    }
 }
 static NEXT_PROFILE: AtomicU64 = AtomicU64::new(1);
 impl std::fmt::Debug for ICCProfile {
@@ -173,6 +243,13 @@ impl ICCProfile {
     pub fn is_builtin_srgb(&self) -> bool {
         self.inner.id == 0
     }
+    pub fn same_profile(&self, other: &Self) -> bool {
+        self.inner.id == other.inner.id
+    }
+    /// Matrix/TRC RGB profiles supported as an actual compositor working space.
+    pub fn is_rgb_blending_profile(&self) -> bool {
+        self.inner.components == 3 && self.inner.profile.is_matrix_shaper()
+    }
     pub fn to_bytes(&self) -> PdfResult<Vec<u8>> {
         if !self.inner.raw.is_empty() {
             let mut data = Vec::new();
@@ -212,6 +289,17 @@ impl ICCProfile {
             {
                 hit.transform.clone()
             } else {
+                let estimate = self
+                    .inner
+                    .raw
+                    .len()
+                    .saturating_add(target.inner.raw.len())
+                    .saturating_mul(32)
+                    .saturating_add(2 * 1024 * 1024);
+                let reservation = TransformReservation::new(estimate)?;
+                cache.try_reserve(1).map_err(|_| {
+                    PdfError::ResourceLimit("ICC transform cache allocation".into())
+                })?;
                 let layout = match self.inner.components {
                     1 => moxcms::Layout::Gray,
                     3 => moxcms::Layout::Rgb,
@@ -279,6 +367,7 @@ impl ICCProfile {
                     .try_reserve(1)
                     .map_err(|_| PdfError::ResourceLimit("ICC transform cache".into()))?;
                 cache.push(CachedTransform {
+                    _reservation: reservation,
                     target: target.inner.id,
                     intent: context.rendering_intent,
                     transform: transform.clone(),

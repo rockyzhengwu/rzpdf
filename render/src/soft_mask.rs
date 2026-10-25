@@ -39,6 +39,9 @@ impl SkiaRender {
             .ok_or_else(|| PdfError::ResourceLimit("soft mask aggregate pixels".into()))?;
         let mut renderer = Self::with_limits(self.scale_x * 72., self.scale_y * 72., limits)?;
         self.inherit_region(&mut renderer, 1)?;
+        // Supported luminosity masks explicitly use nominal RGB/Gray, not the
+        // enclosing ICC working space. ICC mask groups remain explicit errors.
+        renderer.color_context = Default::default();
         // Supported Luminosity groups declare RGB and are isolated. Evaluate
         // their members on transparent, then composite the group over BC below;
         // BC must not affect a member's internal Multiply/Screen operation.

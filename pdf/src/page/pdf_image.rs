@@ -296,12 +296,12 @@ impl PdfImage {
             }
             if alpha_mode == 1 {
                 for key in ["Mask", "SMask"] {
-                    if let Some(value) = image.get_attr(key) {
-                        if !matches!(ctx.resolve(value)?, PdfObject::PdfNull) {
-                            return Err(PdfError::UnsupportedFeature(
-                                "JPX embedded and explicit masks combined".into(),
-                            ));
-                        }
+                    if let Some(value) = image.get_attr(key)
+                        && !matches!(ctx.resolve(value)?, PdfObject::PdfNull)
+                    {
+                        return Err(PdfError::UnsupportedFeature(
+                            "JPX embedded and explicit masks combined".into(),
+                        ));
                     }
                 }
             }
@@ -2353,7 +2353,11 @@ mod explicit_mask_tests {
             .rgba_buffer()
             .unwrap();
         assert_eq!(
-            rgba.chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>(),
+            rgba.as_chunks::<4>()
+                .0
+                .iter()
+                .map(|p| p[3])
+                .collect::<Vec<_>>(),
             vec![0, 255, 0, 255, 0, 255]
         );
         let wide = object(
@@ -2396,10 +2400,19 @@ mod explicit_mask_tests {
             .unwrap();
         assert_eq!((w, h), (3, 2));
         assert_eq!(
-            rgba.chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>(),
+            rgba.as_chunks::<4>()
+                .0
+                .iter()
+                .map(|p| p[3])
+                .collect::<Vec<_>>(),
             [255, 0, 255, 0, 255, 0]
         );
-        assert!(rgba.chunks_exact(4).all(|p| p[..3] == [255, 0, 0]));
+        assert!(
+            rgba.as_chunks::<4>()
+                .0
+                .iter()
+                .all(|p| p[..3] == [255, 0, 0])
+        );
         image.max_rgba_bytes = 23;
         assert!(matches!(
             image.rendering_rgba_with_context(&Default::default()),
@@ -2462,10 +2475,21 @@ mod explicit_mask_tests {
                 .unwrap();
             assert_eq!((w, h), (8, 1));
             assert_eq!(
-                pixels.chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>(),
+                pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|p| p[3])
+                    .collect::<Vec<_>>(),
                 expected
             );
-            assert!(pixels.chunks_exact(4).all(|p| p[..3] == [20, 40, 60]));
+            assert!(
+                pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .all(|p| p[..3] == [20, 40, 60])
+            );
             image.max_rgba_bytes = 31;
             assert!(matches!(
                 image.rendering_rgba_with_context(&Default::default()),
@@ -2500,7 +2524,9 @@ mod explicit_mask_tests {
                 image
                     .rgba_buffer()
                     .unwrap()
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .map(|p| p[3])
                     .collect::<Vec<_>>(),
                 expected

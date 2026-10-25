@@ -56,6 +56,10 @@ impl DisplayList {
                     PageObject::Image(image) => Some(&image.graphic_state),
                     PageObject::Shading(shading) => Some(&shading.graphic_state),
                     PageObject::GroupBegin(group) => {
+                        if let Some(profile) = &group.blending_profile {
+                            bytes = bytes
+                                .saturating_add(profile.retained_source_bytes().saturating_mul(32));
+                        }
                         if let Some(mask) = &group.soft_mask {
                             bytes = bytes.saturating_add(visit(&mask.list, fonts, depth + 1)?);
                         }
@@ -81,10 +85,10 @@ impl DisplayList {
                         &state.color_state.fill_color_space,
                         &state.color_state.stroke_color_space,
                     ] {
-                        if let crate::color::colorspace::ColorSpace::Pattern(space) = space {
-                            if let Some(paint) = space.paint() {
-                                bytes = bytes.saturating_add(visit(&paint.list, fonts, depth + 1)?);
-                            }
+                        if let crate::color::colorspace::ColorSpace::Pattern(space) = space
+                            && let Some(paint) = space.paint()
+                        {
+                            bytes = bytes.saturating_add(visit(&paint.list, fonts, depth + 1)?);
                         }
                     }
                 }

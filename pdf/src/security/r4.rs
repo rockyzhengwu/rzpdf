@@ -37,7 +37,7 @@ fn file_key(
     metadata: bool,
 ) -> Zeroizing<[u8; 16]> {
     let mut h = Md5::new();
-    h.update(&*padded(password));
+    h.update(*padded(password));
     h.update(owner);
     h.update(permissions.to_le_bytes());
     h.update(id);
@@ -46,7 +46,7 @@ fn file_key(
     }
     let mut digest = Zeroizing::new(<[u8; 16]>::from(h.finalize()));
     for _ in 0..50 {
-        *digest = Md5::digest(&*digest).into();
+        *digest = Md5::digest(*digest).into();
     }
     digest
 }
@@ -63,9 +63,9 @@ fn user_valid(key: &[u8; 16], user: &[u8; 32], id: &[u8]) -> bool {
     bool::from(value.as_slice().ct_eq(&user[..16]))
 }
 fn owner_user_password(password: &[u8], owner: &[u8; 32]) -> Zeroizing<[u8; 32]> {
-    let mut digest = Zeroizing::new(<[u8; 16]>::from(Md5::digest(&*padded(password))));
+    let mut digest = Zeroizing::new(<[u8; 16]>::from(Md5::digest(*padded(password))));
     for _ in 0..50 {
-        *digest = Md5::digest(&*digest).into();
+        *digest = Md5::digest(*digest).into();
     }
     let mut value = Zeroizing::new(*owner);
     for i in (0..=19).rev() {

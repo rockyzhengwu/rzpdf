@@ -200,12 +200,12 @@ fn decode_native(
         .map_err(|e| PdfError::FilterError(format!("DCT create decoder error:{:?}", e)))?;
     if let Some(dict) = context.stream_dict {
         for (key, actual) in [("Width", d.width()), ("Height", d.height())] {
-            if let Some(value) = dict.get(key) {
-                if value.as_u32().map(|v| v as usize) != Some(actual) {
-                    return Err(PdfError::FilterError(
-                        "JPEG dimensions disagree with image dictionary".into(),
-                    ));
-                }
+            if let Some(value) = dict.get(key)
+                && value.as_u32().map(|v| v as usize) != Some(actual)
+            {
+                return Err(PdfError::FilterError(
+                    "JPEG dimensions disagree with image dictionary".into(),
+                ));
             }
         }
     }

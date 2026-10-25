@@ -8,3 +8,6 @@ license.workspace = true
 skia-safe = "0.93.1"
 pdf = {path="../pdf/"}
 
+[dev-dependencies]
+moxcms = { version = "=0.9.1", default-features = false, features = ["lut"] }
+

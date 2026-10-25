@@ -23,6 +23,12 @@ use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, block_padding::Pk
 use std::io::{Read, Seek};
 use zeroize::{Zeroize, Zeroizing};
 
+#[derive(Clone, Copy)]
+struct ObjectCrypt<'a> {
+    key: &'a [u8],
+    encrypt: bool,
+}
+
 fn malformed(message: &str) -> PdfError {
     PdfError::MalformedSecurity(message.into())
 }
@@ -318,7 +324,17 @@ impl SecurityHandler {
     ) -> PdfResult<(PdfObject, MemoryLease)> {
         if self.revision == 4 {
             let key = super::r4::object_key(&*self.key, id);
-            self.transform_inner(ctx, &*key, object, false, budget, 0, &mut 0)
+            self.transform_inner(
+                ctx,
+                object,
+                ObjectCrypt {
+                    key: &*key,
+                    encrypt: false,
+                },
+                budget,
+                0,
+                &mut 0,
+            )
         } else {
             self.transform(ctx, object, false, budget)
         }
@@ -336,15 +352,24 @@ impl SecurityHandler {
                 "R4 AES-128 is read-only; decryption requires an object ID".into(),
             ));
         }
-        self.transform_inner(ctx, &*self.key, object, encrypt, budget, 0, &mut 0)
+        self.transform_inner(
+            ctx,
+            object,
+            ObjectCrypt {
+                key: &*self.key,
+                encrypt,
+            },
+            budget,
+            0,
+            &mut 0,
+        )
     }
 
     fn transform_dict<R: Read + Seek>(
         &self,
         ctx: &PDFContext<R>,
-        cipher_key: &[u8],
         dict: &PdfDict,
-        encrypt: bool,
+        crypt: ObjectCrypt<'_>,
         budget: &OperationBudget,
         depth: usize,
         nodes: &mut usize,
@@ -353,7 +378,7 @@ impl SecurityHandler {
         for (key, value) in dict {
             let (key, key_lease) = crate::budget::copy_string(key, budget)?;
             let (value, lease) =
-                self.transform_inner(ctx, cipher_key, value, encrypt, budget, depth + 1, nodes)?;
+                self.transform_inner(ctx, value, crypt, budget, depth + 1, nodes)?;
             builder.insert(key, value, key_lease, lease)?;
         }
         builder.finish()
@@ -362,13 +387,16 @@ impl SecurityHandler {
     fn transform_inner<R: Read + Seek>(
         &self,
         ctx: &PDFContext<R>,
-        cipher_key: &[u8],
         object: &PdfObject,
-        encrypt: bool,
+        crypt: ObjectCrypt<'_>,
         budget: &OperationBudget,
         depth: usize,
         nodes: &mut usize,
     ) -> PdfResult<(PdfObject, MemoryLease)> {
+        let ObjectCrypt {
+            key: cipher_key,
+            encrypt,
+        } = crypt;
         let limits = ctx.limits();
         if depth >= limits.max_depth || *nodes >= limits.max_objects {
             return Err(PdfError::ResourceLimit(
@@ -403,8 +431,7 @@ impl SecurityHandler {
                         "encrypted/signature combination".into(),
                     ));
                 }
-                let (dict, lease) =
-                    self.transform_dict(ctx, cipher_key, dict, encrypt, budget, depth, nodes)?;
+                let (dict, lease) = self.transform_dict(ctx, dict, crypt, budget, depth, nodes)?;
                 Ok((PdfObject::PdfDict(dict), lease))
             }
             PdfObject::PdfArray(items) => {
@@ -420,15 +447,8 @@ impl SecurityHandler {
                     .map_err(|_| PdfError::ResourceLimit("security array allocation".into()))?;
                 lease.resize(values.capacity() * std::mem::size_of::<PdfObject>())?;
                 for value in items {
-                    let (value, mut child) = self.transform_inner(
-                        ctx,
-                        cipher_key,
-                        value,
-                        encrypt,
-                        budget,
-                        depth + 1,
-                        nodes,
-                    )?;
+                    let (value, mut child) =
+                        self.transform_inner(ctx, value, crypt, budget, depth + 1, nodes)?;
                     lease.absorb(&mut child)?;
                     values.push(value);
                 }
@@ -486,7 +506,7 @@ impl SecurityHandler {
                     .map(|(dict, _)| dict)
                     .unwrap_or(stream.dict());
                 let (dict, mut lease) =
-                    self.transform_dict(ctx, cipher_key, dict, encrypt, budget, depth, nodes)?;
+                    self.transform_dict(ctx, dict, crypt, budget, depth, nodes)?;
                 let (data, mut data_lease) = crypt_bytes(
                     method,
                     cipher_key,

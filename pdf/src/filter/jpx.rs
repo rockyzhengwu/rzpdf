@@ -48,9 +48,21 @@ fn u32be(b: &[u8], p: usize) -> PdfResult<u32> {
     ))
 }
 
-fn codestream(data: &[u8]) -> PdfResult<(&[u8], Option<usize>, Option<&[u8]>, Option<u32>)> {
+struct Codestream<'a> {
+    data: &'a [u8],
+    palette: Option<usize>,
+    definitions: Option<&'a [u8]>,
+    enumerated_color: Option<u32>,
+}
+
+fn codestream(data: &[u8]) -> PdfResult<Codestream<'_>> {
     if data.starts_with(&[255, 79]) {
-        return Ok((data, None, None, None));
+        return Ok(Codestream {
+            data,
+            palette: None,
+            definitions: None,
+            enumerated_color: None,
+        });
     }
     if !data.starts_with(b"\0\0\0\x0cjP  \r\n\x87\n") {
         return Err(error("invalid JP2 signature"));
@@ -151,21 +163,23 @@ fn codestream(data: &[u8]) -> PdfResult<(&[u8], Option<usize>, Option<&[u8]>, Op
         let mapping = mapping.ok_or_else(|| error("palette requires component mapping"))?;
         if mapping.len() != columns * 4
             || mapping
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .enumerate()
-                .any(|(index, m)| m != [0, 0, 1, index as u8])
+                .any(|(index, m)| *m != [0, 0, 1, index as u8])
         {
             return Err(unsupported("nonsequential palette component mapping"));
         }
     } else if mapping.is_some() {
         return Err(unsupported("component mapping without palette"));
     }
-    Ok((
-        stream.ok_or_else(|| error("missing codestream"))?,
+    Ok(Codestream {
+        data: stream.ok_or_else(|| error("missing codestream"))?,
         palette,
         definitions,
         enumerated_color,
-    ))
+    })
 }
 
 /// Inspect dimensions and coding envelope before backend header/pixel allocation.
@@ -173,7 +187,12 @@ pub fn inspect(data: &[u8], context: FilterContext<'_>) -> PdfResult<JpxInfo> {
     if data.len() > context.max_decoded_bytes {
         return Err(limit("encoded input bytes"));
     }
-    let (stream, palette, definitions, enumerated_color) = codestream(data)?;
+    let Codestream {
+        data: stream,
+        palette,
+        definitions,
+        enumerated_color,
+    } = codestream(data)?;
     if !stream.starts_with(&[255, 79, 255, 81]) {
         return Err(error("SOC/SIZ header missing"));
     }
@@ -321,7 +340,7 @@ pub fn inspect(data: &[u8], context: FilterContext<'_>) -> PdfResult<JpxInfo> {
                     return Err(unsupported("non-equivalent component coding override"));
                 }
             }
-            0xff5e | 0xff5f | 0xff60 | 0xff61 => {
+            0xff5e..=0xff61 => {
                 return Err(unsupported(
                     "component overrides, ROI or packed packet headers",
                 ));
@@ -406,7 +425,7 @@ pub fn inspect(data: &[u8], context: FilterContext<'_>) -> PdfResult<JpxInfo> {
 // 128 bytes for every output sample. Account separately for small code-blocks
 // and decomposition boundaries so ordinary multi-megapixel RGB scans fit.
 fn scratch_envelope(input: &[u8], info: JpxInfo) -> PdfResult<usize> {
-    let (stream, _, _, _) = codestream(input)?;
+    let stream = codestream(input)?.data;
     let mut p = 2;
     let mut blocks = None;
     while p + 4 <= stream.len() {

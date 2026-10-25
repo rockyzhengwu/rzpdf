@@ -1,4 +1,55 @@
 use super::*;
+
+#[test]
+fn backend_table_reservations_fail_structurally_and_release_on_drop() {
+    use std::sync::atomic::AtomicUsize;
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let first = TransformReservation::reserve(&COUNTER, 24, 32).unwrap();
+    let error = TransformReservation::reserve(&COUNTER, 9, 32)
+        .err()
+        .unwrap();
+    assert!(matches!(
+        error,
+        PdfError::ResourceLimitExceeded {
+            reason: "icc_transform_bytes",
+            stage: "color_conversion",
+            limit: 32,
+            actual: 33,
+        }
+    ));
+    assert_eq!(COUNTER.load(Ordering::Acquire), 24);
+    drop(first);
+    assert_eq!(COUNTER.load(Ordering::Acquire), 0);
+    drop(TransformReservation::reserve(&COUNTER, 32, 32).unwrap());
+    assert_eq!(COUNTER.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn document_interns_identical_profiles_and_releases_them_on_cache_clear() {
+    let doc = crate::document::Document::new().unwrap();
+    let data = ICCProfile::gray_srgb().unwrap().to_bytes().unwrap();
+    let first = doc.ctx().icc_profile(&data).unwrap();
+    for _ in 0..2000 {
+        let profile = doc.ctx().icc_profile(&data.clone()).unwrap();
+        assert!(first.same_profile(&profile));
+        profile
+            .convert(&[0.4], &ColorConversionContext::default())
+            .unwrap();
+    }
+    assert_eq!(first.inner.transforms.lock().unwrap().len(), 1);
+    doc.clear_render_caches();
+    let fresh = doc.ctx().icc_profile(&data).unwrap();
+    assert!(!first.same_profile(&fresh));
+    // Existing display lists may still own the old, valid profile.
+    assert!(
+        first
+            .convert(&[0.4], &ColorConversionContext::default())
+            .is_ok()
+    );
+    doc.try_insert_object(crate::objects::PdfObject::PdfNull)
+        .unwrap();
+    assert!(!fresh.same_profile(&doc.ctx().icc_profile(&data).unwrap()));
+}
 #[test]
 fn srgb_and_gray_profiles_convert_real_bytes_instead_of_alternate() {
     let srgb = ICCProfile::try_new(&ICCProfile::srgb().to_bytes().unwrap()).unwrap();

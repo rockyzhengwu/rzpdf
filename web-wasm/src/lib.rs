@@ -570,7 +570,14 @@ mod tests {
                 panic!("image")
             };
             assert_eq!(image.pixels.len(), 8192);
-            assert!(image.pixels.chunks_exact(4).all(|p| p == [255, 0, 0, 255]));
+            assert!(
+                image
+                    .pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .all(|p| *p == [255, 0, 0, 255])
+            );
         });
         assert_eq!(rz_release(image), 1);
         assert_eq!(rz_retained_bytes(), baseline);

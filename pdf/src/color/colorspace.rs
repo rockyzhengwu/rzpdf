@@ -119,7 +119,7 @@ impl ColorSpace {
         })
     }
     pub fn try_new<R: Seek + Read>(obj: &PdfObject, ctx: &PDFContext<R>) -> PdfResult<Self> {
-        ctx.with_color_depth(|| Self::try_new_inner(obj, ctx))
+        ctx.with_color_depth(obj.as_object_id(), || Self::try_new_inner(obj, ctx))
     }
 
     fn try_new_inner<R: Seek + Read>(obj: &PdfObject, ctx: &PDFContext<R>) -> PdfResult<Self> {
@@ -194,6 +194,38 @@ impl Display for ColorSpace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_nesting_is_bounded_and_error_or_unwind_releases_reference_scope() {
+        use crate::{
+            document::Document,
+            objects::{pdf_array::PdfArray, pdf_name::PdfName, pdf_reference::PdfReference},
+        };
+        let doc = Document::new().unwrap();
+        let rgb = PdfObject::PdfName(PdfName::new("DeviceRGB".into()));
+        let mut nested = rgb.clone();
+        for _ in 0..48 {
+            nested = PdfObject::PdfArray(PdfArray::from_items(vec![
+                PdfObject::PdfName(PdfName::new("Pattern".into())),
+                nested,
+            ]));
+        }
+        for _ in 0..2 {
+            assert!(matches!(
+                ColorSpace::try_new(&nested, doc.ctx()),
+                Err(PdfError::ResourceLimit(_))
+            ));
+            assert!(ColorSpace::try_new(&rgb, doc.ctx()).is_ok());
+        }
+        let id = doc.try_insert_object(rgb).unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            doc.ctx()
+                .with_color_depth(Some(id), || -> PdfResult<()> { panic!("scope unwind") })
+        }));
+        assert!(result.is_err());
+        let reference = PdfObject::PdfReference(PdfReference::from_id(id));
+        assert!(ColorSpace::try_new(&reference, doc.ctx()).is_ok());
+    }
 
     #[test]
     fn unsupported_color_queries_return_errors() {

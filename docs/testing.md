@@ -1,5 +1,137 @@
 # 解析回归与异常输入验证
 
+## ICC 透明组和 WASM 转换表回归
+
+当前状态：后续栈／CFF／lint 修复及整份 92 页检查已完成，见本节末尾
+「后续收口」。下文保留首轮三页诊断和失败记录，便于追溯。
+
+2026-10-25，针对用户指定的本地 92 页 PDF 排查：第一页隔离组的间接
+`CS` 为 ICCBased RGB；第二、三页的灰度 ICC 被每次颜色空间查找重新解析，
+导致每份文字绘制状态分别保留 CMS 转换表。优化 WASM 复现日志明确出现
+`memory allocation of 262144 bytes failed` 和 `Aborted()`；原生采样主要停留在
+`ICCProfile::convert` → `create_transform_f32` → 65536 项 gamma 表构造。
+
+修复与边界见[透明度说明](transparency.md)：实际 RGB matrix/TRC 工作空间、
+修订感知 profile 共享、浏览器转换表估算预留和字符查询的组合绘制隔离。
+新增确定性原生测试验证间接引用、非单位 Range／灰度 ICC 组拒绝、缓存复用／
+释放／编辑失效、资源预留错误与释放、非 sRGB 混合、嵌套 DeviceRGB／继承、
+透明度应用顺序、失败恢复及不支持混合空间中的字符坐标。
+
+```sh
+cargo test -p pdf --locked --lib page::transparency::tests
+RUST_MIN_STACK=8388608 cargo test -p pdf --locked --lib color::
+cargo test -p render --locked --lib icc_group_tests
+cargo test -p pdf --locked --test v08_transparency --test text_geometry \
+  --test text_source --test prepared_page --test v010_optional_content
+cargo test -p web-wasm --locked --lib
+```
+
+颜色用例 131 项、透明组解析 3 项、上述五组集成测试共 50 项、web-wasm
+库单元 23 项通过；SDK 资源协议与既有真实浏览器资源门禁也通过。
+颜色全组首次使用默认测试线程栈时，
+`indirect_parameters_and_color_cycles_recover_after_repair` 栈溢出而中止；
+上面的 8 MiB 仅用于原生测试线程，不修改引擎限制或浏览器构建的既有栈配置。
+首轮完整 render 单元组为 88 passed／1 failed；当时唯一失败的
+`standalone_sparse_cff_uses_cid_for_backend_and_gid_for_charset_inspection`
+已在独立 worktree 的修改前提交 `961f37f` 单独复现，属于现有 CFF 渲染问题，
+当时没有修改或跳过该断言，也未宣称全工作区全部通过。
+首轮格式／差异检查通过，Clippy 完成、无 error，但存在 61 处项目 warning；
+后续修复和严格门禁结果另列于下。
+
+先按[固定工具链构建说明](webassembly/build.md)构建优化 Wasm 与 JS SDK，
+再生成全自制的可再分发样本并执行真实浏览器门禁；输出目录必须尚不存在：
+
+```sh
+cargo run -p pdf --locked --example icc_groups -- output/webassembly/icc-fixtures
+RZPDF_CHROMIUM=/path/to/chromium node web/tests/icc-browser.mjs
+```
+
+门禁覆盖直接／真实 Worker：线性 RGB 黑白 50% 混合像素 `[188,188,188,255]`，
+不支持 CMYK 组返回普通 `unsupported` 且仍可提取 `ABC`；20 份不同 profile
+触发 `resource_limit`，详情 `reason=icc_transform_bytes`、
+`stage=color_conversion`、`limit=33554432`、`actual=33722048`。
+失败后仍能查询状态／字符、清缓存、渲染较轻页面，并重复验证资源释放。
+报告 `output/webassembly/icc-browser/report.json` 记录驱动、fixture 和构建产物
+SHA-256；不依赖用户 PDF。
+
+真实输入单独显式授权路径，不复制文件进仓库：
+
+```sh
+RZPDF_PRIVATE_PDF=/path/to/authorized.pdf \
+RZPDF_CHROMIUM=/path/to/chromium node web/tests/private-pages.mjs
+```
+
+该驱动默认仅检查页面索引 0、1、2，每页新建引擎；直接和 Worker 均先以
+36 DPI、`annotations:false`、`includeWidgets:false` 渲染，再验证状态、文字、
+组合 content、清缓存、再次渲染及状态。六个组合均通过，无 trap；渲染尺寸
+298×421，字符数分别 1862／3091／2887，直接调用记录的线性内存为
+40304640 bytes。此值是观察值，不是整个进程内存或通用峰值保证。
+原生前三页成功渲染并与 `mutool draw -r 36` 参考图目视对照，页面布局和
+第一页蓝色标识正常；原生／WASM 字体栅格化存在差异，不宣称像素完全相同。
+这不构成其余 89 页或跨浏览器验收。
+
+本机日志位于 `/tmp/rzpdf-icc-*`，浏览器报告与 PNG 在忽略的
+`output/webassembly/{icc-browser,private-pages-after}`；原 PDF 未归档。
+
+### 后续收口：默认栈、CFF 与完整文件
+
+颜色构造增加活动间接引用检测，以及 `min(max_depth, 16)` 的递归实现上限，
+直接内嵌空间同样受限；错误和 native unwind 均恢复作用域。原颜色循环测试
+及新增的 48 层直接嵌套／unwind 测试均在默认测试线程栈下通过，最终回归不设置
+`RUST_MIN_STACK`。实现上限是递归构造器的保护边界，不放宽输入语法深度。
+
+CFF 失败由默认字体后端使用的字形编号不同引起：macOS CoreText 的样本 face
+有 3 个字形，GID 2 有轮廓，CID 42 没有可绘制字形。渲染入口按默认后端选择
+GID 或 standalone FreeType CID，保留核心 charset 映射及 PDF 字宽。原失败测试
+保持可见墨迹断言并通过；新增浏览器直接／Worker 样本均绘制出 128 个暗像素。
+循环颜色样本在两条浏览器路径均返回普通资源错误，后续状态查询及较轻页面
+渲染仍有效。五份全自制 fixture 由 `icc_groups` 示例生成；重复执行时需使用新目录：
+
+```sh
+cargo run -p pdf --locked --example icc_groups -- output/webassembly/followup-fixtures
+RZPDF_ICC_FIXTURES=output/webassembly/followup-fixtures \
+RZPDF_CHROMIUM=/path/to/chromium node web/tests/icc-browser.mjs
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked -- --test-threads=2
+```
+
+61 处项目 lint 告警已清理，未新增全局或局部屏蔽。包括固定通道数组遍历、
+条件／借用简化、移除失效 expectation、JPX `Codestream` 命名记录、加密遍历的
+`ObjectCrypt` 参数记录；后者仍借用原密钥，节点／深度／MemoryLease 规则保持。
+另修正图片上限回归的旧断言，精确检查结构化错误的 reason／stage／limit／actual，
+没有放松上限或跳过解码前拒绝检查。Cargo 用户配置弃用提示和依赖的 macOS
+汇编链接 warning 仍单独存在，不属于项目 Rust lint 零告警承诺。
+
+实际完整执行先用 `cargo test --workspace --locked --no-run --message-format=json`
+构建，再按 manifest 所在目录、最多三个程序并发、每程序两个测试线程执行
+全部 97 个测试程序，不加过滤器；文档另用 `cargo test --workspace --locked --doc`。
+最终 1791 passed／0 failed／1 ignored／0 filtered，文档 6 passed，共 1797 项通过。
+唯一 ignored 为需要另一份本地 Financial PDF 的显式样本测试；没有跳过普通测试。
+首次全量暴露的旧图片错误断言及其失败日志已保留；修正后重新核对完整目标清单。
+最终 97 个程序的执行 hash 与最终构建产物一致。记录在
+`output/pdf/followup-acceptance/{results,summary}.json`，初轮和复跑日志在
+`output/pdf/followup-tests*`；格式、差异和全工作区／全目标严格 Clippy 均通过。
+
+用户指定 PDF 的 SHA-256 为
+`390775dbc9debdcf2ed1b076eed013387ca057630be3cb594617b2b742e48cf0`。
+新优化 WASM／SDK 在 Chromium 148.0.7778.96 中完成全部 92 页：直接和真实
+Worker 共 184 个组合、1288 次操作，均先以 36 DPI 渲染，再检查状态、文字、
+content、清缓存、重绘及状态，全部通过，无 trap。全文件直接调用观察到的
+最大线性内存为 58064896 bytes；不是 RSS／其他 DPI 或文件的峰值保证。
+原生 92 页亦全部成功渲染，最终 CLI 前后 hash 一致；记录在
+`output/pdf/followup-native-final/report.json`。目视抽查第 20、53、62、92 页，
+与 MuPDF 36 DPI 参考图的布局、公式、算法框及参考文献正常对齐，不宣称像素相同。
+浏览器完整文件报告在 `output/webassembly/private-pages-full-after/report.json`，
+五样本门禁在 `output/webassembly/icc-browser/report.json`，新构建报告为
+`output/webassembly/followup-build.json`；既有浏览器资源门禁也通过。
+
+原生文字检查共 285078 个字形事件，解析 errors／warnings 均为 0；16 次事件的
+Unicode 为未知。已检查源字体的 ToUnicode：它没有字符码 0x0093、0x0094、0x0095
+的条目，对应出现 8／4／4 次。保持未知值，绘制不受影响；`check_pdf` 因这一
+缺失映射状态返回 2，不能描述为全部 Unicode 已完整提取。未修改原始 PDF，
+也没有把源文件复制进仓库。此轮不覆盖全 DPI、任意 PDF 或独立 Windows／Linux 认证。
+
 ## Xref and Matte compatibility regression
 
 2026-10-21：针对真实输入 `Financial-Examples-for-I20.pdf` 修复两处兼容缺口。

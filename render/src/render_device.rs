@@ -21,6 +21,9 @@ mod annotation_tests;
 #[cfg(test)]
 #[path = "group_tests.rs"]
 mod group_tests;
+#[cfg(test)]
+#[path = "icc_group_tests.rs"]
+mod icc_group_tests;
 #[path = "knockout.rs"]
 mod knockout;
 #[cfg(test)]
@@ -154,6 +157,7 @@ pub struct SkiaRender {
     held_pattern_surfaces: u64,
     group_stack: Vec<RenderGroup>,
     active_intent: pdf::color::conversion::RenderingIntent,
+    color_context: pdf::color::conversion::ColorConversionContext,
     shape_mode: bool,
     object_dispatch: bool,
     initial_override: Option<skia_safe::Image>,
@@ -171,6 +175,7 @@ pub struct SkiaRender {
 }
 
 struct RenderGroup {
+    parent_color_context: pdf::color::conversion::ColorConversionContext,
     parent: Surface,
     limits: Limits,
     paint: pdf::page::transparency::GroupPaint,
@@ -180,6 +185,79 @@ struct RenderGroup {
 }
 
 impl SkiaRender {
+    fn convert_group_space(
+        &mut self,
+        image: skia_safe::Image,
+        source: &pdf::color::conversion::ColorConversionContext,
+        paint: &pdf::page::transparency::GroupPaint,
+    ) -> PdfResult<skia_safe::Image> {
+        if self.shape_mode
+            || source
+                .output_profile()
+                .same_profile(self.color_context.output_profile())
+        {
+            return Ok(image);
+        }
+        let bytes = (self.page_width as usize)
+            .checked_mul(self.page_height as usize)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or_else(|| PdfError::ResourceLimit("ICC group raster size".into()))?;
+        // Parent, group, converted Rust bytes and Skia's owned copy coexist.
+        if bytes
+            .checked_mul(4)
+            .is_none_or(|peak| peak > self.limits.max_render_bytes)
+            || (self.page_width as u64 * self.page_height as u64).saturating_mul(4)
+                > self.limits.max_render_pixels
+        {
+            return Err(PdfError::ResourceLimit("ICC group conversion peak".into()));
+        }
+        let pixels = image
+            .peek_pixels()
+            .ok_or_else(|| PdfError::ResourceLimit("ICC group pixels".into()))?;
+        let target = self.color_context.with_intent(paint.rendering_intent);
+        let mut converted = Vec::new();
+        converted
+            .try_reserve_exact(bytes)
+            .map_err(|_| PdfError::ResourceLimit("ICC group conversion buffer".into()))?;
+        converted.resize(bytes, 0);
+        for y in 0..self.page_height {
+            for x in 0..self.page_width {
+                let color = pixels.get_color((x, y));
+                if color.a() == 0 {
+                    continue;
+                }
+                // Unpremultiplied components must be transformed; alpha is not a
+                // colour component and must remain unchanged across the boundary.
+                let rgb = source.output_profile().convert(
+                    &[
+                        f32::from(color.r()) / 255.,
+                        f32::from(color.g()) / 255.,
+                        f32::from(color.b()) / 255.,
+                    ],
+                    &target,
+                )?;
+                let offset = (y as usize * self.page_width as usize + x as usize) * 4;
+                converted[offset..offset + 4].copy_from_slice(&[
+                    rgb.r(),
+                    rgb.g(),
+                    rgb.b(),
+                    color.a(),
+                ]);
+            }
+        }
+        let info = skia_safe::ImageInfo::new(
+            (self.page_width, self.page_height),
+            skia_safe::ColorType::RGBA8888,
+            skia_safe::AlphaType::Unpremul,
+            None,
+        );
+        skia_safe::images::raster_from_data(
+            &info,
+            skia_safe::Data::new_copy(&converted),
+            self.page_width as usize * 4,
+        )
+        .ok_or_else(|| PdfError::ResourceLimit("ICC group converted image".into()))
+    }
     /// Explicit substitute for fonts without a program. PDF advances remain
     /// authoritative; glyphs are resolved through proven Unicode mappings.
     pub fn set_substitute_font(&mut self, data: &[u8], collection_index: usize) -> PdfResult<()> {
@@ -215,13 +293,12 @@ impl SkiaRender {
         font: &std::rc::Rc<pdf::font::pdf_font::Font>,
     ) -> PdfResult<skia_safe::Typeface> {
         let key = std::rc::Rc::as_ptr(font) as usize;
-        if let Some((source, face, _)) = self.typeface_cache.get(&key) {
-            if source
+        if let Some((source, face, _)) = self.typeface_cache.get(&key)
+            && source
                 .upgrade()
                 .is_some_and(|source| std::rc::Rc::ptr_eq(&source, font))
-            {
-                return Ok(face.clone());
-            }
+        {
+            return Ok(face.clone());
         }
         let data = font
             .fontfile()
@@ -385,6 +462,7 @@ impl SkiaRender {
             held_pattern_surfaces: 0,
             group_stack: Vec::new(),
             active_intent: Default::default(),
+            color_context: Default::default(),
             shape_mode: false,
             object_dispatch: false,
             initial_override: None,
@@ -433,6 +511,7 @@ impl SkiaRender {
         ))
     }
     fn inherit_region(&self, child: &mut Self, factor: u32) -> PdfResult<()> {
+        child.color_context = self.color_context.clone();
         child.set_region(
             self.region
                 .map(|region| region.scaled(factor))
@@ -483,6 +562,7 @@ impl SkiaRender {
                     .max_render_bytes
                     .saturating_sub(parent_pixels as usize * 4);
                 let mut renderer = Self::with_limits(sx * 72., sy * 72., limits)?;
+                renderer.color_context = self.color_context.clone();
                 renderer.clear_color = Color::TRANSPARENT;
                 renderer.shape_mode = self.shape_mode;
                 renderer.substitute_font = self.substitute_font.clone();
@@ -604,6 +684,8 @@ impl SkiaRender {
                 };
                 renderer.initial_override = Some(backdrop);
                 renderer.begin_group(pdf::page::transparency::GroupPaint {
+                    blending_profile: None,
+                    rendering_intent: self.active_intent,
                     isolated: false,
                     knockout: !pattern.is_tiling(),
                     alpha: 1.,
@@ -673,8 +755,7 @@ impl SkiaRender {
             self.paint.set_color(Color::WHITE);
             self.paint.set_shader(shader);
         } else {
-            let context = pdf::color::conversion::ColorConversionContext::default()
-                .with_intent(self.active_intent);
+            let context = self.color_context.with_intent(self.active_intent);
             let rgb = space.rgb_with_context(value, &context)?;
             self.paint.set_color(RGB::from((rgb.r(), rgb.g(), rgb.b())));
         }
@@ -1314,10 +1395,10 @@ impl SkiaRender {
         let yx = b * size * font.scale_x();
         let xy = a * size * font.skew_x() + c * size;
         let yy = b * size * font.skew_x() + d * size;
-        if xx * xx + yx * yx > 256. * 256. || xy * xy + yy * yy > 256. * 256. {
-            if let Some(path) = font.get_path(glyph) {
-                return self.draw_prepared_path(&path, &fill, &Matrix::new(a, b, c, d, x, y));
-            }
+        if (xx * xx + yx * yx > 256. * 256. || xy * xy + yy * yy > 256. * 256.)
+            && let Some(path) = font.get_path(glyph)
+        {
+            return self.draw_prepared_path(&path, &fill, &Matrix::new(a, b, c, d, x, y));
         }
         // Bitmap-only/empty glyphs retain Skia's existing fallback as well.
         self.surface.canvas().draw_glyphs_at(
@@ -1362,7 +1443,7 @@ impl SkiaRender {
                 paint,
                 &mut outline,
                 None,
-                Some(matrix.clone()),
+                Some(matrix),
             );
             outline = outline.with_transform(&matrix);
             if !filled {
@@ -1626,6 +1707,16 @@ impl SkiaRender {
 impl Device for SkiaRender {
     fn begin_group(&mut self, group: pdf::page::transparency::GroupPaint) -> PdfResult<()> {
         self.paint.set_shader(None);
+        let working_context = if let Some(profile) = &group.blending_profile {
+            if !group.isolated || !profile.is_rgb_blending_profile() {
+                return Err(PdfError::UnsupportedFeature(
+                    "explicit group space requires isolated RGB matrix/TRC compositor".into(),
+                ));
+            }
+            pdf::color::conversion::ColorConversionContext::with_output_profile(profile.clone())?
+        } else {
+            self.color_context.clone()
+        };
         if !group.alpha.is_finite() || !(0.0..=1.).contains(&group.alpha) {
             return Err(PdfError::PageOperatorError("invalid group alpha".into()));
         }
@@ -1695,6 +1786,7 @@ impl Device for SkiaRender {
         };
         let parent = std::mem::replace(&mut self.surface, surface);
         self.group_stack.push(RenderGroup {
+            parent_color_context: self.color_context.clone(),
             parent,
             limits: self.limits,
             paint: group,
@@ -1703,6 +1795,7 @@ impl Device for SkiaRender {
             initial,
         });
         self.limits = limits;
+        self.color_context = working_context;
         Ok(())
     }
 
@@ -1713,6 +1806,8 @@ impl Device for SkiaRender {
             .pop()
             .ok_or_else(|| PdfError::PageOperatorError("unmatched render group end".into()))?;
         let mut surface = std::mem::replace(&mut self.surface, group.parent);
+        let working_context =
+            std::mem::replace(&mut self.color_context, group.parent_color_context.clone());
         self.limits = group.limits;
         if !commit {
             return Ok(());
@@ -1790,6 +1885,7 @@ impl Device for SkiaRender {
         } else {
             surface.image_snapshot()
         };
+        let image = self.convert_group_space(image, &working_context, &group.paint)?;
         let shape = group.shape.as_mut().map(Surface::image_snapshot);
         if self.dispatch_group_object(|device| {
             let source = if device.shape_mode {
@@ -1888,27 +1984,25 @@ impl Device for SkiaRender {
         self.clip_cache.clear();
         self.clip_images.clear();
         self.region = effective;
-        if self.region_padding == 0 {
-            if let Some(region) = effective {
-                if f64::from(region.x + region.width) > pixel_width
-                    || f64::from(region.y + region.height) > pixel_height
-                {
-                    // A rounded-up parent pixel may exceed a supersampled
-                    // child's last integer row/column. Preserve the old zero
-                    // contribution without allocating the full child page.
-                    let w = (pixel_width - f64::from(region.x))
-                        .max(0.)
-                        .min(f64::from(width)) as f32;
-                    let h = (pixel_height - f64::from(region.y))
-                        .max(0.)
-                        .min(f64::from(height)) as f32;
-                    self.surface.canvas().clip_rect(
-                        skia_safe::Rect::from_wh(w, h),
-                        skia_safe::ClipOp::Intersect,
-                        false,
-                    );
-                }
-            }
+        if self.region_padding == 0
+            && let Some(region) = effective
+            && (f64::from(region.x + region.width) > pixel_width
+                || f64::from(region.y + region.height) > pixel_height)
+        {
+            // A rounded-up parent pixel may exceed a supersampled
+            // child's last integer row/column. Preserve the old zero
+            // contribution without allocating the full child page.
+            let w = (pixel_width - f64::from(region.x))
+                .max(0.)
+                .min(f64::from(width)) as f32;
+            let h = (pixel_height - f64::from(region.y))
+                .max(0.)
+                .min(f64::from(height)) as f32;
+            self.surface.canvas().clip_rect(
+                skia_safe::Rect::from_wh(w, h),
+                skia_safe::ClipOp::Intersect,
+                false,
+            );
         }
         self.matrix = Matrix::new(
             self.scale_x,
@@ -2144,7 +2238,7 @@ impl Device for SkiaRender {
                 value.set_scale_x(textobject.horizontal_scale);
                 value
             };
-            let mut current_font = typeface.map(&make_font);
+            let mut current_font = typeface.map(make_font);
             let mut current_face = None;
             let mut runs: Vec<(usize, skia_safe::Font)> = Vec::new();
             let mut glyphs = Vec::new();
@@ -2221,7 +2315,13 @@ impl Device for SkiaRender {
                         current_face = Some(face_index);
                     }
                     Some(GlyphDesc::Gid(gid as u32))
+                } else if cfg!(any(target_vendor = "apple", target_os = "windows")) {
+                    // Skia's default CoreText/DirectWrite managers draw GIDs.
+                    // Raw CFF bytes do not imply the loaded face uses CIDs.
+                    font.get_glyph(char_item.charcode())
                 } else {
+                    // The default FreeType ports (including our pinned Wasm
+                    // build) use CIDs for standalone CID-keyed CFF faces.
                     font.raw_cff_cid(char_item.charcode())
                         .map(GlyphDesc::Gid)
                         .or_else(|| font.get_glyph(char_item.charcode()))
@@ -2343,8 +2443,7 @@ impl Device for SkiaRender {
             return Ok(());
         }
         let alpha = object.graphic_state.general_state.fill_alpha;
-        let color_context = pdf::color::conversion::ColorConversionContext::default()
-            .with_intent(self.active_intent);
+        let color_context = self.color_context.with_intent(self.active_intent);
         if !alpha.is_finite() || !(0.0..=1.0).contains(&alpha) {
             return Err(PdfError::PageOperatorError("invalid shading alpha".into()));
         }
@@ -2534,8 +2633,7 @@ impl Device for SkiaRender {
             } else {
                 state.fill_color_space.rgb_with_context(
                     &state.fill_color_value,
-                    &pdf::color::conversion::ColorConversionContext::default()
-                        .with_intent(self.active_intent),
+                    &self.color_context.with_intent(self.active_intent),
                 )?
             };
             let (width, height) = imageobject.image.pixel_dimensions();
@@ -2545,10 +2643,9 @@ impl Device for SkiaRender {
                 imageobject.image.rgba_buffer_with_stencil_color(&color)?,
             )
         } else {
-            imageobject.image.rendering_rgba_with_context(
-                &pdf::color::conversion::ColorConversionContext::default()
-                    .with_intent(self.active_intent),
-            )?
+            imageobject
+                .image
+                .rendering_rgba_with_context(&self.color_context.with_intent(self.active_intent))?
         };
         if self.shape_mode && !imageobject.image.is_mask() && !imageobject.image.has_explicit_mask()
         {
@@ -2741,7 +2838,7 @@ impl Device for SkiaRender {
 
 #[cfg(test)]
 fn white_test_output(mut pixels: Vec<u8>) -> Vec<u8> {
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0.iter_mut() {
         let alpha = u32::from(pixel[3]);
         for channel in &mut pixel[..3] {
             *channel = ((u32::from(*channel) * alpha + 255 * (255 - alpha) + 127) / 255) as u8;
@@ -6459,7 +6556,7 @@ mod font_program_regression_tests {
         expected.end_page().unwrap();
         let a = actual.to_rgba().unwrap().pixels;
         let b = expected.to_rgba().unwrap().pixels;
-        assert!(a.chunks_exact(4).any(|p| p[0] < 200));
+        assert!(a.as_chunks::<4>().0.iter().any(|p| p[0] < 200));
         if a != b {
             let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .parent()
@@ -6585,7 +6682,7 @@ mod font_program_regression_tests {
         };
         let normal = raster(1., 10.);
         let scaled = raster(2., 5.);
-        assert!(normal.chunks_exact(4).any(|p| p[0] < 200));
+        assert!(normal.as_chunks::<4>().0.iter().any(|p| p[0] < 200));
         assert_eq!(normal, scaled);
     }
     #[test]
@@ -6699,7 +6796,7 @@ mod font_program_regression_tests {
             let a = actual.to_rgba().unwrap().pixels;
             let b = expected.to_rgba().unwrap().pixels;
             assert_eq!(a, b, "mixed-face mode {mode:?}");
-            assert!(a.chunks_exact(4).any(|p| p[0] < 200));
+            assert!(a.as_chunks::<4>().0.iter().any(|p| p[0] < 200));
         }
     }
 
@@ -6766,19 +6863,19 @@ mod image_reduction_tests {
             let mut renderer = SkiaRender::new(dpi, dpi).unwrap();
             doc.get_page(0).unwrap().display(&mut renderer).unwrap();
             let image = renderer.to_rgba().unwrap();
-            for (index, pixel) in image.pixels.chunks_exact(4).enumerate() {
+            for (index, pixel) in image.pixels.as_chunks::<4>().0.iter().enumerate() {
                 let row = index / image.width as usize;
                 let source = (row as f64 + 0.5) * 72. / f64::from(dpi);
                 if source == source.floor() {
                     // At an exact source-pixel boundary both adjacent centers
                     // are equally near. Either source color is valid, not gray.
-                    assert!(pixel == [0, 0, 0, 255] || pixel == [255, 255, 255, 255]);
+                    assert!(*pixel == [0, 0, 0, 255] || *pixel == [255, 255, 255, 255]);
                 } else {
                     let source_row = source.floor() as usize;
-                    let expected = if source_row % 2 == 0 { 255 } else { 0 };
+                    let expected = if source_row.is_multiple_of(2) { 255 } else { 0 };
                     assert_eq!(
                         pixel,
-                        [expected, expected, expected, 255],
+                        &[expected, expected, expected, 255],
                         "dpi={dpi}, pixel={index}"
                     );
                 }

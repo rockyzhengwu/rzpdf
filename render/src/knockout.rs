@@ -15,6 +15,8 @@ impl SkiaRender {
         draw: impl FnOnce(&mut Self) -> PdfResult<()>,
     ) -> PdfResult<()> {
         self.begin_group(pdf::page::transparency::GroupPaint {
+            blending_profile: None,
+            rendering_intent: state.general_state.rendering_intent,
             isolated: false,
             knockout: true,
             alpha: 1.,

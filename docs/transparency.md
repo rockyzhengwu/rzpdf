@@ -11,11 +11,21 @@ already started page; the caller owns surrounding group/page boundaries.
 ## RGB compositing
 
 Skia supports isolated and non-isolated Form transparency groups, including
-knockout and nesting. The explicit group blending space is currently limited to
-`DeviceRGB`; absent `CS` inherits the supported RGB display model. Non-isolated
-Form groups cannot declare their own `CS`. This is not CMYK, calibrated or ICC
-group-space compositing, overprint simulation, spot separation or a print proof.
-Unsupported explicit group spaces are rejected.
+knockout and nesting. Isolated Form groups accept `DeviceRGB`, the restricted
+DeviceGray subset below, and ICCBased RGB matrix/TRC profiles with component
+ranges `[0, 1]`. Indirect `CS` arrays and profile streams use the ordinary colour
+space parser. Paint colours, images, shadings and pattern renderers target the
+current group profile; the composed, unpremultiplied group colours are converted
+to the parent's space before applying group opacity and the parent blend mode.
+Alpha is preserved. ICC groups are not aliases for DeviceRGB: linear-light
+black/white mixing at 50% produces about 188 in sRGB, rather than 128.
+
+Absent `CS` inherits the parent's working space. Non-isolated Form groups inherit
+their backdrop's space; their `CS` entry does not select a new one. Nested explicit
+DeviceRGB groups select nominal sRGB and restore the enclosing ICC context on
+success or discard. ICC Gray/CMYK groups, LUT-only output profiles, calibrated
+group spaces, overprint simulation and spot separation remain unsupported. This
+does not add a print-proof pipeline or change the 8-bit raster precision.
 
 Groups use separate offscreen surfaces. A non-isolated group's initial backdrop
 is retained separately from its running result; if its parent is knockout it
@@ -48,6 +58,20 @@ does not move it. Replacement, `/None`, and `q/Q` are ordinary graphics state
 operations. Paths, text, images, shading and groups multiply their opacity by
 the mask. Mask text is not reported as page text or page-edit provenance.
 Unsupported operations, malformed dictionaries and cycles return errors.
+ICC soft-mask group working spaces remain explicit errors; ordinary ICC Form
+group support does not imply ICC luminosity-mask support.
+
+## Character queries and colour conversion
+
+Paint-order character extraction (including its explicit optional-content
+variant) interprets Form geometry and text without evaluating group blending
+spaces or compiling soft-mask graphics. Unsupported compositing therefore need
+not block character positions, source addresses or Unicode. The scope restores
+on errors and its temporary lists never enter rendering caches. Fonts, content
+syntax, invocation limits and other graphics parsing still apply: this is not
+a universal recovery or an image-free interpreter. Marked/semantic extraction
+retains its existing full-validation contract. Browser `content()` also queries
+images, so that combined API still requires a supported graphics display list.
 
 ## Text clipping
 
@@ -76,12 +100,32 @@ internals or every PDF function evaluation temporary; these are not RSS or
 global CPU guarantees. Dense masks, groups and page-sized patterns are not a
 throughput promise.
 
+Identical decoded ICC profile bytes are interned per document revision in a
+bounded LRU. Profiles share their transform tables across repeated colour-space
+lookups; `clear_render_caches()` releases cache-owned ICC references as well as
+page/font references. Caller-held lists can retain profiles. The browser build
+also reserves estimated transform storage before calling the CMS backend:
+32 MiB per Wasm module, shared by its documents. Exhaustion returns
+`resource_limit`, reason `icc_transform_bytes`, stage `color_conversion`, with
+numeric `limit`/`actual`; it does not intentionally abort the engine. This
+conservative estimate is separate from raster budgets, not a complete CMS/RSS
+allocator limit. Native transforms retain their existing policy.
+
 See [v0.8 support matrix](releases/v0.8-support.md) for exact verification scope.
 The compositing model follows [PDF 32000-1, sections 11.4–11.7](https://opensource.adobe.com/dc-acrobat-sdk-docs/standards/pdfstandards/pdf/PDF32000_2008.pdf).
 
 ## Page backdrop and text strokes
 
 Page content blends against an initially transparent backdrop; the configured white output substrate is added after page compositing. Pattern/offscreen renderers retain their transparent output. Raw RGBA readback preserves straight alpha. Text outlines are transformed into graphics user space before stroking, so text-matrix scaling does not scale the graphics-state line width or dash pattern.
+
+Embedded standalone CID-keyed CFF glyph selection follows the default Skia font
+manager: CoreText on Apple and DirectWrite on Windows use physical GIDs;
+FreeType ports use CIDs for standalone CID-keyed CFF and ordinary GIDs for
+OpenType-wrapped CFF. The renderer therefore does not infer the drawing index
+from raw program bytes alone. CID-to-GID charset lookup and PDF advances remain
+separate. The compatibility regression uses sparse CID 42 / GID 2 and tests
+visible ink; platform acceptance covers macOS CoreText and the pinned browser
+FreeType build, not independent Windows/Linux certification.
 
 Subpixel positive stroke widths use a one-device-pixel hairline when every principal CTM scale makes the requested width smaller than a pixel. This display policy keeps very thin rules visible; anisotropic strokes that are wide in any principal direction retain their user-space width. Zero/singular transforms are not promoted into painted hairlines by this rule.
 
