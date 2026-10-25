@@ -223,38 +223,19 @@ pub(crate) fn requirements(s: &State, document: u32, request: &Value) -> ApiResu
             .filter(|n| matches!(n, 0 | 90 | 180 | 270))
             .ok_or("invalid view rotation")? as u16,
     };
-    let visibility = if d.optional_content()?.is_some() {
-        Some(d.optional_content_visibility(&Default::default())?)
-    } else {
-        None
-    };
     let mut collector = render::font_preflight::FontPreflight::new(
         &s.font_provider,
         s.substitute_font.as_ref(),
-        limits(),
+        d.resource_limits(),
     )?;
-    let mut p = d.get_page(page)?;
-    if annotations {
-        let options = pdf::page::annotations::AnnotationRenderOptions {
-            include_widgets,
-            view_zoom,
-            view_rotation,
-            ..Default::default()
-        };
-        let list = if let Some(visibility) = visibility {
-            p.display_list_with_annotations_and_optional_content(options, &visibility)?
-        } else {
-            p.display_list_with_annotations(options)?
-        };
-        list.replay(&mut collector)?;
-    } else {
-        let list = if let Some(visibility) = visibility {
-            p.display_list_with_optional_content(&visibility)?
-        } else {
-            p.display_list()?
-        };
-        list.replay(&mut collector)?;
-    }
+    let options = annotations.then_some(pdf::page::annotations::AnnotationRenderOptions {
+        include_widgets,
+        view_zoom,
+        view_rotation,
+        ..Default::default()
+    });
+    d.prepare_page_for_render(page, options, 72.)?
+        .replay(d, &mut collector)?;
     let redacted = d.security_report().is_some_and(|r| {
         r.authentication != pdf::security::Authentication::Owner && !r.permissions.copy
     });

@@ -56,7 +56,9 @@ async function execute(request:WorkerRequest):Promise<void> {
       case 'save':result=document(request).save(request.args[0] as number);break;
       case 'outlines':result=document(request).outlines();break;
       case 'links':result=document(request).links(request.args[0] as number);break;
-      case 'capabilities':result=document(request).capabilities();break;
+      case 'capabilities':result=request.document===undefined?engine.capabilities():document(request).capabilities();break;
+      case 'cacheStatistics':result=document(request).cacheStatistics();break;
+      case 'clearRenderCaches':result=document(request).clearRenderCaches();break;
       case 'diagnostics':result=document(request).diagnostics();break;
       default:throw new PdfApiError('unsupported','Unsupported Worker operation','protocol');
     }
@@ -66,7 +68,7 @@ async function execute(request:WorkerRequest):Promise<void> {
     const known=error instanceof PdfApiError;
     const fatal=!known || error.code==='internal';
     // Never serialize the request, argument list or password.
-    send(request,{kind:'error',error:{code:known?error.code:'internal',message:known?error.message:'Worker execution failed',operation:known?error.operation:'worker',page:known?error.page:undefined,fatal}} as Omit<WorkerResponse,'protocol'|'session'|'id'>);
+    send(request,{kind:'error',error:{code:known?error.code:'internal',message:known?error.message:'Worker execution failed',operation:known?error.operation:'worker',page:known?error.page:undefined,resource:known?error.resource:undefined,fatal}} as Omit<WorkerResponse,'protocol'|'session'|'id'>);
   }
 }
 let chain=Promise.resolve();

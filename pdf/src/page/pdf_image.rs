@@ -92,6 +92,119 @@ impl ImageSoftMask {
 }
 
 impl PdfImage {
+    /// Target-resolution decoding is exclusively an interpreter render policy.
+    /// Unsupported codecs/masks use the unchanged, bounded full-resolution path.
+    pub(crate) fn try_new_for_render<R: Read + Seek>(
+        name: String,
+        object: &PdfObject,
+        ctx: &PDFContext<R>,
+        matrix: &crate::geom::matrix::Matrix,
+    ) -> PdfResult<Self> {
+        let Some(dpi) = ctx.render_image_dpi() else {
+            return Self::try_new(name, object, ctx);
+        };
+        let resolved = ctx.resolve(object)?;
+        let Some(stream) = resolved.as_stream() else {
+            return Self::try_new(name, object, ctx);
+        };
+        for key in ["Mask", "SMask", "DecodeParms"] {
+            if let Some(value) = stream.dict().get(key)
+                && !matches!(ctx.resolve(value)?, PdfObject::PdfNull)
+            {
+                return Self::try_new(name, object, ctx);
+            }
+        }
+        if let Some(value) = stream.dict().get("ImageMask")
+            && !ctx
+                .resolve(value)?
+                .as_bool()
+                .is_some_and(|flag| !flag.value())
+        {
+            return Self::try_new(name, object, ctx);
+        }
+        if let Some(value) = stream.dict().get("SMaskInData")
+            && ctx.resolve(value)?.as_u32() != Some(0)
+        {
+            return Self::try_new(name, object, ctx);
+        }
+        let filter = stream
+            .dict()
+            .get("Filter")
+            .map(|value| crate::objects::pdf_stream::resolve_filter_setting(value, ctx, false))
+            .transpose()?;
+        let single_jpeg = match filter.as_ref() {
+            Some(PdfObject::PdfName(name)) => matches!(name.name(), "DCT" | "DCTDecode"),
+            Some(PdfObject::PdfArray(array)) if array.len() == 1 => array
+                .get(0)
+                .and_then(PdfObject::as_name)
+                .is_some_and(|name| matches!(name.name(), "DCT" | "DCTDecode")),
+            _ => false,
+        };
+        if !single_jpeg || !crate::filter::dct::sequential(stream.raw_data()) {
+            return Self::try_new(name, object, ctx);
+        }
+        let dimension = |key| -> PdfResult<u32> {
+            let value = ctx.resolve(
+                stream
+                    .dict()
+                    .get(key)
+                    .ok_or_else(|| PdfError::ObjectError("image dimension missing".into()))?,
+            )?;
+            value
+                .as_number()
+                .ok_or_else(|| PdfError::ObjectError("image dimension must be integer".into()))?
+                .as_u32_checked()
+        };
+        let source = (dimension("Width")?, dimension("Height")?);
+        if source.0 == 0 || source.1 == 0 {
+            return Self::try_new(name, object, ctx);
+        }
+        let source_pixels = u64::from(source.0) * u64::from(source.1);
+        // Preserve existing pixel-exact rendering for images whose full decode
+        // already fits. Reduced IDCT and full decode + filtering are not equal.
+        if source_pixels <= ctx.limits().max_image_pixels
+            && source_pixels
+                .checked_mul(4)
+                .is_some_and(|bytes| bytes <= ctx.limits().max_decoded_bytes as u64)
+        {
+            return Self::try_new(name, object, ctx);
+        }
+        let scale = f64::from(dpi) / 72.;
+        let target = (
+            (f64::from(matrix.a()).hypot(f64::from(matrix.b())) * scale).ceil(),
+            (f64::from(matrix.c()).hypot(f64::from(matrix.d())) * scale).ceil(),
+        );
+        if !target.0.is_finite() || !target.1.is_finite() {
+            return Err(PdfError::ObjectError(
+                "image target dimensions nonfinite".into(),
+            ));
+        }
+        let (width, height, data) = crate::filter::dct::decode_target(
+            stream.raw_data(),
+            source,
+            (
+                target.0.max(1.).min(f64::from(source.0)) as u32,
+                target.1.max(1.).min(f64::from(source.1)) as u32,
+            ),
+            crate::filter::FilterContext {
+                max_image_pixels: ctx.limits().max_image_pixels,
+                max_decoded_bytes: ctx.limits().max_decoded_bytes,
+                ..Default::default()
+            },
+        )?;
+        let mut dict = stream.dict().clone();
+        dict.remove("Filter");
+        dict.remove("DecodeParms");
+        dict.remove("Length");
+        for (key, value) in [("Width", width), ("Height", height)] {
+            dict.try_insert(
+                key.into(),
+                PdfObject::PdfNumber(crate::objects::pdf_number::PdfNumber::new(value as f32)),
+            )?;
+        }
+        let decoded = PdfObject::PdfStream(crate::objects::pdf_stream::PdfStream::new(dict, data));
+        Self::try_new(name, &decoded, ctx)
+    }
     pub(crate) fn mark_inline(mut self) -> Self {
         self.is_inline = true;
         self
@@ -271,7 +384,12 @@ impl PdfImage {
         let height = dimension("Height")?;
         let width = dimension("Width")?;
         if u64::from(width) * u64::from(height) > ctx.limits().max_image_pixels {
-            return Err(PdfError::ResourceLimit("image pixel count".into()));
+            return Err(PdfError::ResourceLimitExceeded {
+                reason: "image_pixels",
+                stage: "image_decode",
+                limit: ctx.limits().max_image_pixels,
+                actual: u64::from(width) * u64::from(height),
+            });
         }
         let pixel_count = usize::try_from(u64::from(width) * u64::from(height))
             .map_err(|_| PdfError::ResourceLimit("image pixel count overflow".into()))?;

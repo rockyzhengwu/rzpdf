@@ -23,6 +23,21 @@ def capture(command, env=None):
                                    stderr=subprocess.STDOUT).strip()
 
 
+def capture_json(command, env=None):
+    """Keep tool diagnostics out of machine-readable stdout; preserve warnings."""
+    result = subprocess.run(command, cwd=REPO, env=env, text=True,
+                            capture_output=True, check=True)
+    if result.stderr:
+        print(result.stderr, file=sys.stderr, end="")
+    return json.loads(result.stdout)
+
+
+def matches_emcc_version(output, version):
+    # First invocation may emit SDK sanity-check diagnostics before the version.
+    return any(line.startswith("emcc ") and f" {version} " in line
+               for line in output.splitlines())
+
+
 def sdk_environment(sdk):
     # Pass paths as arguments, never interpolate them into shell source.
     result = subprocess.check_output(
@@ -80,7 +95,7 @@ def main():
         if f"commit-hash: {lock['rust_commit']}" not in rust:
             raise ValueError("rustc commit differs from toolchain.json")
         emcc = capture(["emcc", "--version"], env)
-        if f" {lock['emscripten_version']} " not in emcc.splitlines()[0]:
+        if not matches_emcc_version(emcc, lock["emscripten_version"]):
             raise ValueError("emcc version differs from toolchain.json")
         sdk_revision = capture(["git", "-C", str(args.emsdk.resolve()), "rev-parse", "HEAD"], env)
         if sdk_revision != lock["emsdk_commit"]:
@@ -107,8 +122,8 @@ def main():
                      "FORCE_SKIA_BINARIES_DOWNLOAD"]:
             if env.get(name):
                 raise ValueError(f"unset {name} before running the pinned build")
-        metadata = json.loads(capture(["rustup", "run", args.toolchain, "cargo", "metadata",
-                                       "--locked", "--format-version", "1", "--filter-platform", EMSCRIPTEN], env))
+        metadata = capture_json(["rustup", "run", args.toolchain, "cargo", "metadata",
+                                 "--locked", "--format-version", "1", "--filter-platform", EMSCRIPTEN], env)
         skia = next(p for p in metadata["packages"] if p["name"] == "skia-bindings")
         if skia["metadata"]["skia"] != lock["skia_source"]:
             raise ValueError("Skia source revision differs from toolchain.json")

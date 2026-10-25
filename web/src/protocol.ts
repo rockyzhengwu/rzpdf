@@ -1,11 +1,11 @@
-import {normalizeRasterRegion} from "./raster.js";
+import {normalizeRasterRegion,MAX_REGION_DPI,MAX_FULL_PAGE_DPI} from "./raster.js";
 import {normalizeFontRegistration,normalizeFontStamp,type FontRegistration,type FontStamp} from "./fonts.js";
 import {BUFFER_BUDGET,normalizeRenderOptions,snapshotMutation,mutationAssetLimit} from "./interaction.js";
 import type { ErrorCode, OpenOptions } from './client.js';
 export const WORKER_PROTOCOL=2;
-export type WorkerOperation='open'|'font'|'registerFont'|'registerDocumentFont'|'fontRequirements'|'clearFonts'|'pageInfo'|'text'|'render'|'renderRegion'|'search'|'outlines'|'links'|'capabilities'|'diagnostics'|'close'|'statistics'|'state'|'annotations'|'formFields'|'apply'|'save'|'content';
+export type WorkerOperation='open'|'font'|'registerFont'|'registerDocumentFont'|'fontRequirements'|'clearFonts'|'pageInfo'|'text'|'render'|'renderRegion'|'search'|'outlines'|'links'|'capabilities'|'diagnostics'|'close'|'statistics'|'state'|'annotations'|'formFields'|'apply'|'save'|'content'|'cacheStatistics'|'clearRenderCaches';
 export interface WorkerRequest { protocol:number;session:string;id:number;operation:WorkerOperation|'initialize';document?:number;args:unknown[]; }
-export interface WorkerFailure { code:ErrorCode;message:string;operation:string;page?:number;fatal:boolean; }
+export interface WorkerFailure { code:ErrorCode;message:string;operation:string;page?:number;fatal:boolean;resource?:import('./client.js').ResourceDetails; }
 export type WorkerResponse =
   | {protocol:number;session:string;id:number;kind:'ready'}
   | {protocol:number;session:string;id:number;kind:'started'}
@@ -16,13 +16,13 @@ export type {OpenOptions};
 
 /** Validate before structuredClone so malformed calls cannot enqueue unbounded metadata. */
 export function validateArguments(operation:WorkerRequest['operation'],args:unknown[]):void {
-  const counts:Record<string,number>={initialize:0,open:2,font:2,registerFont:2,registerDocumentFont:3,fontRequirements:2,clearFonts:0,pageInfo:1,text:1,render:3,renderRegion:4,search:2,outlines:0,links:1,capabilities:0,diagnostics:0,close:0,statistics:0,state:0,annotations:1,formFields:0,apply:2,save:1,content:1};
+  const counts:Record<string,number>={initialize:0,open:2,font:2,registerFont:2,registerDocumentFont:3,fontRequirements:2,clearFonts:0,pageInfo:1,text:1,render:3,renderRegion:4,search:2,outlines:0,links:1,capabilities:0,diagnostics:0,close:0,statistics:0,state:0,annotations:1,formFields:0,apply:2,save:1,content:1,cacheStatistics:0,clearRenderCaches:0};
   const invalid=()=>{throw new RangeError('Invalid Worker arguments');};
   if(!Array.isArray(args)||counts[operation]!==args.length)invalid();
   const integer=(n:unknown)=>typeof n==='number'&&Number.isSafeInteger(n)&&n>=0&&n<=0xffffffff;
   const record=(v:unknown):v is Record<string,unknown>=>!!v&&typeof v==='object'&&!Array.isArray(v);
   if(['pageInfo','text','render','renderRegion','links','annotations','content','fontRequirements'].includes(operation)&&!integer(args[0]))invalid();
-  if((operation==='render'||operation==='renderRegion')&&(typeof args[1]!=='number'||!Number.isFinite(args[1])||args[1]<1||args[1]>288))invalid();
+  if((operation==='render'||operation==='renderRegion')&&(typeof args[1]!=='number'||!Number.isFinite(args[1])||args[1]<1||args[1]>(operation==='renderRegion'?MAX_REGION_DPI:MAX_FULL_PAGE_DPI)))invalid();
   if(operation==='render'||operation==='renderRegion')normalizeRenderOptions(args[2] as import('./interaction.js').RenderOptions);
   if(operation==='renderRegion')normalizeRasterRegion(args[3] as import('./raster.js').RasterRegion);
   if(operation==='apply') {
@@ -34,8 +34,9 @@ export function validateArguments(operation:WorkerRequest['operation'],args:unkn
   if(operation==='open') {
     if(!(args[0] instanceof Uint8Array)||!args[0].length||args[0].length>BUFFER_BUDGET)invalid();
     const options=args[1];
-    if(!record(options)||Object.keys(options).some(k=>!['mode','password'].includes(k)))invalid();
+    if(!record(options)||Object.keys(options).some(k=>!['mode','password','resourceProfile'].includes(k)))invalid();
     const opts=options as Record<string,unknown>;
+    if(opts.resourceProfile!==undefined&&opts.resourceProfile!=='default'&&opts.resourceProfile!=='conservative')invalid();
     if(opts.mode!==undefined&&opts.mode!=='strict'&&opts.mode!=='compatible')invalid();
     if(opts.password!==undefined&&(typeof opts.password!=='string'||new TextEncoder().encode(opts.password).length>1024))invalid();
   }

@@ -1,4 +1,4 @@
-import {normalizeRasterRegion,type RasterRegion} from "./raster.js";
+import {normalizeRasterRegion,MAX_REGION_DPI,type RasterRegion} from "./raster.js";
 export type {RasterRegion} from "./raster.js";
 import {normalizeFontRegistration,normalizeFontStamp,type FontRegistration,type FontIdentity,type FontStamp,type FontRequirements} from "./fonts.js";
 export type {FontRegistration,FontIdentity,FontStamp,FontRequirements} from "./fonts.js";
@@ -34,8 +34,12 @@ interface Module {
   _rz_release(h: number): number;
   _rz_error_ptr(): number;
   _rz_error_len(): number;
+  _rz_error_details_ptr?(): number;
+  _rz_error_details_len?(): number;
 }
-export interface OpenOptions { mode?: "strict" | "compatible"; password?: string; }
+export interface OpenOptions { mode?: "strict" | "compatible"; password?: string; resourceProfile?: "default" | "conservative"; }
+export interface ResourceDetails {reason:string;stage:string;limit?:number;actual?:number;}
+export interface RenderCacheStatistics {pageHits:number;pageMisses:number;pageEntries:number;pageEstimatedBytes:number;fontHits:number;fontMisses:number;fontEntries:number;fontEstimatedBytes:number;byteAccounting:string;linearMemoryMayRemainGrown:boolean;callerBuffersReleased:boolean;skiaCacheScope:string;skiaFontBytes:number;skiaFontLimit:number;skiaResourceBytes:number;skiaResourceLimit:number;}
 export type Matrix = [number, number, number, number, number, number];
 export interface PageInfo {
   width: number; height: number; rotation: number; userUnit: number;
@@ -58,7 +62,7 @@ export type ErrorCode = "format" | "password_required" | "password_invalid" | "p
 const errorCodes: ErrorCode[] = ["internal","format","password_required","password_invalid","permission","unsupported","font","resource_limit","invalid_handle","invalid_argument","internal","cancelled"];
 export class PdfApiError extends Error {
   override name = "PdfApiError";
-  constructor(readonly code: ErrorCode, message: string, readonly operation: string, readonly page?: number, readonly taskId?: number, readonly session?: string) { super(message); }
+  constructor(readonly code: ErrorCode, message: string, readonly operation: string, readonly page?: number, readonly taskId?: number, readonly session?: string, readonly resource?: ResourceDetails) { super(message); }
 }
 export interface SearchMatch extends TextMatch { page: number; }
 export interface SearchReport { matches: SearchMatch[]; truncated: boolean; pagesScanned: number; missingUnicode: number; diagnostics: number; }
@@ -91,8 +95,12 @@ export class PdfEngine {
     const code = errorCodes[this.module._rz_error_code()] ?? "internal";
     const n = this.module._rz_error_len();
     const p = this.module._rz_error_ptr();
-    return new PdfApiError(code, new TextDecoder().decode(this.module.HEAPU8.slice(p, p + n)) || "PDF operation failed", operation, page);
+    const message=new TextDecoder().decode(this.module.HEAPU8.slice(p,p+n));
+    const length=this.module._rz_error_details_len?.()??0,ptr=this.module._rz_error_details_ptr?.()??0;
+    const resource=length?JSON.parse(new TextDecoder().decode(this.module.HEAPU8.slice(ptr,ptr+length))) as ResourceDetails:undefined;
+    return new PdfApiError(code, message || "PDF operation failed", operation, page,undefined,undefined,resource);
   }
+  capabilities():Record<string,unknown> {return this.query(0,'capabilities');}
   release(handle: number): void {
     if (this.alive) this.invoke(() => this.module._rz_release(handle));
   }
@@ -162,6 +170,7 @@ export class PdfEngine {
     });}finally{bytes.fill(0);}
   }
   open(bytes: Uint8Array, options: OpenOptions = {}): PdfDocument {
+    if(options.resourceProfile!==undefined&&!['default','conservative'].includes(options.resourceProfile))throw new PdfApiError('invalid_argument','Invalid resource profile','open');
     if (!Number.isSafeInteger(bytes.length) || bytes.length < 1 || bytes.length > BUFFER_BUDGET)
       throw new PdfApiError("resource_limit", "PDF input is empty or exceeds the shared buffer budget", "open");
     if (options.mode !== undefined && options.mode !== "strict" && options.mode !== "compatible") throw new PdfApiError("invalid_argument", "Invalid parse mode", "open");
@@ -225,6 +234,8 @@ export class PdfDocument {
   outlines(): OutlineItem[] { this.check(); return this.engine.query(this.handle, "outlines"); }
   links(page: number): PageLink[] { this.checkPage(page); return this.engine.query(this.handle, "links", page); }
   capabilities(): Record<string, unknown> { this.check(); return this.engine.query(this.handle, "capabilities"); }
+  cacheStatistics():RenderCacheStatistics {this.check();return this.engine.query(this.handle,'cacheStatistics');}
+  clearRenderCaches():RenderCacheStatistics {this.check();return this.engine.query(this.handle,'clearRenderCaches');}
   diagnostics(): {reason:string;offset:number;object:number[]|null}[] { this.check(); return this.engine.query(this.handle, "diagnostics"); }
   private interaction<T extends {stamp:DocumentStamp}>(operation:string,page?:number):T {
     this.check();const value=this.engine.query<T>(this.handle,operation,page);
@@ -253,7 +264,7 @@ export class PdfDocument {
   }
   renderRegion(page:number,region:RasterRegion,dpi=72,options:RenderOptions={}):RgbaRegion {
     this.checkPage(page);
-    if(!Number.isFinite(dpi)||dpi<1||dpi>288)throw new PdfApiError("invalid_argument","DPI must be between 1 and 288","renderRegion",page);
+    if(!Number.isFinite(dpi)||dpi<1||dpi>MAX_REGION_DPI)throw new PdfApiError("invalid_argument","DPI exceeds region limit","renderRegion",page);
     let area:RasterRegion,settings:Required<RenderOptions>;
     try{area=normalizeRasterRegion(region);settings=normalizeRenderOptions(options);}catch{throw new PdfApiError("invalid_argument","Invalid render region or options","renderRegion",page);}
     const flags=(settings.annotations?(settings.includeWidgets?3:1):0)|(settings.viewRotation/90<<2),m=this.engine.module;

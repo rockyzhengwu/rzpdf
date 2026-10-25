@@ -2,6 +2,14 @@
 
 本文件只记录交付变化，不替代长期任务池或原始测试日志。版本范围见 [ROADMAP](ROADMAP.md)。
 
+## Unreleased — 浏览器渲染资源策略（限定范围已验收）
+
+新增打开前能力查询、打开时选择 default／conservative 固定资源档位、文档缓存统计／清理及可贯穿 ABI／SDK／Worker 的资源错误详情。分块 DPI 上限为 1152，整页仍为 288，单块／逻辑尺寸与像素／字节限制保持；演示按实际能力选择分辨率，不创建整页高倍画布。
+
+新增渲染专用 JPEG 原生 IDCT 降采样，适用于超出完整解码预算的单阶段、无蒙版 sequential JPEG；原图独立像素限制保留，目标由变换和 DPI 确定，缓存区分修订／分辨率，不影响原始保存或全精度图片提取。原本能完整解码的图片保留像素路径；蒙版／Matte、progressive JPEG、JPX、Type3／pattern 不冒充已支持低峰值降采样。浏览器文字几何和字体预检避免因附带图片解码重新阻塞预览。详见[策略与使用](docs/webassembly/resources.md)和[计划／验收状态](docs/webassembly/resource-plan.md)。
+
+用户授权后完成项目内固定工具链安装，优化 Wasm 构建及 Chromium 148 下直接／真实 Worker 资源门禁通过；覆盖高 DPI、8.75M 源像素扫描图、错误详情和恢复、缓存及输出所有权。修复构建驱动将 stderr 混入 JSON 和首次 SDK 诊断干扰版本识别的问题，脚本验证 11 项通过。仍不是完整浏览器发布、全编解码器降采样或统一 RSS 上限；既有严格 lint 告警另行保留。未提交／推送。
+
 ## Unreleased — xref 与图像 Matte 兼容修复
 
 Strict 接受零条目的经典 xref 分段，不再把它当作 Compatible 修复；依据 ISO 32000-2 7.5.4 勘误 #147，分段头两个整数均可为非负数。保留条目格式、范围、重复条目及最终空闲链校验，空分段不能替代必要的 object 0 条目。

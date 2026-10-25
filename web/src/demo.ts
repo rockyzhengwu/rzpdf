@@ -106,7 +106,8 @@ try {
       status.textContent=`正在显示第 ${index+1} 页…`;
       const fontReport=await fontResources?.ensure(target,index,{viewZoom:scale,viewRotation},current);if(!current())return false;
       const state=await target.state();if(!current())return false;
-      const dpi=Math.min(288,72*scale*window.devicePixelRatio),size=rasterSize(info.width,info.height,dpi);
+      const capabilities=await target.capabilities();if(!current())return false;
+      const dpi=Math.min(Number(capabilities.maxRegionDpi??288),72*scale*window.devicePixelRatio),size=rasterSize(info.width,info.height,dpi);
       const width=info.width*scale,height=info.height*scale,layout=viewTransform(width,height,viewRotation);
       content.style.width=width+'px';content.style.height=height+'px';
       content.style.transform=`matrix(${layout.matrix.join(',')})`;view.style.width=layout.width+'px';view.style.height=layout.height+'px';

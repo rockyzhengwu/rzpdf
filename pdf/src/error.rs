@@ -35,6 +35,16 @@ pub enum PdfError {
     #[error("resource limit exceeded: {0}")]
     ResourceLimit(String),
 
+    /// Stable machine-readable resource failure. Legacy unclassified failures
+    /// remain ResourceLimit; callers must not infer reasons from their text.
+    #[error("resource limit exceeded: {stage}/{reason} (limit {limit}, actual {actual})")]
+    ResourceLimitExceeded {
+        reason: &'static str,
+        stage: &'static str,
+        limit: u64,
+        actual: u64,
+    },
+
     #[error("IO Error '{0}' ")]
     IOError(String),
 

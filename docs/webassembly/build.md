@@ -16,6 +16,23 @@ rustup toolchain install nightly-2026-08-26 --profile minimal --component rust-s
 
 准备命令需要网络。首次构建还会获取 Cargo 缓存缺少的包、Emscripten zlib port 和 Skia 固定版本源码及其依赖。Cargo 使用 `--locked`；不更新仓库锁文件。SDK 环境仅由子进程加载，不写 shell 启动文件。
 
+2026-10-25 用户授权的资源专题复验使用项目内 Node 22.15.1（macOS x86_64），
+目录为 `output/webassembly/toolchains/node-v22.15.1-darwin-x64`，不覆盖系统 Node。
+Emsdk 使用上述默认目录，nightly-2026-08-26 已有 rust-src。当前检查点可执行：
+
+```sh
+env PATH="$PWD/output/webassembly/toolchains/node-v22.15.1-darwin-x64/bin:$PATH" \
+  python3 scripts/build_webassembly.py --package web-wasm \
+  --output output/webassembly/resource-build-final.json
+env PATH="$PWD/output/webassembly/toolchains/node-v22.15.1-darwin-x64/bin:$PATH" \
+  npm --prefix web run build
+```
+
+换机器仍需按锁定版本自行准备对应平台工具，不能照抄 Darwin x64 目录。
+构建驱动识别实际 emcc 版本行，不让首次 SDK sanity 输出干扰固定版本检查；
+Cargo metadata 单独解析 stdout，stderr 警告保留。资源门禁命令与证据见
+[资源计划](resource-plan.md#authorized-environment-setup-and-real-browser-acceptance)。
+
 ## 构建与运行
 
 ```sh

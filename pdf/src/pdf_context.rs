@@ -26,6 +26,7 @@ pub struct PDFContext<R: Seek + Read> {
     loading_objects: RefCell<Vec<ObjectId>>,
     decoding_depth: Cell<usize>,
     color_depth: Cell<usize>,
+    render_image_dpi: Cell<Option<f32>>,
     cached_stream_bytes: Cell<usize>,
     source_resolution_depth: Cell<usize>,
     security: Option<crate::security::SecurityHandler>,
@@ -64,6 +65,27 @@ impl Drop for BudgetedLoadingGuard<'_> {
 }
 
 impl<R: Seek + Read> PDFContext<R> {
+    pub(crate) fn render_image_dpi(&self) -> Option<f32> {
+        self.render_image_dpi.get()
+    }
+
+    pub(crate) fn with_render_image_dpi<T>(
+        &self,
+        dpi: f32,
+        action: impl FnOnce() -> PdfResult<T>,
+    ) -> PdfResult<T> {
+        struct Restore<'a>(&'a Cell<Option<f32>>, Option<f32>);
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                self.0.set(self.1);
+            }
+        }
+        let _restore = Restore(
+            &self.render_image_dpi,
+            self.render_image_dpi.replace(Some(dpi)),
+        );
+        action()
+    }
     pub(crate) fn cached_font(
         &self,
         id: ObjectId,
@@ -157,6 +179,7 @@ impl<R: Seek + Read> PDFContext<R> {
             loading_objects: RefCell::new(Vec::new()),
             decoding_depth: Cell::new(0),
             color_depth: Cell::new(0),
+            render_image_dpi: Cell::new(None),
             cached_stream_bytes: Cell::new(0),
             source_resolution_depth: Cell::new(0),
             security: None,
@@ -320,6 +343,7 @@ impl<R: Seek + Read> PDFContext<R> {
             loading_objects: RefCell::new(Vec::new()),
             decoding_depth: Cell::new(0),
             color_depth: Cell::new(0),
+            render_image_dpi: Cell::new(None),
             cached_stream_bytes: Cell::new(0),
             source_resolution_depth: Cell::new(0),
             security,

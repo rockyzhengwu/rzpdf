@@ -427,7 +427,9 @@ face 排名，不更改编码/GID、字宽、提取的 ActualText 或引入 shap
 新增 renderRegion(page, region, dpi, options)，region 为该 DPI 下、已有页面旋转/
 CropBox/UserUnit 后的左上角整数像素 x/y/width/height。区域必须完全位于 round
 后的整页像素尺寸内，不隐式裁切或缩放；Web 单边最多 1024，单块最多 1,048,576
-像素，逻辑整页单边最多 32768。沿用 DPI 1～288、现有绘制选项、权限及资源限额。
+像素，逻辑整页单边最多 32768。当前分块 DPI 为 1～1152，整页仍为 1～288；
+现有绘制选项、权限及资源限额保持。后续资源扩展及未完成的浏览器验收见
+[资源计划](resource-plan.md)和[策略](resources.md)，不将旧门禁外推为新实现已验收。
 输出为独立 RGBA 副本，附区域 x/y；不返回跨 memory.grow 的借用视图。
 
 渲染器只分配区域大小的颜色/透明组/软蒙版/页面空间图案 surface，使用整数平移

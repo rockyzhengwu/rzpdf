@@ -93,6 +93,14 @@ def source_inventory():
                 "web/tsconfig.json", "web/index.html", "web/src/client.ts", "web/src/demo.ts",
                 "web/tests/browser.mjs", "render/examples/rgba_reference.rs",
                 "scripts/prepare_webassembly_fixtures.py"]
+    optional.extend([
+        "web-wasm/src/resources.rs", "pdf/src/pdf_context.rs", "pdf/src/error.rs",
+        "scripts/test_build_webassembly.py",
+        "pdf/src/document/mod.rs", "pdf/examples/resource_scan.rs",
+        "pdf/tests/render_image_resolution.rs", "web/tests/resources.mjs",
+        "web/tests/resources-browser.mjs", "docs/webassembly/resources.md",
+        "docs/webassembly/resource-plan.md",
+    ])
     files.extend(name for name in optional if (REPO / name).exists())
     files.extend(str(path.relative_to(REPO)) for directory in ["fonts", "afm", "cmaps", "licenses"]
                  for path in sorted((REPO / "font-data" / directory).iterdir()) if path.is_file())

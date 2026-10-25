@@ -74,7 +74,7 @@ export class WorkerPdfEngine extends EventTarget {
       if(!job||response.id!==job.id)return;
       if(response.kind==='started') {this.dispatchEvent(new CustomEvent('taskstart',{detail:{id:job.id,session,operation:job.operation}}));return;}
       if(response.kind==='error') {
-        const error=new PdfApiError(response.error.code,response.error.message,response.error.operation,response.error.page,job.id,session);
+        const error=new PdfApiError(response.error.code,response.error.message,response.error.operation,response.error.page,job.id,session,response.error.resource);
         if(response.error.fatal){this.reset(error);return;}
         this.finish(job);job.reject(error);this.pump();return;
       }
@@ -173,6 +173,7 @@ export class WorkerPdfEngine extends EventTarget {
     await this.enqueue('font',[owned,index],undefined,task,owned?.length??0,owned?[owned.buffer]:[]);
   }
   statistics(task:TaskOptions={}):Promise<{handles:number;retainedBytes:number;documents:number}> {return this.enqueue('statistics',[],undefined,task);}
+  capabilities(task:TaskOptions={}):Promise<Record<string,unknown>> {return this.enqueue('capabilities',[],undefined,task);}
   checkSession(session:string):void {
     this.valid();if(session!==this.session||!this.worker)throw new PdfApiError('invalid_handle','Document belongs to an expired Worker session','session',undefined,undefined,session);
   }
@@ -180,7 +181,7 @@ export class WorkerPdfEngine extends EventTarget {
     this.checkSession(session);if(!this.documents.has(id))throw new PdfApiError('invalid_handle','Document is closed or belongs to another engine','document');
   }
   callDocument<T>(session:string,id:number,operation:WorkerOperation,args:unknown[],task:TaskOptions={}):Promise<T> {
-    try {this.checkDocument(session,id);if(!['pageInfo','text','render','renderRegion','search','outlines','links','capabilities','diagnostics','state','annotations','formFields','apply','save','content','fontRequirements','registerDocumentFont'].includes(operation))throw new PdfApiError('invalid_argument','Not a document operation',operation);}catch(error){return Promise.reject(error);}
+    try {this.checkDocument(session,id);if(!['pageInfo','text','render','renderRegion','search','outlines','links','capabilities','diagnostics','state','annotations','formFields','apply','save','content','fontRequirements','registerDocumentFont','cacheStatistics','clearRenderCaches'].includes(operation))throw new PdfApiError('invalid_argument','Not a document operation',operation);}catch(error){return Promise.reject(error);}
     if(operation==='registerDocumentFont') {
       try {
         validateArguments(operation,args);this.admit((args[0] as Uint8Array).length,'registerFont',task);
@@ -254,6 +255,8 @@ export class WorkerPdfDocument {
   outlines(task:TaskOptions={}):Promise<OutlineItem[]>{return this.call('outlines',[],task);}
   links(page:number,task:TaskOptions={}):Promise<PageLink[]>{return this.call('links',[page],task);}
   capabilities(task:TaskOptions={}):Promise<Record<string,unknown>>{return this.call('capabilities',[],task);}
+  cacheStatistics(task:TaskOptions={}):Promise<import('./client.js').RenderCacheStatistics>{return this.call('cacheStatistics',[],task);}
+  clearRenderCaches(task:TaskOptions={}):Promise<import('./client.js').RenderCacheStatistics>{return this.call('clearRenderCaches',[],task);}
   diagnostics(task:TaskOptions={}):Promise<{reason:string;offset:number;object:number[]|null}[]>{return this.call('diagnostics',[],task);}
   close():Promise<void>{if(this.closing)return this.closing;this.closed=true;this.closing=this.engine.closeDocument(this.session,this.id);return this.closing;}
 }

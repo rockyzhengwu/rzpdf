@@ -4,6 +4,7 @@ import io
 import json
 from pathlib import Path
 import tempfile
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -11,6 +12,19 @@ import build_webassembly as build
 
 
 class BuildTests(unittest.TestCase):
+    def test_json_stdout_is_not_contaminated_by_warning_stderr(self):
+        completed = subprocess.CompletedProcess(["cargo"], 0,
+            stdout='{"packages": []}', stderr='warning: deprecated configuration\n')
+        with patch.object(build.subprocess, "run", return_value=completed) as run, \
+                contextlib.redirect_stderr(io.StringIO()) as diagnostics:
+            self.assertEqual(build.capture_json(["cargo", "metadata"]), {"packages": []})
+        self.assertIn("warning:", diagnostics.getvalue())
+        self.assertTrue(run.call_args.kwargs["check"])
+
+    def test_sdk_initialization_does_not_hide_or_weaken_version_check(self):
+        self.assertTrue(build.matches_emcc_version("cache: INFO sanity checks\nemcc (Emscripten) 3.1.64 (revision)", "3.1.64"))
+        self.assertFalse(build.matches_emcc_version("warning: expected 3.1.64 \nemcc (Emscripten) 3.1.65 (revision)", "3.1.64"))
+
     def test_wrong_rust_revision_blocks_before_cargo(self):
         with tempfile.TemporaryDirectory() as folder:
             report = Path(folder) / "result.json"

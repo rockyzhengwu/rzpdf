@@ -2363,7 +2363,16 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             dict,
             image.encoded_data().to_vec(),
         ));
-        let decoded = PdfImage::try_new(String::new(), &stream, self.ctx)?.mark_inline();
+        let image_matrix = self
+            .current_state
+            .ctm()
+            .checked_mul(&self.page.page_matrix)?;
+        let decoded = if self.pattern_depth == 0 && self.type3_depth == 0 {
+            PdfImage::try_new_for_render(String::new(), &stream, self.ctx, &image_matrix)?
+        } else {
+            PdfImage::try_new(String::new(), &stream, self.ctx)?
+        }
+        .mark_inline();
         if (self.type3_uncoloured || self.pattern_uncoloured) && !decoded.is_mask() {
             return Err(PdfError::FontError(
                 "d1 glyph image must be a stencil".into(),
@@ -2448,10 +2457,37 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                 let pdfimage = if let Some(image) = self.image_cache.get(name) {
                     image.clone()
                 } else {
+                    let image_matrix = self
+                        .current_state
+                        .ctm()
+                        .checked_mul(&self.page.page_matrix)?;
                     let image =
-                        std::rc::Rc::new(PdfImage::try_new(name.to_string(), &xobject, self.ctx)?);
+                        std::rc::Rc::new(if self.pattern_depth == 0 && self.type3_depth == 0 {
+                            PdfImage::try_new_for_render(
+                                name.to_string(),
+                                &xobject,
+                                self.ctx,
+                                &image_matrix,
+                            )?
+                        } else {
+                            PdfImage::try_new(name.to_string(), &xobject, self.ctx)?
+                        });
                     let bytes = image.retained_sample_bytes()?;
-                    if self.image_cache.len() < self.ctx.limits().max_objects
+                    let source_dimension = |key| -> PdfResult<Option<u32>> {
+                        xobject
+                            .get_attr(key)
+                            .map(|value| self.ctx.resolve(value))
+                            .transpose()
+                            .map(|value| value.and_then(|value| value.as_u32()))
+                    };
+                    let (width, height) = image.pixel_dimensions();
+                    // Only full-size images enter this name-only cache. Reduced
+                    // images depend on each draw's transform, not just its name.
+                    let full_precision = self.ctx.render_image_dpi().is_none()
+                        || (source_dimension("Width")? == Some(width)
+                            && source_dimension("Height")? == Some(height));
+                    if full_precision
+                        && self.image_cache.len() < self.ctx.limits().max_objects
                         && bytes
                             <= self
                                 .ctx

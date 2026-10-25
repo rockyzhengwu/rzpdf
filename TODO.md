@@ -6,6 +6,9 @@
 
 ## 当前检查点
 
+- [x] WR-01～06 浏览器资源专题实现／评估：能力与档位、结构化错误、缓存接口、1152 DPI 分块及受限 JPEG 降采样，详见[计划](docs/webassembly/resource-plan.md)。
+- [x] WR-07：用户授权安装固定环境后，优化 Wasm 构建及 Chromium 下直接／真实 Worker 资源门禁通过；指纹、源码边界和早期环境阻塞见[验收记录](docs/webassembly/resource-plan.md#authorized-environment-setup-and-real-browser-acceptance)。不外推其他编解码器／平台或整版浏览器发布。
+
 - [x] 修复真实文件暴露的空 xref 分段过严拒绝及图像 SMask Matte 缺口；不新开版本，验证范围见[定向兼容回归](docs/testing.md#xref-and-matte-compatibility-regression)。
 - [x] v0.14 的 V14-00～09／阶段 A、B、C 全部按限定范围验收。
 - [x] 完整工作区 93 组／1633 项、联合 189 项及十二组独立门禁通过。

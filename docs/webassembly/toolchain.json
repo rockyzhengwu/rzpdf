@@ -21,6 +21,6 @@
     "-sEXPORT_ES6=1",
     "-sEXPORT_NAME=createRzpdfModule",
     "-sENVIRONMENT=web,worker",
-    "-sEXPORTED_FUNCTIONS=[\"_main\",\"_rz_abi_version\",\"_rz_alloc\",\"_rz_buffer_ptr\",\"_rz_buffer_len\",\"_rz_open\",\"_rz_page_count\",\"_rz_render\",\"_rz_image_width\",\"_rz_image_height\",\"_rz_release\",\"_rz_error_ptr\",\"_rz_error_len\",\"_rz_set_substitute_font\",\"_rz_open_with_options\",\"_rz_query\",\"_rz_error_code\",\"_rz_dispose\",\"_rz_handle_count\",\"_rz_retained_bytes\",\"_rz_apply\",\"_rz_apply_asset\",\"_rz_save\",\"_rz_render_page\",\"_rz_render_region\",\"_rz_register_font\",\"_rz_clear_fonts\"]"
+    "-sEXPORTED_FUNCTIONS=[\"_main\",\"_rz_abi_version\",\"_rz_alloc\",\"_rz_buffer_ptr\",\"_rz_buffer_len\",\"_rz_open\",\"_rz_page_count\",\"_rz_render\",\"_rz_image_width\",\"_rz_image_height\",\"_rz_release\",\"_rz_error_ptr\",\"_rz_error_len\",\"_rz_set_substitute_font\",\"_rz_open_with_options\",\"_rz_query\",\"_rz_error_code\",\"_rz_dispose\",\"_rz_handle_count\",\"_rz_retained_bytes\",\"_rz_apply\",\"_rz_apply_asset\",\"_rz_save\",\"_rz_render_page\",\"_rz_render_region\",\"_rz_register_font\",\"_rz_clear_fonts\",\"_rz_error_details_ptr\",\"_rz_error_details_len\"]"
   ]
 }

@@ -313,7 +313,8 @@ missingCodepoints 是其中尚无覆盖的子集。selected.preference 是名称
 `doc.renderRegion(page, {x,y,width,height}, dpi=72, options={})` 返回独立
 `{x,y,width,height,pixels}`。坐标为已有页面旋转/CropBox/UserUnit 后、该 DPI 的
 左上角整数像素；区域必须完全在页面内。单边最多 1024，逻辑页面单边最多
-32768，DPI 仍为 1～288。`rasterSize(info.width, info.height, dpi)` 可从
+32768；分块 DPI 为 1～1152，整页 `render` 仍为 1～288。资源查询、档位、降采样
+和错误详情见[资源策略](resources.md)。`rasterSize(info.width, info.height, dpi)` 可从
 `raster.js` 导入，按原生 f32 缩放/f64 取整计算完整像素尺寸，不分配整页。
 
 ```ts

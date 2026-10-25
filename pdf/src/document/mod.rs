@@ -217,6 +217,11 @@ impl<R: Seek + Read> PdfDocument<R> {
         &self.ctx
     }
 
+    /// Immutable effective resource policy used when this document was opened.
+    pub fn resource_limits(&self) -> crate::parser::options::Limits {
+        self.ctx.limits()
+    }
+
     pub fn from_reader(reader: R) -> PdfResult<PdfDocument<R>> {
         Self::from_reader_with_mode(reader, crate::parser::syntax::ParseMode::Compatible)
     }

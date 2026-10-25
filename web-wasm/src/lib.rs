@@ -3,6 +3,7 @@ mod api;
 mod content;
 mod fonts;
 mod interaction;
+mod resources;
 use api::{ApiError, ApiResult};
 use pdf::{
     document::Document,
@@ -57,6 +58,7 @@ struct State {
     resources: BTreeMap<u32, Resource>,
     error: String,
     error_code: u32,
+    error_details: String,
     substitute_font: Option<SubstituteFont>,
     font_provider: Rc<render::font_provider::MemoryFontProvider>,
     font_epoch: u64,
@@ -116,11 +118,13 @@ fn call(f: impl FnOnce(&mut State) -> ApiResult<u32>) -> u32 {
         let mut s = s.borrow_mut();
         s.error.clear();
         s.error_code = 0;
+        s.error_details.clear();
         match f(&mut s) {
             Ok(n) => n,
             Err(e) => {
                 s.error = e.message;
                 s.error_code = e.code;
+                s.error_details = e.details.map_or_else(String::new, |v| v.to_string());
                 0
             }
         }
@@ -151,6 +155,7 @@ pub extern "C" fn rz_buffer_ptr(handle: u32) -> usize {
         let mut s = s.borrow_mut();
         s.error.clear();
         s.error_code = 0;
+        s.error_details.clear();
         match s.resources.get(&handle).and_then(Resource::bytes) {
             Some(b) => b.as_ptr() as usize,
             None => {
@@ -262,10 +267,15 @@ fn render(
     annotations: Option<pdf::page::annotations::AnnotationRenderOptions>,
     region: Option<RasterRegion>,
 ) -> ApiResult<u32> {
-    if !dpi.is_finite() || !(1.0..=288.0).contains(&dpi) {
-        return Err("DPI must be between 1 and 288".into());
+    let max_dpi = if region.is_some() {
+        resources::MAX_REGION_DPI
+    } else {
+        resources::MAX_FULL_PAGE_DPI
+    };
+    if !dpi.is_finite() || !(1.0..=max_dpi).contains(&dpi) {
+        return Err("DPI is outside the rendering mode's supported range".into());
     }
-    if s.resources.len() >= 8 || s.retained() + limits().max_render_bytes > BUFFER_LIMIT {
+    if s.resources.len() >= 8 {
         return Err(ApiError::resource("release buffers before rendering"));
     }
     let Some(Resource::Document(d, _)) = s.resources.get(&document) else {
@@ -274,15 +284,51 @@ fn render(
     if page as usize >= d.page_count() {
         return Err("page index out of range".into());
     }
+    let geometry = d.get_page(page)?.geometry()?;
+    let scale = f64::from(dpi / 72.);
+    let raster_width = (f64::from(geometry.display_width) * scale).round();
+    let raster_height = (f64::from(geometry.display_height) * scale).round();
+    let effective = d.resource_limits();
+    let pixels = region.map_or(raster_width * raster_height, |r| {
+        f64::from(r.width) * f64::from(r.height)
+    });
+    if pixels * 4. > BUFFER_LIMIT.saturating_sub(s.retained()) as f64 {
+        return Err(pdf::error::PdfError::ResourceLimitExceeded {
+            reason: "retained_bytes",
+            stage: "raster_output",
+            limit: BUFFER_LIMIT as u64,
+            actual: s.retained().saturating_add((pixels * 4.) as usize) as u64,
+        }
+        .into());
+    }
+    for (reason, actual, limit) in [
+        ("render_pixels", pixels, effective.max_render_pixels),
+        (
+            "render_bytes",
+            pixels * 4.,
+            effective.max_render_bytes as u64,
+        ),
+    ] {
+        if actual > limit as f64 {
+            return Err(pdf::error::PdfError::ResourceLimitExceeded {
+                reason,
+                stage: "raster_output",
+                limit,
+                actual: actual as u64,
+            }
+            .into());
+        }
+    }
     if let Some(region) = region {
-        let geometry = d.get_page(page)?.geometry()?;
-        let scale = f64::from(dpi / 72.);
-        let width = (f64::from(geometry.display_width) * scale).round();
-        let height = (f64::from(geometry.display_height) * scale).round();
+        let (width, height) = (raster_width, raster_height);
         if width > 32768. || height > 32768. {
-            return Err(ApiError::resource(
-                "logical raster exceeds region dimension limit",
-            ));
+            return Err(pdf::error::PdfError::ResourceLimitExceeded {
+                reason: "raster_side",
+                stage: "raster_output",
+                limit: 32768,
+                actual: width.max(height) as u64,
+            }
+            .into());
         }
         if f64::from(region.x + region.width) > width
             || f64::from(region.y + region.height) > height
@@ -290,7 +336,8 @@ fn render(
             return Err("render region exceeds page".into());
         }
     }
-    let mut renderer = SkiaRender::with_limits(dpi, dpi, limits()).map_err(ApiError::from)?;
+    let mut renderer =
+        SkiaRender::with_limits(dpi, dpi, d.resource_limits()).map_err(ApiError::from)?;
     renderer.set_region(region)?;
     if let Some(program) = &s.substitute_font {
         renderer.set_substitute_program(program);
@@ -298,7 +345,9 @@ fn render(
     renderer.set_font_provider(s.font_provider.clone());
     // Interpretation is document/revision scoped; DPI and tile rectangles only
     // affect replay. NoZoom/NoRotate annotation inputs remain part of the key.
-    let prepared = d.prepare_page(page, annotations).map_err(ApiError::from)?;
+    let prepared = d
+        .prepare_page_for_render(page, annotations, dpi)
+        .map_err(ApiError::from)?;
     prepared.replay(d, &mut renderer).map_err(ApiError::from)?;
     s.insert(Resource::Image(renderer.to_rgba().map_err(ApiError::from)?))
 }
@@ -376,6 +425,16 @@ pub extern "C" fn rz_error_ptr() -> usize {
 #[unsafe(no_mangle)]
 pub extern "C" fn rz_error_len() -> u32 {
     STATE.with(|s| s.borrow().error.len() as u32)
+}
+
+/// Borrowed UTF-8 JSON metadata; read before the next mutating ABI call.
+#[unsafe(no_mangle)]
+pub extern "C" fn rz_error_details_ptr() -> usize {
+    STATE.with(|s| s.borrow().error_details.as_ptr() as usize)
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn rz_error_details_len() -> u32 {
+    STATE.with(|s| s.borrow().error_details.len() as u32)
 }
 
 /// Free tracked resources without resetting the monotonically increasing handle ID.

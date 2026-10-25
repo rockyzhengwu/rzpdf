@@ -1,5 +1,6 @@
-//! Reusable interpretation snapshots. Raster DPI and tile rectangles are not
-//! interpretation inputs; annotation magnification/rotation are.
+//! Reusable interpretation snapshots. Tile rectangles are not interpretation
+//! inputs. Render-only reduced image decoding adds DPI to snapshot identity;
+//! annotation magnification/rotation remain inputs as well.
 use super::{PdfDocument, identity::DocumentStamp};
 use crate::{
     device::Device,
@@ -18,6 +19,7 @@ use std::{
 pub(crate) struct PageKey {
     page: u32,
     annotations: Option<(bool, bool, u32, u16)>,
+    image_dpi: Option<u32>,
 }
 #[derive(Debug)]
 enum List {
@@ -67,6 +69,39 @@ pub struct RenderCacheStatistics {
     pub font_estimated_bytes: usize,
 }
 impl<R: Read + Seek> PdfDocument<R> {
+    /// Display text geometry with reduced incidental images and default layer
+    /// visibility. Character data and source positions are not downsampled.
+    pub fn extract_characters_for_display(
+        &self,
+        page: u32,
+    ) -> PdfResult<crate::page::text_extraction::TextExtractionReport> {
+        self.ctx().with_render_image_dpi(72., || {
+            let mut page = self.get_page(page)?;
+            if self.optional_content()?.is_some() {
+                page.extract_characters_with_optional_content_report(
+                    &self.optional_content_visibility(&Default::default())?,
+                )
+            } else {
+                page.extract_characters_paint_order_report()
+            }
+        })
+    }
+    /// Render-only interpretation. DPI is part of the image cache identity;
+    /// tile position is not. Extraction and editing keep full source precision.
+    pub fn prepare_page_for_render(
+        &self,
+        page: u32,
+        annotations: Option<AnnotationRenderOptions>,
+        dpi: f32,
+    ) -> PdfResult<Rc<PreparedPage>> {
+        if !dpi.is_finite() || dpi <= 0.0 {
+            return Err(PdfError::PageResourceError(
+                "invalid image decode DPI".into(),
+            ));
+        }
+        self.ctx()
+            .with_render_image_dpi(dpi, || self.prepare_page(page, annotations))
+    }
     /// Prepare the current default optional-content selection. Keeps at most two
     /// pages / 32 MiB of estimated owned Rust storage per document. Oversized or
     /// Type3 snapshots are returned without retention; parse errors are not cached.
@@ -87,6 +122,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         }
         let key = PageKey {
             page,
+            image_dpi: self.ctx().render_image_dpi().map(f32::to_bits),
             annotations: annotations.map(|o| {
                 (
                     o.intent == crate::page::annotations::AnnotationRenderIntent::Print,

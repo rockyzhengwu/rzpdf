@@ -19,3 +19,13 @@ pub fn configure_isolated_web_caches() {
 pub fn purge_isolated_web_caches() {
     skia_safe::graphics::purge_all_caches();
 }
+
+/// Backend-owned cache counters, not total process or linear-memory usage.
+pub fn backend_cache_statistics() -> [usize; 4] {
+    [
+        skia_safe::graphics::font_cache_used(),
+        skia_safe::graphics::font_cache_limit(),
+        skia_safe::graphics::resource_cache_total_bytes_used(),
+        skia_safe::graphics::resource_cache_total_bytes_limit(),
+    ]
+}

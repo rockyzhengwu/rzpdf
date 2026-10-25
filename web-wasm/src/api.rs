@@ -17,12 +17,14 @@ pub(crate) type ApiResult<T> = Result<T, ApiError>;
 pub(crate) struct ApiError {
     pub code: u32,
     pub message: String,
+    pub details: Option<Value>,
 }
 impl ApiError {
     pub(crate) fn new(code: u32, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
+            details: (code == 7).then(|| json!({"reason":"unclassified","stage":"unknown"})),
         }
     }
     pub fn handle(message: &str) -> Self {
@@ -50,10 +52,21 @@ impl From<PdfError> for ApiError {
             PdfError::PermissionDenied(_) => 4,
             PdfError::UnsupportedFeature(_) | PdfError::UnsupportedSecurity(_) => 5,
             PdfError::FontError(_) => 6,
-            PdfError::ResourceLimit(_) => 7,
+            PdfError::ResourceLimit(_) | PdfError::ResourceLimitExceeded { .. } => 7,
             _ => 1,
         };
-        Self::new(code, error.to_string())
+        let mut result = Self::new(code, error.to_string());
+        if let PdfError::ResourceLimitExceeded {
+            reason,
+            stage,
+            limit,
+            actual,
+        } = error
+        {
+            result.details =
+                Some(json!({"reason":reason,"stage":stage,"limit":limit,"actual":actual}));
+        }
+        result
     }
 }
 pub(crate) fn open(
@@ -61,6 +74,15 @@ pub(crate) fn open(
     input: u32,
     password: Option<&str>,
     mode: ParseMode,
+) -> ApiResult<u32> {
+    open_with_policy(s, input, password, mode, limits())
+}
+fn open_with_policy(
+    s: &mut State,
+    input: u32,
+    password: Option<&str>,
+    mode: ParseMode,
+    policy: Limits,
 ) -> ApiResult<u32> {
     let Some(Resource::Input(bytes)) = s.resources.get(&input) else {
         return Err(ApiError::handle("invalid PDF input handle"));
@@ -81,7 +103,7 @@ pub(crate) fn open(
     let source_bytes = owned.len();
     let options = ParseOptions {
         mode,
-        limits: limits(),
+        limits: policy,
     };
     let doc = match password {
         Some(password) => Document::from_bytes_with_password_and_options(owned, password, options),
@@ -183,14 +205,7 @@ fn text(d: &Document, index: u32) -> ApiResult<Value> {
     {
         return Err(PdfError::PermissionDenied("text extraction".into()).into());
     }
-    let mut page = d.get_page(index)?;
-    let report = if d.optional_content()?.is_some() {
-        page.extract_characters_with_optional_content_report(
-            &d.optional_content_visibility(&Default::default())?,
-        )?
-    } else {
-        page.extract_characters_paint_order_report()?
-    };
+    let report = d.extract_characters_for_display(index)?;
     let mut bytes = 0usize;
     let mut characters = Vec::new();
     for c in report.characters {
@@ -218,10 +233,21 @@ fn text(d: &Document, index: u32) -> ApiResult<Value> {
 }
 fn query(d: &Document, document: u32, request: &Value) -> ApiResult<Value> {
     match request.get("operation").and_then(Value::as_str).ok_or("operation is required")? {
-        "capabilities" => Ok(json!({"abi":2,"text":true,"navigation":true,"passwordOpen":true,
+        "capabilities" => {
+            let mut value = crate::resources::capabilities(d.resource_limits());
+            value.as_object_mut().unwrap().extend(json!({"abi":2,"text":true,"navigation":true,"passwordOpen":true,
             "annotations":true,"forms":true,"editing":true,"save":true,"renderRegion":true,"maxRegionSide":1024,"maxRasterSide":32768,"regionRasterStatus":"experimental",
             "textOrder":"paint","maxInputBytes":null,"maxBufferBytes":BUFFER_LIMIT,"maxJsonBytes":OUTPUT_LIMIT,
-            "revision":d.revision()})),
+            "revision":d.revision()}).as_object().unwrap().clone());
+            Ok(value)
+        },
+        "cacheStatistics" => Ok(crate::resources::cache_statistics(d)),
+        "clearRenderCaches" => {
+            d.clear_render_caches();
+            #[cfg(target_os = "emscripten")]
+            render::purge_isolated_web_caches();
+            Ok(crate::resources::cache_statistics(d))
+        },
         "state" | "annotations" | "formFields" | "content" => crate::interaction::query(d,document,request),
         "pageInfo" => {
             let g = d.get_page(page(request)?)?.geometry()?;
@@ -276,6 +302,11 @@ pub extern "C" fn rz_open_with_options(input: u32, options: u32) -> u32 {
             Some(Value::String(mode)) if mode == "compatible" => ParseMode::Compatible,
             _ => return Err("mode must be strict or compatible".into()),
         };
+        let policy = match options.remove("resourceProfile") {
+            None => limits(),
+            Some(Value::String(name)) => crate::resources::profile(&name)?,
+            _ => return Err("resourceProfile must be a supported profile name".into()),
+        };
         let password = match options.remove("password") {
             None => None,
             Some(Value::String(password)) if password.len() <= 1024 => {
@@ -286,13 +317,23 @@ pub extern "C" fn rz_open_with_options(input: u32, options: u32) -> u32 {
         if !options.is_empty() {
             return Err("unknown open option".into());
         }
-        open(s, input, password.as_deref().map(String::as_str), mode)
+        open_with_policy(
+            s,
+            input,
+            password.as_deref().map(String::as_str),
+            mode,
+            policy,
+        )
     })
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn rz_query(document: u32, input: u32) -> u32 {
     call(|s| {
         let request = request(s, input)?;
+        if document == 0 && request.get("operation").and_then(Value::as_str) == Some("capabilities")
+        {
+            return output(s, crate::resources::capabilities(limits()));
+        }
         let Some(Resource::Document(d, _)) = s.resources.get(&document) else {
             return Err(ApiError::handle("invalid document handle"));
         };
