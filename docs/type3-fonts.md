@@ -6,6 +6,13 @@ v0.7 已接通受限 Type3 图形字形执行、文字提取和来源隔离；�
 
 通过 `PdfPage::inspect_type3_font` 或 `inspect_type3_font_with_budget` 取得 `Type3Font`。模型校验 Type/Subtype、FontMatrix、FontBBox、FirstChar/LastChar、Widths、Encoding、CharProcs 和可选 Resources。Encoding 复用现有预定义编码与 Differences；字段和数组元素可为间接对象。
 
+`FontBBox` 是 PDF rectangle，可以用任意一对对角点表示；模型将其规范化为
+`[min_x, min_y, max_x, max_y]`，Strict 和 Compatible 行为一致，不记为结构修复。
+反向排列的角点常见于带负 Y `FontMatrix` 的 Skia Type3 字体。矩阵、字宽、字形
+坐标保持原值，保存保留源字典的角点顺序；四个零仍表示不能据此假设字形大小。
+长度、数字类型和有限值检查继续执行。依据
+[ISO 32000-1 §7.9.5 与 Type3 字体条目](https://opensource.adobe.com/dc-acrobat-sdk-docs/standards/pdfstandards/pdf/PDF32000_2008.pdf)。
+
 ```rust,ignore
 let page = doc.get_page(0)?;
 let font = page.inspect_type3_font("F0")?;
@@ -69,3 +76,13 @@ PYTHONPATH=tmp/pdfs/v06-verifiers:tmp/pdfs/v05-verifiers:tmp/pdfs/python python3
 一致的外部 alpha 按整个字形应用一次：字形内部先以不透明状态绘制到隔离组，
 再合成组，避免重叠图元重复积累 alpha。字形内部 ExtGState、软遮罩及透明组
 等未列出的程序能力仍保持原有限制。
+
+## 密集图形字形的覆盖扫描
+
+渲染仍使用固定的 64×64 全局覆盖单元及原有 halo，保持整页与分块的一致性。
+Solid SrcOver 路径的整数覆盖扫描只访问与当前表面相交的轮廓范围，加一个像素
+抗锯齿余量；每个小字形不再扫描完整单元中的空白部分。工作额度按每单元
+轮廓点数和实际扫描面积计数，原工作预算、遮罩尺寸、像素／字节及细分限制保持。
+1024 个小曲线路径及 Type3 字形可在既有浏览器默认额度内绘制；合成 Type3 的
+72／144 DPI 整页和分块像素逐项相同。真实文件的原生 72 DPI PNG 在扫描优化
+前后逐字节一致。具体范围和复现方法见[回归记录](testing.md#type3-fontbbox-与覆盖扫描兼容回归)。

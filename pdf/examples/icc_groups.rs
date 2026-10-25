@@ -1,4 +1,4 @@
-//! Generated, non-private ICC working-space and transform-budget regressions.
+//! Generated, non-private browser colour-space and embedded-glyph regressions.
 use pdf::{
     document::{Document, resource_manager::ResourceKind},
     io::stream_reader::StreamReader,
@@ -129,5 +129,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .content(b"0 0 30 20 re f".to_vec()),
     )?;
     std::fs::write(output.join("cyclic-color.pdf"), cyclic.save_to_bytes()?)?;
+
+    // Same reflected Type3 glyph with canonical and opposite-order FontBBox.
+    // FontMatrix and glyph operations must produce identical page pixels.
+    let type3 = Document::new()?;
+    let glyph = type3.try_insert_object(PdfObject::PdfStream(PdfStream::from_decoded_data(
+        Default::default(),
+        b"600 0 0 -700 600 0 d1 0 -700 600 700 re f".to_vec(),
+    )?))?;
+    for (page, bbox) in ["[0 -700 600 0]", "[600 0 0 -700]"].iter().enumerate() {
+        let page = page as u32;
+        type3.add_page_with_builder(page, PageBuilder::new().size(30., 30.))?;
+        let font = type3.try_insert_object(object(&format!("<< /Type /Font /Subtype /Type3 /FontMatrix [.001 0 0 -.001 0 0] /FontBBox {bbox} /FirstChar 65 /LastChar 65 /Widths [600] /Encoding << /Differences [65 /A] >> /CharProcs << /A {} 0 R >> >>", glyph.obj_num())))?;
+        let name = type3
+            .resources()
+            .register_existing(page, ResourceKind::Font, font)?;
+        type3.replace_page_contents(
+            page,
+            format!("BT /{name} 20 Tf 1 0 0 1 5 10 Tm (A) Tj ET").into_bytes(),
+        )?;
+    }
+    let dense_glyph =
+        type3.try_insert_object(PdfObject::PdfStream(PdfStream::from_decoded_data(
+            Default::default(),
+            b"600 0 0 -700 600 0 d1 0 0 m 0 -700 600 -700 600 0 c h f".to_vec(),
+        )?))?;
+    type3.add_page_with_builder(2, PageBuilder::new().size(160., 160.))?;
+    let font = type3.try_insert_object(object(&format!("<< /Type /Font /Subtype /Type3 /FontMatrix [.001 0 0 -.001 0 0] /FontBBox [600 0 0 -700] /FirstChar 65 /LastChar 65 /Widths [600] /Encoding << /Differences [65 /A] >> /CharProcs << /A {} 0 R >> >>", dense_glyph.obj_num())))?;
+    let name = type3
+        .resources()
+        .register_existing(2, ResourceKind::Font, font)?;
+    let mut content = format!("BT /{name} 5 Tf 1 0 0 1 2 156 Tm ");
+    for _ in 0..32 {
+        content.push_str("(AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA) Tj 0 -4 Td ");
+    }
+    content.push_str("ET");
+    type3.replace_page_contents(2, content.into_bytes())?;
+    std::fs::write(output.join("type3-rectangles.pdf"), type3.save_to_bytes()?)?;
     Ok(())
 }

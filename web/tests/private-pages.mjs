@@ -10,6 +10,8 @@ if(!process.env.RZPDF_PRIVATE_PDF)throw Error('Set RZPDF_PRIVATE_PDF to an expli
 const input=resolve(process.env.RZPDF_PRIVATE_PDF),out=resolve(process.env.RZPDF_PRIVATE_REPORT??resolve(repo,'output/webassembly/private-pages'));
 await mkdir(out,{recursive:true});
 const bytes=await readFile(input);
+const parseMode=process.env.RZPDF_PRIVATE_MODE??'compatible';
+const dpi=Number(process.env.RZPDF_PRIVATE_DPI??36);
 const server=createServer(async(req,res)=>{try{
  const path=decodeURIComponent(new URL(req.url,'http://localhost').pathname);
  if(path==='/input.pdf'){res.setHeader('Content-Type','application/pdf');res.end(bytes);return;}
@@ -18,7 +20,7 @@ const server=createServer(async(req,res)=>{try{
  res.setHeader('Content-Type',({'.js':'text/javascript','.mjs':'text/javascript','.wasm':'application/wasm'})[extname(file)]??'application/octet-stream');res.end(await readFile(file));
 }catch{res.writeHead(404).end();}});
 await new Promise(done=>server.listen(0,'127.0.0.1',done));
-const report={status:'failed',inputSha256:createHash('sha256').update(bytes).digest('hex'),cases:[],errors:[],artifacts:{}};
+const report={status:'failed',parseMode,dpi,inputSha256:createHash('sha256').update(bytes).digest('hex'),cases:[],errors:[],artifacts:{}};
 for (const name of ['rzpdf_web.wasm','rzpdf_web.mjs','client.js','worker-client.js','pdf-worker.js']) {
  report.artifacts[name]=createHash('sha256').update(await readFile(resolve(web,'dist',name))).digest('hex');
 }
@@ -32,7 +34,7 @@ try{
  await page.goto(`http://127.0.0.1:${server.address().port}`);
  const indices=(process.env.RZPDF_PRIVATE_PAGES??'0,1,2').split(',').map(Number);
  for(const transport of ['sync','worker'])for(const index of indices){
-  const result=await page.evaluate(async ({index,transport})=>{
+  const result=await page.evaluate(async ({index,transport,parseMode,dpi})=>{
    const {PdfEngine}=await import('/dist/client.js');
    const stderr=[],traps=[];let module,engine;
    if(transport==='sync'){
@@ -46,11 +48,11 @@ try{
    }
    const result={index,transport,stderr,traps,operations:{}};
    try{
-    const doc=await engine.open(new Uint8Array(await(await fetch('/input.pdf')).arrayBuffer()),{mode:'compatible'});
-    for(const operation of ['render','state','text','content','clearCaches','renderAgain','stateAgain'])try{
+    const doc=await engine.open(new Uint8Array(await(await fetch('/input.pdf')).arrayBuffer()),{mode:parseMode});
+    for(const operation of ['fontRequirements','render','state','text','content','clearCaches','renderAgain','stateAgain'])try{
      const started=performance.now();
      const render=operation==='render'||operation==='renderAgain';
-     const value=await(render?doc.render(index,36,{annotations:false,includeWidgets:false}):operation.startsWith('state')?doc.state():operation==='text'?doc.extractText(index):operation==='clearCaches'?doc.clearRenderCaches():doc.content(index));
+     const value=await(render?doc.render(index,dpi,{annotations:false,includeWidgets:false}):operation==='fontRequirements'?doc.fontRequirements(index,{annotations:false,includeWidgets:false}):operation.startsWith('state')?doc.state():operation==='text'?doc.extractText(index):operation==='clearCaches'?doc.clearRenderCaches():doc.content(index));
      result.operations[operation]={ok:true,milliseconds:Math.round(performance.now()-started),...(render?{width:value.width,height:value.height,ink:value.pixels.some((v,i)=>i%4!==3&&v<240)}:operation==='text'?{characters:value.characters.length}:{})};
      if(operation==='render'){
       const canvas=document.createElement('canvas');canvas.width=value.width;canvas.height=value.height;
@@ -62,7 +64,7 @@ try{
     await doc.close();
    }finally{engine.dispose();}
    return result;
-  },{index,transport});
+  },{index,transport,parseMode,dpi});
   if(result.png){await writeFile(resolve(out,`${transport}-page-${index+1}.png`),Buffer.from(result.png,'base64'));delete result.png;}
   report.cases.push(result);console.log(JSON.stringify(result));
  }

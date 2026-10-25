@@ -12,7 +12,7 @@ const web = resolve(repo, 'web');
 const fixtures = resolve(process.env.RZPDF_ICC_FIXTURES ?? resolve(repo, 'output/webassembly/icc-fixtures'));
 const out = resolve(repo, 'output/webassembly/icc-browser');
 await mkdir(out, {recursive: true});
-const names = ['linear-group.pdf', 'unsupported-group.pdf', 'many-profiles.pdf', 'sparse-cid.pdf', 'cyclic-color.pdf'];
+const names = ['linear-group.pdf', 'unsupported-group.pdf', 'many-profiles.pdf', 'sparse-cid.pdf', 'cyclic-color.pdf', 'type3-rectangles.pdf'];
 const server = createServer(async (req, res) => {
   try {
     const path = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
@@ -68,6 +68,30 @@ try {
           check(recovery.pixels.some((v, i) => i % 4 !== 3 && v < 10), 'render after colour-cycle failure');
         }
         await cyclic.close();
+        const type3 = await engine.open(await bytes('type3-rectangles.pdf'));
+        let canonical;
+        for (const pageIndex of [0, 1]) {
+          const preflight = await type3.fontRequirements(pageIndex);
+          check(preflight.complete && preflight.fonts.length === 0, 'Type3 glyphs need no external font');
+          const text = await type3.extractText(pageIndex);
+          check(text.characters.map(c => c.unicode ?? '').join('') === 'A', 'Type3 reflected text extraction');
+          const image = await type3.render(pageIndex, 72);
+          check(image.pixels.filter((v, i) => i % 4 === 0 && v < 128).length > 100, 'Type3 glyph must paint');
+          if (canonical) check(image.pixels.length === canonical.length && image.pixels.every((v, i) => v === canonical[i]), 'FontBBox corner order must not change glyph pixels');
+          else canonical = image.pixels.slice();
+        }
+        check((await type3.extractText(2)).characters.length === 1024, 'dense Type3 character count');
+        for (const dpi of [72, 144]) {
+          const dense = await type3.render(2, dpi);
+          check(dense.pixels.filter((v, i) => i % 4 === 0 && v < 128).length > 1024, 'dense Type3 curves fit unchanged browser work budget');
+          const region = {x: 40, y: 20, width: 32, height: 48};
+          const tile = await type3.renderRegion(2, region, dpi);
+          for (let row = 0; row < region.height; row++) {
+            const start = ((region.y + row) * dense.width + region.x) * 4;
+            check(tile.pixels.slice(row * region.width * 4, (row + 1) * region.width * 4).every((v, i) => v === dense.pixels[start + i]), 'trimmed coverage keeps Type3 tile seams identical');
+          }
+        }
+        await type3.close();
         const unsupported = await engine.open(await bytes('unsupported-group.pdf'));
         for (let retry = 0; retry < 2; retry++) {
           let error;
@@ -92,7 +116,7 @@ try {
         }
         await many.close();
         check((await engine.statistics()).handles === 0, 'all handles released');
-        checks.push({transport: worker ? 'worker' : 'sync', pixel, failures, glyphInk, colourCycleRecovery: true, textIndependent: true, recovery: true});
+        checks.push({transport: worker ? 'worker' : 'sync', pixel, failures, glyphInk, colourCycleRecovery: true, type3RectangleEquivalence: true, textIndependent: true, recovery: true});
       } finally { engine.dispose(); }
     }
     return checks;

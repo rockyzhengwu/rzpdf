@@ -109,15 +109,16 @@ impl Type3Font {
         };
         let matrix = numbers("FontMatrix", 6)?;
         let bbox_values = numbers("FontBBox", 4)?;
+        // FontBBox is a PDF rectangle: either pair of diagonally opposite
+        // corners is legal (ISO 32000-1, 7.9.5). Skia commonly emits reversed
+        // y corners together with a reflected FontMatrix. Canonicalize the
+        // model, preserving the original dictionary and glyph transforms.
         let bbox = [
-            bbox_values[0],
-            bbox_values[1],
-            bbox_values[2],
-            bbox_values[3],
+            bbox_values[0].min(bbox_values[2]),
+            bbox_values[1].min(bbox_values[3]),
+            bbox_values[0].max(bbox_values[2]),
+            bbox_values[1].max(bbox_values[3]),
         ];
-        if bbox[0] > bbox[2] || bbox[1] > bbox[3] {
-            return Err(invalid("reversed FontBBox"));
-        }
         let code = |key: &str| -> PdfResult<u8> {
             let (value, _temporary) = field(key)?;
             value

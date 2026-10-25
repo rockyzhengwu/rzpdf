@@ -121,13 +121,63 @@ fn font_and_glyph_share_retained_budget_and_retry_without_neighbors() {
 }
 
 #[test]
+fn font_bbox_normalizes_opposite_corners_without_rewriting_source_or_matrix() {
+    use pdf::parser::syntax::ParseMode;
+    for mode in [ParseMode::Strict, ParseMode::Compatible] {
+        for bbox in [
+            "[0 0 600 700]",
+            "[600 0 0 700]",
+            "[0 700 600 0]",
+            "[600 700 0 0]",
+            "[0 0 0 0]",
+        ] {
+            let source = FONT
+                .replace("[0 0 600 700]", bbox)
+                .replace("[.002 .001 0 .003 3 4]", "[.002 0 0 -.003 0 0]");
+            let (doc, name, id) = document(
+                &source,
+                b"600 0 d0 0 -700 600 700 re f",
+                ParseOptions {
+                    mode,
+                    ..Default::default()
+                },
+            );
+            let original = doc.resolve_object(id).unwrap().into_dict().unwrap();
+            let saved = doc.save_to_bytes().unwrap();
+            let reopened = Document::from_bytes_with_mode(saved, mode).unwrap();
+            for current in [&doc, &reopened] {
+                let page = current.get_page(0).unwrap();
+                let font = page.inspect_type3_font(&name).unwrap();
+                let expected = if bbox == "[0 0 0 0]" {
+                    [0.; 4]
+                } else {
+                    [0., 0., 600., 700.]
+                };
+                assert_eq!(font.font_bbox(), expected, "{mode:?}: {bbox}");
+                assert_eq!(font.font_matrix(), [0.002, 0., 0., -0.003, 0., 0.]);
+                assert_eq!(font.text_space_advance(65).unwrap(), [1.2, 0.]);
+                assert_eq!(
+                    page.inspect_type3_glyph(&font, 65).unwrap().metrics().bbox,
+                    None
+                );
+                let raw = current.resolve_object(id).unwrap().into_dict().unwrap();
+                assert_eq!(raw.get("FontBBox"), original.get("FontBBox"));
+                assert_eq!(raw.get("FontMatrix"), original.get("FontMatrix"));
+                assert!(current.structure_diagnostics().unwrap().is_empty());
+            }
+        }
+    }
+}
+
+#[test]
 fn invalid_fields_reject_and_release_every_reservation() {
     for (key, value) in [
         ("Type", "/NotFont"),
         ("Subtype", "/Type1"),
         ("FontMatrix", "[1 0 0 1 0]"),
         ("FontMatrix", "[1 0 0 1 0 /Bad]"),
-        ("FontBBox", "[2 0 1 3]"),
+        ("FontBBox", "[2 0 1]"),
+        ("FontBBox", "[2 0 /Bad 3]"),
         ("FirstChar", "65.5"),
         ("FirstChar", "-1"),
         ("LastChar", "256"),

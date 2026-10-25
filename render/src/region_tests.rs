@@ -6,6 +6,49 @@ trait Replay {
 }
 
 #[test]
+fn many_small_curves_fit_browser_work_budget_and_keep_pixel_coverage() {
+    let limits = pdf::parser::options::Limits {
+        max_operation_bytes: 64 * 1024 * 1024,
+        ..Default::default()
+    };
+    let mut renderer = SkiaRender::with_limits(72., 72., limits).unwrap();
+    renderer.start_page(128., 128.).unwrap();
+    renderer.surface.canvas().clear(Color::WHITE);
+    let mut builder = PathBuilder::new();
+    builder.move_to((0.25, 2.75)).line_to((0.25, 1.5));
+    builder.cubic_to((0.25, 0.25), (2.75, 0.25), (2.75, 1.5));
+    builder.line_to((2.75, 2.75)).close();
+    let path = builder.snapshot();
+    let mut paint = Paint::default();
+    paint
+        .set_color(Color::RED)
+        .set_alpha(128)
+        .set_anti_alias(true);
+    // Previously 1024 small paints exhausted the browser's unchanged budget
+    // just scanning entire 64x64 cells, regardless of actual glyph size.
+    for row in 0..32 {
+        for column in 0..32 {
+            renderer
+                .draw_prepared_path(
+                    &path,
+                    &paint,
+                    &Matrix::new(1., 0., 0., 1., (column * 4) as f32, (row * 4) as f32),
+                )
+                .unwrap();
+        }
+    }
+    let image = renderer.to_rgba().unwrap();
+    for row in 0..32 {
+        for column in 0..32 {
+            let center = ((row * 4 + 1) * 128 + column * 4 + 1) * 4;
+            let gap = ((row * 4 + 3) * 128 + column * 4 + 3) * 4;
+            assert_eq!(&image.pixels[center..center + 4], &[255, 127, 127, 255]);
+            assert_eq!(&image.pixels[gap..gap + 4], &[255; 4]);
+        }
+    }
+}
+
+#[test]
 fn canonical_curve_coverage_preserves_alpha_across_cells_and_checks_scratch() {
     let mut path = PathBuilder::new();
     path.move_to((8., 8.));

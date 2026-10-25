@@ -1519,19 +1519,38 @@ impl SkiaRender {
         let rows = (bottom - 1).div_euclid(CELL) - top.div_euclid(CELL) + 1;
         let integer_spans =
             fill.shader().is_none() && fill.as_blend_mode() == Some(skia_safe::BlendMode::SrcOver);
-        let cell_work = outline
-            .points()
-            .len()
-            .max(1)
-            .checked_add(if integer_spans {
-                (CELL * CELL) as usize
-            } else {
-                0
-            })
-            .ok_or_else(|| PdfError::ResourceLimit("canonical coverage cell work".into()))?;
-        let work = (columns as usize)
+        // Keep the mask's canonical viewport, but visit only visible samples
+        // around the outline. A one-pixel fringe includes antialias coverage.
+        // Tiny glyphs must not scan (and pay for) 4096 mostly empty samples.
+        let span_left = left
+            .saturating_sub(1)
+            .max(origin.0 as i32)
+            .max(left.div_euclid(CELL) * CELL);
+        let span_top = top
+            .saturating_sub(1)
+            .max(origin.1 as i32)
+            .max(top.div_euclid(CELL) * CELL);
+        let span_right = right
+            .saturating_add(1)
+            .min(origin.0 as i32 + self.page_width)
+            .min(((right - 1).div_euclid(CELL) * CELL).saturating_add(CELL));
+        let span_bottom = bottom
+            .saturating_add(1)
+            .min(origin.1 as i32 + self.page_height)
+            .min(((bottom - 1).div_euclid(CELL) * CELL).saturating_add(CELL));
+        let point_work = (columns as usize)
             .checked_mul(rows as usize)
-            .and_then(|n| n.checked_mul(cell_work))
+            .and_then(|n| n.checked_mul(outline.points().len().max(1)))
+            .ok_or_else(|| PdfError::ResourceLimit("canonical curve coverage work".into()))?;
+        let sample_work = if integer_spans {
+            ((span_right - span_left) as usize)
+                .checked_mul((span_bottom - span_top) as usize)
+                .ok_or_else(|| PdfError::ResourceLimit("canonical curve coverage work".into()))?
+        } else {
+            0
+        };
+        let work = point_work
+            .checked_add(sample_work)
             .ok_or_else(|| PdfError::ResourceLimit("canonical curve coverage work".into()))?;
         self.raster_path_budget = self
             .raster_path_budget
@@ -1594,9 +1613,15 @@ impl SkiaRender {
                     };
                     let mut span = fill.clone();
                     span.set_anti_alias(false);
-                    for row in 0..CELL as usize {
-                        let row_start = (row + HALO as usize) * pixels.row_bytes() + HALO as usize;
-                        let values = &bytes[row_start..row_start + CELL as usize];
+                    let first_column = (span_left - x).max(0) as usize;
+                    let last_column = (span_right - x).min(CELL) as usize;
+                    let first_row = (span_top - y).max(0) as usize;
+                    let last_row = (span_bottom - y).min(CELL) as usize;
+                    for row in first_row..last_row {
+                        let row_start = (row + HALO as usize) * pixels.row_bytes()
+                            + HALO as usize
+                            + first_column;
+                        let values = &bytes[row_start..row_start + last_column - first_column];
                         let mut first = 0;
                         while first < values.len() {
                             let coverage = values[first];
@@ -1610,7 +1635,7 @@ impl SkiaRender {
                                 span.set_alpha(alpha as u8);
                                 self.surface.canvas().draw_rect(
                                     skia_safe::Rect::from_xywh(
-                                        x as f32 + first as f32,
+                                        x as f32 + (first_column + first) as f32,
                                         y as f32 + row as f32,
                                         (end - first) as f32,
                                         1.,

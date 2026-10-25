@@ -2,6 +2,18 @@
 
 本文件只记录交付变化，不替代长期任务池或原始测试日志。版本范围见 [ROADMAP](ROADMAP.md)。
 
+## Unreleased — Type3 矩形与密集字形兼容修复
+
+Type3 FontBBox 按 PDF rectangle 规则接受任意对角点顺序，模型规范化坐标，
+Strict／Compatible 一致；保存保留源顺序，矩阵、字宽和字形位置保持。
+修复带负 Y FontMatrix 的 Skia Type3 文件被 `reversed FontBBox` 拒绝的问题。
+
+固定全局覆盖单元的 Solid SrcOver 扫描只访问可见轮廓范围及 AA 余量，工作
+按实际访问像素计费，避免密集小字形因扫描空白单元耗尽浏览器预算。单元、
+遮罩和资源上限保持；新增 1024 曲线路径／字形及 72／144 DPI 分块一致性检查。
+138 项定向回归、严格 Clippy 和真实文件的 native／直接 Wasm／Worker 检查通过；
+具体范围见[验证记录](docs/testing.md#type3-fontbbox-与覆盖扫描兼容回归)。
+
 ## Unreleased — ICC 透明组与浏览器内存兼容修复
 
 后续收口：颜色空间构造加入引用循环检测和 16 层实现上限，默认测试线程栈

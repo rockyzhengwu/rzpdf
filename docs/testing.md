@@ -1,5 +1,74 @@
 # 解析回归与异常输入验证
 
+## Type3 FontBBox 与覆盖扫描兼容回归
+
+2026-10-26，基线 `a1300a9`。用户提供的单页 Skia/PDF m120 文件含 54 个 Type3
+字体，页解释首先报 `Type3: reversed FontBBox`。其 FontBBox 以反向 Y 对角点
+给出，同时使用负 Y FontMatrix。根据
+[ISO 32000-1 §7.9.5](https://opensource.adobe.com/dc-acrobat-sdk-docs/standards/pdfstandards/pdf/PDF32000_2008.pdf)，
+这是可规范化的 rectangle；原来将角点顺序视为错误的检查过严。
+
+模型现返回最小／最大坐标，保留源 FontBBox 数组顺序、FontMatrix、Widths 和
+字形坐标。Strict／Compatible 均接受，不作为兼容修复；新增测试覆盖四种角点
+排列、零框、负 Y 矩阵、保存严格重读和无结构诊断。原非法字段测试改为精确拒绝
+错误长度及非数字，d1 操作数、字宽、颜色、资源、预算和权限拒绝测试保留。
+
+修正后原生通过，浏览器进一步暴露 `canonical curve coverage work`：小字形
+也按完整 64×64 单元扫描覆盖值，密集 Type3 曲线过早耗尽工作额度。保留原单元
+栅格化视口和 halo，改为只扫描轮廓与目标表面相交的像素，额外保留一像素 AA
+余量；按实际访问面积计费。浏览器操作／工作额度、遮罩 scratch、输出像素／
+字节及曲线细分限制均未提高。原生新增 1024 个小曲线的半透明像素／空隙检查，
+既有 scratch／工作拒绝、曲线分块、裁剪、图案及透明组回归保持通过。
+
+```sh
+cargo test -p pdf --locked --test v07_type3_model
+cargo test -p render --locked --lib
+cargo test -p web-wasm --locked --lib
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+```
+
+结果：Type3 集成 25 项、render 单元 90 项、web-wasm 单元 23 项，共 138 项通过，
+0 failed／ignored；不是重跑全部工作区的声明。格式、差异和严格 Clippy 通过。
+日志在 `/tmp/rzpdf-type3-{model-tests,render-tests-final,web-native,clippy-final}.log`。
+现有用户 Cargo 配置弃用提示和依赖的 macOS 汇编链接 warning 单独保留。
+
+按[固定工具链说明](webassembly/build.md)构建优化 Wasm 后，生成到新目录：
+
+```sh
+cargo run -p pdf --locked --example icc_groups -- output/webassembly/type3-bbox-final-fixtures
+RZPDF_ICC_FIXTURES=output/webassembly/type3-bbox-final-fixtures \
+RZPDF_CHROMIUM=/path/to/chromium node web/tests/icc-browser.mjs
+```
+
+六份全自制样本保留原 ICC／CFF／循环错误门禁，新增三页 Type3 文件：常规／
+反序 FontBBox 两页像素完全相同，字符均为 A，字体预检 complete 且无需外部
+字体；第三页含 1024 个曲线字形，72／144 DPI 成功渲染，文字数正确，横跨覆盖
+单元的区域输出逐像素等于整页相应部分。真实直接／Worker 两条路径均通过。
+报告为 `output/webassembly/icc-browser/report.json`，构建报告为
+`output/webassembly/type3-bbox-verified-build.json`，含工具链及产物 hash。
+
+私有样本只读，不进入 fixture 或仓库；驱动可指定模式和 DPI：
+
+```sh
+RZPDF_PRIVATE_PDF=/path/to/authorized.pdf RZPDF_PRIVATE_PAGES=0 \
+RZPDF_PRIVATE_MODE=strict RZPDF_PRIVATE_DPI=72 \
+RZPDF_PRIVATE_REPORT=output/webassembly/private-type3-strict-72 \
+RZPDF_CHROMIUM=/path/to/chromium node web/tests/private-pages.mjs
+```
+
+该文件在 native Strict／Compatible 下解析／绘制均通过，1067 字符、0 errors／
+warnings／missing Unicode。72 DPI 与 MuPDF 参考图目视一致；覆盖扫描优化前后
+native PNG SHA-256 同为
+`0ee54b765aa3e91bec26704da779fba6e989e4a97209b056330b6b748643b143`。
+Chromium 148.0.7778.96 中，两种模式×直接／Worker，在 36 和 72 DPI 均完成
+字体预检、渲染、状态、文字、content、清缓存、重绘和状态查询，无 trap；没有
+注册外部字体。72 DPI 输出 595×842，直接路径观察到线性内存 33554432 bytes，
+不是通用峰值保证。最终 72 DPI 报告位于
+`output/webassembly/private-type3-{strict,compatible}-72/report.json`，36 DPI 记录
+位于 `private-type3-{strict,compatible}-final`。本轮不扩展其他 Type3 程序边界，
+也不构成任意文档、全 DPI 或跨浏览器认证。
+
 ## ICC 透明组和 WASM 转换表回归
 
 当前状态：后续栈／CFF／lint 修复及整份 92 页检查已完成，见本节末尾
