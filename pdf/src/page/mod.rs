@@ -24,6 +24,7 @@ pub mod diagnostic;
 pub mod display_list;
 pub(crate) mod execution_budget;
 pub(crate) mod font_binding;
+pub mod preparation_profile;
 pub use font_binding::BudgetedFont as InspectedFont;
 pub mod general_state;
 pub mod graph_state;
@@ -327,6 +328,9 @@ impl<'a, R: Seek + Read> PdfPage<'a, R> {
     }
 
     pub(crate) fn content_bytes(&self) -> PdfResult<Vec<u8>> {
+        let _span = self
+            .ctx
+            .preparation_span(preparation_profile::PreparationPhase::ContentStreams);
         let mut result = Vec::new();
         let mut stream_ranges = Vec::new();
         let mut push = |data: Vec<u8>| -> PdfResult<()> {

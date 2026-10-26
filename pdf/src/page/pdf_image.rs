@@ -1094,6 +1094,53 @@ impl PdfImage {
         let mut rgba = Vec::new();
         rgba.try_reserve_exact(output_size)
             .map_err(|_| PdfError::ResourceLimit("unable to allocate image RGBA buffer".into()))?;
+        // Common scan path: preserve the ICC transform, Decode and Range, but
+        // amortize transform-cache locking and dispatch over small stack batches.
+        // Matte and resampled masks retain the general high-precision path.
+        if let (ColorSpace::IccBased(space), Some((8, endpoints))) =
+            (&self.colorspace, &self.color_sample_decode)
+            && self.soft_mask.is_none()
+            && self.hard_mask_alpha.is_none()
+            && (width, height) == (self.width, self.height)
+            && context.icc_fallback == crate::color::conversion::IccFallback::Reject
+            && let Some(profile) = space.profile()
+        {
+            if self.data.len() != input_size {
+                return Err(PdfError::ObjectError(
+                    "packed image sample length mismatch".into(),
+                ));
+            }
+            let mut source = [0f32; 128 * 4];
+            let mut target = [0f32; 128 * 3];
+            // Decode/Range depends on the component and byte, not the pixel.
+            // Keep exactly the scalar f64 -> f32 rounding with bounded tables.
+            let mut decoded = [[0f32; 256]; 4];
+            for (c, table) in decoded.iter_mut().enumerate().take(components) {
+                for (sample, value) in table.iter_mut().enumerate() {
+                    let v = (endpoints[c * 2]
+                        + sample as f64 / 255. * (endpoints[c * 2 + 1] - endpoints[c * 2]))
+                        as f32;
+                    *value = v.clamp(space.range()[c * 2], space.range()[c * 2 + 1]);
+                }
+            }
+            for data in self.data.chunks(128 * components) {
+                for (input, output) in data
+                    .chunks_exact(components)
+                    .zip(source[..data.len()].chunks_exact_mut(components))
+                {
+                    for (c, (&sample, value)) in input.iter().zip(output).enumerate() {
+                        *value = decoded[c][sample as usize];
+                    }
+                }
+                let rgb = &mut target[..data.len() / components * 3];
+                profile.convert_samples(&mut source[..data.len()], rgb, context)?;
+                for pixel in rgb.as_chunks::<3>().0 {
+                    let color = crate::color::value::ColorRgb::new(pixel[0], pixel[1], pixel[2]);
+                    rgba.extend_from_slice(&[color.r(), color.g(), color.b(), 255]);
+                }
+            }
+            return Ok(rgba);
+        }
         if let Some((bits, endpoints)) = &self.color_sample_decode {
             let bits = *bits;
             let row_samples = (self.width as usize)
@@ -2295,6 +2342,65 @@ mod explicit_mask_tests {
         .into_dict()
         .unwrap();
         PdfObject::PdfStream(PdfStream::new(dict, data))
+    }
+    #[test]
+    fn batched_icc_image_matches_scalar_with_decode_range_and_tail_batch() {
+        use crate::color::{
+            conversion::{ColorConversionContext, IccFallback},
+            icc_based::IccBased,
+            icc_profile::ICCProfile,
+        };
+        let ctx = PDFContext::<Cursor<Vec<u8>>>::new_without_source(
+            PdfDict::default(),
+            ParseOptions::default(),
+        );
+        for profile in [ICCProfile::srgb(), ICCProfile::gray_srgb().unwrap()] {
+            let n = profile.number_of_components();
+            let range = "0.1 0.9 ".repeat(n);
+            let space = IccBased::try_new(
+                &object(
+                    &format!("<< /N {n} /Range [{range}] >>"),
+                    profile.to_bytes().unwrap(),
+                ),
+                &ctx,
+            )
+            .unwrap();
+            let data: Vec<_> = (0..259 * n).map(|i| (i % 256) as u8).collect();
+            let mut image = PdfImage::try_new(
+                "batch".into(),
+                &object(
+                    "<< /Width 259 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceGray >>",
+                    vec![0; 259],
+                ),
+                &ctx,
+            )
+            .unwrap();
+            image.colorspace = ColorSpace::IccBased(space);
+            image.data = data;
+            image.color_sample_decode = Some((8, (0..n).flat_map(|_| [1., 0.]).collect()));
+            let context = ColorConversionContext::default();
+            let mut scalar = context.clone();
+            scalar.icc_fallback = IccFallback::Alternate;
+            let expected = image.rgba_buffer_with_context(&scalar).unwrap();
+            assert_eq!(image.rgba_buffer_with_context(&context).unwrap(), expected);
+            for short in [true, false] {
+                let mut invalid = image.clone();
+                if short {
+                    invalid.data.pop();
+                } else {
+                    invalid.data.push(0);
+                }
+                assert!(matches!(
+                    invalid.rgba_buffer_with_context(&context),
+                    Err(PdfError::ObjectError(_))
+                ));
+            }
+            image.max_rgba_bytes = expected.len() - 1;
+            assert!(matches!(
+                image.rgba_buffer_with_context(&context),
+                Err(PdfError::ResourceLimit(_))
+            ));
+        }
     }
     #[test]
     fn group4_indexed_samples_keep_palette_and_decode_semantics() {

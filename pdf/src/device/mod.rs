@@ -35,6 +35,23 @@ pub trait Device {
     ) -> PdfResult<()> {
         Ok(())
     }
+    /// Borrow immutable scene data during replay. Existing devices retain the
+    /// owned-event fallback; rendering backends can avoid copying edit metadata.
+    fn do_image_ref(&mut self, object: &ImageObject) -> PdfResult<()> {
+        self.do_image(object.clone())
+    }
+    fn show_text_ref(&mut self, object: &TextObject) -> PdfResult<()> {
+        self.show_text(object.clone())
+    }
+    fn stroke_path_ref(&mut self, object: &PathObject) -> PdfResult<()> {
+        self.stroke_path(object.clone())
+    }
+    fn fill_path_ref(&mut self, object: &PathObject) -> PdfResult<()> {
+        self.fill_path(object.clone())
+    }
+    fn fill_and_stroke_path_ref(&mut self, object: &PathObject) -> PdfResult<()> {
+        self.fill_and_stroke_path(object.clone())
+    }
     fn start_page(&mut self, page_width: f32, page_height: f32) -> PdfResult<()>;
     fn do_image(&mut self, imageobject: ImageObject) -> PdfResult<()>;
     fn stroke_path(&mut self, pathobject: PathObject) -> PdfResult<()>;

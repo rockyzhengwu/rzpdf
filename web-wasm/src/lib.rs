@@ -12,7 +12,7 @@ use pdf::{
         syntax::ParseMode,
     },
 };
-use render::render_device::{RasterRegion, RgbaImage, SkiaRender, SubstituteFont};
+use render::render_device::{RasterRegion, RgbaImage, SubstituteFont};
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 use zeroize::Zeroize;
 
@@ -62,6 +62,7 @@ struct State {
     substitute_font: Option<SubstituteFont>,
     font_provider: Rc<render::font_provider::MemoryFontProvider>,
     font_epoch: u64,
+    render_sessions: BTreeMap<u32, render::render_device::RenderSession>,
 }
 impl State {
     fn retained(&self) -> usize {
@@ -336,8 +337,20 @@ fn render(
             return Err("render region exceeds page".into());
         }
     }
-    let mut renderer =
-        SkiaRender::with_limits(dpi, dpi, d.resource_limits()).map_err(ApiError::from)?;
+    // Keep the module's optional backend cache bounded even with several
+    // open documents: only the currently rendered document retains resources.
+    for (handle, session) in &s.render_sessions {
+        if *handle != document {
+            session.clear();
+        }
+    }
+    let session = s
+        .render_sessions
+        .entry(document)
+        .or_insert_with(|| render::render_device::RenderSession::new(d.resource_limits()));
+    let mut renderer = session
+        .renderer(d, s.font_epoch, dpi, dpi)
+        .map_err(ApiError::from)?;
     renderer.set_region(region)?;
     if let Some(program) = &s.substitute_font {
         renderer.set_substitute_program(program);
@@ -412,6 +425,7 @@ pub extern "C" fn rz_release(handle: u32) -> u32 {
             .resources
             .remove(&handle)
             .ok_or_else(|| ApiError::handle("invalid or released handle"))?;
+        s.render_sessions.remove(&handle);
         if let Resource::Input(bytes) = &mut resource {
             bytes.zeroize();
         }
@@ -447,6 +461,7 @@ pub extern "C" fn rz_dispose() -> u32 {
             }
         }
         s.resources.clear();
+        s.render_sessions.clear();
         s.font_provider = Default::default();
         s.substitute_font = None;
         #[cfg(target_os = "emscripten")]

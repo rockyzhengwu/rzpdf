@@ -651,6 +651,25 @@ impl<R: Seek + Read> SyntaxParser<R> {
             return Err(PdfError::EndofFile);
         }
         let word = self.get_next_word()?;
+        self.object_from_word_inner(word)
+    }
+
+    /// Reuse a classification token without lexing its bytes a second time.
+    /// Apply the same nesting guard as get_object(), including compound tokens.
+    pub(crate) fn get_object_from_word(&mut self, word: PdfWord) -> PdfResult<PdfObject> {
+        if self.object_depth >= self.limits.max_depth {
+            return Err(PdfError::ResourceLimit(format!(
+                "object nesting at byte {}",
+                self.pos
+            )));
+        }
+        self.object_depth += 1;
+        let result = self.object_from_word_inner(word);
+        self.object_depth -= 1;
+        result
+    }
+
+    fn object_from_word_inner(&mut self, word: PdfWord) -> PdfResult<PdfObject> {
         if word.is_number() {
             let saved_pos = self.pos;
             let next = match self.get_next_word() {
@@ -1702,6 +1721,71 @@ pub(crate) fn is_number_token(buf: &[u8]) -> bool {
     }
 
     i == buf.len() && (digits_before > 0 || digits_after > 0)
+}
+
+#[cfg(test)]
+mod classified_word_tests {
+    use super::*;
+    use std::io::Cursor;
+    #[test]
+    fn reused_words_preserve_lexemes_references_containers_and_nesting_limits() {
+        for source in [
+            "+0001 rest",
+            "-.5 rest",
+            "1 0 R rest",
+            "/A#20B rest",
+            "true rest",
+            "false rest",
+            "null rest",
+            "(a\\(b\\)c) rest",
+            "<4142> rest",
+            "[1 2 (a) /B true] rest",
+            "<< /A [1 2] /B 2 0 R >> rest",
+        ] {
+            let parser = || {
+                SyntaxParser::new(
+                    StreamReader::try_new(Cursor::new(source.as_bytes().to_vec())).unwrap(),
+                )
+            };
+            let mut ordinary = parser();
+            let expected = ordinary.get_object().unwrap();
+            let mut reused = parser();
+            let word = reused.get_next_word().unwrap();
+            let actual = reused.get_object_from_word(word).unwrap();
+            assert_eq!(actual, expected, "{source}");
+            assert_eq!(reused.position(), ordinary.position(), "{source}");
+            assert!(reused.get_next_word().unwrap().is_equal(b"rest"));
+        }
+        for source in ["1.0 0 R", "[1", "<< /A >>", "(unterminated"] {
+            let parser = || {
+                SyntaxParser::new(
+                    StreamReader::try_new(Cursor::new(source.as_bytes().to_vec())).unwrap(),
+                )
+            };
+            assert!(parser().get_object().is_err(), "{source}");
+            let mut reused = parser();
+            let word = reused.get_next_word().unwrap();
+            assert!(reused.get_object_from_word(word).is_err(), "{source}");
+        }
+        let options = crate::parser::options::ParseOptions {
+            limits: crate::parser::options::Limits {
+                max_depth: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        for source in [b"[[0]]".as_slice(), b"<< /A [0] >>"] {
+            let mut parser = SyntaxParser::with_options(
+                StreamReader::try_new(Cursor::new(source.to_vec())).unwrap(),
+                options,
+            );
+            let word = parser.get_next_word().unwrap();
+            assert!(matches!(
+                parser.get_object_from_word(word),
+                Err(PdfError::ResourceLimit(_))
+            ));
+        }
+    }
 }
 
 #[cfg(test)]

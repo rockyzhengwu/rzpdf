@@ -18,6 +18,8 @@ use std::{fs::File, io::Write};
 #[cfg(test)]
 #[path = "annotation_tests.rs"]
 mod annotation_tests;
+#[path = "coverage_spans.rs"]
+mod coverage_spans;
 #[cfg(test)]
 #[path = "group_tests.rs"]
 mod group_tests;
@@ -29,8 +31,17 @@ mod knockout;
 #[cfg(test)]
 #[path = "pattern_tests.rs"]
 mod pattern_tests;
+#[cfg(test)]
+#[path = "performance_tests.rs"]
+mod performance_tests;
 #[path = "raster_path.rs"]
 mod raster_path;
+#[path = "render_session.rs"]
+mod render_session;
+#[cfg(test)]
+#[path = "render_session_tests.rs"]
+mod render_session_tests;
+pub use render_session::{RenderSession, RenderSessionStatistics};
 #[cfg(test)]
 #[path = "region_tests.rs"]
 mod region_tests;
@@ -163,15 +174,7 @@ pub struct SkiaRender {
     initial_override: Option<skia_safe::Image>,
     substitute_font: Option<skia_safe::Typeface>,
     font_provider: Option<std::rc::Rc<crate::font_provider::MemoryFontProvider>>,
-    typeface_cache: std::collections::HashMap<
-        usize,
-        (
-            std::rc::Weak<pdf::font::pdf_font::Font>,
-            skia_safe::Typeface,
-            usize,
-        ),
-    >,
-    typeface_cache_bytes: usize,
+    session: RenderSession,
 }
 
 struct RenderGroup {
@@ -185,6 +188,87 @@ struct RenderGroup {
 }
 
 impl SkiaRender {
+    fn prefer_integer_white_background(&mut self) -> bool {
+        let Some(pixels) = self.surface.peek_pixels() else {
+            return false;
+        };
+        if !matches!(
+            pixels.color_type(),
+            skia_safe::ColorType::RGBA8888 | skia_safe::ColorType::BGRA8888
+        ) {
+            return false;
+        }
+        let Some(data) = pixels.bytes() else {
+            return false;
+        };
+        let (width, height) = (pixels.width() as usize, pixels.height() as usize);
+        // Sparse pages and opaque images benefit from zero-block / opaque
+        // shortcuts. Dense antialiased text benefits from Skia's SIMD blend.
+        // This only selects equivalent compositors; it does not change pixels.
+        let mut mixed = 0;
+        for row in 0..16 {
+            let y = (row * 2 + 1) * height / 32;
+            for column in 0..32 {
+                let x = (column * 2 + 1) * width / 64;
+                let alpha = data[y * pixels.row_bytes() + x * 4 + 3];
+                mixed += usize::from(alpha != 0 && alpha != 255);
+            }
+        }
+        mixed <= 512 / 8
+    }
+    /// White DstOver in premultiplied RGBA/BGRA is exactly c += 255 - a.
+    /// Other substrates, non-rectangular clips and non-raster targets retain
+    /// Skia's general compositor. Notify first to preserve snapshot COW.
+    fn finish_white_background(&mut self) -> bool {
+        if self.clear_color != Color::WHITE
+            || !self.surface.canvas().is_clip_rect()
+            || self.surface.canvas().device_clip_bounds()
+                != Some(skia_safe::IRect::from_wh(self.page_width, self.page_height))
+        {
+            return false;
+        }
+        self.surface
+            .notify_content_will_change(skia_safe::surface::ContentChangeMode::Retain);
+        let Some(mut pixels) = self.surface.peek_pixels() else {
+            return false;
+        };
+        if !matches!(
+            pixels.color_type(),
+            skia_safe::ColorType::RGBA8888 | skia_safe::ColorType::BGRA8888
+        ) || pixels.alpha_type() != skia_safe::AlphaType::Premul
+        {
+            return false;
+        }
+        let row_bytes = pixels.row_bytes();
+        let Some(data) = pixels.bytes_mut() else {
+            return false;
+        };
+        for row in data.chunks_mut(row_bytes).take(self.page_height as usize) {
+            let (blocks, tail) = row[..self.page_width as usize * 4].as_chunks_mut::<64>();
+            for block in blocks {
+                if *block == [0; 64] {
+                    block.fill(255);
+                } else {
+                    Self::white_pixels(block);
+                }
+            }
+            Self::white_pixels(tail);
+        }
+        true
+    }
+    fn white_pixels(bytes: &mut [u8]) {
+        for pixel in bytes.as_chunks_mut::<4>().0 {
+            if pixel[3] == 0 {
+                pixel.fill(255);
+            } else if pixel[3] != 255 {
+                let white = 255 - pixel[3];
+                pixel[0] = pixel[0].saturating_add(white);
+                pixel[1] = pixel[1].saturating_add(white);
+                pixel[2] = pixel[2].saturating_add(white);
+                pixel[3] = 255;
+            }
+        }
+    }
     fn convert_group_space(
         &mut self,
         image: skia_safe::Image,
@@ -292,38 +376,19 @@ impl SkiaRender {
         &mut self,
         font: &std::rc::Rc<pdf::font::pdf_font::Font>,
     ) -> PdfResult<skia_safe::Typeface> {
-        let key = std::rc::Rc::as_ptr(font) as usize;
-        if let Some((source, face, _)) = self.typeface_cache.get(&key)
-            && source
-                .upgrade()
-                .is_some_and(|source| std::rc::Rc::ptr_eq(&source, font))
-        {
-            return Ok(face.clone());
-        }
         let data = font
             .fontfile()
             .ok_or_else(|| PdfError::FontError("missing embedded program".into()))?;
-        let maximum = self.limits.max_decoded_bytes;
-        if data.len() > maximum {
+        if data.len() > self.limits.max_decoded_bytes {
             return Err(PdfError::ResourceLimit("render font program bytes".into()));
         }
-        if self.typeface_cache.len() >= 128
-            || self.typeface_cache_bytes.saturating_add(data.len()) > maximum
-        {
-            self.typeface_cache.clear();
-            self.typeface_cache_bytes = 0;
+        if let Some(face) = self.session.font(font) {
+            return Ok(face);
         }
         let face = FontMgr::new()
             .new_from_data(data, 0)
             .ok_or_else(|| PdfError::FontError("Skia rejected font program".into()))?;
-        if let Some((_, _, bytes)) = self.typeface_cache.remove(&key) {
-            self.typeface_cache_bytes -= bytes;
-        }
-        self.typeface_cache_bytes += data.len();
-        self.typeface_cache.insert(
-            key,
-            (std::rc::Rc::downgrade(font), face.clone(), data.len()),
-        );
+        self.session.insert_font(font, face.clone(), data.len());
         Ok(face)
     }
 
@@ -415,6 +480,11 @@ impl SkiaRender {
         Ok(offset)
     }
 
+    /// Share backend resources with subsequent request-local raster targets.
+    pub fn render_session(&self) -> RenderSession {
+        self.session.clone()
+    }
+
     pub fn new(xdpi: f32, ydpi: f32) -> PdfResult<Self> {
         Self::with_limits(xdpi, ydpi, Limits::default())
     }
@@ -457,8 +527,7 @@ impl SkiaRender {
             clear_color: Color::WHITE,
             substitute_font: None,
             font_provider: None,
-            typeface_cache: std::collections::HashMap::new(),
-            typeface_cache_bytes: 0,
+            session: RenderSession::new(limits),
             held_pattern_surfaces: 0,
             group_stack: Vec::new(),
             active_intent: Default::default(),
@@ -567,6 +636,7 @@ impl SkiaRender {
                 renderer.shape_mode = self.shape_mode;
                 renderer.substitute_font = self.substitute_font.clone();
                 renderer.font_provider = self.font_provider.clone();
+                renderer.session = self.session.clone();
                 pattern.list.replay(&mut renderer)?;
                 self.curved_raster_paths |= renderer.curved_raster_paths;
                 let image = renderer.surface.image_snapshot();
@@ -667,6 +737,7 @@ impl SkiaRender {
             renderer.shape_mode = self.shape_mode;
             renderer.substitute_font = self.substitute_font.clone();
             renderer.font_provider = self.font_provider.clone();
+            renderer.session = self.session.clone();
             if needs_backdrop && !self.shape_mode {
                 renderer.start_page(pattern.list.page_width(), pattern.list.page_height())?;
                 let image = self.surface.image_snapshot();
@@ -1187,10 +1258,22 @@ impl SkiaRender {
             .try_reserve_exact(size)
             .map_err(|_| PdfError::ResourceLimit("RGBA allocation failed".into()))?;
         pixels.resize(size, 0);
+        let alpha_type = if self
+            .surface
+            .peek_pixels()
+            .is_some_and(|p| p.compute_is_opaque())
+        {
+            // Opaque premultiplied pixels already equal straight RGBA. Avoid
+            // Skia's floating unpremultiply pipeline without assuming that a
+            // completed page (or a clipped child region) must be opaque.
+            skia_safe::AlphaType::Opaque
+        } else {
+            skia_safe::AlphaType::Unpremul
+        };
         let info = skia_safe::ImageInfo::new(
             (width, height),
             skia_safe::ColorType::RGBA8888,
-            skia_safe::AlphaType::Unpremul,
+            alpha_type,
             skia_safe::ColorSpace::new_srgb(),
         );
         if !self
@@ -1468,7 +1551,9 @@ impl SkiaRender {
             outline = outline.with_transform(&matrix);
         }
         self.curved_raster_paths |= raster_path::has_curves(&outline);
-        let outline = raster_path::normalized(&outline, &mut self.raster_path_budget)?;
+        let outline = self
+            .session
+            .normalized(&outline, &mut self.raster_path_budget)?;
         if let Some(shader) = paint.shader() {
             fill.set_shader(shader.with_local_matrix(&matrix));
         }
@@ -1515,8 +1600,6 @@ impl SkiaRender {
                 "canonical curve coverage scratch".into(),
             ));
         }
-        let columns = (right - 1).div_euclid(CELL) - left.div_euclid(CELL) + 1;
-        let rows = (bottom - 1).div_euclid(CELL) - top.div_euclid(CELL) + 1;
         let integer_spans =
             fill.shader().is_none() && fill.as_blend_mode() == Some(skia_safe::BlendMode::SrcOver);
         // Keep the mask's canonical viewport, but visit only visible samples
@@ -1538,10 +1621,6 @@ impl SkiaRender {
             .saturating_add(1)
             .min(origin.1 as i32 + self.page_height)
             .min(((bottom - 1).div_euclid(CELL) * CELL).saturating_add(CELL));
-        let point_work = (columns as usize)
-            .checked_mul(rows as usize)
-            .and_then(|n| n.checked_mul(outline.points().len().max(1)))
-            .ok_or_else(|| PdfError::ResourceLimit("canonical curve coverage work".into()))?;
         let sample_work = if integer_spans {
             ((span_right - span_left) as usize)
                 .checked_mul((span_bottom - span_top) as usize)
@@ -1549,13 +1628,53 @@ impl SkiaRender {
         } else {
             0
         };
-        let work = point_work
-            .checked_add(sample_work)
-            .ok_or_else(|| PdfError::ResourceLimit("canonical curve coverage work".into()))?;
         self.raster_path_budget = self
             .raster_path_budget
-            .checked_sub(work)
+            .checked_sub(sample_work)
             .ok_or_else(|| PdfError::ResourceLimit("canonical curve coverage work".into()))?;
+        let coverage_key = (integer_spans && self.session.byte_limit() != 0).then(|| {
+            RenderSession::coverage_key(
+                &outline,
+                [
+                    left,
+                    top,
+                    right,
+                    bottom,
+                    span_left,
+                    span_top,
+                    span_right,
+                    span_bottom,
+                ],
+                paint.is_anti_alias(),
+            )
+        });
+        if let Some(key) = &coverage_key
+            && let Some(cells) = self.session.coverage(key, &mut self.raster_path_budget)?
+        {
+            self.surface.canvas().save();
+            self.surface.canvas().set_matrix(&transform);
+            for cell in cells.iter() {
+                self.draw_coverage_rects(cell.x, cell.y, &cell.rects, &fill);
+            }
+            self.surface.canvas().restore();
+            return Ok(());
+        }
+        let coverage_work_start = self.raster_path_budget;
+        let mut contours = raster_path::Contours::new(
+            &outline,
+            &mut self.raster_path_budget,
+            self.limits.max_operation_bytes,
+        )?;
+        let mut cached_cells = coverage_key.as_ref().map(|_| Vec::new());
+        let mut cached_bytes = 0usize;
+        let cache_limit = self.session.byte_limit();
+        contours.reserve_grid_work(
+            (left, top, right, bottom),
+            CELL,
+            HALO,
+            &mut self.raster_path_budget,
+            self.limits.max_operation_bytes,
+        )?;
         let mask_info = skia_safe::ImageInfo::new(
             (SIDE, SIDE),
             skia_safe::ColorType::Alpha8,
@@ -1572,11 +1691,15 @@ impl SkiaRender {
         self.surface.canvas().set_matrix(&transform);
         for y in (top.div_euclid(CELL) * CELL..bottom).step_by(CELL as usize) {
             for x in (left.div_euclid(CELL) * CELL..right).step_by(CELL as usize) {
+                let local_outline = contours.for_cell(x, y);
+                if local_outline.is_empty() {
+                    continue;
+                }
                 mask.canvas().clear(Color::TRANSPARENT);
                 mask.canvas().reset_matrix();
                 mask.canvas()
                     .translate((-(x - HALO) as f32, -(y - HALO) as f32));
-                mask.canvas().draw_path(&outline, &coverage);
+                mask.canvas().draw_path(&local_outline, &coverage);
                 let image = mask.image_snapshot();
                 self.surface.canvas().save();
                 self.surface.canvas().clip_rect(
@@ -1617,34 +1740,57 @@ impl SkiaRender {
                     let last_column = (span_right - x).min(CELL) as usize;
                     let first_row = (span_top - y).max(0) as usize;
                     let last_row = (span_bottom - y).min(CELL) as usize;
-                    for row in first_row..last_row {
-                        let row_start = (row + HALO as usize) * pixels.row_bytes()
-                            + HALO as usize
-                            + first_column;
-                        let values = &bytes[row_start..row_start + last_column - first_column];
-                        let mut first = 0;
-                        while first < values.len() {
-                            let coverage = values[first];
-                            let mut end = first + 1;
-                            while end < values.len() && values[end] == coverage {
-                                end += 1;
+                    let mut saved = Vec::new();
+                    let mut save = cached_cells.is_some();
+                    coverage_spans::rectangles(
+                        bytes,
+                        pixels.row_bytes(),
+                        (
+                            first_column + HALO as usize,
+                            first_row + HALO as usize,
+                            last_column + HALO as usize,
+                            last_row + HALO as usize,
+                        ),
+                        |rect| {
+                            if save {
+                                if saved.len() == saved.capacity() {
+                                    if cached_bytes.saturating_add(64 * 5) <= cache_limit
+                                        && saved.try_reserve_exact(64).is_ok()
+                                    {
+                                        cached_bytes += 64 * 5;
+                                    } else {
+                                        save = false;
+                                    }
+                                }
+                                if save {
+                                    saved.push(rect);
+                                }
                             }
-                            if coverage != 0 {
-                                let alpha =
-                                    (u16::from(fill.alpha()) * u16::from(coverage) + 127) / 255;
-                                span.set_alpha(alpha as u8);
-                                self.surface.canvas().draw_rect(
-                                    skia_safe::Rect::from_xywh(
-                                        x as f32 + (first_column + first) as f32,
-                                        y as f32 + row as f32,
-                                        (end - first) as f32,
-                                        1.,
-                                    ),
-                                    &span,
-                                );
+                            let alpha =
+                                (u16::from(fill.alpha()) * u16::from(rect.coverage) + 127) / 255;
+                            span.set_alpha(alpha as u8);
+                            self.surface.canvas().draw_rect(
+                                skia_safe::Rect::from_xywh(
+                                    (x - HALO) as f32 + f32::from(rect.left),
+                                    (y - HALO) as f32 + f32::from(rect.top),
+                                    f32::from(rect.right - rect.left),
+                                    f32::from(rect.bottom - rect.top),
+                                ),
+                                &span,
+                            );
+                        },
+                    );
+                    if save {
+                        if let Some(cells) = &mut cached_cells {
+                            cached_bytes = cached_bytes.saturating_add(64);
+                            if cached_bytes <= cache_limit && cells.try_reserve(1).is_ok() {
+                                cells.push(render_session::CoverageCell { x, y, rects: saved });
+                            } else {
+                                cached_cells = None;
                             }
-                            first = end;
                         }
+                    } else {
+                        cached_cells = None;
                     }
                 } else {
                     self.surface.canvas().draw_image(
@@ -1657,10 +1803,56 @@ impl SkiaRender {
             }
         }
         self.surface.canvas().restore();
+        if let (Some(key), Some(cells)) = (coverage_key, cached_cells) {
+            self.session
+                .insert_coverage(key, cells, coverage_work_start - self.raster_path_budget);
+        }
         Ok(())
     }
 
-    fn draw_path(&mut self, pathobject: PathObject, paintstyle: PaintStyle) -> PdfResult<()> {
+    fn validate_image_mipmaps(&self, width: i32, height: i32) -> PdfResult<()> {
+        let mut mip_pixels = 0u64;
+        let (mut w, mut h) = (width as u64, height as u64);
+        while w > 1 || h > 1 {
+            w = (w / 2).max(1);
+            h = (h / 2).max(1);
+            mip_pixels = mip_pixels
+                .checked_add(w * h)
+                .ok_or_else(|| PdfError::ResourceLimit("image mipmap pixels".into()))?;
+        }
+        if mip_pixels > self.limits.max_render_pixels
+            || mip_pixels > (self.limits.max_render_bytes / 4) as u64
+        {
+            return Err(PdfError::ResourceLimit("image mipmap storage".into()));
+        }
+        Ok(())
+    }
+
+    fn draw_coverage_rects(
+        &mut self,
+        x: i32,
+        y: i32,
+        rects: &[coverage_spans::CoverageRect],
+        fill: &Paint,
+    ) {
+        let mut span = fill.clone();
+        span.set_anti_alias(false);
+        for rect in rects {
+            let alpha = (u16::from(fill.alpha()) * u16::from(rect.coverage) + 127) / 255;
+            span.set_alpha(alpha as u8);
+            self.surface.canvas().draw_rect(
+                skia_safe::Rect::from_xywh(
+                    (x - 2) as f32 + f32::from(rect.left),
+                    (y - 2) as f32 + f32::from(rect.top),
+                    f32::from(rect.right - rect.left),
+                    f32::from(rect.bottom - rect.top),
+                ),
+                &span,
+            );
+        }
+    }
+
+    fn draw_path(&mut self, pathobject: &PathObject, paintstyle: PaintStyle) -> PdfResult<()> {
         self.active_intent = pathobject.graphic_state().general_state.rendering_intent;
         let ctm = pathobject.matrix().checked_mul(&self.matrix)?;
         let global = pathobject.matrix().checked_mul(&Matrix::new(
@@ -1683,7 +1875,7 @@ impl SkiaRender {
             self.surface.canvas().set_matrix(&path_m44);
             let graphic_state = pathobject.graphic_state();
             self.set_path_paint_state(graphic_state);
-            self.build_path(&pathobject);
+            self.build_path(pathobject);
             match paintstyle {
                 PaintStyle::Fill => {
                     self.fill_path(graphic_state, &ctm)?;
@@ -1931,13 +2123,6 @@ impl Device for SkiaRender {
     fn start_page(&mut self, page_width: f32, page_height: f32) -> PdfResult<()> {
         self.raster_path_budget = self.limits.max_operation_bytes / 16;
         self.curved_raster_paths = false;
-        self.typeface_cache
-            .retain(|_, (font, _, _)| font.strong_count() != 0);
-        self.typeface_cache_bytes = self
-            .typeface_cache
-            .values()
-            .map(|(_, _, bytes)| *bytes)
-            .sum();
         while !self.group_stack.is_empty() {
             self.end_group(false)?;
         }
@@ -2003,9 +2188,8 @@ impl Device for SkiaRender {
                 "render surface exceeds pixel/byte budget".into(),
             ));
         }
-        let surface = surfaces::raster_n32_premul((width, height))
+        self.surface = surfaces::raster_n32_premul((width, height))
             .ok_or_else(|| PdfError::ResourceLimit("unable to allocate render surface".into()))?;
-        self.surface = surface;
         self.clip_cache.clear();
         self.clip_images.clear();
         self.region = effective;
@@ -2041,11 +2225,16 @@ impl Device for SkiaRender {
         self.page_height = height;
         // The page group blends over a transparent backdrop; white is the
         // output substrate, added only after page compositing.
+        // Initialize the transparent backdrop before incremental paints.
         self.surface.canvas().clear(Color::TRANSPARENT);
         Ok(())
     }
 
     fn show_text(&mut self, textobject: TextObject) -> PdfResult<()> {
+        self.show_text_ref(&textobject)
+    }
+
+    fn show_text_ref(&mut self, textobject: &TextObject) -> PdfResult<()> {
         // Default PDF text knockout (TK=true) treats each glyph as a member,
         // not a whole Tj run. TK=false is rejected by ExtGState validation.
         if !self.object_dispatch
@@ -2060,7 +2249,7 @@ impl Device for SkiaRender {
             }
             return Ok(());
         }
-        if self.dispatch_group_object(|device| device.show_text(textobject.clone()))? {
+        if self.dispatch_group_object(|device| device.show_text_ref(textobject))? {
             return Ok(());
         }
         if matches!(
@@ -2073,13 +2262,13 @@ impl Device for SkiaRender {
                 let mut fill = textobject.clone();
                 fill.state.text_state.text_rendering_mode = TextRenderingMode::Fill;
                 device.show_text(fill)?;
-                let mut stroke = textobject;
+                let mut stroke = textobject.clone();
                 stroke.state.text_state.text_rendering_mode = TextRenderingMode::Stroke;
                 device.show_text(stroke)
             });
         }
         self.active_intent = textobject.state.general_state.rendering_intent;
-        self.capture_group_alpha(|device| device.show_text(textobject.clone()))?;
+        self.capture_group_alpha(|device| device.show_text_ref(textobject))?;
         // Type3 shapes were executed as ordinary graphics by the interpreter.
         // Keep its text event for extraction, never ask Skia for a font file.
         if textobject.is_type3_metadata() {
@@ -2635,14 +2824,18 @@ impl Device for SkiaRender {
     }
 
     fn do_image(&mut self, imageobject: ImageObject) -> PdfResult<()> {
-        if self.dispatch_group_object(|device| device.do_image(imageobject.clone()))? {
+        self.do_image_ref(&imageobject)
+    }
+
+    fn do_image_ref(&mut self, imageobject: &ImageObject) -> PdfResult<()> {
+        if self.dispatch_group_object(|device| device.do_image_ref(imageobject))? {
             return Ok(());
         }
         self.active_intent = imageobject
             .image
             .rendering_intent()
             .unwrap_or(imageobject.graphic_state.general_state.rendering_intent);
-        self.capture_group_alpha(|device| device.do_image(imageobject.clone()))?;
+        self.capture_group_alpha(|device| device.do_image_ref(imageobject))?;
         let matrix = &imageobject.matrix;
         let ctm = matrix.checked_mul(&self.matrix)?;
         let m44 = self.pdf_to_skia_m44(ctm.a(), ctm.b(), ctm.c(), ctm.d(), ctm.e(), ctm.f());
@@ -2651,48 +2844,100 @@ impl Device for SkiaRender {
                 imageobject.graphic_state.color_state.fill_color_space,
                 pdf::color::colorspace::ColorSpace::Pattern(_)
             );
-        let (raster_width, raster_height, mut rgba) = if imageobject.image.is_mask() {
-            let state = &imageobject.graphic_state.color_state;
-            let color = if pattern_stencil {
-                pdf::color::value::ColorRgb::new(1., 1., 1.)
+        let conversion = self.color_context.with_intent(self.active_intent);
+        let image_transform = [
+            ctm.a().to_bits(),
+            ctm.b().to_bits(),
+            ctm.c().to_bits(),
+            ctm.d().to_bits(),
+        ];
+        let cacheable_image = !imageobject.image.is_mask();
+        let cached = cacheable_image
+            .then(|| {
+                self.session.image(
+                    &imageobject.image,
+                    image_transform,
+                    self.shape_mode,
+                    &conversion,
+                )
+            })
+            .flatten();
+        let image = if let Some(image) = cached {
+            image
+        } else {
+            let (raster_width, raster_height, mut rgba) = if imageobject.image.is_mask() {
+                let state = &imageobject.graphic_state.color_state;
+                let color = if pattern_stencil {
+                    pdf::color::value::ColorRgb::new(1., 1., 1.)
+                } else {
+                    state.fill_color_space.rgb_with_context(
+                        &state.fill_color_value,
+                        &self.color_context.with_intent(self.active_intent),
+                    )?
+                };
+                let (width, height) = imageobject.image.pixel_dimensions();
+                (
+                    width,
+                    height,
+                    imageobject.image.rgba_buffer_with_stencil_color(&color)?,
+                )
             } else {
-                state.fill_color_space.rgb_with_context(
-                    &state.fill_color_value,
+                imageobject.image.rendering_rgba_with_context(
                     &self.color_context.with_intent(self.active_intent),
                 )?
             };
-            let (width, height) = imageobject.image.pixel_dimensions();
-            (
-                width,
-                height,
-                imageobject.image.rgba_buffer_with_stencil_color(&color)?,
-            )
-        } else {
-            imageobject
-                .image
-                .rendering_rgba_with_context(&self.color_context.with_intent(self.active_intent))?
-        };
-        if self.shape_mode && !imageobject.image.is_mask() && !imageobject.image.has_explicit_mask()
-        {
-            for pixel in rgba.as_chunks_mut::<4>().0 {
-                pixel[3] = 255;
+            if self.shape_mode
+                && !imageobject.image.is_mask()
+                && !imageobject.image.has_explicit_mask()
+            {
+                for pixel in rgba.as_chunks_mut::<4>().0 {
+                    pixel[3] = 255;
+                }
             }
+            let (width, height) = (raster_width, raster_height);
+            let width = i32::try_from(width)
+                .map_err(|_| PdfError::ResourceLimit("image width exceeds backend range".into()))?;
+            let height = i32::try_from(height).map_err(|_| {
+                PdfError::ResourceLimit("image height exceeds backend range".into())
+            })?;
+            let info = skia_safe::ImageInfo::new(
+                (width, height),
+                skia_safe::ColorType::RGBA8888,
+                skia_safe::AlphaType::Unpremul,
+                None,
+            );
+            let row_bytes = info.min_row_bytes();
+            let pixels = skia_safe::Data::new_copy(&rgba);
+            let image =
+                skia_safe::images::raster_from_data(&info, pixels, row_bytes).ok_or_else(|| {
+                    PdfError::ResourceLimit("Skia rejected image pixel buffer".into())
+                })?;
+            let shrinking = imageobject.image.interpolate()
+                && (ctm.a().hypot(ctm.b()) < width as f32
+                    || ctm.c().hypot(ctm.d()) < height as f32);
+            let image = if shrinking {
+                self.validate_image_mipmaps(width, height)?;
+                image
+                    .with_default_mipmaps()
+                    .ok_or_else(|| PdfError::ResourceLimit("image mipmap allocation".into()))?
+            } else {
+                image
+            };
+            if cacheable_image {
+                self.session.insert_image(
+                    &imageobject.image,
+                    image_transform,
+                    self.shape_mode,
+                    conversion.clone(),
+                    image.clone(),
+                );
+            }
+            image
+        };
+        let (width, height) = (image.width(), image.height());
+        if image.has_mipmaps() {
+            self.validate_image_mipmaps(width, height)?;
         }
-        let (width, height) = (raster_width, raster_height);
-        let width = i32::try_from(width)
-            .map_err(|_| PdfError::ResourceLimit("image width exceeds backend range".into()))?;
-        let height = i32::try_from(height)
-            .map_err(|_| PdfError::ResourceLimit("image height exceeds backend range".into()))?;
-        let info = skia_safe::ImageInfo::new(
-            (width, height),
-            skia_safe::ColorType::RGBA8888,
-            skia_safe::AlphaType::Unpremul,
-            None,
-        );
-        let row_bytes = info.min_row_bytes();
-        let pixels = skia_safe::Data::new_copy(&rgba);
-        let image = skia_safe::images::raster_from_data(&info, pixels, row_bytes)
-            .ok_or_else(|| PdfError::ResourceLimit("Skia rejected image pixel buffer".into()))?;
         // Mipmaps integrate source pixels when scans and stencils shrink. A
         // nearest-neighbour sample can erase entire thin strokes at low DPI.
         let shrinking = imageobject.image.interpolate()
@@ -2706,27 +2951,6 @@ impl Device for SkiaRender {
             skia_safe::SamplingOptions::from(skia_safe::FilterMode::Linear)
         } else {
             skia_safe::SamplingOptions::default()
-        };
-        let image = if shrinking {
-            let mut mip_pixels = 0u64;
-            let (mut w, mut h) = (width as u64, height as u64);
-            while w > 1 || h > 1 {
-                w = (w / 2).max(1);
-                h = (h / 2).max(1);
-                mip_pixels = mip_pixels
-                    .checked_add(w * h)
-                    .ok_or_else(|| PdfError::ResourceLimit("image mipmap pixels".into()))?;
-            }
-            if mip_pixels > self.limits.max_render_pixels
-                || mip_pixels > (self.limits.max_render_bytes / 4) as u64
-            {
-                return Err(PdfError::ResourceLimit("image mipmap storage".into()));
-            }
-            image
-                .with_default_mipmaps()
-                .ok_or_else(|| PdfError::ResourceLimit("image mipmap allocation".into()))?
-        } else {
-            image
         };
         let alpha = imageobject.graphic_state.general_state.fill_alpha;
         if !alpha.is_finite() || !(0.0..=1.0).contains(&alpha) {
@@ -2809,44 +3033,55 @@ impl Device for SkiaRender {
     }
 
     fn stroke_path(&mut self, pathobject: PathObject) -> PdfResult<()> {
-        if self.dispatch_group_object(|device| Device::stroke_path(device, pathobject.clone()))? {
+        self.stroke_path_ref(&pathobject)
+    }
+
+    fn stroke_path_ref(&mut self, pathobject: &PathObject) -> PdfResult<()> {
+        if self.dispatch_group_object(|device| Device::stroke_path_ref(device, pathobject))? {
             return Ok(());
         }
-        self.capture_group_alpha(|device| {
-            device.draw_path(pathobject.clone(), PaintStyle::Stroke)
-        })?;
+        self.capture_group_alpha(|device| device.draw_path(pathobject, PaintStyle::Stroke))?;
         self.draw_path(pathobject, PaintStyle::Stroke)?;
         Ok(())
     }
 
     fn fill_and_stroke_path(&mut self, pathobject: PathObject) -> PdfResult<()> {
-        if self.dispatch_group_object(|device| device.fill_and_stroke_path(pathobject.clone()))? {
+        self.fill_and_stroke_path_ref(&pathobject)
+    }
+
+    fn fill_and_stroke_path_ref(&mut self, pathobject: &PathObject) -> PdfResult<()> {
+        if self.dispatch_group_object(|device| device.fill_and_stroke_path_ref(pathobject))? {
             return Ok(());
         }
         if self.needs_combined_group(pathobject.graphic_state()) {
             let state = pathobject.graphic_state().clone();
             return self.combined_group(&state, |device| {
-                Device::fill_path(device, pathobject.clone())?;
-                Device::stroke_path(device, pathobject)
+                Device::fill_path_ref(device, pathobject)?;
+                Device::stroke_path_ref(device, pathobject)
             });
         }
-        self.capture_group_alpha(|device| {
-            device.draw_path(pathobject.clone(), PaintStyle::StrokeAndFill)
-        })?;
+        self.capture_group_alpha(|device| device.draw_path(pathobject, PaintStyle::StrokeAndFill))?;
         self.draw_path(pathobject, PaintStyle::StrokeAndFill)?;
         Ok(())
     }
 
     fn fill_path(&mut self, pathobject: PathObject) -> PdfResult<()> {
-        if self.dispatch_group_object(|device| Device::fill_path(device, pathobject.clone()))? {
+        self.fill_path_ref(&pathobject)
+    }
+
+    fn fill_path_ref(&mut self, pathobject: &PathObject) -> PdfResult<()> {
+        if self.dispatch_group_object(|device| Device::fill_path_ref(device, pathobject))? {
             return Ok(());
         }
-        self.capture_group_alpha(|device| device.draw_path(pathobject.clone(), PaintStyle::Fill))?;
+        self.capture_group_alpha(|device| device.draw_path(pathobject, PaintStyle::Fill))?;
         self.draw_path(pathobject, PaintStyle::Fill)?;
         Ok(())
     }
 
     fn end_page(&mut self) -> PdfResult<()> {
+        if self.prefer_integer_white_background() && self.finish_white_background() {
+            return Ok(());
+        }
         if self.clear_color != Color::TRANSPARENT {
             let mut background = Paint::default();
             background.set_color(self.clear_color);
@@ -4558,13 +4793,13 @@ mod tests {
                 FillType::Winding,
                 false,
             );
-            assert!(renderer.draw_path(object, PaintStyle::Fill).is_err());
+            assert!(renderer.draw_path(&object, PaintStyle::Fill).is_err());
             assert_eq!(renderer.surface.canvas().save_count(), count);
             assert_eq!(renderer.surface.canvas().local_to_device(), matrix);
         }
         assert!(
             renderer
-                .draw_path(PathObject::default(), PaintStyle::Fill)
+                .draw_path(&PathObject::default(), PaintStyle::Fill)
                 .is_ok()
         );
     }
@@ -4591,12 +4826,12 @@ mod tests {
             FillType::Winding,
             false,
         );
-        assert!(renderer.draw_path(path, PaintStyle::Fill).is_err());
+        assert!(renderer.draw_path(&path, PaintStyle::Fill).is_err());
         assert_eq!(renderer.surface.canvas().save_count(), count);
         assert_eq!(renderer.surface.canvas().local_to_device(), matrix);
         assert!(
             renderer
-                .draw_path(PathObject::default(), PaintStyle::Fill)
+                .draw_path(&PathObject::default(), PaintStyle::Fill)
                 .is_ok()
         );
     }
@@ -6711,14 +6946,33 @@ mod font_program_regression_tests {
         assert_eq!(normal, scaled);
     }
     #[test]
+    fn render_session_shares_embedded_faces_across_fresh_targets() {
+        let doc = document(true);
+        let page = doc.prepare_page_for_render(0, None, 72.).unwrap();
+        let session = RenderSession::new(doc.resource_limits());
+        let mut first = session.renderer(&doc, 0, 72., 72.).unwrap();
+        page.replay(&doc, &mut first).unwrap();
+        let expected = first.to_rgba().unwrap().pixels;
+        drop(first);
+        let before = session.statistics().font_hits;
+        let mut second = session.renderer(&doc, 0, 72., 72.).unwrap();
+        page.replay(&doc, &mut second).unwrap();
+        assert_eq!(expected, second.to_rgba().unwrap().pixels);
+        assert!(session.statistics().font_hits > before);
+        session.clear();
+        assert_eq!(session.statistics().font_entries, 0);
+        assert_eq!(expected, second.to_rgba().unwrap().pixels);
+    }
+
+    #[test]
     fn embedded_empty_notdef_is_valid_and_does_not_abort_following_glyph() {
         let doc = document(true);
         let list = doc.get_page(0).unwrap().display_list().unwrap();
         let mut renderer = SkiaRender::new(72., 72.).unwrap();
         list.replay(&mut renderer).unwrap();
-        assert_eq!(renderer.typeface_cache.len(), 1);
+        assert_eq!(renderer.session.statistics().font_entries, 1);
         list.replay(&mut renderer).unwrap();
-        assert_eq!(renderer.typeface_cache.len(), 1);
+        assert_eq!(renderer.session.statistics().font_entries, 1);
         let info = skia_safe::ImageInfo::new(
             (40, 40),
             skia_safe::ColorType::RGBA8888,

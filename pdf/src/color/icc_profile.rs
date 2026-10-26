@@ -263,20 +263,11 @@ impl ICCProfile {
             .encode()
             .map_err(|e| PdfError::ColorError(format!("ICC encoding: {e:?}")))
     }
-    pub fn convert(&self, values: &[f32], context: &ColorConversionContext) -> PdfResult<ColorRgb> {
-        if values.len() != self.inner.components || values.iter().any(|v| !v.is_finite()) {
-            return Err(PdfError::ColorError(
-                "ICC input component count or value".into(),
-            ));
-        }
+    fn resolve_transform(
+        &self,
+        context: &ColorConversionContext,
+    ) -> PdfResult<Arc<moxcms::TransformF32Executor>> {
         let target = context.output_profile();
-        if self.inner.id == target.inner.id && self.inner.components == 3 {
-            return Ok(ColorRgb::new(
-                values[0].clamp(0., 1.),
-                values[1].clamp(0., 1.),
-                values[2].clamp(0., 1.),
-            ));
-        }
         let transform = {
             let mut cache = self
                 .inner
@@ -375,6 +366,59 @@ impl ICCProfile {
                 transform
             }
         };
+        Ok(transform)
+    }
+
+    /// Convert bounded batches without a cache lock and dispatch per pixel.
+    /// Components retain the same clipping and intent semantics as `convert`.
+    pub(crate) fn convert_samples(
+        &self,
+        values: &mut [f32],
+        rgb: &mut [f32],
+        context: &ColorConversionContext,
+    ) -> PdfResult<()> {
+        if !values.len().is_multiple_of(self.inner.components)
+            || rgb.len() != values.len() / self.inner.components * 3
+            || values.iter().any(|v| !v.is_finite())
+        {
+            return Err(PdfError::ColorError(
+                "ICC batch component count or value".into(),
+            ));
+        }
+        for value in values.iter_mut() {
+            *value = value.clamp(0., 1.);
+        }
+        if self.same_profile(context.output_profile()) && self.inner.components == 3 {
+            rgb.copy_from_slice(values);
+        } else {
+            self.resolve_transform(context)?
+                .transform(values, rgb)
+                .map_err(|e| PdfError::ColorError(format!("ICC conversion: {e:?}")))?;
+        }
+        for value in rgb {
+            if !value.is_finite() {
+                return Err(PdfError::ColorError("ICC nonfinite output".into()));
+            }
+            *value = value.clamp(0., 1.);
+        }
+        Ok(())
+    }
+
+    pub fn convert(&self, values: &[f32], context: &ColorConversionContext) -> PdfResult<ColorRgb> {
+        if values.len() != self.inner.components || values.iter().any(|v| !v.is_finite()) {
+            return Err(PdfError::ColorError(
+                "ICC input component count or value".into(),
+            ));
+        }
+        let target = context.output_profile();
+        if self.inner.id == target.inner.id && self.inner.components == 3 {
+            return Ok(ColorRgb::new(
+                values[0].clamp(0., 1.),
+                values[1].clamp(0., 1.),
+                values[2].clamp(0., 1.),
+            ));
+        }
+        let transform = self.resolve_transform(context)?;
         let mut source = [0f32; 4];
         for (dst, src) in source.iter_mut().zip(values) {
             *dst = src.clamp(0., 1.);

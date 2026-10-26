@@ -260,6 +260,21 @@ impl CidFont {
             if count > ctx.limits().max_objects {
                 return Err(PdfError::ResourceLimit("CFF charset entries".into()));
             }
+            // Some producers wrap a name-keyed Type1 program as CIDFontType0
+            // and write physical glyph indices into the Type0 CMap. Such a
+            // program has no CFF CID charset. Recover only the known format,
+            // with bounded GIDs; never infer identity for sparse CID CFF.
+            let type1_indices = super::font_program::is_type1(&face);
+            if type1_indices {
+                if ctx.options().mode != crate::parser::syntax::ParseMode::Compatible {
+                    return Err(PdfError::FontError(
+                        "CIDFontType0 contains a non-CID Type1 program".into(),
+                    ));
+                }
+                ctx.record_structure_recovery(
+                    crate::parser::diagnostic::StructureReason::FontProgram,
+                )?;
+            }
             // FreeType exposes the CFF charset, which maps glyph indices to
             // CIDs (not Unicode). Invert it once for PDF glyph selection.
             let mut retained = budget
@@ -280,7 +295,11 @@ impl CidFont {
                 lease.as_mut().unwrap().absorb(retained)?;
             }
             for gid in 0..count as u32 {
-                if let Some(cid) = super::font_program::cff_cid(&face, gid) {
+                if let Some(cid) = if type1_indices {
+                    Some(gid)
+                } else {
+                    super::font_program::cff_cid(&face, gid)
+                } {
                     mappings.entry(cid).or_insert(gid);
                 }
             }
@@ -837,6 +856,50 @@ mod cff_charset_tests {
         document::Document,
         objects::{pdf_name::PdfName, pdf_stream::PdfStream},
     };
+    #[test]
+    fn wrapped_type1_gids_are_bounded_and_compatible_only() {
+        use crate::parser::{options::ParseOptions, syntax::ParseMode};
+        let mut dict = PdfDict::default();
+        dict.insert(
+            "BaseFont".into(),
+            PdfObject::PdfName(PdfName::new("NimbusSanL-Regu".into())),
+        );
+        dict.insert(
+            "Subtype".into(),
+            PdfObject::PdfName(PdfName::new("CIDFontType0".into())),
+        );
+        let mut descriptor = PdfDict::default();
+        descriptor.insert(
+            "FontFile".into(),
+            PdfObject::PdfStream(PdfStream::new(
+                Default::default(),
+                include_bytes!("../../../font-data/fonts/n019003l.pfb").to_vec(),
+            )),
+        );
+        dict.insert("FontDescriptor".into(), PdfObject::PdfDict(descriptor));
+        for mode in [ParseMode::Compatible, ParseMode::Strict] {
+            let doc = Document::new_with_options(ParseOptions {
+                mode,
+                ..Default::default()
+            })
+            .unwrap();
+            if mode == ParseMode::Strict {
+                assert!(matches!(
+                    CidFont::try_new(&dict, doc.ctx()),
+                    Err(PdfError::FontError(_))
+                ));
+            } else {
+                let font = CidFont::try_new(&dict, doc.ctx()).unwrap();
+                assert_eq!(font.glyph_id(49), Some(49));
+                assert_eq!(font.glyph_id(u32::MAX), None);
+                let pool = crate::budget::OperationBudget::new(2 * 1024 * 1024);
+                let (font, lease) = CidFont::try_new_with_budget(&dict, doc.ctx(), &pool).unwrap();
+                assert_eq!(font.glyph_id(49), Some(49));
+                drop((font, lease));
+                assert_eq!(pool.live_bytes(), 0);
+            }
+        }
+    }
     #[test]
     fn cid_keyed_charset_is_not_an_identity_gid_mapping() {
         let doc = Document::new().unwrap();

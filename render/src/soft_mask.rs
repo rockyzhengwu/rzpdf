@@ -48,6 +48,7 @@ impl SkiaRender {
         renderer.clear_color = Color::TRANSPARENT;
         renderer.substitute_font = self.substitute_font.clone();
         renderer.font_provider = self.font_provider.clone();
+        renderer.session = self.session.clone();
         mask.list.replay(&mut renderer)?;
         self.curved_raster_paths |= renderer.curved_raster_paths;
         let source = renderer

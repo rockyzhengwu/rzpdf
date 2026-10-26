@@ -1,6 +1,46 @@
 use super::*;
 
 #[test]
+fn batch_conversion_preserves_scalar_intents_clipping_and_validation() {
+    let adobe =
+        ICCProfile::try_new(&moxcms::ColorProfile::new_adobe_rgb().encode().unwrap()).unwrap();
+    for profile in [adobe, ICCProfile::gray_srgb().unwrap(), ICCProfile::srgb()] {
+        for intent in [
+            RenderingIntent::RelativeColorimetric,
+            RenderingIntent::AbsoluteColorimetric,
+            RenderingIntent::Perceptual,
+            RenderingIntent::Saturation,
+        ] {
+            let context = ColorConversionContext::default().with_intent(intent);
+            let n = profile.number_of_components();
+            let values: Vec<_> = (0..257 * n).map(|i| (i % 37) as f32 / 31. - 0.1).collect();
+            let expected: Vec<_> = values
+                .chunks_exact(n)
+                .map(|p| profile.convert(p, &context).unwrap())
+                .flat_map(|v| [v.r, v.g, v.b])
+                .collect();
+            let mut result = vec![0.; 257 * 3];
+            profile
+                .convert_samples(&mut values.clone(), &mut result, &context)
+                .unwrap();
+            for (a, b) in result.iter().zip(expected) {
+                assert!((a - b).abs() < 0.000001, "{a} {b}");
+            }
+            assert!(
+                profile
+                    .convert_samples(&mut [f32::NAN; 4][..n], &mut [0.; 3], &context)
+                    .is_err()
+            );
+            assert!(
+                profile
+                    .convert_samples(&mut [0.; 4][..n], &mut [], &context)
+                    .is_err()
+            );
+        }
+    }
+}
+
+#[test]
 fn backend_table_reservations_fail_structurally_and_release_on_drop() {
     use std::sync::atomic::AtomicUsize;
     static COUNTER: AtomicUsize = AtomicUsize::new(0);

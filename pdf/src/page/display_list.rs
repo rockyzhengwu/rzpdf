@@ -232,12 +232,12 @@ impl DisplayList {
         let result = (|| -> PdfResult<()> {
             for object in &self.objects {
                 match object {
-                    PageObject::Image(image) => device.do_image(image.clone())?,
-                    PageObject::Text(text) => device.show_text(text.clone())?,
+                    PageObject::Image(image) => device.do_image_ref(image)?,
+                    PageObject::Text(text) => device.show_text_ref(text)?,
                     PageObject::Path(path) => match (path.stroke(), path.fill_type()) {
-                        (true, FillType::NoFill) => device.stroke_path(path.clone())?,
-                        (false, _) => device.fill_path(path.clone())?,
-                        _ => device.fill_and_stroke_path(path.clone())?,
+                        (true, FillType::NoFill) => device.stroke_path_ref(path)?,
+                        (false, _) => device.fill_path_ref(path)?,
+                        _ => device.fill_and_stroke_path_ref(path)?,
                     },
                     PageObject::Shading(shading) => device.do_shading(shading.clone())?,
                     PageObject::Form => {}

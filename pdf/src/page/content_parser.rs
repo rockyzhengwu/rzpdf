@@ -101,10 +101,14 @@ impl<R: Read + Seek> ContentParser<R> {
                         }
                         return Ok(Some(op));
                     } else {
-                        // Only operands need object parsing from the original
-                        // position. Drop the classification token first.
-                        drop(word);
-                        self.syntax.set_pos(start)?;
+                        let classified = if budget.is_none() {
+                            Some(word)
+                        } else {
+                            // The bounded object reader owns its token leases.
+                            drop(word);
+                            self.syntax.set_pos(start)?;
+                            None
+                        };
                         if operands.len() >= self.syntax.limits().max_objects {
                             return Err(PdfError::ResourceLimit("content operand count".into()));
                         }
@@ -148,7 +152,7 @@ impl<R: Read + Seek> ContentParser<R> {
                                 retained.absorb(&mut lease)?;
                                 object
                             } else {
-                                self.syntax.get_object()?
+                                self.syntax.get_object_from_word(classified.unwrap())?
                             };
                         operands.push(obj)
                     }

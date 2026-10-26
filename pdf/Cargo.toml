@@ -5,6 +5,9 @@ edition = "2024"
 rust-version = "1.92"
 license.workspace = true
 
+[features]
+prepare-diagnostics = []
+
 [dependencies]
 allocator-api2 = "0.2.21"
 hashbrown = { version = "0.16.1", default-features = false, features = ["allocator-api2"] }

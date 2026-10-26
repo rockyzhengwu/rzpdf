@@ -1,6 +1,49 @@
 use super::*;
 use pdf::{document::Document, page::page_builder::PageBuilder};
 
+#[test]
+fn new_page_resets_clip_and_opaque_readback_matches_general_conversion() {
+    let mut renderer = SkiaRender::new(72., 72.).unwrap();
+    renderer.start_page(40., 30.).unwrap();
+    renderer
+        .surface
+        .canvas()
+        .clip_rect(skia_safe::Rect::from_wh(2., 2.), None, false);
+    renderer.start_page(40., 30.).unwrap();
+    renderer.surface.canvas().clear(Color::WHITE);
+    let mut paint = Paint::default();
+    paint.set_color(Color::RED).set_alpha(83);
+    renderer.surface.canvas().draw_paint(&paint);
+    let output = renderer.to_rgba().unwrap();
+    assert!(
+        output
+            .pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| *p == [255, 172, 172, 255])
+    );
+    for transparent in [false, true] {
+        if transparent {
+            renderer.surface.canvas().clear(Color::TRANSPARENT);
+        }
+        renderer.surface.canvas().draw_paint(&paint);
+        let mut expected = vec![0; 40 * 30 * 4];
+        let info = skia_safe::ImageInfo::new(
+            (40, 30),
+            skia_safe::ColorType::RGBA8888,
+            skia_safe::AlphaType::Unpremul,
+            skia_safe::ColorSpace::new_srgb(),
+        );
+        assert!(
+            renderer
+                .surface
+                .read_pixels(&info, &mut expected, 40 * 4, (0, 0))
+        );
+        assert_eq!(renderer.to_rgba().unwrap().pixels, expected);
+    }
+}
+
 trait Replay {
     fn replay(&self, renderer: &mut SkiaRender) -> PdfResult<()>;
 }

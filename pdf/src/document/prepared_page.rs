@@ -102,6 +102,20 @@ impl<R: Read + Seek> PdfDocument<R> {
         self.ctx()
             .with_render_image_dpi(dpi, || self.prepare_page(page, annotations))
     }
+    /// Diagnostic-only exclusive phase timings. Requires `prepare-diagnostics`;
+    /// cached pages stay cached, so clear render caches first to measure preparation.
+    pub fn profile_page_preparation(
+        &self,
+        page: u32,
+        annotations: Option<AnnotationRenderOptions>,
+        dpi: f32,
+    ) -> PdfResult<(
+        Rc<PreparedPage>,
+        crate::page::preparation_profile::PreparationProfile,
+    )> {
+        self.ctx()
+            .profile_preparation(|| self.prepare_page_for_render(page, annotations, dpi))
+    }
     /// Prepare the current default optional-content selection. Keeps at most two
     /// pages / 32 MiB of estimated owned Rust storage per document. Oversized or
     /// Type3 snapshots are returned without retention; parse errors are not cached.
@@ -151,6 +165,9 @@ impl<R: Read + Seek> PdfDocument<R> {
             }
             (None, None) => List::Contents(source.display_list()?),
         };
+        let _span = self
+            .ctx()
+            .preparation_span(crate::page::preparation_profile::PreparationPhase::CacheAccounting);
         let estimated_bytes = match &list {
             List::Contents(v) => v.cache_bytes(),
             List::Annotated(v) => v.cache_bytes(),

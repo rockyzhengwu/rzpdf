@@ -31,6 +31,8 @@ pub struct PDFContext<R: Seek + Read> {
     color_depth: Cell<usize>,
     active_color_spaces: RefCell<Vec<ObjectId>>,
     render_image_dpi: Cell<Option<f32>>,
+    #[cfg(feature = "prepare-diagnostics")]
+    pub(crate) preparation_profile: RefCell<Option<crate::page::preparation_profile::Recorder>>,
     text_geometry_only: Cell<bool>,
     cached_stream_bytes: Cell<usize>,
     source_resolution_depth: Cell<usize>,
@@ -235,6 +237,8 @@ impl<R: Seek + Read> PDFContext<R> {
             color_depth: Cell::new(0),
             active_color_spaces: RefCell::new(Vec::new()),
             render_image_dpi: Cell::new(None),
+            #[cfg(feature = "prepare-diagnostics")]
+            preparation_profile: RefCell::new(None),
             text_geometry_only: Cell::new(false),
             cached_stream_bytes: Cell::new(0),
             source_resolution_depth: Cell::new(0),
@@ -405,6 +409,8 @@ impl<R: Seek + Read> PDFContext<R> {
             color_depth: Cell::new(0),
             active_color_spaces: RefCell::new(Vec::new()),
             render_image_dpi: Cell::new(None),
+            #[cfg(feature = "prepare-diagnostics")]
+            preparation_profile: RefCell::new(None),
             text_geometry_only: Cell::new(false),
             cached_stream_bytes: Cell::new(0),
             source_resolution_depth: Cell::new(0),

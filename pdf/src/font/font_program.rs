@@ -140,11 +140,17 @@ pub fn use_charmap(is_symbolic: bool, face: &Face) -> PdfResult<CharmapType> {
 
 // The freetype-rs bindings omit the CID service; use the linked FreeType ABI.
 unsafe extern "C" {
+    fn FT_Get_Font_Format(face: freetype::ffi::FT_Face) -> *const std::ffi::c_char;
     fn FT_Get_CID_From_Glyph_Index(
         face: freetype::ffi::FT_Face,
         glyph_index: u32,
         cid: *mut u32,
     ) -> i32;
+}
+pub(crate) fn is_type1(face: &Face) -> bool {
+    // SAFETY: FreeType returns a static, NUL-terminated format name or null.
+    let format = unsafe { FT_Get_Font_Format(face.raw() as *const _ as freetype::ffi::FT_Face) };
+    !format.is_null() && unsafe { std::ffi::CStr::from_ptr(format) }.to_bytes() == b"Type 1"
 }
 pub(crate) fn cff_cid(face: &Face, glyph: u32) -> Option<u32> {
     let mut cid = 0;

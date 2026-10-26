@@ -6,6 +6,8 @@ use crate::error::{PdfError, PdfResult};
 pub struct StreamReader<R: Read + Seek> {
     inner: R,
     length: u64,
+    position: u64,
+    position_known: bool,
 }
 
 impl<R: Read + Seek> StreamReader<R> {
@@ -16,20 +18,31 @@ impl<R: Read + Seek> StreamReader<R> {
         inner.seek(SeekFrom::Start(0)).map_err(|e| {
             PdfError::ReaderError(format!("StreamReader failed seek start :{:?}", e))
         })?;
-        Ok(Self { inner, length })
+        Ok(Self {
+            inner,
+            length,
+            position: 0,
+            position_known: true,
+        })
     }
 
     pub fn read_byte(&mut self) -> PdfResult<u8> {
         let mut buf = [0u8; 1];
-        self.inner
-            .read_exact(&mut buf)
-            .map_err(|e| PdfError::ReaderError(format!("StreamReader failed read byte:{:?}", e)))?;
+        if let Err(error) = self.inner.read_exact(&mut buf) {
+            // read_exact may consume a prefix before failing. Query the source
+            // only on recovery, never on ordinary lexer reads/lookbehind.
+            self.position_known = false;
+            return Err(PdfError::ReaderError(format!(
+                "StreamReader failed read byte:{error:?}"
+            )));
+        }
+        self.position = self.position.saturating_add(1);
         Ok(buf[0])
     }
 
     /// Reads n bytes from the stream
     pub fn read_bytes(&mut self, len: usize) -> PdfResult<Vec<u8>> {
-        let position = self.inner.stream_position()?;
+        let position = self.current_position()?;
         if len as u64 > self.length.saturating_sub(position) {
             return Err(PdfError::ReaderError(
                 "requested bytes exceed remaining input".into(),
@@ -39,9 +52,14 @@ impl<R: Read + Seek> StreamReader<R> {
         buf.try_reserve_exact(len)
             .map_err(|_| PdfError::ResourceLimit("input read buffer allocation".into()))?;
         buf.resize(len, 0);
-        self.inner
-            .read_exact(&mut buf)
-            .map_err(|e| PdfError::ReaderError(format!("StreamReader failed read byte:{:?}", e)))?;
+        if let Err(error) = self.inner.read_exact(&mut buf) {
+            self.position_known = false;
+            return Err(PdfError::ReaderError(format!(
+                "StreamReader failed read byte:{error:?}"
+            )));
+        }
+        self.position = position + len as u64;
+        self.position_known = true;
         Ok(buf)
     }
 
@@ -55,19 +73,47 @@ impl<R: Read + Seek> StreamReader<R> {
         len: usize,
         budget: &crate::budget::OperationBudget,
     ) -> PdfResult<crate::budget::BudgetedBytes> {
-        let position = self.inner.stream_position()?;
+        let position = self.current_position()?;
         if len as u64 > self.length.saturating_sub(position) {
             return Err(PdfError::ReaderError(
                 "requested bytes exceed remaining input".into(),
             ));
         }
-        crate::budget::BudgetedBytes::read_exact_from(budget, &mut self.inner, len)
+        let result = crate::budget::BudgetedBytes::read_exact_from(budget, &mut self.inner, len);
+        self.position_known = result.is_ok();
+        if self.position_known {
+            self.position = position + len as u64;
+        }
+        result
+    }
+    fn current_position(&mut self) -> std::io::Result<u64> {
+        if !self.position_known {
+            self.position = self.inner.stream_position()?;
+            self.position_known = true;
+        }
+        Ok(self.position)
     }
     pub fn seek(&mut self, pos: u64) -> PdfResult<()> {
-        self.inner
-            .seek(SeekFrom::Start(pos))
-            .map_err(|e| PdfError::ReaderError(format!("StreamReader Seek error:{:?}", e)))?;
-        Ok(())
+        // BufReader discards its buffer on an absolute seek, including the
+        // one-byte lookbehind used by the lexer. Relative seeks can stay in
+        // the buffer. Preserve arbitrary Read+Seek inputs with an absolute
+        // fallback when position queries or relative seeks aren't supported.
+        let relative = (pos <= self.length)
+            .then(|| self.current_position().ok())
+            .flatten()
+            .and_then(|current| i64::try_from(i128::from(pos) - i128::from(current)).ok());
+        let result = if let Some(offset) = relative {
+            self.inner
+                .seek_relative(offset)
+                .or_else(|_| self.inner.seek(SeekFrom::Start(pos)).map(|_| ()))
+        } else {
+            self.inner.seek(SeekFrom::Start(pos)).map(|_| ())
+        };
+        self.position_known = result.is_ok();
+        if self.position_known {
+            self.position = pos;
+        }
+        result.map_err(|e| PdfError::ReaderError(format!("StreamReader Seek error:{e:?}")))
     }
 }
 
@@ -175,6 +221,83 @@ mod tests {
         ));
         assert_eq!(budget.live_bytes(), 0);
         assert_eq!(reader.inner.stream_position().unwrap(), 0);
+    }
+
+    #[test]
+    fn boxed_buffered_lookbehind_reuses_input_and_crosses_buffer_boundaries() {
+        use std::{cell::Cell, rc::Rc};
+        struct Counted {
+            data: Cursor<Vec<u8>>,
+            reads: Rc<Cell<usize>>,
+            seeks: Rc<Cell<usize>>,
+        }
+        impl Read for Counted {
+            fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+                self.reads.set(self.reads.get() + 1);
+                self.data.read(out)
+            }
+        }
+        impl Seek for Counted {
+            fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+                self.seeks.set(self.seeks.get() + 1);
+                self.data.seek(position)
+            }
+        }
+        let reads = Rc::new(Cell::new(0));
+        let seeks = Rc::new(Cell::new(0));
+        let input = Counted {
+            data: Cursor::new((0..128).collect()),
+            reads: reads.clone(),
+            seeks: seeks.clone(),
+        };
+        trait Input: Read + Seek {}
+        impl<T: Read + Seek> Input for T {}
+        let boxed: Box<dyn Input> = Box::new(io::BufReader::with_capacity(32, input));
+        let mut reader = StreamReader::try_new(boxed).unwrap();
+        for position in 0..80 {
+            assert_eq!(reader.read_byte().unwrap(), position as u8);
+            reader.seek(position).unwrap();
+            assert_eq!(reader.read_byte().unwrap(), position as u8);
+        }
+        assert!(
+            reads.get() <= 4,
+            "lexer lookbehind must not discard each buffer"
+        );
+        assert!(
+            seeks.get() <= 4,
+            "lookbehind must not query the source position per token"
+        );
+        reader.seek(3).unwrap();
+        assert_eq!(reader.read_bytes(3).unwrap(), [3, 4, 5]);
+        reader.seek(128).unwrap();
+        assert!(reader.read_byte().is_err());
+        reader.seek(127).unwrap();
+        assert_eq!(reader.read_byte().unwrap(), 127);
+    }
+
+    #[test]
+    fn absolute_only_readers_and_offsets_beyond_i64_keep_seek_support() {
+        struct Absolute(Cursor<Vec<u8>>);
+        impl Read for Absolute {
+            fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+                self.0.read(out)
+            }
+        }
+        impl Seek for Absolute {
+            fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
+                match from {
+                    SeekFrom::Current(_) => Err(io::Error::other("relative position unsupported")),
+                    _ => self.0.seek(from),
+                }
+            }
+        }
+        let mut reader = StreamReader::try_new(Absolute(Cursor::new(b"abc".to_vec()))).unwrap();
+        reader.seek(1).unwrap();
+        assert_eq!(reader.read_byte().unwrap(), b'b');
+        reader.seek(u64::MAX).unwrap();
+        assert!(reader.read_byte().is_err());
+        reader.seek(0).unwrap();
+        assert_eq!(reader.read_byte().unwrap(), b'a');
     }
 
     #[test]

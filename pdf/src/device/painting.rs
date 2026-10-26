@@ -38,6 +38,9 @@ impl Device for PaintingDevice<'_> {
         self.0.clip_path(path)
     }
     fn do_image(&mut self, image: ImageObject) -> PdfResult<()> {
+        self.do_image_ref(&image)
+    }
+    fn do_image_ref(&mut self, image: &ImageObject) -> PdfResult<()> {
         let space = if image.image.is_mask() {
             &image.graphic_state.color_state.fill_color_space
         } else {
@@ -46,10 +49,13 @@ impl Device for PaintingDevice<'_> {
         if space.is_nonpainting() {
             Ok(())
         } else {
-            self.0.do_image(image)
+            self.0.do_image_ref(image)
         }
     }
     fn fill_path(&mut self, path: PathObject) -> PdfResult<()> {
+        self.fill_path_ref(&path)
+    }
+    fn fill_path_ref(&mut self, path: &PathObject) -> PdfResult<()> {
         if path
             .graphic_state()
             .color_state
@@ -58,10 +64,13 @@ impl Device for PaintingDevice<'_> {
         {
             Ok(())
         } else {
-            self.0.fill_path(path)
+            self.0.fill_path_ref(path)
         }
     }
     fn stroke_path(&mut self, path: PathObject) -> PdfResult<()> {
+        self.stroke_path_ref(&path)
+    }
+    fn stroke_path_ref(&mut self, path: &PathObject) -> PdfResult<()> {
         if path
             .graphic_state()
             .color_state
@@ -70,19 +79,34 @@ impl Device for PaintingDevice<'_> {
         {
             Ok(())
         } else {
-            self.0.stroke_path(path)
+            self.0.stroke_path_ref(path)
         }
     }
     fn fill_and_stroke_path(&mut self, path: PathObject) -> PdfResult<()> {
+        self.fill_and_stroke_path_ref(&path)
+    }
+    fn fill_and_stroke_path_ref(&mut self, path: &PathObject) -> PdfResult<()> {
         let state = &path.graphic_state().color_state;
         match (
             !state.fill_color_space.is_nonpainting(),
             !state.stroke_color_space.is_nonpainting(),
         ) {
-            (true, true) => self.0.fill_and_stroke_path(path),
-            (true, false) => self.0.fill_path(path),
-            (false, true) => self.0.stroke_path(path),
+            (true, true) => self.0.fill_and_stroke_path_ref(path),
+            (true, false) => self.0.fill_path_ref(path),
+            (false, true) => self.0.stroke_path_ref(path),
             (false, false) => Ok(()),
+        }
+    }
+    fn show_text_ref(&mut self, text: &TextObject) -> PdfResult<()> {
+        if text.is_type3_metadata() {
+            return Ok(());
+        }
+        if text.state.color_state.fill_color_space.is_nonpainting()
+            || text.state.color_state.stroke_color_space.is_nonpainting()
+        {
+            self.show_text(text.clone())
+        } else {
+            self.0.show_text_ref(text)
         }
     }
     fn show_text(&mut self, mut text: TextObject) -> PdfResult<()> {

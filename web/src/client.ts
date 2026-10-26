@@ -39,7 +39,12 @@ interface Module {
 }
 export interface OpenOptions { mode?: "strict" | "compatible"; password?: string; resourceProfile?: "default" | "conservative"; }
 export interface ResourceDetails {reason:string;stage:string;limit?:number;actual?:number;}
-export interface RenderCacheStatistics {pageHits:number;pageMisses:number;pageEntries:number;pageEstimatedBytes:number;fontHits:number;fontMisses:number;fontEntries:number;fontEstimatedBytes:number;byteAccounting:string;linearMemoryMayRemainGrown:boolean;callerBuffersReleased:boolean;skiaCacheScope:string;skiaFontBytes:number;skiaFontLimit:number;skiaResourceBytes:number;skiaResourceLimit:number;}
+export interface RenderCacheStatistics {pageHits:number;pageMisses:number;pageEntries:number;pageEstimatedBytes:number;fontHits:number;fontMisses:number;fontEntries:number;fontEstimatedBytes:number;byteAccounting:string;linearMemoryMayRemainGrown:boolean;callerBuffersReleased:boolean;skiaCacheScope:string;skiaFontBytes:number;skiaFontLimit:number;skiaResourceBytes:number;skiaResourceLimit:number;
+  renderSessionEstimatedBytes:number;renderSessionByteLimit:number;
+  renderSessionFontEntries:number;renderSessionImageEntries:number;renderSessionGeometryEntries:number;
+  renderSessionFontHits:number;renderSessionImageHits:number;renderSessionGeometryHits:number;
+  renderSessionMisses:number;renderSessionEvictions:number;
+}
 export type Matrix = [number, number, number, number, number, number];
 export interface PageInfo {
   width: number; height: number; rotation: number; userUnit: number;

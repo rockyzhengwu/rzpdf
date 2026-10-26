@@ -142,7 +142,23 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
     fn run_content(&mut self, device: &mut dyn Device) -> PdfResult<()> {
         self.initialize_language()?;
         let mut operations = 0usize;
-        while let Some(op) = self.parser.read_operator()? {
+        loop {
+            use super::preparation_profile::PreparationPhase;
+            let context = self.ctx;
+            let op = {
+                let _span = context.preparation_span(PreparationPhase::OperatorParsing);
+                self.parser.read_operator()?
+            };
+            let Some(op) = op else {
+                break;
+            };
+            let phase = match op.name() {
+                "Tf" => PreparationPhase::Fonts,
+                "Tj" | "TJ" | "'" | "\"" => PreparationPhase::Text,
+                "Do" | "BI" => PreparationPhase::XObjects,
+                _ => PreparationPhase::OtherOperators,
+            };
+            let _span = context.preparation_span(phase);
             self.execution_budget.operation(&self.ctx.limits())?;
             self.operation_index = operations;
             self.operation_byte_offset = op.byte_offset();
@@ -263,6 +279,12 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
 
     pub fn run_to_display_list(&mut self) -> PdfResult<DisplayList> {
         let mut device = TraceDevice::for_display_list(self.ctx.limits());
+        #[cfg(feature = "prepare-diagnostics")]
+        self.run_unfiltered(&mut super::preparation_profile::Collector {
+            context: self.ctx,
+            device: &mut device,
+        })?;
+        #[cfg(not(feature = "prepare-diagnostics"))]
         self.run_unfiltered(&mut device)?;
         let mut list = device.into_display_list();
         if let Some(visibility) = &self.optional_content {

@@ -165,6 +165,35 @@ mod tests {
     }
 
     #[test]
+    fn session_lifetime_is_bounded_across_documents_clear_and_dispose() {
+        let first = document("default");
+        let second = document("conservative");
+        assert_eq!(
+            read(first, "cacheStatistics")["renderSessionByteLimit"],
+            8 * 1024 * 1024
+        );
+        for doc in [first, second] {
+            let output = rz_render_region(doc, 0, 144., 0, 1., 0, 0, 32, 32);
+            assert_ne!(output, 0);
+            rz_release(output);
+            let stats = read(doc, "cacheStatistics");
+            assert!(stats["renderSessionEstimatedBytes"].as_u64().unwrap() > 0);
+        }
+        assert_eq!(
+            read(first, "cacheStatistics")["renderSessionEstimatedBytes"],
+            0
+        );
+        assert_eq!(
+            read(second, "clearRenderCaches")["renderSessionEstimatedBytes"],
+            0
+        );
+        rz_release(first);
+        STATE.with(|s| assert!(!s.borrow().render_sessions.contains_key(&first)));
+        rz_dispose();
+        STATE.with(|s| assert!(s.borrow().render_sessions.is_empty()));
+    }
+
+    #[test]
     fn typed_image_errors_do_not_require_string_matching() {
         let error = ApiError::from(pdf::error::PdfError::ResourceLimitExceeded {
             reason: "image_pixels",

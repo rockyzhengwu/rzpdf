@@ -337,12 +337,43 @@ pub extern "C" fn rz_query(document: u32, input: u32) -> u32 {
         let Some(Resource::Document(d, _)) = s.resources.get(&document) else {
             return Err(ApiError::handle("invalid document handle"));
         };
-        let value = if request.get("operation").and_then(Value::as_str) == Some("fontRequirements")
+        let operation = request.get("operation").and_then(Value::as_str);
+        if operation == Some("clearRenderCaches")
+            && let Some(session) = s.render_sessions.get(&document)
         {
+            session.clear();
+        }
+        let mut value = if operation == Some("fontRequirements") {
             crate::fonts::requirements(s, document, &request)?
         } else {
             query(d, document, &request)?
         };
+        if matches!(operation, Some("cacheStatistics" | "clearRenderCaches")) {
+            let statistics = s
+                .render_sessions
+                .get(&document)
+                .map(|session| session.statistics())
+                .unwrap_or_else(|| {
+                    render::render_device::RenderSession::new(d.resource_limits()).statistics()
+                });
+            value.as_object_mut().unwrap().extend(
+                json!({
+                    "renderSessionEstimatedBytes": statistics.estimated_bytes,
+                    "renderSessionByteLimit": statistics.byte_limit,
+                    "renderSessionFontEntries": statistics.font_entries,
+                    "renderSessionImageEntries": statistics.image_entries,
+                    "renderSessionGeometryEntries": statistics.geometry_entries,
+                    "renderSessionFontHits": statistics.font_hits,
+                    "renderSessionImageHits": statistics.image_hits,
+                    "renderSessionGeometryHits": statistics.geometry_hits,
+                    "renderSessionMisses": statistics.misses,
+                    "renderSessionEvictions": statistics.evictions
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            );
+        }
         output(s, value)
     })
 }

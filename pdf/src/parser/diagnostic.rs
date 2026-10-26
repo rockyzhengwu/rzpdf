@@ -24,6 +24,7 @@ pub enum StructureReason {
     PatternResources,
     FontWidths,
     FontUnicode,
+    FontProgram,
     FilterParameters,
     MissingEndobj,
     OptionalContentConfig,
