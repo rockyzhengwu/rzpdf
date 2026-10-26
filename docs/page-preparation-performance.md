@@ -182,3 +182,7 @@ measurement.
 Before worker SHA-256: `532c961e257a3ea8b43b258c36f41bd33ea51c5cec11accdf6ab8bd0e0a2a71e`.
 After worker SHA-256: `b99d4ab22d59f62cd5ba5ba555e105dacb0d000a028d1ec6fe46cca324829187`.
 Final WASM SHA-256: `23884ee5090ee5f272dff810ecf2a9f18e5c5fce1873bd80dab3a318bdaefb33`.
+
+A subsequent [fresh comparison with PDFium](pdfium-comparison-2026-10-26.md)
+measures code commit `2771736`: first output is 3.27x PDFium, retained-page warm
+replay 0.79x and subsequent pages 1.33x under the same existing quality gates.

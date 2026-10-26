@@ -11,7 +11,9 @@ MuPDF comparison, fixes, before/after timings and browser regression evidence.
 The [second optimization round](render-performance-round2.md) adds further
 same-output improvements and separate phase CPU/RSS diagnostics.
 The [render-session architecture and results](render-session-optimization.md)
-contain the latest three-engine ranking, WASM resource reuse and memory boundaries.
+document WASM resource reuse and memory boundaries.
+The [comparison of committed code with PDFium](pdfium-comparison-2026-10-26.md)
+contains the latest three-engine ranking after the preparation changes.
 The [page preparation follow-up](page-preparation-performance.md) adds exclusive
 phase diagnostics and interleaved native before/after results; it does not rerank
 the other engines.
