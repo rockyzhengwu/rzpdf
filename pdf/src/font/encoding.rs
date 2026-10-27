@@ -303,6 +303,18 @@ mod safety_tests {
     use crate::{io::stream_reader::StreamReader, parser::syntax::SyntaxParser};
     use std::io::Cursor;
     #[test]
+    fn named_zapf_encoding_alias_keeps_all_glyphs_and_unicode() {
+        let canonical = Encoding::new_from_name("ZapfDingbats").unwrap();
+        let alias = Encoding::new_from_name("ZapfDingbatsEncoding").unwrap();
+        for code in 0..=255 {
+            assert_eq!(alias.get_glyph_name(code), canonical.get_glyph_name(code));
+            assert_eq!(alias.unicode_mapping(code), canonical.unicode_mapping(code));
+        }
+        assert_eq!(alias.get_glyph_name(33), Some("a1"));
+        assert_eq!(alias.unicode_mapping(33), Some(0x2701));
+        assert!(Encoding::new_from_name("UnknownDingbatsEncoding").is_err());
+    }
+    #[test]
     fn budget_differences_tracks_growth_names_and_failure_recovery() {
         let parse = |source: &str| {
             SyntaxParser::new(
@@ -2079,7 +2091,7 @@ pub fn get_predefined_encoding(name: &str) -> Option<FontEncoding> {
         "PDFDocEncoding" => Some(FontEncoding::PdfDoc),
         "MacExpertEncoding" => Some(FontEncoding::MacExpert),
         "Symbol" => Some(FontEncoding::AdobeSymbol),
-        "ZapfDingbats" => Some(FontEncoding::ZapfDingbats),
+        "ZapfDingbats" | "ZapfDingbatsEncoding" => Some(FontEncoding::ZapfDingbats),
         _ => None,
     }
 }
