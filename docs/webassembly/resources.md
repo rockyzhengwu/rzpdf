@@ -173,3 +173,15 @@ The generator requires a **new** fixture directory and creates only self-authore
 scan/solid PDFs. The browser test exercises both direct and real Worker transports,
 1152 DPI small tiles, independent solid/scan pixel checks, metadata, typed errors,
 cache release and recovery. Record actual results, not just script availability.
+
+### Raster extents
+
+Native rendering, WASM preflight and SDK `rasterSize()` cover the continuous
+page extent with `ceil(f64(f32(size)) * f64(f32(dpi)) / 72)` pixels per axis.
+This includes the final partial pixel of a fractional CropBox/UserUnit extent.
+Avoid first rounding `dpi / 72` to f32: at 96 DPI that can turn a 600 pt page
+into 801 pixels instead of 800. Region bounds use the same extents; side, pixel
+and byte budgets still apply. Raster transforms retain their existing f32
+precision. This changes fractional-page allocation dimensions from the older
+nearest-integer policy; consumers should query `rasterSize()` rather than
+reimplementing that policy.

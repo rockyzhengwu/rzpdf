@@ -15,6 +15,9 @@ for(const dpi of [NaN,Infinity,0,1153]) {
   assert.throws(()=>rasterSize(100,200,dpi));
 }
 assert.throws(()=>rasterSize(10000,10000,1152));
+assert.deepEqual(rasterSize(612.283,790.866,72),{width:613,height:791});
+assert.deepEqual(rasterSize(600,792,96),{width:800,height:1056});
+assert.deepEqual(rasterSize(0.1,0.2,72),{width:1,height:1});
 validateArguments('open',[new Uint8Array([1]),{resourceProfile:'conservative'}]);
 assert.throws(()=>validateArguments('open',[new Uint8Array([1]),{resourceProfile:'unbounded'}]));
 

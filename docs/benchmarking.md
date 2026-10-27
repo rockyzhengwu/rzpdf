@@ -192,3 +192,8 @@ can be inferred from these synthetic native rendering scores.
 API references: [MuPDF display lists](https://pymupdf.readthedocs.io/en/latest/displaylist.html),
 [PDFium public rendering API](https://pdfium.googlesource.com/pdfium/+/refs/heads/main/public/fpdfview.h),
 and [pypdfium2 bitmap ownership](https://pypdfium2.readthedocs.io/en/stable/python_api.html).
+
+The [image ownership and raster extent round](image-memory-performance.md)
+removes a full RGBA copy, reduces the real scan's paired native peak RSS by
+about 32 MiB, and unifies fractional-page dimensions across native/WASM/SDK.
+It records the remaining PLOS 72 DPI image-quality failure explicitly.

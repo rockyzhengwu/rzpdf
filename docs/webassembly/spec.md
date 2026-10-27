@@ -425,7 +425,7 @@ face 排名，不更改编码/GID、字宽、提取的 ActualText 或引入 shap
 ### 有界像素区域渲染（WA-RUN-06 / WA-T12/13 / WA-WEB-08）
 
 新增 renderRegion(page, region, dpi, options)，region 为该 DPI 下、已有页面旋转/
-CropBox/UserUnit 后的左上角整数像素 x/y/width/height。区域必须完全位于 round
+CropBox/UserUnit 后的左上角整数像素 x/y/width/height。区域必须完全位于 ceil
 后的整页像素尺寸内，不隐式裁切或缩放；Web 单边最多 1024，单块最多 1,048,576
 像素，逻辑整页单边最多 32768。当前分块 DPI 为 1～1152，整页仍为 1～288；
 现有绘制选项、权限及资源限额保持。后续资源扩展及未完成的浏览器验收见

@@ -286,9 +286,12 @@ fn render(
         return Err("page index out of range".into());
     }
     let geometry = d.get_page(page)?.geometry()?;
-    let scale = f64::from(dpi / 72.);
-    let raster_width = (f64::from(geometry.display_width) * scale).round();
-    let raster_height = (f64::from(geometry.display_height) * scale).round();
+    let (raster_width, raster_height) = render::raster_size::raster_dimensions(
+        geometry.display_width,
+        geometry.display_height,
+        dpi,
+        dpi,
+    )?;
     let effective = d.resource_limits();
     let pixels = region.map_or(raster_width * raster_height, |r| {
         f64::from(r.width) * f64::from(r.height)

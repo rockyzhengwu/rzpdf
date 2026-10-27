@@ -194,6 +194,7 @@ def main():
                         "Cargo.lock", "pdf/src/page/pdf_image.rs", "pdf/src/color/icc_profile.rs",
                         "render/src/render_device.rs", "render/src/raster_path.rs",
                         "render/src/coverage_spans.rs", "render/src/coverage_blend.rs", "render/src/performance_tests.rs",
+                        "render/src/owned_raster.rs", "render/src/raster_size.rs",
                         "render/src/render_session.rs", "render/src/render_session_tests.rs",
                         "render/src/memory_font_manager.rs", "render/build.rs", "render/Cargo.toml",
                         "render/native/font_manager_mac.cpp", "render/native/skia-headers/manifest.json",

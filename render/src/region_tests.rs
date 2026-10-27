@@ -744,3 +744,27 @@ fn tight_clip_masks_match_full_mask_alpha_in_global_coordinates() {
         }
     }
 }
+
+#[test]
+fn fractional_page_extent_preserves_last_row_and_column_in_tiles() {
+    let doc = Document::new().unwrap();
+    doc.add_page_with_builder(
+        0,
+        PageBuilder::new()
+            .size(30.25, 20.125)
+            .content(b"0 1 0 rg 0 0 30.25 20.125 re f 1 0 0 rg 29 0 1.25 20.125 re f".to_vec()),
+    )
+    .unwrap();
+    let list = doc.get_page(0).unwrap().display_list().unwrap();
+    for (xdpi, ydpi) in [(72., 72.), (96., 96.), (144., 144.), (96., 144.)] {
+        let mut renderer = SkiaRender::new(xdpi, ydpi).unwrap();
+        list.replay(&mut renderer).unwrap();
+        let image = renderer.to_rgba().unwrap();
+        let extent = crate::raster_size::raster_dimensions(30.25, 20.125, xdpi, ydpi).unwrap();
+        assert_eq!(
+            (image.width, image.height),
+            (extent.0 as u32, extent.1 as u32)
+        );
+        stitched_grid(&list, 0, xdpi, ydpi, 7, 9);
+    }
+}

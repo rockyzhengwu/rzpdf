@@ -156,6 +156,7 @@ pub struct SkiaRender {
     matrix: Matrix,
     scale_x: f32,
     scale_y: f32,
+    dpi: (f32, f32),
     page_width: i32,
     page_height: i32,
     region: Option<RasterRegion>,
@@ -518,6 +519,7 @@ impl SkiaRender {
             matrix,
             scale_x: sx,
             scale_y: sy,
+            dpi: (xdpi, ydpi),
             page_width: 0,
             page_height: 0,
             region: None,
@@ -2173,8 +2175,8 @@ impl Device for SkiaRender {
         while !self.group_stack.is_empty() {
             self.end_group(false)?;
         }
-        let pixel_width = (f64::from(self.scale_x) * f64::from(page_width)).round();
-        let pixel_height = (f64::from(self.scale_y) * f64::from(page_height)).round();
+        let (pixel_width, pixel_height) =
+            crate::raster_size::raster_dimensions(page_width, page_height, self.dpi.0, self.dpi.1)?;
         if !page_width.is_finite()
             || !page_height.is_finite()
             || pixel_width <= 0.0
@@ -2947,18 +2949,7 @@ impl Device for SkiaRender {
             let height = i32::try_from(height).map_err(|_| {
                 PdfError::ResourceLimit("image height exceeds backend range".into())
             })?;
-            let info = skia_safe::ImageInfo::new(
-                (width, height),
-                skia_safe::ColorType::RGBA8888,
-                skia_safe::AlphaType::Unpremul,
-                None,
-            );
-            let row_bytes = info.min_row_bytes();
-            let pixels = skia_safe::Data::new_copy(&rgba);
-            let image =
-                skia_safe::images::raster_from_data(&info, pixels, row_bytes).ok_or_else(|| {
-                    PdfError::ResourceLimit("Skia rejected image pixel buffer".into())
-                })?;
+            let image = crate::owned_raster::from_rgba(width, height, rgba)?;
             let shrinking = imageobject.image.interpolate()
                 && (ctm.a().hypot(ctm.b()) < width as f32
                     || ctm.c().hypot(ctm.d()) < height as f32);
@@ -7191,6 +7182,15 @@ mod image_reduction_tests {
             let image = renderer.to_rgba().unwrap();
             for (index, pixel) in image.pixels.as_chunks::<4>().0.iter().enumerate() {
                 let row = index / image.width as usize;
+                let column = index % image.width as usize;
+                // Ceil allocates a final pixel whose center may lie outside
+                // the painted page. Its white substrate is not an image sample.
+                if (column as f64 + 0.5) * 72. / f64::from(dpi) >= 64.
+                    || (row as f64 + 0.5) * 72. / f64::from(dpi) >= 64.
+                {
+                    assert_eq!(*pixel, [255; 4]);
+                    continue;
+                }
                 let source = (row as f64 + 0.5) * 72. / f64::from(dpi);
                 if source == source.floor() {
                     // At an exact source-pixel boundary both adjacent centers

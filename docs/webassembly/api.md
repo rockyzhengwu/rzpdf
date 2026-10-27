@@ -315,7 +315,7 @@ missingCodepoints 是其中尚无覆盖的子集。selected.preference 是名称
 左上角整数像素；区域必须完全在页面内。单边最多 1024，逻辑页面单边最多
 32768；分块 DPI 为 1～1152，整页 `render` 仍为 1～288。资源查询、档位、降采样
 和错误详情见[资源策略](resources.md)。`rasterSize(info.width, info.height, dpi)` 可从
-`raster.js` 导入，按原生 f32 缩放/f64 取整计算完整像素尺寸，不分配整页。
+`raster.js` 导入，将页面尺寸和 DPI 转为原生 f32 输入后，以 f64 计算 ceil(尺寸 × DPI / 72) 得到完整像素尺寸，不分配整页。
 
 ```ts
 const info = await doc.pageInfo(0);

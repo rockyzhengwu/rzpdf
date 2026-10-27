@@ -1,5 +1,10 @@
 # First-render optimization and real-document baseline
 
+Subsequent image-buffer ownership and fractional-page extent results are in
+[image-memory-performance.md](image-memory-performance.md). That round reduces
+scan peak RSS without changing decoded pixels; the measurements below remain
+historical evidence for the earlier optimization round.
+
 Date: 2026-10-27, macOS x86_64. Baseline implementation: `fd6ded0`.
 Changes are split into `eae7712` (bounded CoreText initialization), `53be974`
 (coverage masks), and `4eaa38d` (the named Zapf encoding alias).

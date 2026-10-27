@@ -17,6 +17,8 @@ def main():
     def add(id,data,**extra):
         p=OUT/('region-'+id+'.pdf');p.write_bytes(data)
         records.append({'id':id,'file':p.name,'sha256':hashlib.sha256(data).hexdigest(),**extra})
+    add('fractional-page',fixture('', '0 1 0 rg 0 0 30.25 20.125 re f 1 0 0 rg 29 0 1.25 20.125 re f',size=(30.25,20.125)))
+    add('fractional-geometry',fixture('', '0 1 0 rg 0 0 50 40 re f 1 0 0 rg 30 0 20 40 re f',size=(50,40),page_extra='/CropBox [5.125 3.25 35.375 23.375] /Rotate 90 /UserUnit 1.5'))
     add('fractional-edges',fixture('', '0 1 0 rg 0 0 30 20 re f 1 1 0 rg 25 0 5 20 re f',size=(30,20)))
     add('glyph-phase',fixture('/Font << /F << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >>', 'BT /F 200 Tf 1 0 0 1 0.124999 30 Tm (AOS) Tj ET',size=(480,260)),curveRaster=True,stressMaxWasmBytes=128*1024*1024)
     add('glyph-phase-pattern',fixture('/Font << /F << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> /Pattern << /P 5 0 R >>', '/Pattern cs /P scn BT /F 200 Tf 1 0 0 1 0.124999 30 Tm (AOS) Tj ET',extra=(stream('/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 8 8] /XStep 8 /YStep 8 /Resources << >>',b'1 0 0 rg 0 0 4 8 re f 0 0 1 rg 4 0 4 8 re f'),),size=(480,260)),curveRaster=True,stressMaxWasmBytes=128*1024*1024)

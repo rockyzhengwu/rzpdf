@@ -45,7 +45,7 @@ try{
       {page:Math.min(doc.pageCount-1,basePage+1),dpi:72,x:0,y:0},{page:basePage,dpi:72,x:0,y:0}];
     const timings=[];let ink=0;
     for(const [index,request] of requests.entries()){
-     const geometry=request.page===basePage?info:await doc.pageInfo(request.page),width=Math.round(geometry.width*request.dpi/72),height=Math.round(geometry.height*request.dpi/72);
+     const geometry=request.page===basePage?info:await doc.pageInfo(request.page),width=Math.ceil(Math.fround(geometry.width)*Math.fround(request.dpi)/72),height=Math.ceil(Math.fround(geometry.height)*Math.fround(request.dpi)/72);
      const area={x:Math.min(request.x,Math.max(0,width-1)),y:Math.min(request.y,Math.max(0,height-1)),width:Math.min(512,width),height:Math.min(512,height)};
      area.width=Math.min(area.width,width-area.x);area.height=Math.min(area.height,height-area.y);
      const start=performance.now(),image=await doc.renderRegion(request.page,area,request.dpi,{viewZoom:request.zoom??1});
