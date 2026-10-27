@@ -61,6 +61,11 @@ fn run() -> Result<Value, Box<dyn std::error::Error>> {
     let mut renderer = SkiaRender::new(dpi, dpi)?;
     let session = renderer.render_session();
     let fresh_renderer = job["fresh_renderer"].as_bool().unwrap_or(false);
+    // Attribution only: force cold backend resources while keeping the same
+    // prepared display list. Formal engine rankings never enable this flag.
+    let clear_session_before_replay = job["clear_session_before_replay"]
+        .as_bool()
+        .unwrap_or(false);
     let diagnostics = job["diagnostics"].as_bool().unwrap_or(false);
     let initialized_memory = diagnostics.then(memory_snapshot);
     let first_cpu_start = diagnostics.then(cpu_ms).flatten();
@@ -109,6 +114,9 @@ fn run() -> Result<Value, Box<dyn std::error::Error>> {
     let replay_cpu_start = diagnostics.then(cpu_ms).flatten();
     let replay_wall = Instant::now();
     for i in 0..warmup + repeats {
+        if clear_session_before_replay {
+            session.clear();
+        }
         let start = Instant::now();
         if fresh_renderer {
             renderer = session.renderer(&doc, 0, dpi, dpi)?;
@@ -147,7 +155,7 @@ fn run() -> Result<Value, Box<dyn std::error::Error>> {
     Ok(
         json!({"status":"ok","engine":"rzpdf","profile":"release", "input_mode":input_mode, "open_ms":open_ms,
         "preparation_profile":preparation_profile,"prepare_ms":prepare_ms,"raster_ms":raster_ms,"first_ms":open_ms+prepare_ms+raster_ms,
-        "fresh_renderer":fresh_renderer,"warm_ms":warm_ms,"warm_replay_ms":replay_ms,"warm_readback_ms":readback_ms,
+        "fresh_renderer":fresh_renderer,"clear_session_before_replay":clear_session_before_replay,"warm_ms":warm_ms,"warm_replay_ms":replay_ms,"warm_readback_ms":readback_ms,
         "diagnostics":diagnostics.then(|| json!({"initialized_memory":initialized_memory,
             "after_first_memory":first_memory,"after_replay_memory":replay_memory,
             "first_cpu_ms":first_cpu_ms,"replay_cpu_ms":replay_cpu_ms,"replay_wall_ms":replay_wall_ms,

@@ -344,17 +344,42 @@ mod tests {
                     let local = contours.for_cell(x, y);
                     let mut images = Vec::new();
                     for outline in [&path, &local] {
-                        let mut mask =
-                            surfaces::raster(&skia_safe::ImageInfo::new_a8((68, 68)), None, None)
-                                .unwrap();
-                        mask.canvas().clear(Color::TRANSPARENT);
-                        mask.canvas().translate((2. - x as f32, 2. - y as f32));
-                        let mut paint = Paint::default();
-                        paint.set_color(Color::WHITE).set_anti_alias(true);
-                        mask.canvas().draw_path(outline, &paint);
-                        images.push(mask.peek_pixels().unwrap().bytes().unwrap().to_vec());
+                        for kind in [skia_safe::ColorType::Alpha8, skia_safe::ColorType::N32] {
+                            let mut mask = surfaces::raster(
+                                &skia_safe::ImageInfo::new(
+                                    (68, 68),
+                                    kind,
+                                    skia_safe::AlphaType::Premul,
+                                    None,
+                                ),
+                                None,
+                                None,
+                            )
+                            .unwrap();
+                            mask.canvas().clear(Color::TRANSPARENT);
+                            mask.canvas().translate((2. - x as f32, 2. - y as f32));
+                            let mut paint = Paint::default();
+                            paint.set_color(Color::WHITE).set_anti_alias(true);
+                            mask.canvas().draw_path(outline, &paint);
+                            let pixels = mask.peek_pixels().unwrap();
+                            let data = pixels.bytes().unwrap();
+                            let mut alpha = Vec::new();
+                            for row in 0..68 {
+                                for column in 0..68 {
+                                    let offset = if kind == skia_safe::ColorType::Alpha8 {
+                                        column
+                                    } else {
+                                        column * 4 + 3
+                                    };
+                                    alpha.push(data[row * pixels.row_bytes() + offset]);
+                                }
+                            }
+                            images.push(alpha);
+                        }
                     }
-                    assert_eq!(images[0], images[1], "{fill:?} cell {x} {y}");
+                    for image in &images[1..] {
+                        assert_eq!(&images[0], image, "{fill:?} cell {x} {y}");
+                    }
                 }
             }
         }

@@ -1,4 +1,5 @@
-//! Coalesce identical adjacent A8 row runs without changing a single sample.
+//! Coalesce identical adjacent alpha row runs without changing a single sample.
+//! Pixels are A8 or native N32, whose alpha occupies its last byte.
 //! Emitted rectangles never overlap, so their submission order is immaterial.
 #[derive(Clone, Copy, Default)]
 pub(super) struct CoverageRect {
@@ -9,7 +10,7 @@ pub(super) struct CoverageRect {
     pub coverage: u8,
 }
 
-pub(super) fn rectangles(
+pub(super) fn rectangles<const PIXEL_BYTES: usize>(
     data: &[u8],
     stride: usize,
     bounds: (usize, usize, usize, usize),
@@ -19,14 +20,16 @@ pub(super) fn rectangles(
     let mut active = [CoverageRect::default(); 64];
     let mut count = 0;
     for row in top..bottom {
-        let values = &data[row * stride + left..row * stride + right];
+        let values = &data[row * stride + left * PIXEL_BYTES..row * stride + right * PIXEL_BYTES];
         let mut next = [CoverageRect::default(); 64];
         let (mut old, mut used, mut column) = (0, 0, 0);
-        while column < values.len() {
+        while column < right - left {
             let start = column;
-            let coverage = values[column];
+            let coverage = values[column * PIXEL_BYTES + PIXEL_BYTES - 1];
             column += 1;
-            while column < values.len() && values[column] == coverage {
+            while column < right - left
+                && values[column * PIXEL_BYTES + PIXEL_BYTES - 1] == coverage
+            {
                 column += 1;
             }
             if coverage == 0 {
@@ -73,6 +76,28 @@ pub(super) fn rectangles(
 mod tests {
     use super::*;
     #[test]
+    fn padded_n32_rows_emit_the_same_rectangles_as_a8() {
+        let mut a8 = vec![0; 68 * 68];
+        let stride = 68 * 4 + 12;
+        let mut n32 = vec![91; stride * 68];
+        for row in 0..68 {
+            for column in 0..68 {
+                let alpha = ((column * 19 + row / 3 * 31) % 256) as u8;
+                a8[row * 68 + column] = alpha;
+                n32[row * stride + column * 4 + 3] = alpha;
+            }
+        }
+        let mut expected = Vec::new();
+        let mut actual = Vec::new();
+        rectangles::<1>(&a8, 68, (3, 5, 65, 64), |r| {
+            expected.push((r.left, r.top, r.right, r.bottom, r.coverage))
+        });
+        rectangles::<4>(&n32, stride, (3, 5, 65, 64), |r| {
+            actual.push((r.left, r.top, r.right, r.bottom, r.coverage))
+        });
+        assert_eq!(actual, expected);
+    }
+    #[test]
     fn runs_reconstruct_exactly_once_and_full_block_is_one_rectangle() {
         for pattern in 0..4 {
             let mut input = vec![0u8; 68 * 68];
@@ -100,7 +125,7 @@ mod tests {
             }
             let mut output = vec![0u8; 68 * 68];
             let mut count = 0;
-            rectangles(&input, 68, (2, 2, 66, 66), |rect| {
+            rectangles::<1>(&input, 68, (2, 2, 66, 66), |rect| {
                 count += 1;
                 for y in rect.top..rect.bottom {
                     for x in rect.left..rect.right {

@@ -1692,9 +1692,16 @@ impl SkiaRender {
             &mut self.raster_path_budget,
             self.limits.max_operation_bytes,
         )?;
+        // Solid coverage can use the native integer blitter and read only its
+        // alpha byte. The existing scratch preflight reserves two N32 cells;
+        // shader and non-SrcOver image-mask semantics retain Alpha8.
         let mask_info = skia_safe::ImageInfo::new(
             (SIDE, SIDE),
-            skia_safe::ColorType::Alpha8,
+            if integer_spans {
+                skia_safe::ColorType::N32
+            } else {
+                skia_safe::ColorType::Alpha8
+            },
             skia_safe::AlphaType::Premul,
             None,
         );
@@ -1717,7 +1724,6 @@ impl SkiaRender {
                 mask.canvas()
                     .translate((-(x - HALO) as f32, -(y - HALO) as f32));
                 mask.canvas().draw_path(&local_outline, &coverage);
-                let image = mask.image_snapshot();
                 self.surface.canvas().save();
                 self.surface.canvas().clip_rect(
                     skia_safe::Rect::from_xywh(x as f32, y as f32, CELL as f32, CELL as f32),
@@ -1725,6 +1731,7 @@ impl SkiaRender {
                     false,
                 );
                 if fill.shader().is_some() {
+                    let image = mask.image_snapshot();
                     let local =
                         skia_safe::Matrix::translate(((x - HALO) as f32, (y - HALO) as f32));
                     let shader =
@@ -1786,27 +1793,38 @@ impl SkiaRender {
                         &fill,
                         (origin.0 as i32, origin.1 as i32),
                         |blitter| {
-                            coverage_spans::rectangles(bytes, pixels.row_bytes(), bounds, |rect| {
-                                save_rect(rect);
-                                blitter.rect(x, y, rect);
-                            });
+                            coverage_spans::rectangles::<4>(
+                                bytes,
+                                pixels.row_bytes(),
+                                bounds,
+                                |rect| {
+                                    save_rect(rect);
+                                    blitter.rect(x, y, rect);
+                                },
+                            );
                         },
                     ) {
-                        coverage_spans::rectangles(bytes, pixels.row_bytes(), bounds, |rect| {
-                            save_rect(rect);
-                            let alpha =
-                                (u16::from(fill.alpha()) * u16::from(rect.coverage) + 127) / 255;
-                            span.set_alpha(alpha as u8);
-                            self.surface.canvas().draw_rect(
-                                skia_safe::Rect::from_xywh(
-                                    (x - HALO) as f32 + f32::from(rect.left),
-                                    (y - HALO) as f32 + f32::from(rect.top),
-                                    f32::from(rect.right - rect.left),
-                                    f32::from(rect.bottom - rect.top),
-                                ),
-                                &span,
-                            );
-                        });
+                        coverage_spans::rectangles::<4>(
+                            bytes,
+                            pixels.row_bytes(),
+                            bounds,
+                            |rect| {
+                                save_rect(rect);
+                                let alpha = (u16::from(fill.alpha()) * u16::from(rect.coverage)
+                                    + 127)
+                                    / 255;
+                                span.set_alpha(alpha as u8);
+                                self.surface.canvas().draw_rect(
+                                    skia_safe::Rect::from_xywh(
+                                        (x - HALO) as f32 + f32::from(rect.left),
+                                        (y - HALO) as f32 + f32::from(rect.top),
+                                        f32::from(rect.right - rect.left),
+                                        f32::from(rect.bottom - rect.top),
+                                    ),
+                                    &span,
+                                );
+                            },
+                        );
                     }
                     if save {
                         if let Some(cells) = &mut cached_cells {
@@ -1821,6 +1839,7 @@ impl SkiaRender {
                         cached_cells = None;
                     }
                 } else {
+                    let image = mask.image_snapshot();
                     self.surface.canvas().draw_image(
                         &image,
                         ((x - HALO) as f32, (y - HALO) as f32),
