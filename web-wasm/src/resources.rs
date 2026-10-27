@@ -22,6 +22,7 @@ pub fn capabilities(limits: Limits) -> Value {
         "imageDecode":{"jpegTargetResolution":true,"jpxTargetResolution":false,
         "maxJpegSourcePixels":16000000,"jpegProcesses":["sequential"],"maskedReduction":false,
         "policy":"target-if-full-decode-exceeds-limits",
+        "defaultPolicy":"budgeted","supportedPolicies":["budgeted","target"],
         "fallback":"bounded-full-resolution-or-error"}})
 }
 

@@ -32,6 +32,13 @@ use crate::{
 };
 
 #[derive(Debug)]
+struct CachedImage {
+    image: std::rc::Rc<PdfImage>,
+    // Translation does not affect decode resolution; DPI is fixed per interpreter.
+    target_transform: Option<[u32; 4]>,
+}
+
+#[derive(Debug)]
 pub struct Interpreter<'a, R: Seek + Read> {
     page: &'a PdfPage<'a, R>,
     ctx: &'a PDFContext<R>,
@@ -74,7 +81,7 @@ pub struct Interpreter<'a, R: Seek + Read> {
     type3_budget: crate::budget::OperationBudget,
     // Cache is local to a resource invocation and invalidated after edits.
     font_cache_revision: u64,
-    image_cache: std::collections::HashMap<String, std::rc::Rc<PdfImage>>,
+    image_cache: std::collections::HashMap<String, CachedImage>,
     image_cache_bytes: usize,
     font_cache: std::collections::HashMap<String, std::rc::Rc<Font>>,
 }
@@ -2482,8 +2489,30 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                     self.image_cache_bytes = 0;
                     self.font_cache_revision = self.ctx.revision();
                 }
-                let pdfimage = if let Some(image) = self.image_cache.get(name) {
-                    image.clone()
+                // A target-policy image depends on each draw's linear transform.
+                // Keep one bounded variant per name and replace it when needed.
+                let target_transform = if self.ctx.render_image_policy()
+                    == Some(crate::document::prepared_page::ImageDecodePolicy::TargetResolution)
+                {
+                    let m = self
+                        .current_state
+                        .ctm()
+                        .checked_mul(&self.page.page_matrix)?;
+                    Some([
+                        m.a().to_bits(),
+                        m.b().to_bits(),
+                        m.c().to_bits(),
+                        m.d().to_bits(),
+                    ])
+                } else {
+                    None
+                };
+                let pdfimage = if let Some(cached) = self
+                    .image_cache
+                    .get(name)
+                    .filter(|cached| cached.target_transform == target_transform)
+                {
+                    cached.image.clone()
                 } else {
                     let image_matrix = self
                         .current_state
@@ -2509,12 +2538,12 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                             .map(|value| value.and_then(|value| value.as_u32()))
                     };
                     let (width, height) = image.pixel_dimensions();
-                    // Only full-size images enter this name-only cache. Reduced
-                    // images depend on each draw's transform, not just its name.
+                    // Budgeted name-only entries retain full-size images. Target
+                    // entries additionally validate the draw transform.
                     let full_precision = self.ctx.render_image_dpi().is_none()
                         || (source_dimension("Width")? == Some(width)
                             && source_dimension("Height")? == Some(height));
-                    if full_precision
+                    if (target_transform.is_some() || full_precision)
                         && self.image_cache.len() < self.ctx.limits().max_objects
                         && bytes
                             <= self
@@ -2526,7 +2555,15 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                         self.image_cache.try_reserve(1).map_err(|_| {
                             PdfError::ResourceLimit("image cache allocation".into())
                         })?;
-                        self.image_cache.insert(name.to_owned(), image.clone());
+                        if let Some(previous) = self.image_cache.insert(
+                            name.to_owned(),
+                            CachedImage {
+                                image: image.clone(),
+                                target_transform,
+                            },
+                        ) {
+                            self.image_cache_bytes -= previous.image.retained_sample_bytes()?;
+                        }
                         self.image_cache_bytes += bytes;
                     }
                     image

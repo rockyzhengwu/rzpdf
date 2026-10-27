@@ -32,11 +32,11 @@ export type MutationRequest = ContentMutation
  | {operation:'setFormValue';stamp:DocumentStamp;object:ObjectId;value:FormValue};
 export interface MutationResult {stamp:DocumentStamp;pageCount:number;created:ObjectId|null;}
 export interface SavedPdf {bytes:Uint8Array<ArrayBuffer>;stamp:DocumentStamp;}
-export interface RenderOptions {annotations?:boolean;includeWidgets?:boolean;viewZoom?:number;viewRotation?:number;}
+export interface RenderOptions {imageDecode?:'budgeted'|'target';annotations?:boolean;includeWidgets?:boolean;viewZoom?:number;viewRotation?:number;}
 export function normalizeRenderOptions(options:RenderOptions):Required<RenderOptions> {
-  if(!options||typeof options!=='object'||Object.keys(options).some(k=>!['annotations','includeWidgets','viewZoom','viewRotation'].includes(k)))throw new RangeError('Invalid render options');
-  const out={annotations:options.annotations??true,includeWidgets:options.includeWidgets??true,viewZoom:options.viewZoom??1,viewRotation:options.viewRotation??0};
-  if(![0,90,180,270].includes(out.viewRotation)||typeof out.annotations!=='boolean'||typeof out.includeWidgets!=='boolean'||typeof out.viewZoom!=='number'||!Number.isFinite(out.viewZoom)||out.viewZoom<.1||out.viewZoom>4)throw new RangeError('Invalid render options');
+  if(!options||typeof options!=='object'||Object.keys(options).some(k=>!['annotations','includeWidgets','viewZoom','viewRotation','imageDecode'].includes(k)))throw new RangeError('Invalid render options');
+  const out={imageDecode:options.imageDecode??'budgeted',annotations:options.annotations??true,includeWidgets:options.includeWidgets??true,viewZoom:options.viewZoom??1,viewRotation:options.viewRotation??0};
+  if(!['budgeted','target'].includes(out.imageDecode)||![0,90,180,270].includes(out.viewRotation)||typeof out.annotations!=='boolean'||typeof out.includeWidgets!=='boolean'||typeof out.viewZoom!=='number'||!Number.isFinite(out.viewZoom)||out.viewZoom<.1||out.viewZoom>4)throw new RangeError('Invalid render options');
   return out;
 }
 /** Own a bounded JSON-only command before enqueueing it in another realm. */

@@ -546,7 +546,7 @@ FreeType 明确的 OutOfMemory 归为资源错误，不归为字体损坏。
 使用旋转后的尺寸；绘制指针先逆变换为 display points，再换算 PDF 用户坐标。
 RenderOptions 新增 viewRotation（默认 0），只描述调用方在输出之外施加的
 角度，不旋转 RGBA 或改变 region 坐标；用于 NoRotate 外观与预检补偿。
-ABI flags 的低两位保持原注释语义，位 2～3 为额外角度除以 90；
+ABI flags 的低两位保持原注释语义，位 2～3 为额外角度除以 90，位 4 为可选的 target 图片解码策略；
 拒绝其他位和非法角度。NoRotate 控件及外观抵消页面与额外视图旋转，
 NoZoom 保持原 viewZoom 语义。Worker 快照参数、旧结果隔离和释放规则不变。
 
@@ -601,7 +601,7 @@ face 或字形覆盖验证。每源最多 32 MiB、独立程序合计 64 MiB、
 ## 页面解释复用与优化构建（WA-PERF）
 
 - WA-PERF-01：浏览器默认使用独立的 `wasm-release` profile，Rust opt-level=2、关闭调试信息与调试断言，并对最终 Emscripten 链接启用 O2。保留显式 dev 构建用于定位；原生默认 profile 不变。优化产物必须经过像素和交互回归，不能用构建成功替代验证。
-- WA-PERF-02：页面准备与区域绘制分开。`prepare_page(page, annotations)` 返回带文档身份和 revision 的不可变快照，区域坐标和 DPI 不参与解释缓存键。默认可选内容选择参与准备；批注 intent、widgets、viewZoom 和 viewRotation 必须区分。跨文档、成功编辑和回滚后的旧快照均拒绝回放。
+- WA-PERF-02：页面准备与区域绘制分开。`prepare_page(page, annotations)` 返回带文档身份和 revision 的不可变快照，区域坐标不参与解释缓存键；渲染专用准备的 DPI 和图片解码策略参与缓存键。默认可选内容选择参与准备；批注 intent、widgets、viewZoom 和 viewRotation 必须区分。跨文档、成功编辑和回滚后的旧快照均拒绝回放。
 - WA-PERF-03：解释器按原始间接字体资源对象身份共享已解析字体及其 CMap，禁止按 `/F1` 或 BaseFont 名称跨资源作用域共享。直接字体保持局部解析；Type3 保持原来的操作预算及 revision 约束，不纳入持久字体缓存。
 - WA-PERF-04：每文档页面缓存最多两项、32 MiB 估计存储；字体缓存最多 32 项、16 MiB 估计存储，且均受 max_operation_bytes 截断。估计包括 Rust 容器、字形映射和程序数据，并非统一 allocator/RSS 硬限额。超大快照、容量不足或缓存分配失败回退为不保留；失败解析不缓存。revision 在下次访问时淘汰旧缓存；显式清除和关闭文档释放缓存引用，调用方自行持有的快照由其管理。
 - WA-PERF-05：以相同输入、区域、倍率和浏览器比较冷／热耗时；优化前后像素必须对照。对缓存命中、LRU、拒绝保留、文档隔离、编辑／回滚失效以及批注参数分别验证。本阶段不以调整分块调度或增加线程掩盖重复解释成本。

@@ -192,6 +192,8 @@ def main():
                         "scripts/benchmark_pdf.py", "scripts/benchmark_pdf_worker.py",
                         "scripts/prepare_benchmark_corpus.py", "render/examples/benchmark_render.rs",
                         "Cargo.lock", "pdf/src/page/pdf_image.rs", "pdf/src/color/icc_profile.rs",
+                        "pdf/src/filter/dct.rs", "pdf/src/document/prepared_page.rs",
+                        "pdf/src/pdf_context.rs", "pdf/src/page/content_interpreter.rs",
                         "render/src/render_device.rs", "render/src/raster_path.rs",
                         "render/src/coverage_spans.rs", "render/src/coverage_blend.rs", "render/src/performance_tests.rs",
                         "render/src/owned_raster.rs", "render/src/raster_size.rs",

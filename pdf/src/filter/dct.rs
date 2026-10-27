@@ -3,6 +3,8 @@ use crate::{
     objects::pdf_dict::PdfDict,
 };
 
+pub(crate) const MAX_TARGET_SOURCE_PIXELS: u64 = 16_000_000;
+
 /// Native IDCT reduction for render-only, sequential JPEG images. Source and
 /// output guards are independent; this never constructs full-size RGB pixels.
 pub(crate) fn decode_target(
@@ -20,11 +22,11 @@ pub(crate) fn decode_target(
             ));
         }
         let source_pixels = u64::from(source.0) * u64::from(source.1);
-        if source_pixels > 16_000_000 {
+        if source_pixels > MAX_TARGET_SOURCE_PIXELS {
             return Err(PdfError::ResourceLimitExceeded {
                 reason: "image_source_pixels",
                 stage: "image_decode",
-                limit: 16_000_000,
+                limit: MAX_TARGET_SOURCE_PIXELS,
                 actual: source_pixels,
             });
         }

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::io::{Read, Seek};
 
 use crate::document::cross_ref_table::ObjectState;
+use crate::document::prepared_page::ImageDecodePolicy;
 use crate::document::store::StoreEntry;
 use crate::objects::object_streams::ObjectStreams;
 use crate::{
@@ -30,7 +31,7 @@ pub struct PDFContext<R: Seek + Read> {
     decoding_depth: Cell<usize>,
     color_depth: Cell<usize>,
     active_color_spaces: RefCell<Vec<ObjectId>>,
-    render_image_dpi: Cell<Option<f32>>,
+    render_image_settings: Cell<Option<(f32, ImageDecodePolicy)>>,
     #[cfg(feature = "prepare-diagnostics")]
     pub(crate) preparation_profile: RefCell<Option<crate::page::preparation_profile::Recorder>>,
     text_geometry_only: Cell<bool>,
@@ -117,7 +118,7 @@ impl<R: Seek + Read> PDFContext<R> {
         Ok(profile)
     }
     pub(crate) fn render_image_dpi(&self) -> Option<f32> {
-        self.render_image_dpi.get()
+        self.render_image_settings.get().map(|v| v.0)
     }
 
     pub(crate) fn with_render_image_dpi<T>(
@@ -125,15 +126,27 @@ impl<R: Seek + Read> PDFContext<R> {
         dpi: f32,
         action: impl FnOnce() -> PdfResult<T>,
     ) -> PdfResult<T> {
-        struct Restore<'a>(&'a Cell<Option<f32>>, Option<f32>);
+        self.with_render_image_policy(dpi, ImageDecodePolicy::Budgeted, action)
+    }
+    pub(crate) fn render_image_policy(&self) -> Option<ImageDecodePolicy> {
+        self.render_image_settings.get().map(|v| v.1)
+    }
+    pub(crate) fn with_render_image_policy<T>(
+        &self,
+        dpi: f32,
+        policy: ImageDecodePolicy,
+        action: impl FnOnce() -> PdfResult<T>,
+    ) -> PdfResult<T> {
+        type Setting = Option<(f32, ImageDecodePolicy)>;
+        struct Restore<'a>(&'a Cell<Setting>, Setting);
         impl Drop for Restore<'_> {
             fn drop(&mut self) {
                 self.0.set(self.1);
             }
         }
         let _restore = Restore(
-            &self.render_image_dpi,
-            self.render_image_dpi.replace(Some(dpi)),
+            &self.render_image_settings,
+            self.render_image_settings.replace(Some((dpi, policy))),
         );
         action()
     }
@@ -236,7 +249,7 @@ impl<R: Seek + Read> PDFContext<R> {
             decoding_depth: Cell::new(0),
             color_depth: Cell::new(0),
             active_color_spaces: RefCell::new(Vec::new()),
-            render_image_dpi: Cell::new(None),
+            render_image_settings: Cell::new(None),
             #[cfg(feature = "prepare-diagnostics")]
             preparation_profile: RefCell::new(None),
             text_geometry_only: Cell::new(false),
@@ -408,7 +421,7 @@ impl<R: Seek + Read> PDFContext<R> {
             decoding_depth: Cell::new(0),
             color_depth: Cell::new(0),
             active_color_spaces: RefCell::new(Vec::new()),
-            render_image_dpi: Cell::new(None),
+            render_image_settings: Cell::new(None),
             #[cfg(feature = "prepare-diagnostics")]
             preparation_profile: RefCell::new(None),
             text_geometry_only: Cell::new(false),

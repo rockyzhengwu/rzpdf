@@ -185,3 +185,13 @@ and byte budgets still apply. Raster transforms retain their existing f32
 precision. This changes fractional-page allocation dimensions from the older
 nearest-integer policy; consumers should query `rasterSize()` rather than
 reimplementing that policy.
+
+### Optional target-resolution JPEG decoding
+
+Pass `{imageDecode: "target"}` to `render` or `renderRegion` to proactively
+reduce eligible JPEGs even when a full decode fits. The default `budgeted`
+policy remains unchanged. This trades some image detail for lower decode and
+conversion work and smaller retained images; it never raises resource limits.
+Both policies keep the bounded full-resolution fallback for masks and
+unsupported codecs/processes. See [the API contract](api.md#image-decode-quality-policy).
+Cache statistics expose retained storage estimates, not process peak memory.

@@ -138,7 +138,7 @@ await scopedDoc.close();scopedEngine.dispose();
 console.log('Worker queue, ownership, cancellation, timeout, stale response and disposal checks passed');
 
 const rotating=await createWorkerEngine();const rotatingDoc=await rotating.open(new Uint8Array([1]));
-const rotationOptions={viewRotation:90},rotatingRequest=rotatingDoc.render(0,72,rotationOptions);rotationOptions.viewRotation=180;await tick();
+const rotationOptions={viewRotation:90,imageDecode:'target'},rotatingRequest=rotatingDoc.render(0,72,rotationOptions);rotationOptions.viewRotation=180;rotationOptions.imageDecode='budgeted';await tick();
 const rotationWorker=FakeWorker.instances.at(-1),queuedRotation=rotationWorker.held.at(-1);
-assert.equal(queuedRotation.args[2].viewRotation,90);rotationWorker.complete(queuedRotation);await rotatingRequest;
+assert.equal(queuedRotation.args[2].viewRotation,90);assert.equal(queuedRotation.args[2].imageDecode,'target');rotationWorker.complete(queuedRotation);await rotatingRequest;
 rotating.dispose();

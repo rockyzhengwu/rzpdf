@@ -66,6 +66,16 @@ fn run() -> Result<Value, Box<dyn std::error::Error>> {
     let clear_session_before_replay = job["clear_session_before_replay"]
         .as_bool()
         .unwrap_or(false);
+    let image_policy = match job["image_decode"].as_str().unwrap_or("budgeted") {
+        "budgeted" => pdf::document::prepared_page::ImageDecodePolicy::Budgeted,
+        "target" => pdf::document::prepared_page::ImageDecodePolicy::TargetResolution,
+        _ => return Err("invalid image_decode policy".into()),
+    };
+    if job["profile_prepare"].as_bool().unwrap_or(false)
+        && image_policy != pdf::document::prepared_page::ImageDecodePolicy::Budgeted
+    {
+        return Err("profile_prepare currently requires budgeted image decoding".into());
+    }
     let diagnostics = job["diagnostics"].as_bool().unwrap_or(false);
     let initialized_memory = diagnostics.then(memory_snapshot);
     let first_cpu_start = diagnostics.then(cpu_ms).flatten();
@@ -87,7 +97,10 @@ fn run() -> Result<Value, Box<dyn std::error::Error>> {
         }).collect();
         (page, Some(phases))
     } else {
-        (doc.prepare_page_for_render(0, None, dpi)?, None)
+        (
+            doc.prepare_page_for_render_with_policy(0, None, dpi, image_policy)?,
+            None,
+        )
     };
     let prepare_ms = start.elapsed().as_secs_f64() * 1000.;
     let start = Instant::now();
@@ -141,7 +154,8 @@ fn run() -> Result<Value, Box<dyn std::error::Error>> {
     let mut next_ms = Vec::new();
     for index in 1..count {
         let start = Instant::now();
-        let page = doc.prepare_page_for_render(index as u32, None, dpi)?;
+        let page =
+            doc.prepare_page_for_render_with_policy(index as u32, None, dpi, image_policy)?;
         page.replay(&doc, &mut renderer)?;
         let image = renderer.to_rgba()?;
         next_ms.push(start.elapsed().as_secs_f64() * 1000.);
@@ -153,7 +167,7 @@ fn run() -> Result<Value, Box<dyn std::error::Error>> {
         }
     }
     Ok(
-        json!({"status":"ok","engine":"rzpdf","profile":"release", "input_mode":input_mode, "open_ms":open_ms,
+        json!({"status":"ok","engine":"rzpdf","profile":"release", "input_mode":input_mode,"image_decode":job["image_decode"].as_str().unwrap_or("budgeted"), "open_ms":open_ms,
         "preparation_profile":preparation_profile,"prepare_ms":prepare_ms,"raster_ms":raster_ms,"first_ms":open_ms+prepare_ms+raster_ms,
         "fresh_renderer":fresh_renderer,"clear_session_before_replay":clear_session_before_replay,"warm_ms":warm_ms,"warm_replay_ms":replay_ms,"warm_readback_ms":readback_ms,
         "diagnostics":diagnostics.then(|| json!({"initialized_memory":initialized_memory,

@@ -266,9 +266,86 @@ fn masked_jpeg_retains_full_precision_and_matte_is_not_dropped() {
     .unwrap();
     let page = doc.prepare_page_for_render(0, None, 72.).unwrap();
     assert_eq!(dimensions(&doc, &page), [(256, 256)]);
+    let target = doc
+        .prepare_page_for_render_with_policy(
+            0,
+            None,
+            72.,
+            pdf::document::prepared_page::ImageDecodePolicy::TargetResolution,
+        )
+        .unwrap();
+    assert_eq!(dimensions(&doc, &target), [(256, 256)]);
     let list = doc.get_page(0).unwrap().display_list().unwrap();
     let PageObject::Image(image) = &list.objects()[0] else {
         panic!("expected image");
     };
     assert_eq!(image.image.rgba_buffer().unwrap()[3], 128);
+}
+
+#[test]
+fn target_policy_is_opt_in_and_cache_identity_includes_policy_and_dpi() {
+    use pdf::document::prepared_page::ImageDecodePolicy::TargetResolution;
+    let doc = scan(1600, 1200, "q 200 0 0 150 0 0 cm /IMAGE Do Q");
+    let saved = doc.save_to_bytes().unwrap();
+    let full = doc.prepare_page_for_render(0, None, 72.).unwrap();
+    assert_eq!(dimensions(&doc, &full), [(1600, 1200)]);
+    let target = doc
+        .prepare_page_for_render_with_policy(0, None, 72., TargetResolution)
+        .unwrap();
+    assert_eq!(dimensions(&doc, &target), [(200, 150)]);
+    assert!(!Rc::ptr_eq(&target, &full));
+    assert!(Rc::ptr_eq(
+        &target,
+        &doc.prepare_page_for_render_with_policy(0, None, 72., TargetResolution)
+            .unwrap()
+    ));
+    assert!(Rc::ptr_eq(
+        &full,
+        &doc.prepare_page_for_render(0, None, 72.).unwrap()
+    ));
+    let high = doc
+        .prepare_page_for_render_with_policy(0, None, 144., TargetResolution)
+        .unwrap();
+    assert_eq!(dimensions(&doc, &high), [(400, 300)]);
+    let native = doc
+        .prepare_page_for_render_with_policy(0, None, 576., TargetResolution)
+        .unwrap();
+    assert_eq!(dimensions(&doc, &native), [(1600, 1200)]);
+    assert!(
+        doc.prepare_page_for_render_with_policy(99, None, 72., TargetResolution)
+            .is_err()
+    );
+    assert_eq!(
+        dimensions(&doc, &doc.prepare_page(0, None).unwrap()),
+        [(1600, 1200)]
+    );
+    assert_eq!(saved, doc.save_to_bytes().unwrap());
+}
+
+#[test]
+fn target_policy_observes_each_draw_transform_and_progressive_fallback() {
+    use pdf::document::prepared_page::ImageDecodePolicy::TargetResolution;
+    let doc = scan(
+        1600,
+        1200,
+        "q 200 0 0 150 0 0 cm /IMAGE Do Q q 0 800 -600 0 600 0 cm /IMAGE Do Q q 1200 0 0 900 0 0 cm /IMAGE Do Q q 200 0 0 150 0 0 cm /IMAGE Do Q q 200 0 0 150 20 30 cm /IMAGE Do Q",
+    );
+    let target = doc
+        .prepare_page_for_render_with_policy(0, None, 72., TargetResolution)
+        .unwrap();
+    assert_eq!(
+        dimensions(&doc, &target),
+        [(200, 150), (800, 600), (1600, 1200), (200, 150), (200, 150)]
+    );
+    let mut draws = Images::default();
+    target.replay(&doc, &mut draws).unwrap();
+    assert_eq!(
+        draws.1[3], draws.1[4],
+        "translation should reuse reduced pixels"
+    );
+    let progressive = scan_with_process(256, 256, "q 16 0 0 16 0 0 cm /IMAGE Do Q", true);
+    let target = progressive
+        .prepare_page_for_render_with_policy(0, None, 72., TargetResolution)
+        .unwrap();
+    assert_eq!(dimensions(&progressive, &target), [(256, 256)]);
 }

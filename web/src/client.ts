@@ -262,7 +262,7 @@ export class PdfDocument {
     if (!Number.isInteger(page) || page < 0 || page >= this.pageCount) throw new PdfApiError("invalid_argument", "Page index out of range", "render", page);
     if (!Number.isFinite(dpi) || dpi < 1 || dpi > 288) throw new PdfApiError("invalid_argument", "DPI must be between 1 and 288", "render", page);
     let settings:Required<RenderOptions>;try{settings=normalizeRenderOptions(options);}catch{throw new PdfApiError("invalid_argument","Invalid render options","render",page);}
-    const flags=(settings.annotations?(settings.includeWidgets?3:1):0)|(settings.viewRotation/90<<2);
+    const flags=(settings.annotations?(settings.includeWidgets?3:1):0)|(settings.viewRotation/90<<2)|(settings.imageDecode==='target'?16:0);
     const m = this.engine.module;
     const image = this.engine.invoke(() => m._rz_render_page(this.handle, page, dpi,flags,settings.viewZoom));
     return this.readRgba(image,"render",page);
@@ -272,7 +272,7 @@ export class PdfDocument {
     if(!Number.isFinite(dpi)||dpi<1||dpi>MAX_REGION_DPI)throw new PdfApiError("invalid_argument","DPI exceeds region limit","renderRegion",page);
     let area:RasterRegion,settings:Required<RenderOptions>;
     try{area=normalizeRasterRegion(region);settings=normalizeRenderOptions(options);}catch{throw new PdfApiError("invalid_argument","Invalid render region or options","renderRegion",page);}
-    const flags=(settings.annotations?(settings.includeWidgets?3:1):0)|(settings.viewRotation/90<<2),m=this.engine.module;
+    const flags=(settings.annotations?(settings.includeWidgets?3:1):0)|(settings.viewRotation/90<<2)|(settings.imageDecode==='target'?16:0),m=this.engine.module;
     const image=this.engine.invoke(()=>m._rz_render_region(this.handle,page,dpi,flags,settings.viewZoom,area.x,area.y,area.width,area.height));
     const result=this.readRgba(image,"renderRegion",page);
     if(result.width!==area.width||result.height!==area.height)throw new PdfApiError("internal","Unexpected region dimensions","renderRegion",page);

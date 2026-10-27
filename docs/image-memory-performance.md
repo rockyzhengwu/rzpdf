@@ -1,5 +1,10 @@
 # Image buffer ownership and raster extents
 
+A subsequent [target-resolution JPEG round](target-resolution-performance.md)
+adds proactive decoding as an explicit quality option. The measurements below
+retain the default full-when-fitting policy and are historical evidence for
+the ownership change.
+
 This round removes an image-sized copy between decoded PDF RGBA and Skia,
 and makes fractional-page raster dimensions consistent across native, WASM
 preflight and the JavaScript SDK. No resource limits were raised.

@@ -190,7 +190,7 @@ pub extern "C" fn rz_page_count(document: u32) -> u32 {
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn rz_render(document: u32, page: u32, dpi: f32) -> u32 {
-    call(|s| render(s, document, page, dpi, None, None))
+    call(|s| render(s, document, page, dpi, None, None, 0))
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn rz_render_page(
@@ -208,6 +208,7 @@ pub extern "C" fn rz_render_page(
             dpi,
             render_options(flags, view_zoom)?,
             None,
+            flags,
         )
     })
 }
@@ -215,14 +216,14 @@ fn render_options(
     flags: u32,
     view_zoom: f32,
 ) -> ApiResult<Option<pdf::page::annotations::AnnotationRenderOptions>> {
-    if flags > 15 || flags & 3 == 2 || !view_zoom.is_finite() || !(0.1..=4.).contains(&view_zoom) {
+    if flags > 31 || flags & 3 == 2 || !view_zoom.is_finite() || !(0.1..=4.).contains(&view_zoom) {
         return Err("invalid render options".into());
     }
     Ok(
         (flags & 1 != 0).then_some(pdf::page::annotations::AnnotationRenderOptions {
             include_widgets: flags & 2 != 0,
             view_zoom,
-            view_rotation: ((flags >> 2) * 90) as u16,
+            view_rotation: (((flags >> 2) & 3) * 90) as u16,
             ..Default::default()
         }),
     )
@@ -256,6 +257,7 @@ pub extern "C" fn rz_render_region(
                 width,
                 height,
             }),
+            flags,
         )
     })
 }
@@ -267,6 +269,7 @@ fn render(
     dpi: f32,
     annotations: Option<pdf::page::annotations::AnnotationRenderOptions>,
     region: Option<RasterRegion>,
+    flags: u32,
 ) -> ApiResult<u32> {
     let max_dpi = if region.is_some() {
         resources::MAX_REGION_DPI
@@ -359,10 +362,19 @@ fn render(
         renderer.set_substitute_program(program);
     }
     renderer.set_font_provider(s.font_provider.clone());
-    // Interpretation is document/revision scoped; DPI and tile rectangles only
-    // affect replay. NoZoom/NoRotate annotation inputs remain part of the key.
+    // Interpretation is document/revision scoped; DPI and image policy enter
+    // cache identity, while tile rectangles affect only replay. NoZoom/NoRotate annotation inputs remain part of the key.
     let prepared = d
-        .prepare_page_for_render(page, annotations, dpi)
+        .prepare_page_for_render_with_policy(
+            page,
+            annotations,
+            dpi,
+            if flags & 16 != 0 {
+                pdf::document::prepared_page::ImageDecodePolicy::TargetResolution
+            } else {
+                pdf::document::prepared_page::ImageDecodePolicy::Budgeted
+            },
+        )
         .map_err(ApiError::from)?;
     prepared.replay(d, &mut renderer).map_err(ApiError::from)?;
     s.insert(Resource::Image(renderer.to_rgba().map_err(ApiError::from)?))
@@ -493,7 +505,9 @@ mod tests {
             assert!(render_options(turns << 2, 1.).unwrap().is_none());
             assert!(render_options(2 | (turns << 2), 1.).is_err());
         }
-        assert!(render_options(16, 1.).is_err());
+        assert!(render_options(16, 1.).unwrap().is_none());
+        assert!(render_options(32, 1.).is_err());
+        assert_eq!(render_options(31, 1.).unwrap().unwrap().view_rotation, 270);
     }
 
     #[test]

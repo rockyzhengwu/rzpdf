@@ -195,7 +195,7 @@ pub(crate) fn requirements(s: &State, document: u32, request: &Value) -> ApiResu
             || v.as_object().unwrap().keys().any(|k| {
                 !matches!(
                     k.as_str(),
-                    "annotations" | "includeWidgets" | "viewZoom" | "viewRotation"
+                    "annotations" | "includeWidgets" | "viewZoom" | "viewRotation" | "imageDecode"
                 )
             })
     }) {
@@ -234,7 +234,17 @@ pub(crate) fn requirements(s: &State, document: u32, request: &Value) -> ApiResu
         view_rotation,
         ..Default::default()
     });
-    d.prepare_page_for_render(page, options, 72.)?
+    let image_policy = match opts.and_then(|v| v.get("imageDecode")) {
+        None => pdf::document::prepared_page::ImageDecodePolicy::Budgeted,
+        Some(v) if v.as_str() == Some("budgeted") => {
+            pdf::document::prepared_page::ImageDecodePolicy::Budgeted
+        }
+        Some(v) if v.as_str() == Some("target") => {
+            pdf::document::prepared_page::ImageDecodePolicy::TargetResolution
+        }
+        _ => return Err("invalid image decode policy".into()),
+    };
+    d.prepare_page_for_render_with_policy(page, options, 72., image_policy)?
         .replay(d, &mut collector)?;
     let redacted = d.security_report().is_some_and(|r| {
         r.authentication != pdf::security::Authentication::Owner && !r.permissions.copy
@@ -254,7 +264,7 @@ pub(crate) fn requirements(s: &State, document: u32, request: &Value) -> ApiResu
         json!({"fontId":format!("font-{i}"),"name":f.name,"language":f.language,"codepoints":if redacted{vec![]}else{f.codepoints.iter().copied().collect::<Vec<_>>()} ,"weight":f.weight,"italic":f.italic,"serif":f.serif,"missingCount":f.missing.len(),"missingCodepoints":if redacted{vec![]}else{f.missing.iter().copied().collect::<Vec<_>>()},"missingUnicode":f.missing_unicode,"needsShaping":f.needs_shaping,"selected":selected})
     }).collect();
     Ok(
-        json!({"stamp":{"document":document,"revision":d.revision().to_string(),"fontEpoch":s.font_epoch.to_string()},"page":page,"renderOptions":{"annotations":annotations,"includeWidgets":include_widgets,"viewZoom":view_zoom,"viewRotation":view_rotation},"codepointsRedacted":redacted,"complete":complete,"fonts":records}),
+        json!({"stamp":{"document":document,"revision":d.revision().to_string(),"fontEpoch":s.font_epoch.to_string()},"page":page,"renderOptions":{"annotations":annotations,"includeWidgets":include_widgets,"viewZoom":view_zoom,"viewRotation":view_rotation,"imageDecode":if image_policy == pdf::document::prepared_page::ImageDecodePolicy::TargetResolution {"target"} else {"budgeted"}},"codepointsRedacted":redacted,"complete":complete,"fonts":records}),
     )
 }
 
@@ -308,6 +318,24 @@ mod preflight_tests {
         });
         let query = json!({"page":0,"renderOptions":{}});
         let before = STATE.with(|s| requirements(&s.borrow(), document, &query).unwrap());
+        let targeted = STATE.with(|s| {
+            requirements(
+                &s.borrow(),
+                document,
+                &json!({"page":0,"renderOptions":{"imageDecode":"target"}}),
+            )
+            .unwrap()
+        });
+        assert_eq!(targeted["renderOptions"]["imageDecode"], "target");
+        assert!(
+            STATE
+                .with(|s| requirements(
+                    &s.borrow(),
+                    document,
+                    &json!({"page":0,"renderOptions":{"imageDecode":"unknown"}})
+                ))
+                .is_err()
+        );
         assert_eq!(before["fonts"][0]["missingCodepoints"], json!([0x65b0]));
         assert_eq!(doc.revision().to_string(), revision);
         let font = input(include_bytes!(

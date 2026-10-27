@@ -1,6 +1,7 @@
 // Deterministic SDK/protocol tests. These stubs do not claim Wasm runtime QA.
 import assert from 'node:assert/strict';
 import {PdfEngine,PdfDocument} from '../dist/client.js';
+import {normalizeRenderOptions} from '../dist/interaction.js';
 import {rasterSize} from '../dist/raster.js';
 import {validateArguments} from '../dist/protocol.js';
 import {WorkerPdfEngine} from '../dist/worker-client.js';
@@ -21,18 +22,28 @@ assert.deepEqual(rasterSize(0.1,0.2,72),{width:1,height:1});
 validateArguments('open',[new Uint8Array([1]),{resourceProfile:'conservative'}]);
 assert.throws(()=>validateArguments('open',[new Uint8Array([1]),{resourceProfile:'unbounded'}]));
 
+assert.equal(normalizeRenderOptions({}).imageDecode,'budgeted');
+assert.equal(normalizeRenderOptions({imageDecode:'target'}).imageDecode,'target');
+for(const imageDecode of ['fast','',0,true]) {
+  assert.throws(()=>validateArguments('render',[0,72,{imageDecode}]));
+}
+validateArguments('renderRegion',[0,72,{imageDecode:'target'},{x:0,y:0,width:32,height:32}]);
 const resource={reason:'image_pixels',stage:'image_decode',limit:4000000,actual:8750000};
 const message=new TextEncoder().encode('Image decoding exceeds pixel budget');
 const details=new TextEncoder().encode(JSON.stringify(resource));
 const heap=new Uint8Array(4096);heap.set(message,32);heap.set(details,1024);
-let nativeDpi;
+let nativeDpi,nativeFlags;
 const engine=new PdfEngine({HEAPU8:heap,_rz_abi_version:()=>2,_rz_page_count:()=>1,
   _rz_error_code:()=>7,_rz_error_ptr:()=>32,_rz_error_len:()=>message.length,
   _rz_error_details_ptr:()=>1024,_rz_error_details_len:()=>details.length,
-  _rz_render_region:(_doc,_page,dpi)=>{nativeDpi=dpi;return 0;},_rz_dispose:()=>1});
+  _rz_render_region:(_doc,_page,dpi,flags)=>{nativeDpi=dpi;nativeFlags=flags;return 0;},_rz_dispose:()=>1});
 const doc=new PdfDocument(engine,1);
 assert.throws(()=>doc.renderRegion(0,{x:0,y:0,width:64,height:64},576),e=>e.code==='resource_limit'&&JSON.stringify(e.resource)===JSON.stringify(resource));
 assert.equal(nativeDpi,576);
+assert.throws(()=>doc.renderRegion(0,{x:0,y:0,width:64,height:64},72,{annotations:false,imageDecode:'target'}));
+assert.equal(nativeFlags,16);
+assert.throws(()=>doc.renderRegion(0,{x:0,y:0,width:64,height:64},72,{viewRotation:270,imageDecode:'target'}));
+assert.equal(nativeFlags,31);
 assert.throws(()=>doc.render(0,576),e=>e.code==='invalid_argument');
 engine.dispose();
 

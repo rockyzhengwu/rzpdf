@@ -197,3 +197,9 @@ The [image ownership and raster extent round](image-memory-performance.md)
 removes a full RGBA copy, reduces the real scan's paired native peak RSS by
 about 32 MiB, and unifies fractional-page dimensions across native/WASM/SDK.
 It records the remaining PLOS 72 DPI image-quality failure explicitly.
+
+The [optional target-resolution JPEG round](target-resolution-performance.md)
+adds explicit `imageDecode: "target"` to native/WASM/SDK rendering. Its serial
+80-process comparison records lower scan decode/conversion cost and memory,
+while preserving default outputs and labeling the quality-policy difference.
+The standard three-engine comparison still uses `budgeted` by default.

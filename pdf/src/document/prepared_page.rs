@@ -15,11 +15,23 @@ use std::{
     rc::Rc,
 };
 
+/// Render-only JPEG decode policy. Neither variant changes extraction or saving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ImageDecodePolicy {
+    /// Keep full pixels when they fit; reduce only to meet resource limits.
+    #[default]
+    Budgeted,
+    /// Decode supported JPEGs at the smallest IDCT scale covering their draw size.
+    /// This can change pixels compared with full decode followed by sampling.
+    TargetResolution,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PageKey {
     page: u32,
     annotations: Option<(bool, bool, u32, u16)>,
     image_dpi: Option<u32>,
+    image_policy: Option<ImageDecodePolicy>,
 }
 #[derive(Debug)]
 enum List {
@@ -94,13 +106,29 @@ impl<R: Read + Seek> PdfDocument<R> {
         annotations: Option<AnnotationRenderOptions>,
         dpi: f32,
     ) -> PdfResult<Rc<PreparedPage>> {
+        self.prepare_page_for_render_with_policy(
+            page,
+            annotations,
+            dpi,
+            ImageDecodePolicy::Budgeted,
+        )
+    }
+    /// Choose an explicit image quality policy. DPI and policy participate in
+    /// prepared-page cache identity; region rectangles do not.
+    pub fn prepare_page_for_render_with_policy(
+        &self,
+        page: u32,
+        annotations: Option<AnnotationRenderOptions>,
+        dpi: f32,
+        policy: ImageDecodePolicy,
+    ) -> PdfResult<Rc<PreparedPage>> {
         if !dpi.is_finite() || dpi <= 0.0 {
             return Err(PdfError::PageResourceError(
                 "invalid image decode DPI".into(),
             ));
         }
         self.ctx()
-            .with_render_image_dpi(dpi, || self.prepare_page(page, annotations))
+            .with_render_image_policy(dpi, policy, || self.prepare_page(page, annotations))
     }
     /// Diagnostic-only exclusive phase timings. Requires `prepare-diagnostics`;
     /// cached pages stay cached, so clear render caches first to measure preparation.
@@ -136,6 +164,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         let key = PageKey {
             page,
             image_dpi: self.ctx().render_image_dpi().map(f32::to_bits),
+            image_policy: self.ctx().render_image_policy(),
             annotations: annotations.map(|o| {
                 (
                     o.intent == crate::page::annotations::AnnotationRenderIntent::Print,

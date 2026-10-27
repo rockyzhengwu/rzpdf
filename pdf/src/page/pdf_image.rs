@@ -160,12 +160,15 @@ impl PdfImage {
             return Self::try_new(name, object, ctx);
         }
         let source_pixels = u64::from(source.0) * u64::from(source.1);
-        // Preserve existing pixel-exact rendering for images whose full decode
-        // already fits. Reduced IDCT and full decode + filtering are not equal.
-        if source_pixels <= ctx.limits().max_image_pixels
+        // The budgeted policy preserves full pixels whenever they fit. Reduced IDCT and full decode + filtering are not equal.
+        let full_fits = source_pixels <= ctx.limits().max_image_pixels
             && source_pixels
                 .checked_mul(4)
-                .is_some_and(|bytes| bytes <= ctx.limits().max_decoded_bytes as u64)
+                .is_some_and(|bytes| bytes <= ctx.limits().max_decoded_bytes as u64);
+        let target_policy = ctx.render_image_policy()
+            == Some(crate::document::prepared_page::ImageDecodePolicy::TargetResolution);
+        if full_fits
+            && (!target_policy || source_pixels > crate::filter::dct::MAX_TARGET_SOURCE_PIXELS)
         {
             return Self::try_new(name, object, ctx);
         }
@@ -178,6 +181,14 @@ impl PdfImage {
             return Err(PdfError::ObjectError(
                 "image target dimensions nonfinite".into(),
             ));
+        }
+        // If even half resolution cannot cover both axes there is no useful
+        // IDCT reduction. Keep the established full-decode behavior and limits.
+        if full_fits
+            && (target.0 > f64::from(source.0.div_ceil(2))
+                || target.1 > f64::from(source.1.div_ceil(2)))
+        {
+            return Self::try_new(name, object, ctx);
         }
         let (width, height, data) = crate::filter::dct::decode_target(
             stream.raw_data(),

@@ -342,7 +342,7 @@ RenderOptions.viewRotation 可取 0/90/180/270，默认 0。它描述调用方
 随后施加的顺时针视图旋转，只用于 NoRotate 批注外观及字体预检补偿；
 render/renderRegion 的 RGBA、页信息及 region 坐标仍处于原 display
 坐标系。调用方需将画面和交互层一并变换。Worker 同样接受该参数。
-C ABI flags 的位 2～3 编码角度除以 90，低两位保持原语义，其他位拒绝。
+C ABI flags 的位 2～3 编码角度除以 90，低两位保持原语义，位 4 选择目标分辨率图片解码，其他位拒绝。
 
 ### 阅读器可见分块
 
@@ -359,3 +359,36 @@ RGBA 缓存上限 16 MiB／128 项、显示画布上限 32 MiB，单个在途块
 PDF 打开和页面导入不再设置独立的 8 MiB 文件大小上限。`capabilities.maxInputBytes` 为 `null`，`maxBufferBytes` 为 64 MiB：输入传输、打开时的源码副本、其他活跃文档、输出和字体共享缓冲预算，因此 64 MiB 不是对单个 PDF 可打开大小的保证。超出剩余预算返回 `resource_limit`，不启动不可满足的复制。保存默认 `maxBytes` 同步调整到 64 MiB，调用方仍可指定更低值。
 
 此变更不调整字体程序 32 MiB、替换图片 8 MiB、内容元数据 8 MiB、解码流 16 MiB、绘制像素与线性内存等独立资源预算。
+
+### Image decode quality policy
+
+`render()` and `renderRegion()` accept `imageDecode: "budgeted" | "target"`.
+The default, `budgeted`, preserves full-resolution image pixels whenever they
+fit the existing budgets, and uses the existing reduced-JPEG fallback when
+they do not. `target` proactively selects the smallest supported JPEG IDCT
+scale covering the image's transformed drawing size at the requested DPI.
+It can change fine detail and edge pixels; it is an explicit preview/display
+quality choice, not a pixel-equivalent optimization.
+
+```ts
+const preview = await doc.render(0, 144, { imageDecode: "target" });
+const tile = await doc.renderRegion(0,
+  { x: 0, y: 0, width: 512, height: 512 }, 576,
+  { imageDecode: "target" });
+```
+
+Native callers use `prepare_page_for_render_with_policy(...,
+ImageDecodePolicy::TargetResolution)`. Existing `prepare_page_for_render()`
+keeps `ImageDecodePolicy::Budgeted`. DPI and policy are part of prepared-page
+cache identity. Tile bounds are not: every tile at the same DPI/quality uses
+one interpretation and consistent image samples. The caller must prepare
+again for a higher output DPI; replay cannot restore discarded detail.
+
+Only eligible external sequential JPEG images use reduced IDCT, at 1/8, 1/4
+or 1/2 resolution. Rotation and shear use both transformed axis lengths.
+Masks/SMask/Matte, progressive JPEG, unsupported filters and decoder parameters
+keep bounded full-resolution behavior. JPX and inline images are unchanged.
+All existing pixel, byte and source limits still apply. Extraction, source
+images and serialization remain at source precision. Capability information
+lists `imageDecode.supportedPolicies` and `defaultPolicy`. WASM flags bit 4
+encodes `target`; bits 0–3 retain their prior meanings.
