@@ -28,6 +28,11 @@ The v0.8 in-process colour backend and its new transitive dependencies are
 recorded in [the dependency inventory](releases/v0.8-dependencies.md), with
 selected BSD-3-Clause and MIT redistribution notices under `docs/licenses/`.
 
+The macOS font-manager bridge bundles eleven unmodified Skia 0.93.1 headers
+under [render/native/skia-headers](../render/native/skia-headers/README.md).
+Their [BSD license](../render/native/skia-headers/LICENSE), original notices
+and file hashes are retained alongside the headers.
+
 Cargo's package license fields describe project-owned code; they do not replace
 the notices for the bundled data. Distributors must review and include all
 applicable third-party notices, not just the root LICENSE.

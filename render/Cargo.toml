@@ -5,8 +5,15 @@ edition = "2024"
 license.workspace = true
 
 [dependencies]
-skia-safe = "0.93.1"
+skia-safe = "=0.93.1"
 pdf = {path="../pdf/"}
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The native bridge uses the matching public Skia headers and opaque pointer type.
+skia-bindings = { version = "=0.93.1", default-features = false }
+
+[build-dependencies]
+cc = "=1.2.56"
 
 [dev-dependencies]
 libc = "=0.2.182"

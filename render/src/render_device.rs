@@ -57,8 +57,8 @@ mod soft_mask_tests;
 mod text_clip_tests;
 
 use skia_safe::{
-    Color, EncodedImageFormat, FontMgr, Paint, PaintStyle, PathBuilder, PathEffect, PathFillType,
-    RGB, Surface, paint::Cap, surfaces,
+    Color, EncodedImageFormat, Paint, PaintStyle, PathBuilder, PathEffect, PathFillType, RGB,
+    Surface, paint::Cap, surfaces,
 };
 
 /// Owned, tightly packed sRGB RGBA8 pixels with straight (unpremultiplied) alpha.
@@ -83,7 +83,7 @@ impl SubstituteFont {
             ));
         }
         Ok(Self {
-            face: FontMgr::new()
+            face: crate::memory_font_manager::new()
                 .new_from_data(data, collection_index)
                 .ok_or_else(|| PdfError::FontError("invalid substitute font program".into()))?,
             bytes: data.len(),

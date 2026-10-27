@@ -230,14 +230,14 @@ impl RenderSession {
         r.cache.insert(key, Entry { value, bytes, used });
         r.statistics.estimated_bytes += bytes;
     }
-    /// System discovery is lazy and happens inside the first font request.
+    /// Backend initialization is lazy and happens inside the first font request.
     /// Reuse the manager for later faces without moving cold work out of timers.
     pub(super) fn font_manager(&self) -> skia_safe::FontMgr {
         if let Some(Value::FontManager(manager)) = self.get(&Key::FontManager) {
             self.0.borrow_mut().statistics.font_manager_hits += 1;
             return manager;
         }
-        let manager = skia_safe::FontMgr::custom_empty().unwrap_or_default();
+        let manager = crate::memory_font_manager::new();
         // Opaque backend storage is an estimate, not an RSS limit. Charge an
         // allowance alongside the same LRU budget as font programs and images.
         self.insert(

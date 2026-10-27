@@ -1,3 +1,4 @@
+mod memory_font_manager;
 pub mod render_device;
 
 pub mod font_provider;

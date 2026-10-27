@@ -1,0 +1,18 @@
+{
+  "skia_bindings": "0.93.1",
+  "skia_tag": "m145-0.92.0",
+  "files": {
+    "LICENSE": "5f787c1dee3c56547f09ccc2906ab5f5293c4d8dd6c8654e573216c38e908dbd",
+    "include/config/SkUserConfig.h": "a02b5973be64d4aab014f84648a085c23d4390873c7972468b4a42ce77c93cb8",
+    "include/core/SkFontMgr.h": "aeb209bf51022a13e3265dddc2abeb09b18a58028c37b5125f89925f2bcfd6cb",
+    "include/core/SkRefCnt.h": "1fa21c776ef9ed2002c54f9fde529220f762a173ef10fcc2a121eee0dfc6ab8b",
+    "include/core/SkTypes.h": "c3aa09780d209a6e92e5bce13a18658b783a78e6566fbde277e03338fd018b99",
+    "include/ports/SkFontMgr_mac_ct.h": "c506dcf54419b2a35b48e15410f2cb5cdbd68e8c0144dfdc47049d2dc23347d4",
+    "include/private/base/SkAPI.h": "af7897a4dfff88588d1b991bf3a6831c3ee7e13d503b807192c6a26290785bca",
+    "include/private/base/SkAssert.h": "6cdb99bf5c50e16a937bfc4223091cb5f3b5eda4d90f85552502701f6fb73937",
+    "include/private/base/SkAttributes.h": "2ff4d36ed11c5eb007e6f3368f45adf33f99bf9fd1d8e62682fee7efa780c766",
+    "include/private/base/SkDebug.h": "16f4f57705e07acef1ab94c98ec0bc34fd2877dc5cc108536b0d9f41b09db087",
+    "include/private/base/SkFeatures.h": "08e33e0039d665dbf322e80a10f0fea1bfe43b45a2a92a085ec3dbf619d45d5f",
+    "include/private/base/SkLoadUserConfig.h": "b830bb0d376cd4a5135ed29823fa5319b32db0858906903e3c57aeb294b3bf0d"
+  }
+}
