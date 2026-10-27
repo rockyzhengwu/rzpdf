@@ -34,8 +34,8 @@ for (const item of manifest.cases) {
     cases.push({name: item.name, dpi, nonblank: item.nonblank,
       // Native uses full-resolution JPEG where it fits; the browser's default
       // image budget deliberately selects a reduced JPEG for the large scan.
-      exact: item.name !== 'jpeg-scan' && !/^(text-|ttf-|cjk-)/.test(item.name),
-      text: /^(text-|ttf-|cjk-)/.test(item.name),
+      exact: item.browser_exact ?? (item.name !== 'jpeg-scan' && !/^(text-|ttf-|cjk-)/.test(item.name)),
+      text: item.browser_text ?? /^(text-|ttf-|cjk-)/.test(item.name),
       ink: inkStats(await readFile(row.outputs[0].file), row.width, row.height),
       width: row.width, height: row.height,
       sha256: createHash('sha256').update(await readFile(row.outputs[0].file)).digest('hex')});
@@ -105,9 +105,9 @@ try {
             if(await digest(repeated.pixels)!==sha256)throw Error('cached replay changed pixels');
             const caches=await doc.cacheStatistics();
             if(caches.renderSessionEstimatedBytes>caches.renderSessionByteLimit)throw Error('session exceeded cache budget');
-            if(/^(text-|ttf-|cjk-)/.test(item.name)&&caches.renderSessionFontHits===0)throw Error('embedded font not reused across requests');
+            if(item.text&&caches.renderSessionFontHits===0)throw Error('embedded font not reused across requests');
             if(['jpeg-small','flate-image'].includes(item.name)&&caches.renderSessionImageHits===0)throw Error('image not reused across requests');
-            if(/^(text-|ttf-|cjk-)/.test(item.name)&&caches.renderSessionFontManagerEntries!==1)throw Error('font manager lifetime not shared');
+            if(item.text&&caches.renderSessionFontManagerEntries!==1)throw Error('font manager lifetime not shared');
             const cleared=await doc.clearRenderCaches();
             if(cleared.renderSessionEstimatedBytes!==0||cleared.renderSessionFontEntries!==0||cleared.renderSessionFontManagerEntries!==0
               ||cleared.renderSessionImageEntries!==0||cleared.renderSessionGeometryEntries!==0)throw Error('session clear retained entries');

@@ -18,8 +18,11 @@ The [font preparation and backend follow-up](font-preparation-performance.md)
 records compact Identity CMaps, lazy shared
 font managers and the remaining macOS first-initialization cost.
 The [canonical coverage blending follow-up](coverage-blending-performance.md)
-contains the latest ranking and the exact-output shortcut for solid coverage
+records the exact-output shortcut for solid coverage
 on native raster targets, with browser verification and fallback boundaries.
+The [first-render and real-document follow-up](first-render-performance.md)
+contains the latest ranking, bounded CoreText initialization, mask-generation
+measurements and the separately licensed real-file corpus and its limits.
 The [page preparation follow-up](page-preparation-performance.md) adds exclusive
 phase diagnostics and interleaved native before/after results; it does not rerank
 the other engines.

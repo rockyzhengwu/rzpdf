@@ -195,10 +195,13 @@ def main():
                         "render/src/render_device.rs", "render/src/raster_path.rs",
                         "render/src/coverage_spans.rs", "render/src/coverage_blend.rs", "render/src/performance_tests.rs",
                         "render/src/render_session.rs", "render/src/render_session_tests.rs",
+                        "render/src/memory_font_manager.rs", "render/build.rs", "render/Cargo.toml",
+                        "render/native/font_manager_mac.cpp", "render/native/skia-headers/manifest.json",
                         "pdf/src/device/mod.rs", "pdf/src/device/painting.rs", "pdf/src/page/display_list.rs",
                         "pdf/src/io/stream_reader.rs", "pdf/src/parser/syntax.rs",
                         "pdf/src/page/content_parser.rs", "pdf/src/page/content_interpreter.rs",
                         "pdf/src/page/preparation_profile.rs", "pdf/src/font/cmap/mod.rs",
+                        "pdf/src/font/encoding.rs", "scripts/prepare_real_benchmark_corpus.py", "docs/benchmark-real-corpus.json",
                         "render/examples/profile_font_backend.rs", "pdf/Cargo.toml")})
     (args.output / "metadata.json").write_text(json.dumps(metadata, indent=2))
     gates, checks, records = {}, [], []

@@ -33,6 +33,11 @@ under [render/native/skia-headers](../render/native/skia-headers/README.md).
 Their [BSD license](../render/native/skia-headers/LICENSE), original notices
 and file hashes are retained alongside the headers.
 
+The [real benchmark corpus](benchmark-real-corpus.json) records the original
+publisher/agency attribution, permission sources and fixed file hashes.
+Those PDFs are downloaded into ignored output storage and retain their
+original terms; the root project license does not relicense them.
+
 Cargo's package license fields describe project-owned code; they do not replace
 the notices for the bundled data. Distributors must review and include all
 applicable third-party notices, not just the root LICENSE.

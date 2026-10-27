@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "cases": [
+    {
+      "name": "plos-data-sharing",
+      "path": "plos-data-sharing.pdf",
+      "title": "Sharing Detailed Research Data Is Associated with Increased Citation Rate",
+      "attribution": "Heather A. Piwowar, Roger S. Day, Douglas B. Fridsma (2007), PLoS ONE 2(3): e308, DOI:10.1371/journal.pone.0000308",
+      "source": "https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0000308",
+      "url": "https://journals.plos.org/plosone/article/file?id=10.1371/journal.pone.0000308&type=printable",
+      "license": "Creative Commons Attribution, as stated by the publisher; no version inferred",
+      "license_source": "https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0000308",
+      "sha256": "b52ca44dfd09d240543b80315f0cd43fe9ba7946f2b5650d5580213ed5d9186c",
+      "nonblank": true,
+      "workloads": ["published-paper", "multi-font", "tables", "figures"],
+      "page_count": 5,
+      "browser_text": true,
+      "browser_exact": false,
+      "font_objects": 9
+    },
+    {
+      "name": "constitution-scan",
+      "path": "constitution-scan.pdf",
+      "title": "Constitution of the United States, page 1: National Archives classroom scan",
+      "attribution": "United States National Archives and Records Administration, Constitution Workshop",
+      "source": "https://www.archives.gov/education/lessons/constitution-workshop",
+      "url": "https://www.archives.gov/files/education/lessons/constitution-workshop/images/Constitution_Pg1of4_AC.pdf",
+      "license": "Public domain, NARA educational-material statement",
+      "license_source": "https://www.archives.gov/education/lessons/constitution-workshop",
+      "sha256": "aa53c6eed746f6f9952739bd99338e100c7a2a753dee37d46350163acc6d60be",
+      "nonblank": true,
+      "workloads": ["historical-scan", "image-with-caption"],
+      "page_count": 1,
+      "browser_text": false,
+      "browser_exact": false,
+      "font_objects": 2
+    }
+  ]
+}
