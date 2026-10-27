@@ -193,12 +193,13 @@ def main():
                         "scripts/prepare_benchmark_corpus.py", "render/examples/benchmark_render.rs",
                         "Cargo.lock", "pdf/src/page/pdf_image.rs", "pdf/src/color/icc_profile.rs",
                         "render/src/render_device.rs", "render/src/raster_path.rs",
-                        "render/src/coverage_spans.rs", "render/src/performance_tests.rs",
+                        "render/src/coverage_spans.rs", "render/src/coverage_blend.rs", "render/src/performance_tests.rs",
                         "render/src/render_session.rs", "render/src/render_session_tests.rs",
                         "pdf/src/device/mod.rs", "pdf/src/device/painting.rs", "pdf/src/page/display_list.rs",
                         "pdf/src/io/stream_reader.rs", "pdf/src/parser/syntax.rs",
                         "pdf/src/page/content_parser.rs", "pdf/src/page/content_interpreter.rs",
-                        "pdf/src/page/preparation_profile.rs", "pdf/Cargo.toml")})
+                        "pdf/src/page/preparation_profile.rs", "pdf/src/font/cmap/mod.rs",
+                        "render/examples/profile_font_backend.rs", "pdf/Cargo.toml")})
     (args.output / "metadata.json").write_text(json.dumps(metadata, indent=2))
     gates, checks, records = {}, [], []
     rng = random.Random(20261026)

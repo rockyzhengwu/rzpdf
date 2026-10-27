@@ -13,7 +13,13 @@ same-output improvements and separate phase CPU/RSS diagnostics.
 The [render-session architecture and results](render-session-optimization.md)
 document WASM resource reuse and memory boundaries.
 The [comparison of committed code with PDFium](pdfium-comparison-2026-10-26.md)
-contains the latest three-engine ranking after the preparation changes.
+records the committed baseline after the preparation changes.
+The [font preparation and backend follow-up](font-preparation-performance.md)
+records compact Identity CMaps, lazy shared
+font managers and the remaining macOS first-initialization cost.
+The [canonical coverage blending follow-up](coverage-blending-performance.md)
+contains the latest ranking and the exact-output shortcut for solid coverage
+on native raster targets, with browser verification and fallback boundaries.
 The [page preparation follow-up](page-preparation-performance.md) adds exclusive
 phase diagnostics and interleaved native before/after results; it does not rerank
 the other engines.

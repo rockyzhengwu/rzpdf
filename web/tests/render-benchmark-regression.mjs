@@ -107,8 +107,9 @@ try {
             if(caches.renderSessionEstimatedBytes>caches.renderSessionByteLimit)throw Error('session exceeded cache budget');
             if(/^(text-|ttf-|cjk-)/.test(item.name)&&caches.renderSessionFontHits===0)throw Error('embedded font not reused across requests');
             if(['jpeg-small','flate-image'].includes(item.name)&&caches.renderSessionImageHits===0)throw Error('image not reused across requests');
+            if(/^(text-|ttf-|cjk-)/.test(item.name)&&caches.renderSessionFontManagerEntries!==1)throw Error('font manager lifetime not shared');
             const cleared=await doc.clearRenderCaches();
-            if(cleared.renderSessionEstimatedBytes!==0||cleared.renderSessionFontEntries!==0
+            if(cleared.renderSessionEstimatedBytes!==0||cleared.renderSessionFontEntries!==0||cleared.renderSessionFontManagerEntries!==0
               ||cleared.renderSessionImageEntries!==0||cleared.renderSessionGeometryEntries!==0)throw Error('session clear retained entries');
             const rebuilt=await doc.render(0,item.dpi,{annotations:false,includeWidgets:false});
             if(await digest(rebuilt.pixels)!==sha256)throw Error('cache clear changed pixels');

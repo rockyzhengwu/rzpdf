@@ -205,3 +205,51 @@ fn warm_coverage_preserves_work_and_scratch_limit_rejections() {
     assert_eq!(target.to_rgba().unwrap().pixels, bytes);
     assert_ne!(baseline, bytes);
 }
+
+#[test]
+fn font_manager_is_lazy_budgeted_shared_and_released_on_clear() {
+    let session = RenderSession::new(Limits::default());
+    assert_eq!(session.statistics().font_manager_entries, 0);
+    let first = session.font_manager();
+    let bytes = session.statistics().estimated_bytes;
+    assert!(bytes > 0 && bytes <= session.byte_limit());
+    let second = session.font_manager();
+    assert_eq!(session.statistics().font_manager_entries, 1);
+    assert_eq!(session.statistics().font_manager_hits, 1);
+    assert_eq!(session.statistics().estimated_bytes, bytes);
+    session.clear();
+    assert_eq!(session.statistics().font_manager_entries, 0);
+    // Active references remain usable after optional cache removal.
+    let data = include_bytes!("../../pdf/tests/fixtures/synthetic-symbol.ttf");
+    assert!(first.new_from_data(data, 0).is_some());
+    assert!(second.new_from_data(data, 0).is_some());
+    let disabled = RenderSession::with_cache_limit(Limits::default(), 0);
+    drop(disabled.font_manager());
+    assert_eq!(disabled.statistics().font_manager_entries, 0);
+    assert_eq!(disabled.statistics().estimated_bytes, 0);
+}
+
+#[test]
+fn backend_face_count_stays_bounded_for_many_tiny_programs() {
+    let session = RenderSession::new(Limits::default());
+    let manager = session.font_manager();
+    let face = manager
+        .new_from_data(
+            include_bytes!("../../pdf/tests/fixtures/synthetic-symbol.ttf"),
+            0,
+        )
+        .unwrap();
+    let mut sources = Vec::new();
+    for _ in 0..129 {
+        let font = std::rc::Rc::new(pdf::font::pdf_font::Font::Type0(Default::default()));
+        session.insert_font(&font, face.clone(), 16);
+        sources.push(font);
+    }
+    assert_eq!(session.statistics().font_entries, 128);
+    assert!(session.statistics().evictions > 0);
+    assert!(session.font(&sources[0]).is_none());
+    assert!(session.font(&sources[128]).is_some());
+    session.clear();
+    assert_eq!(session.statistics().estimated_bytes, 0);
+    assert_eq!(session.statistics().font_entries, 0);
+}

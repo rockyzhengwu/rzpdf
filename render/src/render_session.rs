@@ -18,6 +18,8 @@ pub struct RenderSessionStatistics {
     pub estimated_bytes: usize,
     pub byte_limit: usize,
     pub font_entries: usize,
+    pub font_manager_entries: usize,
+    pub font_manager_hits: u64,
     pub image_entries: usize,
     pub geometry_entries: usize,
     pub font_hits: u64,
@@ -26,6 +28,8 @@ pub struct RenderSessionStatistics {
     pub misses: u64,
     pub evictions: u64,
 }
+
+const ENTRY_OVERHEAD: usize = 512;
 
 struct Resources {
     scope: Option<(DocumentStamp, u64)>,
@@ -36,6 +40,7 @@ struct Resources {
 }
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(super) enum Key {
+    FontManager,
     Font(usize),
     Image(usize, [u32; 4], bool),
     Outline(PathKey),
@@ -79,6 +84,7 @@ impl Hash for PathKey {
 }
 #[derive(Clone)]
 enum Value {
+    FontManager(skia_safe::FontMgr),
     Font(Weak<pdf::font::pdf_font::Font>, skia_safe::Typeface),
     Image(
         Weak<pdf::page::pdf_image::PdfImage>,
@@ -167,6 +173,7 @@ impl RenderSession {
         let mut s = r.statistics;
         for key in r.cache.keys() {
             match key {
+                Key::FontManager => s.font_manager_entries += 1,
                 Key::Font(_) => s.font_entries += 1,
                 Key::Image(..) => s.image_entries += 1,
                 _ => s.geometry_entries += 1,
@@ -196,7 +203,9 @@ impl RenderSession {
             Key::Outline(p) | Key::Coverage(p, ..) => p.path.approximate_bytes_used(),
             _ => 0,
         };
-        let bytes = payload_bytes.saturating_add(key_bytes).saturating_add(512);
+        let bytes = payload_bytes
+            .saturating_add(key_bytes)
+            .saturating_add(ENTRY_OVERHEAD);
         let mut r = self.0.borrow_mut();
         if bytes > r.statistics.byte_limit || r.cache.try_reserve(1).is_err() {
             return;
@@ -221,6 +230,23 @@ impl RenderSession {
         r.cache.insert(key, Entry { value, bytes, used });
         r.statistics.estimated_bytes += bytes;
     }
+    /// System discovery is lazy and happens inside the first font request.
+    /// Reuse the manager for later faces without moving cold work out of timers.
+    pub(super) fn font_manager(&self) -> skia_safe::FontMgr {
+        if let Some(Value::FontManager(manager)) = self.get(&Key::FontManager) {
+            self.0.borrow_mut().statistics.font_manager_hits += 1;
+            return manager;
+        }
+        let manager = skia_safe::FontMgr::custom_empty().unwrap_or_default();
+        // Opaque backend storage is an estimate, not an RSS limit. Charge an
+        // allowance alongside the same LRU budget as font programs and images.
+        self.insert(
+            Key::FontManager,
+            Value::FontManager(manager.clone()),
+            32 * 1024,
+        );
+        manager
+    }
     pub(super) fn font(&self, font: &Rc<pdf::font::pdf_font::Font>) -> Option<skia_safe::Typeface> {
         if let Some(Value::Font(source, face)) = self.get(&Key::Font(Rc::as_ptr(font) as usize))
             && source
@@ -239,6 +265,33 @@ impl RenderSession {
         face: skia_safe::Typeface,
         bytes: usize,
     ) {
+        if bytes.saturating_add(ENTRY_OVERHEAD) > self.byte_limit() {
+            return;
+        }
+        // Tiny font programs can hide sizable backend face allocations.
+        // Preserve the original renderer's independent 128-face ceiling even
+        // when compact CMaps allow more source fonts to fit the document cache.
+        {
+            let mut resources = self.0.borrow_mut();
+            if resources
+                .cache
+                .keys()
+                .filter(|key| matches!(key, Key::Font(_)))
+                .count()
+                >= 128
+                && let Some(oldest) = resources
+                    .cache
+                    .iter()
+                    .filter(|(key, _)| matches!(key, Key::Font(_)))
+                    .min_by_key(|(_, entry)| entry.used)
+                    .map(|(key, _)| key.clone())
+            {
+                let old = resources.cache.remove(&oldest).unwrap();
+                resources.order.remove(&old.used);
+                resources.statistics.estimated_bytes -= old.bytes;
+                resources.statistics.evictions += 1;
+            }
+        }
         self.insert(
             Key::Font(Rc::as_ptr(font) as usize),
             Value::Font(Rc::downgrade(font), face),

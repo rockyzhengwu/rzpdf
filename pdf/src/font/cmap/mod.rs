@@ -204,6 +204,9 @@ pub struct Cmap {
     code_space_range: Vec<CodeSpaceRange>,
     cid_to_unicode: MappingTable<String, (u8, u32)>,
     code_to_cids: MappingTable<u32, (u8, u32)>,
+    // The fixed Adobe Identity-H/V programs cover every two-byte CID. Keep
+    // that default arithmetic instead of constructing 65,536 hash entries.
+    identity_cids: bool,
 }
 
 impl Cmap {
@@ -368,6 +371,39 @@ impl Cmap {
                 "Predefined CMap source bytes".into(),
             ));
         }
+        if matches!(name, "Identity-H" | "Identity-V") {
+            let vertical = name == "Identity-V";
+            let source_bytes = cmap_data.len().saturating_add(if vertical {
+                get_predefine_cmap_data("Identity-H")
+                    .ok_or_else(|| PdfError::FontError("bundled Identity-H missing".into()))?
+                    .len()
+            } else {
+                0
+            });
+            // Preserve the expanded parser's logical entry/source/depth caps.
+            if limits.max_objects < 65_537 {
+                return Err(PdfError::ResourceLimit("CMap mapping entries".into()));
+            }
+            if source_bytes > limits.max_decoded_bytes {
+                return Err(PdfError::ResourceLimit(
+                    "CMap cumulative source bytes".into(),
+                ));
+            }
+            if vertical && limits.max_depth == 0 {
+                return Err(PdfError::ResourceLimit("CMap inheritance depth".into()));
+            }
+            let mut spaces = Vec::new();
+            spaces
+                .try_reserve_exact(1)
+                .map_err(|_| PdfError::ResourceLimit("CMap spaces allocation".into()))?;
+            spaces.push(CodeSpaceRange::new(0, 65_535, 2));
+            return Ok(Self {
+                wmode: Some(u8::from(vertical)),
+                identity_cids: true,
+                code_space_range: spaces,
+                ..Default::default()
+            });
+        }
         let mut data = Vec::new();
         data.try_reserve_exact(cmap_data.len())
             .map_err(|_| PdfError::ResourceLimit("Predefined CMap allocation".into()))?;
@@ -380,6 +416,7 @@ impl Cmap {
         self.code_space_range = other.code_space_range;
         self.cid_to_unicode = other.cid_to_unicode;
         self.code_to_cids = other.code_to_cids;
+        self.identity_cids = other.identity_cids;
     }
 
     pub fn add_code_space_range(&mut self, space_range: CodeSpaceRange) {
@@ -403,10 +440,11 @@ impl Cmap {
             }
         }
         for (key, value) in other.code_to_cids.into_entries() {
-            if self.code_to_cids.get(&key).is_none() {
+            if self.exact_cid(key).is_none() {
                 self.code_to_cids.insert(key, value);
             }
         }
+        self.identity_cids |= other.identity_cids;
         if self.wmode.is_none() {
             self.wmode = other.wmode;
         }
@@ -452,11 +490,11 @@ impl Cmap {
         // Preserve the lengthless inspection API only for unambiguous values.
         let mut result = None;
         for length in 0..=4 {
-            if let Some(value) = self.code_to_cids.get(&(length, code)) {
-                if result.is_some_and(|previous| previous != *value) {
+            if let Some(value) = self.exact_cid((length, code)) {
+                if result.is_some_and(|previous| previous != value) {
                     return 0;
                 }
-                result = Some(*value);
+                result = Some(value);
             }
         }
         result.unwrap_or(0)
@@ -464,11 +502,16 @@ impl Cmap {
 
     /// Encoding lookup preserves source byte length; an unmapped code is .notdef.
     pub fn cid_for_char(&self, ch: &CharCode) -> u32 {
-        self.code_to_cids
-            .get(&(ch.length, ch.code))
-            .or_else(|| self.code_to_cids.get(&(0, ch.code)))
-            .copied()
+        self.exact_cid((ch.length, ch.code))
+            .or_else(|| self.exact_cid((0, ch.code)))
             .unwrap_or(0)
+    }
+
+    fn exact_cid(&self, key: (u8, u32)) -> Option<u32> {
+        self.code_to_cids
+            .get(&key)
+            .copied()
+            .or_else(|| (self.identity_cids && key.0 == 2 && key.1 <= 65_535).then_some(key.1))
     }
 
     pub(crate) fn unicode_entries(&self) -> impl Iterator<Item = (u32, u8, &str)> {
@@ -564,6 +607,94 @@ impl Cmap {
             }
         }
         Ok(count)
+    }
+}
+
+#[cfg(test)]
+mod compact_identity_tests {
+    use super::*;
+    #[test]
+    fn compact_identity_matches_every_expanded_cid_and_keeps_length_and_overrides() {
+        let limits = crate::parser::options::Limits::default();
+        for name in ["Identity-H", "Identity-V"] {
+            let mut compact = Cmap::new_from_predefined_with_limits(name, &limits).unwrap();
+            let mut expanded =
+                CmapParser::with_limits(get_predefine_cmap_data(name).unwrap().to_vec(), &limits)
+                    .parse()
+                    .unwrap();
+            assert!(compact.cache_bytes() < 1024);
+            assert!(expanded.cache_bytes() > 1024 * 1024);
+            assert_eq!(compact.wmode(), expanded.wmode());
+            for code in 0..=65_535 {
+                assert_eq!(compact.cid(code), expanded.cid(code));
+                for length in [1, 2, 3] {
+                    let ch = CharCode::new(code, length, 0.);
+                    assert_eq!(compact.cid_for_char(&ch), expanded.cid_for_char(&ch));
+                }
+            }
+            for code in [1, 32, 65535] {
+                compact.add_code_to_cid(code, 42);
+                expanded.add_code_to_cid(code, 42);
+                assert_eq!(compact.cid(code), expanded.cid(code));
+                for length in [1, 2] {
+                    let ch = CharCode::new(code, length, 0.);
+                    assert_eq!(compact.cid_for_char(&ch), expanded.cid_for_char(&ch));
+                }
+            }
+            assert!(compact.chars_limited(&[0], 1).is_err());
+            assert_eq!(compact.cid_for_char(&CharCode::new(65536, 2, 0.)), 0);
+        }
+    }
+    #[test]
+    fn compact_defaults_preserve_local_overrides_and_base_precedence() {
+        let mut local = Cmap::default();
+        local.code_to_cids.insert((2, 1), 42);
+        local
+            .inherit_defaults(Cmap::new_from_predefined("Identity-V").unwrap())
+            .unwrap();
+        assert_eq!(local.cid_for_char(&CharCode::new(1, 2, 0.)), 42);
+        assert_eq!(local.cid_for_char(&CharCode::new(2, 2, 0.)), 2);
+        let mut later_base = Cmap::default();
+        later_base.code_to_cids.insert((2, 2), 99);
+        local.inherit_defaults(later_base).unwrap();
+        assert_eq!(local.cid_for_char(&CharCode::new(2, 2, 0.)), 2);
+        assert_eq!(local.wmode(), Some(1));
+        let mut swapped = Cmap::default();
+        swapped.usecmap(local);
+        // The legacy replacement API preserves its receiver's writing mode.
+        assert_eq!(swapped.wmode(), None);
+        assert_eq!(swapped.cid_for_char(&CharCode::new(1, 2, 0.)), 42);
+        assert_eq!(swapped.cid_for_char(&CharCode::new(2, 2, 0.)), 2);
+    }
+    #[test]
+    fn compact_factory_preserves_expanded_source_depth_and_logical_entry_limits() {
+        let h = get_predefine_cmap_data("Identity-H").unwrap().len();
+        let v = get_predefine_cmap_data("Identity-V").unwrap().len();
+        for name in ["Identity-H", "Identity-V"] {
+            for max_objects in [1, 65536, 65537] {
+                for max_depth in [0, 1] {
+                    for max_decoded_bytes in [h - 1, h, h + v - 1, h + v] {
+                        let limits = crate::parser::options::Limits {
+                            max_objects,
+                            max_depth,
+                            max_decoded_bytes,
+                            ..Default::default()
+                        };
+                        let ordinary = CmapParser::with_limits(
+                            get_predefine_cmap_data(name).unwrap().to_vec(),
+                            &limits,
+                        )
+                        .parse();
+                        let compact = Cmap::new_from_predefined_with_limits(name, &limits);
+                        assert_eq!(
+                            compact.is_ok(),
+                            ordinary.is_ok(),
+                            "{name} objects={max_objects} depth={max_depth} bytes={max_decoded_bytes}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 

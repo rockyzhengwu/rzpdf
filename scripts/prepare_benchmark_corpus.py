@@ -70,7 +70,36 @@ def generate(directory):
     return manifest
 
 
+def generate_multifont(directory):
+    """Supplement the fixed corpus without changing its 14-case ranking set."""
+    import fitz
+    directory.mkdir(parents=True, exist_ok=True)
+    root = Path(__file__).resolve().parents[1]
+    inputs = [("pdf/tests/fixtures/v03/NotoSansSC-static-subset.ttf", "Hello PDF"),
+              ("pdf/tests/fixtures/v03/RzpdfTestSans-composite.ttf", "Café"),
+              ("font-data/fonts/n019003l.pfb", "AAA")]
+    doc = fitz.open()
+    page = doc.new_page(width=300, height=200)
+    for index, (font, text) in enumerate(inputs):
+        program = fitz.Font(fontfile=str(root / font))
+        if any(not program.has_glyph(ord(char)) for char in text if char != " "):
+            raise ValueError(f"multifont input lacks glyphs: {font}")
+        name = f"F{index}"
+        page.insert_font(fontname=name, fontfile=str(root / font))
+        page.insert_text((20, 40 + index * 40), text, fontsize=18, fontname=name)
+    path = directory / "multifont.pdf"
+    doc.save(path, no_new_id=True)
+    doc.close()
+    manifest = directory / "manifest.json"
+    manifest.write_text(json.dumps(dict(schema=1, generator="synthetic-multifont-v1", cases=[
+        dict(name="multifont", path=str(path.resolve()), nonblank=True,
+             sha256=hashlib.sha256(path.read_bytes()).hexdigest())]), indent=2) + "\n")
+    return manifest
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
-    print(generate(parser.parse_args().directory))
+    parser.add_argument("--multifont-only", action="store_true", help="generate the separate three-font supplement")
+    args = parser.parse_args()
+    print((generate_multifont if args.multifont_only else generate)(args.directory))

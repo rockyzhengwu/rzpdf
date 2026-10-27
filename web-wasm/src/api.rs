@@ -361,6 +361,8 @@ pub extern "C" fn rz_query(document: u32, input: u32) -> u32 {
                     "renderSessionEstimatedBytes": statistics.estimated_bytes,
                     "renderSessionByteLimit": statistics.byte_limit,
                     "renderSessionFontEntries": statistics.font_entries,
+                    "renderSessionFontManagerEntries": statistics.font_manager_entries,
+                    "renderSessionFontManagerHits": statistics.font_manager_hits,
                     "renderSessionImageEntries": statistics.image_entries,
                     "renderSessionGeometryEntries": statistics.geometry_entries,
                     "renderSessionFontHits": statistics.font_hits,

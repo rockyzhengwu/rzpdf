@@ -18,6 +18,8 @@ use std::{fs::File, io::Write};
 #[cfg(test)]
 #[path = "annotation_tests.rs"]
 mod annotation_tests;
+#[path = "coverage_blend.rs"]
+mod coverage_blend;
 #[path = "coverage_spans.rs"]
 mod coverage_spans;
 #[cfg(test)]
@@ -385,7 +387,9 @@ impl SkiaRender {
         if let Some(face) = self.session.font(font) {
             return Ok(face);
         }
-        let face = FontMgr::new()
+        let face = self
+            .session
+            .font_manager()
             .new_from_data(data, 0)
             .ok_or_else(|| PdfError::FontError("Skia rejected font program".into()))?;
         self.session.insert_font(font, face.clone(), data.len());
@@ -1653,8 +1657,21 @@ impl SkiaRender {
         {
             self.surface.canvas().save();
             self.surface.canvas().set_matrix(&transform);
-            for cell in cells.iter() {
-                self.draw_coverage_rects(cell.x, cell.y, &cell.rects, &fill);
+            if !coverage_blend::draw(
+                &mut self.surface,
+                &fill,
+                (origin.0 as i32, origin.1 as i32),
+                |blitter| {
+                    for cell in cells.iter() {
+                        for rect in &cell.rects {
+                            blitter.rect(cell.x, cell.y, *rect);
+                        }
+                    }
+                },
+            ) {
+                for cell in cells.iter() {
+                    self.draw_coverage_rects(cell.x, cell.y, &cell.rects, &fill);
+                }
             }
             self.surface.canvas().restore();
             return Ok(());
@@ -1742,30 +1759,41 @@ impl SkiaRender {
                     let last_row = (span_bottom - y).min(CELL) as usize;
                     let mut saved = Vec::new();
                     let mut save = cached_cells.is_some();
-                    coverage_spans::rectangles(
-                        bytes,
-                        pixels.row_bytes(),
-                        (
-                            first_column + HALO as usize,
-                            first_row + HALO as usize,
-                            last_column + HALO as usize,
-                            last_row + HALO as usize,
-                        ),
-                        |rect| {
-                            if save {
-                                if saved.len() == saved.capacity() {
-                                    if cached_bytes.saturating_add(64 * 5) <= cache_limit
-                                        && saved.try_reserve_exact(64).is_ok()
-                                    {
-                                        cached_bytes += 64 * 5;
-                                    } else {
-                                        save = false;
-                                    }
-                                }
-                                if save {
-                                    saved.push(rect);
+                    let bounds = (
+                        first_column + HALO as usize,
+                        first_row + HALO as usize,
+                        last_column + HALO as usize,
+                        last_row + HALO as usize,
+                    );
+                    let mut save_rect = |rect| {
+                        if save {
+                            if saved.len() == saved.capacity() {
+                                if cached_bytes.saturating_add(64 * 5) <= cache_limit
+                                    && saved.try_reserve_exact(64).is_ok()
+                                {
+                                    cached_bytes += 64 * 5;
+                                } else {
+                                    save = false;
                                 }
                             }
+                            if save {
+                                saved.push(rect);
+                            }
+                        }
+                    };
+                    if !coverage_blend::draw(
+                        &mut self.surface,
+                        &fill,
+                        (origin.0 as i32, origin.1 as i32),
+                        |blitter| {
+                            coverage_spans::rectangles(bytes, pixels.row_bytes(), bounds, |rect| {
+                                save_rect(rect);
+                                blitter.rect(x, y, rect);
+                            });
+                        },
+                    ) {
+                        coverage_spans::rectangles(bytes, pixels.row_bytes(), bounds, |rect| {
+                            save_rect(rect);
                             let alpha =
                                 (u16::from(fill.alpha()) * u16::from(rect.coverage) + 127) / 255;
                             span.set_alpha(alpha as u8);
@@ -1778,8 +1806,8 @@ impl SkiaRender {
                                 ),
                                 &span,
                             );
-                        },
-                    );
+                        });
+                    }
                     if save {
                         if let Some(cells) = &mut cached_cells {
                             cached_bytes = cached_bytes.saturating_add(64);
