@@ -76,6 +76,17 @@ fn run() -> Result<Value, Box<dyn std::error::Error>> {
     {
         return Err("profile_prepare currently requires budgeted image decoding".into());
     }
+    #[cfg(feature = "render-diagnostics")]
+    let render_profile = job["profile_render"]
+        .as_bool()
+        .unwrap_or(false)
+        .then(render::render_profile::RenderProfile::default);
+    #[cfg(feature = "render-diagnostics")]
+    renderer.set_render_profile(render_profile.clone());
+    #[cfg(not(feature = "render-diagnostics"))]
+    if job["profile_render"].as_bool().unwrap_or(false) {
+        return Err("profile_render requires render-diagnostics".into());
+    }
     let diagnostics = job["diagnostics"].as_bool().unwrap_or(false);
     let initialized_memory = diagnostics.then(memory_snapshot);
     let first_cpu_start = diagnostics.then(cpu_ms).flatten();
@@ -110,6 +121,16 @@ fn run() -> Result<Value, Box<dyn std::error::Error>> {
     let image = renderer.to_rgba()?;
     let first_readback_ms = readback.elapsed().as_secs_f64() * 1000.;
     let raster_ms = start.elapsed().as_secs_f64() * 1000.;
+    #[cfg(feature = "render-diagnostics")]
+    let first_render_profile = render_profile.map(|profile| {
+        renderer.set_render_profile(None);
+        render::render_profile::RenderPhase::ALL.into_iter().map(|phase| {
+            let m = profile.measurement(phase);
+            json!({"phase": phase.name(), "ms": m.elapsed.as_secs_f64() * 1000., "calls": m.calls})
+        }).collect::<Vec<_>>()
+    });
+    #[cfg(not(feature = "render-diagnostics"))]
+    let first_render_profile = None::<Vec<Value>>;
     let first_cpu_ms = cpu_delta(first_cpu_start, diagnostics.then(cpu_ms).flatten());
     let first_memory = diagnostics.then(memory_snapshot);
     let width = image.width;
@@ -168,7 +189,7 @@ fn run() -> Result<Value, Box<dyn std::error::Error>> {
     }
     Ok(
         json!({"status":"ok","engine":"rzpdf","profile":"release", "input_mode":input_mode,"image_decode":job["image_decode"].as_str().unwrap_or("budgeted"), "open_ms":open_ms,
-        "preparation_profile":preparation_profile,"prepare_ms":prepare_ms,"raster_ms":raster_ms,"first_ms":open_ms+prepare_ms+raster_ms,
+        "preparation_profile":preparation_profile,"first_render_profile":first_render_profile,"prepare_ms":prepare_ms,"raster_ms":raster_ms,"first_ms":open_ms+prepare_ms+raster_ms,
         "fresh_renderer":fresh_renderer,"clear_session_before_replay":clear_session_before_replay,"warm_ms":warm_ms,"warm_replay_ms":replay_ms,"warm_readback_ms":readback_ms,
         "diagnostics":diagnostics.then(|| json!({"initialized_memory":initialized_memory,
             "after_first_memory":first_memory,"after_replay_memory":replay_memory,

@@ -5,6 +5,13 @@ native Python bindings. It measures rendering to an **owned RGBA8 buffer on
 white**, without PNG encoding or file writes inside the timers. It does not
 measure WebAssembly, text extraction, editing, saving, or GPU rendering.
 
+The latest [complete text-replay comparison](text-replay-performance.md)
+retains the same 20 eligible nonblank synthetic combinations: default first
+output / warm replay are **2.016× / 0.597× PDFium**; next page is **1.045×**,
+with only four combinations. Alternating native text-worker tests attribute
+about 3.9% less first-output time and 22.6% less warm time to this round.
+Failed gates and sampling limits remain explicit in that report.
+
 See the [initial measured baseline and findings](benchmark-baseline-2026-10-26.md).
 The [optimization results](render-optimization-results.md) contain the corrected
 MuPDF comparison, fixes, before/after timings and browser regression evidence.
@@ -21,7 +28,7 @@ The [canonical coverage blending follow-up](coverage-blending-performance.md)
 records the exact-output shortcut for solid coverage
 on native raster targets, with browser verification and fallback boundaries.
 The [first-render and real-document follow-up](first-render-performance.md)
-contains the latest ranking, bounded CoreText initialization, mask-generation
+contains the earlier ranking, bounded CoreText initialization, mask-generation
 measurements and the separately licensed real-file corpus and its limits.
 The [page preparation follow-up](page-preparation-performance.md) adds exclusive
 phase diagnostics and interleaved native before/after results; it does not rerank

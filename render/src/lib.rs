@@ -2,6 +2,8 @@ mod memory_font_manager;
 mod owned_raster;
 pub mod raster_size;
 pub mod render_device;
+#[cfg(feature = "render-diagnostics")]
+pub mod render_profile;
 
 pub mod font_provider;
 

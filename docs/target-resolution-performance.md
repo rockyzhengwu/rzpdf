@@ -1,5 +1,9 @@
 # Optional target-resolution JPEG decoding
 
+The subsequent [text-replay round](text-replay-performance.md) refreshes the
+complete synthetic ranking and optimizes exact-output glyph submission. This
+report retains the preceding image-policy measurements and their limitations.
+
 Rendering now has an explicit JPEG quality policy in native preparation,
 WASM, the SDK and Worker. Existing calls keep their default behavior.
 This round follows the pixel-preserving

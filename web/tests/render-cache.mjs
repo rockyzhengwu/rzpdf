@@ -29,7 +29,7 @@ try{
  await page.goto(`http://127.0.0.1:${server.address().port}`);
  await page.waitForFunction(()=>!document.querySelector('#pdf').disabled);
  const frames=[];
- await page.exposeFunction('__cacheFrame',({label,index,pixels})=>{frames.push({label,index,pixels});});
+ await page.exposeFunction('__cacheFrame',frame=>{frames.push(frame);});
  for(const label of baseline?['before','after']:['after']){
   const basePage=Number(process.env.RZPDF_PERF_PAGE??0),fontIndex=Number(process.env.RZPDF_PERF_FONT_INDEX??0);
   const result=await page.evaluate(async ({label,basePage,hasFont,fontIndex})=>{
@@ -51,7 +51,9 @@ try{
      const start=performance.now(),image=await doc.renderRegion(request.page,area,request.dpi,{viewZoom:request.zoom??1});
      timings.push({request,region:area,ms:performance.now()-start});
      ink+=image.pixels.filter((v,i)=>i%4!==3&&v<240).length;
-     await window.__cacheFrame({label,index,pixels:Array.from(image.pixels)});
+     const digest=await crypto.subtle.digest('SHA-256',image.pixels);
+     const sha256=Array.from(new Uint8Array(digest),v=>v.toString(16).padStart(2,'0')).join('');
+     await window.__cacheFrame({label,index,width:image.width,height:image.height,bytes:image.pixels.byteLength,sha256});
     }
     const beforeClose=await engine.statistics(),pageCount=doc.pageCount;await doc.close();if(hasFont)await engine.setSubstituteFont();const closed=await engine.statistics();
     if(closed.handles!==0||closed.retainedBytes!==0)throw Error('closed document retained resources');
@@ -63,7 +65,8 @@ try{
  }
  for(const run of report.runs)assert.ok(run.ink>0,'benchmark regions must include actual page content');
  if(font)report.substituteFont={sha256:createHash('sha256').update(await readFile(font)).digest('hex'),index:Number(process.env.RZPDF_PERF_FONT_INDEX??0)};
- if(baseline){for(let index=0;index<7;index++)assert.deepEqual(frames.find(f=>f.label==='after'&&f.index===index).pixels,frames.find(f=>f.label==='before'&&f.index===index).pixels,`region ${index} differs from frozen baseline`);report.pixelComparison='7 regions exactly equal to frozen pre-change Wasm';}
+ if(baseline){for(let index=0;index<7;index++){const before=frames.find(f=>f.label==='before'&&f.index===index),after=frames.find(f=>f.label==='after'&&f.index===index);assert.deepEqual([after.width,after.height,after.bytes,after.sha256],[before.width,before.height,before.bytes,before.sha256],`region ${index} differs from frozen baseline`);}report.pixelComparison='7 region RGBA SHA-256 hashes and dimensions match frozen pre-change Wasm';}
+ report.frames=frames;
  assert.equal(report.errors.length,0);report.status='passed';
 }catch(error){report.errors.push(error.stack);process.exitCode=1;}
 finally{await browser?.close();await new Promise(done=>server.close(done));await writeFile(resolve(out,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));}

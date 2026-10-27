@@ -22,6 +22,8 @@ mod annotation_tests;
 mod coverage_blend;
 #[path = "coverage_spans.rs"]
 mod coverage_spans;
+#[path = "glyph_run.rs"]
+mod glyph_run;
 #[cfg(test)]
 #[path = "group_tests.rs"]
 mod group_tests;
@@ -178,6 +180,8 @@ pub struct SkiaRender {
     substitute_font: Option<skia_safe::Typeface>,
     font_provider: Option<std::rc::Rc<crate::font_provider::MemoryFontProvider>>,
     session: RenderSession,
+    #[cfg(feature = "render-diagnostics")]
+    profile: Option<crate::render_profile::RenderProfile>,
 }
 
 struct RenderGroup {
@@ -375,6 +379,18 @@ impl SkiaRender {
         })
     }
 
+    #[cfg(feature = "render-diagnostics")]
+    pub fn set_render_profile(&mut self, profile: Option<crate::render_profile::RenderProfile>) {
+        self.profile = profile;
+    }
+    #[cfg(feature = "render-diagnostics")]
+    fn profile_span(
+        &self,
+        phase: crate::render_profile::RenderPhase,
+    ) -> Option<crate::render_profile::Span> {
+        self.profile.as_ref().map(|p| p.span(phase))
+    }
+
     fn embedded_typeface(
         &mut self,
         font: &std::rc::Rc<pdf::font::pdf_font::Font>,
@@ -388,11 +404,18 @@ impl SkiaRender {
         if let Some(face) = self.session.font(font) {
             return Ok(face);
         }
-        let face = self
-            .session
-            .font_manager()
-            .new_from_data(data, 0)
-            .ok_or_else(|| PdfError::FontError("Skia rejected font program".into()))?;
+        let manager = {
+            #[cfg(feature = "render-diagnostics")]
+            let _span = self.profile_span(crate::render_profile::RenderPhase::FontManager);
+            self.session.font_manager()
+        };
+        let face = {
+            #[cfg(feature = "render-diagnostics")]
+            let _span = self.profile_span(crate::render_profile::RenderPhase::TypefaceLoad);
+            manager
+                .new_from_data(data, 0)
+                .ok_or_else(|| PdfError::FontError("Skia rejected font program".into()))?
+        };
         self.session.insert_font(font, face.clone(), data.len());
         Ok(face)
     }
@@ -534,6 +557,8 @@ impl SkiaRender {
             substitute_font: None,
             font_provider: None,
             session: RenderSession::new(limits),
+            #[cfg(feature = "render-diagnostics")]
+            profile: None,
             held_pattern_surfaces: 0,
             group_stack: Vec::new(),
             active_intent: Default::default(),
@@ -1434,14 +1459,7 @@ impl SkiaRender {
         )
     }
 
-    fn draw_filled_glyph(
-        &mut self,
-        font: &skia_safe::Font,
-        glyph: u16,
-        position: skia_safe::Point,
-        paint: &Paint,
-        global: &Matrix,
-    ) -> PdfResult<()> {
+    fn glyph_device_origin(global: &Matrix, position: skia_safe::Point) -> PdfResult<(f32, f32)> {
         let (a, b, c, d) = (global.a(), global.b(), global.c(), global.d());
         let x = f64::from(a) * f64::from(position.x)
             + f64::from(c) * f64::from(position.y)
@@ -1456,6 +1474,19 @@ impl SkiaRender {
                 "glyph raster origin overflow".into(),
             ));
         }
+        Ok((x, y))
+    }
+
+    fn draw_filled_glyph(
+        &mut self,
+        font: &skia_safe::Font,
+        glyph: u16,
+        position: skia_safe::Point,
+        paint: &Paint,
+        global: &Matrix,
+    ) -> PdfResult<()> {
+        let (a, b, c, d) = (global.a(), global.b(), global.c(), global.d());
+        let (x, y) = Self::glyph_device_origin(global, position)?;
         let origin = self.region.map_or((0, 0), |r| (r.x, r.y));
         let transform = self.pdf_to_skia_m44(a, b, c, d, x - origin.0 as f32, y - origin.1 as f32);
         self.surface.canvas().set_matrix(&transform);
@@ -1506,6 +1537,8 @@ impl SkiaRender {
         paint: &Paint,
         global: &Matrix,
     ) -> PdfResult<()> {
+        #[cfg(feature = "render-diagnostics")]
+        let _span = self.profile_span(crate::render_profile::RenderPhase::PreparedPath);
         if paint.style() == PaintStyle::Fill && path.bounds().is_empty() {
             return Ok(());
         }
@@ -1725,7 +1758,12 @@ impl SkiaRender {
                 mask.canvas().reset_matrix();
                 mask.canvas()
                     .translate((-(x - HALO) as f32, -(y - HALO) as f32));
-                mask.canvas().draw_path(&local_outline, &coverage);
+                {
+                    #[cfg(feature = "render-diagnostics")]
+                    let _span =
+                        self.profile_span(crate::render_profile::RenderPhase::CoverageRaster);
+                    mask.canvas().draw_path(&local_outline, &coverage);
+                }
                 self.surface.canvas().save();
                 self.surface.canvas().clip_rect(
                     skia_safe::Rect::from_xywh(x as f32, y as f32, CELL as f32, CELL as f32),
@@ -2284,6 +2322,8 @@ impl Device for SkiaRender {
     }
 
     fn show_text_ref(&mut self, textobject: &TextObject) -> PdfResult<()> {
+        #[cfg(feature = "render-diagnostics")]
+        let _span = self.profile_span(crate::render_profile::RenderPhase::Text);
         // Default PDF text knockout (TK=true) treats each glyph as a member,
         // not a whole Tj run. TK=false is rejected by ExtGState validation.
         if !self.object_dispatch
@@ -2507,6 +2547,9 @@ impl Device for SkiaRender {
             let mut glyphs = Vec::new();
             let mut positions = Vec::new();
 
+            #[cfg(feature = "render-diagnostics")]
+            let selection_span =
+                self.profile_span(crate::render_profile::RenderPhase::GlyphSelection);
             for char_item in textobject.items.iter() {
                 let item_pos = position_scale.checked_transform(char_item.pos())?;
                 let dx = item_pos.x() as f64 - position_matrix.e() as f64;
@@ -2614,6 +2657,8 @@ impl Device for SkiaRender {
                     }
                 }
             }
+            #[cfg(feature = "render-diagnostics")]
+            drop(selection_span);
             if !substituted {
                 runs.push((0, current_font.unwrap()));
             }
@@ -2644,9 +2689,22 @@ impl Device for SkiaRender {
             }
             self.surface.canvas().set_matrix(&transform);
             if !stroke_only {
+                #[cfg(feature = "render-diagnostics")]
+                let _span = self.profile_span(crate::render_profile::RenderPhase::GlyphPaint);
                 let global = Matrix::new(a, b, c, d, position_matrix.e(), position_matrix.f());
                 for (i, (start, run_font)) in runs.iter().enumerate() {
                     let end = runs.get(i + 1).map_or(glyphs.len(), |r| r.0);
+                    if stroke_paint.is_none()
+                        && self.try_draw_glyph_run(
+                            run_font,
+                            &glyphs[*start..end],
+                            &positions[*start..end],
+                            &fill_paint,
+                            &global,
+                        )
+                    {
+                        continue;
+                    }
                     for (glyph, position) in glyphs[*start..end].iter().zip(&positions[*start..end])
                     {
                         if let Err(error) = self.draw_filled_glyph(
