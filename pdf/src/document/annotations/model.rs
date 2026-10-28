@@ -12,7 +12,8 @@ pub enum AnnotationKind {
     Popup {
         open: bool,
     },
-    /// Plain ASCII with explicit LF line breaks; Courier, no automatic layout.
+    /// Legacy APIs use ASCII Courier. Explicit-font APIs support the bounded
+    /// Unicode profile; both use LF lines and no automatic wrapping.
     FreeText {
         font_size: f32,
         alignment: TextAlignment,

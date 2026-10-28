@@ -50,6 +50,13 @@ to ordinary PDF through all full-save layouts are supported within the
 and the [qpdf/MuPDF gate](check-linearized-save.py). Linearized output, progressive
 Range loading and linearized-source incremental saving remain unsupported.
 
+Explicit-font FreeText (12.5): a bounded static TrueType Chinese/Latin appearance
+profile now covers native and Web creation, strict save/reopen and updates. See
+[API/scope](unicode-freetext.md), [native assertions](../pdf/tests/unicode_freetext.rs),
+[real SDK/Worker gate](../web/tests/unicode-freetext-browser.mjs) and
+[MuPDF/PDFium gate](check-unicode-freetext.py). Legacy ASCII APIs remain unchanged;
+this does not imply arbitrary external FreeText, rich text or shaping support.
+
 ## Reproducible evidence and licensing
 
 ### Accepted associated file profile

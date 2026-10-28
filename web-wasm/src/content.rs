@@ -140,10 +140,10 @@ pub(crate) enum Command {
     Reorder(Vec<u32>),
 }
 pub(crate) struct FontInput {
-    embedding: pdf::document::embedded_font::TrueTypeEmbeddingOptions,
-    omit: bool,
+    pub(crate) embedding: pdf::document::embedded_font::TrueTypeEmbeddingOptions,
+    pub(crate) omit: bool,
 }
-fn parse_font(value: &Value) -> ApiResult<FontInput> {
+pub(crate) fn parse_font(value: &Value) -> ApiResult<FontInput> {
     keys(
         value,
         &[

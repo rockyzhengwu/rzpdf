@@ -62,12 +62,12 @@ state and metadata are stored, but the core does not draw a viewer's interactive
 popup window. Stamp uses a plain Courier label and frame, not an application icon
 library. Contents metadata supports Unicode.
 
-FreeText appearance generation uses plain ASCII Courier, explicit LF line breaks,
-font size and left/center/right alignment. Oversized text is rejected; there is no
-wrapping, shrinking or automatic paragraph layout. Unicode FreeText appearance,
-rich text and arbitrary external DA font selection are not supported by this
-increment. The upcoming AcroForm Unicode task is separate; this limitation must
-not be described as Chinese appearance support.
+Legacy FreeText appearance generation uses plain ASCII Courier, explicit LF line
+breaks, font size and left/center/right alignment. For explicit static TrueType
+Chinese/Latin appearances, use the [Unicode FreeText APIs](unicode-freetext.md):
+create, save/reopen and update with persistent font bindings. Oversized text is
+rejected; neither profile silently wraps or shrinks. Rich text, complex shaping
+and arbitrary external DA/font appearance editing remain unsupported.
 
 Use `add_attachment` and `attachment_filespec` to obtain a Filespec handle for
 `AnnotationKind::FileAttachment`. `annotation_file_data` decodes an annotation's

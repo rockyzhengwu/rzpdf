@@ -1147,3 +1147,40 @@ The two older pikepdf-dependent v0.12 scripts were updated for the new policy bu
 were not rerun here. This is not full-workspace, all-platform, encrypted-signature
 or linearized-signature-history acceptance. No linearized generation, progressive
 network loading, incremental policy expansion or fuzz work is included.
+
+
+## Explicit-font Unicode FreeText acceptance
+
+2026-10-28–29: pdf-editor RZPDF 001 is implemented in the bounded static TrueType
+profile. See [contract, examples and reproducible commands](unicode-freetext.md)
+for native/Wasm/SDK/Worker APIs, immutable repertoire updates, scope and evidence.
+The native suite has 61 targeted passes, context loading/rollback 15, and Wasm
+host interfaces 25; 11 build-driver unit tests and deterministic protocol checks
+also pass. This is not a full-workspace or all-platform claim.
+
+Real direct SDK and Worker tests cover mixed Chinese/Latin, LF, three alignments,
+strict save/reopen/update, fresh assets for new characters, actual shared font
+copies, rotation/CropBox/UserUnit, opacity, negative atomicity, save budget/retry,
+R6 annotation-only permission and signed-source refusal. Legacy ASCII CRUD and
+save/reopen remain valid. The restricted R6 permission test exposed an existing
+content-modification check beneath annotation writes; a private scoped grant now
+permits only the authenticated annotation operation and is restored on failure.
+Actual font format and embedding rights are rechecked on reuse after reopening;
+private binding metadata is not sufficient authority.
+
+qpdf, MuPDF and PDFium independently checked eight output files, 80 AP Unicode
+text/alignment assertions and 68 page/DPI render pairs; maximum normalized MAE
+0.004164 under the fixed 0.025 gate. Three standalone PNGs were inspected for
+Chinese, updated repertoire and combined rotated/cropped/UserUnit output.
+The independent adapter accounts for PDFium default user-space page dimensions
+and PyMuPDF 1.26's unscaled annotation derotation translation. It does not change
+PDF attributes or relax tolerances. Local final evidence is under
+`output/unicode-freetext-20261028/`; filenames and reproduction are in the guide.
+The context scope is the 15 `pdf_context::loading_tests` cases; unrelated library
+tests were filtered and are not included in the passing count.
+
+No fonts were downloaded, no system font fallback was used, and no Poppler,
+fuzz, remote CI, release tag or push is part of this acceptance. The existing
+Noto fixture's OFL provenance/notice is reused. Editor application acceptance is
+separate: pin the implementation commit, rebuild both artifacts, add positive
+explicit-font probes and retain the legacy Unicode rejection check.

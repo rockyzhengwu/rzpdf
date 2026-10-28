@@ -1,10 +1,12 @@
 # PDF 引擎当前任务
 
-更新日期：2026-10-26。v0.14 已提交 `64be233`，v0.1～v0.14 各自冻结范围已验收；后续真实语料兼容修复已提交 `7480541`。当前用户已授权按 [WebAssembly spec](docs/webassembly/spec.md) 推进浏览器移植，先做 P0 工具链与最小闭环；不等于开工 v0.15/v1.0，也未新增标签或正式发布。当前性能专题及未提交的工作区修改见下方 RB 系列记录。
+更新日期：2026-10-29。v0.14 已提交 `64be233`，v0.1～v0.14 各自冻结范围已验收；后续真实语料兼容修复已提交 `7480541`。当前用户已授权按 [WebAssembly spec](docs/webassembly/spec.md) 推进浏览器移植，先做 P0 工具链与最小闭环；不等于开工 v0.15/v1.0，也未新增标签或正式发布。当前性能专题及未提交的工作区修改见下方 RB 系列记录。
 
 本文件只列当前状态和下一步；三千多行旧任务、运行日志、架构工作包及历史 checkbox 完整保存在 [TODO-history.md](TODO-history.md)。历史父项未勾选不等于功能尚未开发，版本完成也不等于任意 PDF 或所有组合均已支持。
 
 ## 当前检查点
+
+- [x] FT-01：完成 [Unicode FreeText](docs/unicode-freetext.md)：显式静态 TrueType、独立 AP 字体绑定、三种对齐／LF 与实际轮廓边界、保存重开更新、共享隔离、原生／WASM／SDK／Worker 资产及权限闭环。61＋15＋25 项原生／接口回归、两种浏览器传输、80 次外观文字／对齐和 68 次 MuPDF／PDFium 页面配对通过；旧 ASCII 保留，editor 需升级新操作正例后自行接收。
 
 - [x] LIN-01：支持线性化输入完整重写为普通 PDF；三布局移除参数字典／提示流，保留编辑及源状态，拒绝引用或修改过的结构，增量保存规则不变。90 项定向测试、qpdf 九份输出和 MuPDF 36 次像素对比通过，见[验证记录](docs/testing.md#linearized-input-ordinary-full-save-regression)。
 - [x] LIN-02：补齐有效溢出提示流、R6 加密与签名来源保护样本，SDK／真实 Worker 共 10 组合通过；独立检查八份浏览器输出和 16 次跨传输像素对比，CMS 由 OpenSSL 验证。签名历史遇到线性化基础修订返回明确 Unsupported，仍不开放其签名历史验证；见同一[验证记录](docs/testing.md#linearized-input-ordinary-full-save-regression)。

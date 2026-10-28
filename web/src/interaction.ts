@@ -8,7 +8,7 @@ export interface AnnotationInput {
   rect:[number,number,number,number];color?:[number,number,number];interiorColor?:[number,number,number]|null;contents?:string;flags?:number;opacity?:number;strokeWidth?:number;
   icon?:string;open?:boolean;fontSize?:number;alignment?:'left'|'center'|'right';points?:number[];vertices?:number[][];quads?:number[][];strokes?:number[][][];name?:string;file?:ObjectId;
 }
-export interface AnnotationRecord {object:ObjectId|null;subtype:string;annotation:AnnotationInput|null;unsupportedReason:string|null;popup:ObjectId|null;popupParent:ObjectId|null;replyTo:ObjectId|null;}
+export interface AnnotationRecord {unicodeFreeText?:{fontObject:ObjectId;repertoire:string}|null;object:ObjectId|null;subtype:string;annotation:AnnotationInput|null;unsupportedReason:string|null;popup:ObjectId|null;popupParent:ObjectId|null;replyTo:ObjectId|null;}
 export interface AnnotationSnapshot {stamp:DocumentStamp;page:number;records:AnnotationRecord[];}
 export type FormValue={kind:'text';text:string}|{kind:'checkbox';checked:boolean}|{kind:'radio'|'buttonState';state:string|null}|{kind:'choice';values:string[]}|{kind:'choiceIndices';indices:number[]}|{kind:'pushButton'};
 export interface FormFieldRecord {object:ObjectId;name:string;fieldType:string|null;flags:number;widgets:{object:ObjectId;page:number;rect:[number,number,number,number];onState:string|null;flags:number;visible:boolean}[];details:{type:{kind:'text'|'checkbox'|'radio'|'choice'|'pushButton';multiline?:boolean;noToggleToOff?:boolean;inUnison?:boolean;combo?:boolean;editable?:boolean;multiple?:boolean};value:FormValue;options:{export:string;display:string}[];buttonStates:string[];buttonExports:string[]|null}|null;unsupportedReason:string|null;}
@@ -26,6 +26,8 @@ export type ContentMutation =
  | {operation:'reorderPages';stamp:DocumentStamp;order:number[]}
  | {operation:'importPages';stamp:DocumentStamp;source:DocumentStamp;pages:number[];insertion:number;namePrefix?:string;includeNavigation?:boolean};
 export type MutationRequest = ContentMutation
+ | {operation:'addUnicodeFreeText';stamp:DocumentStamp;page:number;annotation:AnnotationInput&{kind:'FreeText'};font:FontWriteOptions}
+ | {operation:'updateUnicodeFreeText';stamp:DocumentStamp;page:number;object:ObjectId;annotation:AnnotationInput&{kind:'FreeText'};font?:FontWriteOptions}
  | {operation:'addAnnotation';stamp:DocumentStamp;page:number;annotation:AnnotationInput}
  | {operation:'updateAnnotation';stamp:DocumentStamp;page:number;object:ObjectId;annotation:AnnotationInput}
  | {operation:'removeAnnotation';stamp:DocumentStamp;page:number;object:ObjectId;cascade?:boolean}
@@ -45,13 +47,14 @@ export function snapshotMutation(request:MutationRequest):MutationRequest {
   try {text=JSON.stringify(request);}catch{throw new RangeError('Invalid mutation data');}
   if(typeof text!=='string'||new TextEncoder().encode(text).length>64*1024)throw new RangeError('Mutation request exceeds 64 KiB');
   const copy=JSON.parse(text);
-  if(!copy||typeof copy!=='object'||!['addAnnotation','updateAnnotation','removeAnnotation','setFormValue','replaceText','replaceTextSpan','removeImage','transformImage','replaceImage','rotatePage','copyPage','deletePage','reorderPages','importPages'].includes(copy.operation)||!copy.stamp||typeof copy.stamp.engine!=='string'||copy.stamp.engine.length>128||!Number.isInteger(copy.stamp.document)||typeof copy.stamp.revision!=='string'||!/^\d{1,20}$/.test(copy.stamp.revision))throw new RangeError('Invalid mutation identity');
+  if(!copy||typeof copy!=='object'||!['addUnicodeFreeText','updateUnicodeFreeText','addAnnotation','updateAnnotation','removeAnnotation','setFormValue','replaceText','replaceTextSpan','removeImage','transformImage','replaceImage','rotatePage','copyPage','deletePage','reorderPages','importPages'].includes(copy.operation)||!copy.stamp||typeof copy.stamp.engine!=='string'||copy.stamp.engine.length>128||!Number.isInteger(copy.stamp.document)||typeof copy.stamp.revision!=='string'||!/^\d{1,20}$/.test(copy.stamp.revision))throw new RangeError('Invalid mutation identity');
   if(copy.operation==='importPages'&&(!copy.source||typeof copy.source.engine!=='string'||!Number.isInteger(copy.source.document)||typeof copy.source.revision!=='string'||!/^\d{1,20}$/.test(copy.source.revision)))throw new RangeError('Invalid import source identity');
   return copy;
 }
 
 export function mutationAssetLimit(request:MutationRequest):number {
   if(request.operation==='replaceImage')return 8*1024*1024;
+  if(request.operation==='addUnicodeFreeText'||(request.operation==='updateUnicodeFreeText'&&request.font!==undefined))return 32*1024*1024;
   if((request.operation==='replaceText'||request.operation==='replaceTextSpan')&&request.font!==undefined)return 32*1024*1024;
   return 0;
 }

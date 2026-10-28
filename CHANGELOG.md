@@ -2,6 +2,16 @@
 
 本文件只记录交付变化，不替代长期任务池或原始测试日志。版本范围见 [ROADMAP](ROADMAP.md)。
 
+## Unreleased — 显式字体 Unicode FreeText
+
+新增原生 add/update_unicode_freetext 与预算入口，以及 SDK／Worker 的
+add/updateUnicodeFreeText。复用静态 TrueType 子集、CID／ToUnicode 和独立 AP 资源，
+支持中英混合、LF、三种对齐、真实字宽／轮廓超框拒绝与严格保存重开后继续更新。
+现有字集无须原字体，新增字符需显式资产；不原地改共享字体或其他外观。保留旧 ASCII
+接口，并修复只有批注权限的 R6 用户被底层正文修改检查误拒绝的问题；授权作用域不外泄。
+101 项原生／接口回归、真实 SDK／Worker 和 MuPDF／PDFium 独立检查通过；
+边界、示例和 editor 接收步骤见 [Unicode FreeText](docs/unicode-freetext.md)。
+
 ## Unreleased — 线性化输入的普通完整保存
 
 三种完整保存布局支持将识别出的线性化来源转为普通 PDF，移除原参数字典和提示流，

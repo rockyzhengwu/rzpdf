@@ -2,7 +2,9 @@
 mod edit;
 mod model;
 mod paint;
+mod unicode_freetext;
 pub use model::*;
+pub use unicode_freetext::{UnicodeFreeTextBinding, UnicodeFreeTextFont};
 
 use super::PdfDocument;
 use crate::error::PdfResult;

@@ -39,7 +39,7 @@ pub struct PDFContext<R: Seek + Read> {
     source_resolution_depth: Cell<usize>,
     security: Option<crate::security::SecurityHandler>,
     encryption_dictionary_id: Option<ObjectId>,
-    form_edit_depth: Cell<u32>,
+    authorized_edit_depth: Cell<u32>,
     source_has_signatures: OnceCell<bool>,
     state: crate::document::state::DocumentState,
 }
@@ -257,7 +257,7 @@ impl<R: Seek + Read> PDFContext<R> {
             source_resolution_depth: Cell::new(0),
             security: None,
             encryption_dictionary_id: None,
-            form_edit_depth: Cell::new(0),
+            authorized_edit_depth: Cell::new(0),
             source_has_signatures: OnceCell::new(),
             derived_fonts: RefCell::new(crate::derived_cache::DerivedCache::new(
                 options.limits.max_operation_bytes.min(16 * 1024 * 1024),
@@ -429,7 +429,7 @@ impl<R: Seek + Read> PDFContext<R> {
             source_resolution_depth: Cell::new(0),
             security,
             encryption_dictionary_id,
-            form_edit_depth: Cell::new(0),
+            authorized_edit_depth: Cell::new(0),
             source_has_signatures: OnceCell::new(),
             derived_fonts: RefCell::new(crate::derived_cache::DerivedCache::new(
                 limits.max_operation_bytes.min(16 * 1024 * 1024),
@@ -575,26 +575,41 @@ impl<R: Seek + Read> PDFContext<R> {
         }) {
             return Err(PdfError::PermissionDenied("form filling".into()));
         }
+        self.with_authorized_edit(edit)
+    }
+
+    pub(crate) fn with_annotation_edit<T>(
+        &self,
+        edit: impl FnOnce() -> PdfResult<T>,
+    ) -> PdfResult<T> {
+        self.require_annotation_permission()?;
+        self.require_unsigned_source()?;
+        self.with_authorized_edit(edit)
+    }
+
+    // Internal capability scope: only form/annotation entry points can grant
+    // their already-authenticated operation. Signature checks stay in next_revision.
+    fn with_authorized_edit<T>(&self, edit: impl FnOnce() -> PdfResult<T>) -> PdfResult<T> {
         struct Grant<'a>(&'a Cell<u32>, u32);
         impl Drop for Grant<'_> {
             fn drop(&mut self) {
                 self.0.set(self.1);
             }
         }
-        let previous = self.form_edit_depth.get();
-        self.form_edit_depth.set(
+        let previous = self.authorized_edit_depth.get();
+        self.authorized_edit_depth.set(
             previous
                 .checked_add(1)
-                .ok_or_else(|| PdfError::ResourceLimit("form edit depth".into()))?,
+                .ok_or_else(|| PdfError::ResourceLimit("authorized edit depth".into()))?,
         );
-        let _grant = Grant(&self.form_edit_depth, previous);
+        let _grant = Grant(&self.authorized_edit_depth, previous);
         edit()
     }
 
     /// Authenticate before edit preparation; denial must not invalidate sources.
     pub(crate) fn require_content_edit_permission(&self) -> PdfResult<()> {
         self.require_unsigned_source()?;
-        if self.form_edit_depth.get() == 0
+        if self.authorized_edit_depth.get() == 0
             && self.security.as_ref().is_some_and(|handler| {
                 handler.report().authentication != crate::security::Authentication::Owner
                     && !handler.report().permissions.modify

@@ -24,6 +24,11 @@ struct Entry {
 }
 
 impl<R: Read + Seek> PdfDocument<R> {
+    fn annotation_transaction<T>(&self, edit: impl FnOnce(&Self) -> PdfResult<T>) -> PdfResult<T> {
+        self.ctx()
+            .with_annotation_edit(|| self.edit_transaction(edit))
+    }
+
     pub(crate) fn validate_annotation_ownership(&self) -> PdfResult<()> {
         self.annotation_graph().map(|_| ())
     }
@@ -273,7 +278,16 @@ impl<R: Read + Seek> PdfDocument<R> {
             "FreeText" => {
                 let da = self.annot_text(dict, "DA")?;
                 let words: Vec<_> = da.split_ascii_whitespace().collect();
-                let font_size = if words.len() == 3 && words[0] == "/F0" && words[2] == "Tf" {
+                let bound = self.unicode_binding(dict)?.is_some();
+                let valid_da = (words.len() == 3 && !bound)
+                    || (words.len() == 7
+                        && bound
+                        && words[6] == "rg"
+                        && words[3..6].iter().all(|v| {
+                            v.parse::<f32>()
+                                .is_ok_and(|n| n.is_finite() && (0. ..=1.).contains(&n))
+                        }));
+                let font_size = if valid_da && words[0] == "/F0" && words[2] == "Tf" {
                     words[1]
                         .parse::<f32>()
                         .map_err(|_| invalid("FreeText DA size"))?
@@ -565,7 +579,11 @@ impl<R: Read + Seek> PdfDocument<R> {
         if self.annot_name(&entry.dict, "Subtype")?.as_deref() == Some("FreeText") {
             let da = self.annot_text(&entry.dict, "DA")?;
             let words: Vec<_> = da.split_ascii_whitespace().collect();
-            if words.len() != 3 || words[0] != "/F0" || words[2] != "Tf" {
+            let bound = self.unicode_binding(&entry.dict)?.is_some();
+            if !(words.len() == 3 && !bound || words.len() == 7 && bound)
+                || words[0] != "/F0"
+                || words[2] != "Tf"
+            {
                 return Err(PdfError::UnsupportedFeature(
                     "editing external FreeText default appearance".into(),
                 ));
@@ -575,6 +593,17 @@ impl<R: Read + Seek> PdfDocument<R> {
     }
 
     pub fn add_annotation(&self, page: u32, annotation: &Annotation) -> PdfResult<ObjectHandle> {
+        self.add_annotation_encoded(page, annotation, |doc, dict| {
+            doc.encode_annotation(annotation, dict)
+        })
+    }
+
+    pub(super) fn add_annotation_encoded(
+        &self,
+        page: u32,
+        annotation: &Annotation,
+        encode: impl FnOnce(&Self, PdfDict) -> PdfResult<PdfDict>,
+    ) -> PdfResult<ObjectHandle> {
         self.ctx().require_annotation_permission()?;
         let minimum = if matches!(
             annotation.kind,
@@ -589,10 +618,10 @@ impl<R: Read + Seek> PdfDocument<R> {
                 "annotation writing requires newer PDF version".into(),
             ));
         }
-        self.edit_transaction(|doc| {
+        self.annotation_transaction(|doc| {
             doc.annotation_graph()?;
             let location = doc.page_location(page)?;
-            let mut dict = doc.encode_annotation(annotation, PdfDict::default())?;
+            let mut dict = encode(doc, PdfDict::default())?;
             dict.try_insert("P".into(), reference(location.page_id))?;
             let id = doc.try_insert_object(PdfObject::PdfDict(dict))?;
             let mut annots = match location.page_dict.get("Annots") {
@@ -620,9 +649,26 @@ impl<R: Read + Seek> PdfDocument<R> {
         handle: &ObjectHandle,
         annotation: &Annotation,
     ) -> PdfResult<()> {
+        self.update_annotation_encoded(page, handle, annotation, |doc, dict| {
+            if dict.contains_key("RzFreeText") {
+                return Err(PdfError::UnsupportedFeature(
+                    "use update_unicode_freetext for an explicit-font appearance".into(),
+                ));
+            }
+            doc.encode_annotation(annotation, dict)
+        })
+    }
+
+    pub(super) fn update_annotation_encoded(
+        &self,
+        page: u32,
+        handle: &ObjectHandle,
+        annotation: &Annotation,
+        encode: impl FnOnce(&Self, PdfDict) -> PdfResult<PdfDict>,
+    ) -> PdfResult<()> {
         self.ctx().require_annotation_permission()?;
         let id = self.validate_handle(handle)?;
-        self.edit_transaction(|doc| {
+        self.annotation_transaction(|doc| {
             let graph = doc.annotation_graph()?;
             let entry = graph
                 .iter()
@@ -635,7 +681,7 @@ impl<R: Read + Seek> PdfDocument<R> {
                     "changing annotation subtype".into(),
                 ));
             }
-            let dict = doc.encode_annotation(annotation, entry.dict.clone())?;
+            let dict = encode(doc, entry.dict.clone())?;
             doc.update_object(id, PdfObject::PdfDict(dict))
         })
     }
@@ -655,7 +701,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         }
         let id = self.validate_handle(handle)?;
         let target = target.map(|h| self.validate_handle(h)).transpose()?;
-        self.edit_transaction(|doc| {
+        self.annotation_transaction(|doc| {
             let graph = doc.annotation_graph()?;
             let entry = graph
                 .iter()
@@ -701,7 +747,7 @@ impl<R: Read + Seek> PdfDocument<R> {
         self.ctx().require_annotation_permission()?;
         let parent = self.validate_handle(parent)?;
         let popup = popup.map(|h| self.validate_handle(h)).transpose()?;
-        self.edit_transaction(|doc| {
+        self.annotation_transaction(|doc| {
             let graph = doc.annotation_graph()?;
             let entry = graph
                 .iter()
@@ -768,7 +814,7 @@ impl<R: Read + Seek> PdfDocument<R> {
     ) -> PdfResult<()> {
         self.ctx().require_annotation_permission()?;
         let id = self.validate_handle(handle)?;
-        self.edit_transaction(|doc| {
+        self.annotation_transaction(|doc| {
             let graph = doc.annotation_graph()?;
             let entry = graph
                 .iter()

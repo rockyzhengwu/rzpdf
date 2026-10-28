@@ -53,10 +53,15 @@ impl Painter {
 }
 
 impl<R: Read + Seek> PdfDocument<R> {
-    pub(super) fn encode_annotation(
+    pub(super) fn encode_annotation(&self, a: &Annotation, dict: PdfDict) -> PdfResult<PdfDict> {
+        self.encode_annotation_prepared(a, dict, None)
+    }
+
+    pub(super) fn encode_annotation_prepared(
         &self,
         a: &Annotation,
         mut dict: PdfDict,
+        custom_text: Option<(PdfDict, String)>,
     ) -> PdfResult<PdfDict> {
         use crate::document::save_options::PdfVersion;
         let minimum = if a.flags & 512 != 0 {
@@ -279,14 +284,17 @@ impl<R: Read + Seek> PdfDocument<R> {
                 if !font_size.is_finite() || *font_size <= 0. {
                     return Err(invalid("invalid FreeText font size"));
                 }
-                if !a.contents.is_ascii()
-                    || a.contents
-                        .bytes()
-                        .any(|b| b != b'\n' && !(0x20..=0x7e).contains(&b))
-                {
-                    return Err(PdfError::UnsupportedFeature("FreeText appearance supports ASCII with LF; Unicode font layout is separate".into()));
+                let custom = custom_text;
+                if custom.is_none() {
+                    if !a.contents.is_ascii()
+                        || a.contents
+                            .bytes()
+                            .any(|b| b != b'\n' && !(0x20..=0x7e).contains(&b))
+                    {
+                        return Err(PdfError::UnsupportedFeature("FreeText appearance supports ASCII with LF; Unicode font layout is separate".into()));
+                    }
+                    resources = courier()?;
                 }
-                resources = courier()?;
                 dict.try_insert(
                     "DA".into(),
                     PdfObject::PdfString(PdfString::new(
@@ -300,30 +308,37 @@ impl<R: Read + Seek> PdfDocument<R> {
                     TextAlignment::Right => 2.,
                 };
                 dict.try_insert("Q".into(), number(q))?;
-                let mut baseline = h - 2. - font_size;
-                for line in a.contents.split('\n') {
-                    let width = line.len() as f32 * font_size * 0.6;
-                    if baseline < 2. || width > w - 4. || !width.is_finite() {
-                        return Err(invalid(
-                            "FreeText does not fit; automatic layout is not supported",
-                        ));
+                if let Some((fonts, commands)) = custom {
+                    resources = fonts;
+                    painter.add(commands)?;
+                } else {
+                    let mut baseline = h - 2. - font_size;
+                    for line in a.contents.split('\n') {
+                        let width = line.len() as f32 * font_size * 0.6;
+                        if baseline < 2. || width > w - 4. || !width.is_finite() {
+                            return Err(invalid(
+                                "FreeText does not fit; automatic layout is not supported",
+                            ));
+                        }
+                        let left = match alignment {
+                            TextAlignment::Left => 2.,
+                            TextAlignment::Center => (w - width) / 2.,
+                            TextAlignment::Right => w - 2. - width,
+                        };
+                        if line.len() > painter.limit.saturating_sub(painter.content.len()) / 2 {
+                            return Err(PdfError::ResourceLimit(
+                                "FreeText appearance bytes".into(),
+                            ));
+                        }
+                        let mut hex = String::new();
+                        for byte in line.bytes() {
+                            write!(&mut hex, "{byte:02X}").map_err(|_| invalid("hex encoding"))?;
+                        }
+                        painter.add(format!(
+                            "BT /F0 {font_size} Tf 1 0 0 1 {left} {baseline} Tm <{hex}> Tj ET\n"
+                        ))?;
+                        baseline -= font_size * 1.2;
                     }
-                    let left = match alignment {
-                        TextAlignment::Left => 2.,
-                        TextAlignment::Center => (w - width) / 2.,
-                        TextAlignment::Right => w - 2. - width,
-                    };
-                    if line.len() > painter.limit.saturating_sub(painter.content.len()) / 2 {
-                        return Err(PdfError::ResourceLimit("FreeText appearance bytes".into()));
-                    }
-                    let mut hex = String::new();
-                    for byte in line.bytes() {
-                        write!(&mut hex, "{byte:02X}").map_err(|_| invalid("hex encoding"))?;
-                    }
-                    painter.add(format!(
-                        "BT /F0 {font_size} Tf 1 0 0 1 {left} {baseline} Tm <{hex}> Tj ET\n"
-                    ))?;
-                    baseline -= font_size * 1.2;
                 }
             }
             AnnotationKind::Line { points } => {

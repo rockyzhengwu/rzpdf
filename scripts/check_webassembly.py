@@ -101,6 +101,17 @@ def source_inventory():
         "web/tests/resources-browser.mjs", "docs/webassembly/resources.md",
         "docs/webassembly/resource-plan.md",
     ])
+    optional.extend([
+        "pdf/src/document/annotations.rs", "pdf/src/document/annotations/model.rs",
+        "pdf/src/document/annotations/edit.rs", "pdf/src/document/annotations/paint.rs",
+        "pdf/src/document/annotations/unicode_freetext.rs", "pdf/src/document/embedded_font.rs",
+        "pdf/src/document/appearance.rs", "pdf/src/font/cid_encoding.rs",
+        "pdf/examples/unicode_freetext.rs", "pdf/tests/unicode_freetext.rs",
+        "pdf/tests/fixtures/v03/NotoSansSC-static-subset.ttf", "docs/licenses/NotoSansSC-OFL.txt",
+        "web-wasm/src/interaction.rs", "web-wasm/src/content.rs", "web/src/interaction.ts",
+        "web/tests/unicode-freetext-protocol.mjs", "web/tests/unicode-freetext-browser.mjs",
+        "docs/check-unicode-freetext.py", "docs/unicode-freetext.md",
+    ])
     files.extend(name for name in optional if (REPO / name).exists())
     files.extend(str(path.relative_to(REPO)) for directory in ["fonts", "afm", "cmaps", "licenses"]
                  for path in sorted((REPO / "font-data" / directory).iterdir()) if path.is_file())

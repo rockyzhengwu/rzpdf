@@ -86,11 +86,18 @@ pub(crate) fn query(d: &Document, document: u32, request: &Value) -> ApiResult<V
         "content" => crate::content::query(d, document, uint(&request["page"])?),
         "annotations" => {
             let page = uint(&request["page"])?;
-            let records = d.page_annotations(page)?;
-            Ok(
-                json!({"stamp":stamp(d,document),"page":page,"records":records.into_iter().map(|r|json!({"object":r.handle.map(|h|object(h.object_id())),"subtype":r.subtype,"annotation":r.annotation.as_ref().map(annotation),"unsupportedReason":r.unsupported_reason,
-                "popup":r.popup.map(|h|object(h.object_id())),"popupParent":r.popup_parent.map(|h|object(h.object_id())),"replyTo":r.reply_to.map(|h|object(h.object_id()))})).collect::<Vec<_>>()}),
-            )
+            let mut bytes = 0usize;
+            let records = d.page_annotations(page)?.into_iter().map(|r| -> ApiResult<Value> {
+                let binding = if r.annotation.is_some() {
+                    r.handle.as_ref().map(|h| d.unicode_freetext_binding(h)).transpose()?.flatten()
+                } else { None };
+                bytes = bytes.saturating_add(1024 + r.annotation.as_ref().map_or(0, |a| a.contents.len()) + binding.as_ref().map_or(0, |b| b.repertoire.len()));
+                if bytes > 8 * 1024 * 1024 { return Err(ApiError::resource("annotation metadata budget")); }
+                Ok(json!({"object":r.handle.map(|h|object(h.object_id())),"subtype":r.subtype,"annotation":r.annotation.as_ref().map(annotation),"unsupportedReason":r.unsupported_reason,
+                    "unicodeFreeText":binding.map(|b|json!({"fontObject":object(b.font.object_id()),"repertoire":b.repertoire})),
+                    "popup":r.popup.map(|h|object(h.object_id())),"popupParent":r.popup_parent.map(|h|object(h.object_id())),"replyTo":r.reply_to.map(|h|object(h.object_id()))}))
+            }).collect::<ApiResult<Vec<_>>>()?;
+            Ok(json!({"stamp":stamp(d,document),"page":page,"records":records}))
         }
         "formFields" => {
             let mut records = Vec::new();
@@ -340,6 +347,12 @@ fn parse_value(v: &Value) -> ApiResult<FormValue> {
 }
 enum Command {
     Add(u32, Annotation),
+    UnicodeFreeText {
+        page: u32,
+        target: Option<ObjectId>,
+        annotation: Annotation,
+        font: Option<crate::content::FontInput>,
+    },
     Update(u32, ObjectId, Annotation),
     Remove(u32, ObjectId, bool),
     Field(ObjectId, FormValue),
@@ -376,12 +389,38 @@ fn prepare(d: &Document, r: &Value) -> ApiResult<Command> {
             "page",
             "object",
             "annotation",
+            "font",
             "value",
             "cascade",
         ],
     )?;
 
+    if r.get("font").is_some()
+        && !matches!(
+            r["operation"].as_str(),
+            Some("addUnicodeFreeText" | "updateUnicodeFreeText")
+        )
+    {
+        return Err(invalid());
+    }
     match r["operation"].as_str().ok_or_else(invalid)? {
+        "addUnicodeFreeText" | "updateUnicodeFreeText" => {
+            let add = r["operation"].as_str() == Some("addUnicodeFreeText");
+            let annotation = parse_annotation(d, &r["annotation"])?;
+            if !matches!(annotation.kind, Kind::FreeText { .. }) {
+                return Err(invalid());
+            }
+            let font = r.get("font").map(crate::content::parse_font).transpose()?;
+            if add && font.is_none() {
+                return Err(invalid());
+            }
+            Ok(Command::UnicodeFreeText {
+                page: uint(&r["page"])?,
+                target: if add { None } else { Some(id(&r["object"])?) },
+                annotation,
+                font,
+            })
+        }
         "addAnnotation" => Ok(Command::Add(
             uint(&r["page"])?,
             parse_annotation(d, &r["annotation"])?,
@@ -413,6 +452,46 @@ fn apply(
         }
         Command::Content(command) => crate::content::apply(d, command, asset, budget),
         Command::Add(p, a) => Ok(Some(d.add_annotation(p, &a)?.object_id())),
+        Command::UnicodeFreeText {
+            page,
+            target,
+            annotation,
+            font,
+        } => {
+            let font = font
+                .map(|f| {
+                    Ok::<_, PdfError>(pdf::document::annotations::UnicodeFreeTextFont {
+                        bytes: asset.ok_or_else(|| {
+                            PdfError::DocumentError("Unicode FreeText font asset missing".into())
+                        })?,
+                        embedding: f.embedding,
+                        omit_layout_and_auxiliary: f.omit,
+                    })
+                })
+                .transpose()?;
+            if let Some(target) = target {
+                d.update_unicode_freetext_with_budget(
+                    page,
+                    &d.object_handle(target)?,
+                    &annotation,
+                    font,
+                    budget,
+                )?;
+                Ok(None)
+            } else {
+                Ok(Some(
+                    d.add_unicode_freetext_with_budget(
+                        page,
+                        &annotation,
+                        font.ok_or_else(|| {
+                            PdfError::DocumentError("Unicode FreeText font required".into())
+                        })?,
+                        budget,
+                    )?
+                    .object_id(),
+                ))
+            }
+        }
         Command::Update(p, id, a) => {
             d.update_annotation(p, &d.object_handle(id)?, &a)?;
             Ok(None)
@@ -510,6 +589,7 @@ pub extern "C" fn rz_apply_asset(document: u32, input: u32, asset: u32) -> u32 {
         };
         let asset_limit = match &command {
             Command::Content(c) => c.asset_limit(),
+            Command::UnicodeFreeText { font: Some(_), .. } => Some(32 * 1024 * 1024),
             _ => None,
         };
         let needs_asset = asset_limit.is_some();
@@ -927,6 +1007,77 @@ mod tests {
         );
         rz_dispose();
     }
+    #[test]
+    fn unicode_freetext_assets_survive_reopen_and_fail_without_partial_publication() {
+        rz_dispose();
+        let document = open(&source(), None);
+        let state = query(document, "state", None);
+        let annotation = json!({"kind":"FreeText","rect":[20,80,300,160],"fontSize":16,"alignment":"center","contents":"你好，世界！Hello PDF"});
+        let metadata = json!({"postscriptName":"NotoSansSC-Regular","capHeight":733,"stemV":80,"serif":false,"omitLayoutAndAuxiliary":true});
+        let request = message(
+            json!({"operation":"addUnicodeFreeText","stamp":state["stamp"],"page":0,"annotation":annotation,"font":metadata}),
+        );
+        assert_eq!(rz_apply(document, request), 0); // Declared font bytes required.
+        let asset = input(include_bytes!(
+            "../../pdf/tests/fixtures/v03/NotoSansSC-static-subset.ttf"
+        ));
+        let added = json(rz_apply_asset(document, request, asset));
+        rz_release(request);
+        rz_release(asset);
+        let snapshot = query(document, "annotations", Some(0));
+        let row = snapshot["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["object"] == added["created"])
+            .unwrap();
+        assert!(
+            row["unicodeFreeText"]["repertoire"]
+                .as_str()
+                .unwrap()
+                .contains('你')
+        );
+        let saved = rz_save(document, SAVE_LIMIT as u32);
+        let output = bytes(saved);
+        rz_release(saved);
+        let reopened = open(&output, None);
+        let snapshot = query(reopened, "annotations", Some(0));
+        let target = added["created"].clone();
+        let mut update = annotation.clone();
+        update["contents"] = json!("Hello\n世界");
+        update["alignment"] = json!("right");
+        let changed = json(mutate(
+            reopened,
+            json!({"operation":"updateUnicodeFreeText","stamp":snapshot["stamp"],"page":0,"object":target,"annotation":update}),
+        ));
+        let commit = query(reopened, "state", None)["commitRevision"].clone();
+        update["contents"] = json!("新增");
+        assert_eq!(
+            mutate(
+                reopened,
+                json!({"operation":"updateUnicodeFreeText","stamp":changed["stamp"],"page":0,"object":target,"annotation":update})
+            ),
+            0
+        );
+        assert_eq!(query(reopened, "state", None)["commitRevision"], commit);
+        let after = query(reopened, "annotations", Some(0));
+        assert!(
+            after["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["object"] == target && r["annotation"]["contents"] == "Hello\n世界")
+        );
+        let image = rz_render_page(reopened, 0, 36., 3, 1.);
+        assert_ne!(image, 0, "{}", STATE.with(|s| s.borrow().error.clone()));
+        rz_release(image);
+        assert!(added["created"].is_array());
+        rz_release(reopened);
+        rz_release(document);
+        assert_eq!(rz_handle_count(), 0);
+        rz_dispose();
+    }
+
     #[test]
     fn licensed_font_assets_write_new_subset_glyphs_atomically_and_isolate_shared_page() {
         use pdf::document::embedded_font::TrueTypeEmbeddingOptions;
