@@ -277,8 +277,9 @@ impl FullLayoutPlan {
         max_depth: usize,
         depth: usize,
     ) -> PdfResult<()> {
-        let Entries::Stream { id, .. } = &self.entries else {
-            return Ok(());
+        let output_id = match &self.entries {
+            Entries::Stream { id, .. } => Some(*id),
+            Entries::Classic(_) => None,
         };
         if depth > max_depth {
             return Err(PdfError::ResourceLimit(
@@ -288,7 +289,7 @@ impl FullLayoutPlan {
         match object {
             PdfObject::PdfReference(reference)
                 if reference.id().gen_num() == 0
-                    && reference.id().obj_num() >= id.obj_num()
+                    && output_id.is_some_and(|id| reference.id().obj_num() >= id.obj_num())
                     && reference.id().obj_num() < self.size =>
             {
                 return Err(PdfError::InvalidReference(
@@ -303,7 +304,7 @@ impl FullLayoutPlan {
             PdfObject::PdfDict(dict) => {
                 if dict.contains_key("Linearized") {
                     return Err(PdfError::UnsupportedFeature(
-                        "xref-stream full save cannot retain a linearization declaration".into(),
+                        "full save cannot retain an unrecognized linearization declaration".into(),
                     ));
                 }
                 for (_, value) in dict {
@@ -313,7 +314,7 @@ impl FullLayoutPlan {
             PdfObject::PdfStream(stream) => {
                 if stream.dict().contains_key("Linearized") {
                     return Err(PdfError::UnsupportedFeature(
-                        "xref-stream full save cannot retain a linearization declaration".into(),
+                        "full save cannot retain an unrecognized linearization declaration".into(),
                     ));
                 }
                 for (_, value) in stream.dict() {

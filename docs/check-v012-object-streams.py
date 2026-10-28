@@ -168,9 +168,14 @@ for case in ("extends", "unknown-field", "active-reference", "trailer-reference"
     assert not refused.exists()
 
 linearized = fixtures / "linearized.pdf"
-refused = OUT / "linearized-refused.pdf"
-run("linearized-refusal", EXE, linearized, refused, "objects", success=False)
-assert not refused.exists()
+ordinary = OUT / "linearized-to-ordinary.pdf"
+run("linearized-rewrite", EXE, linearized, ordinary, "objects")
+assert "File is not linearized" in run("ordinary-check", "qpdf", "--check", ordinary)
+with pikepdf.Pdf.open(ordinary) as after, pikepdf.Pdf.open(linearized) as before:
+    assert not after.is_linearized
+    assert len(after.pages) == len(before.pages)
+    for a, b in zip(after.pages, before.pages):
+        assert a.Contents.read_bytes() == b.Contents.read_bytes()
 existing = OUT / "existing.pdf"
 existing.write_bytes(b"keep existing target")
 run("no-overwrite", EXE, source, existing, "objects", success=False)

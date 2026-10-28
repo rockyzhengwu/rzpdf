@@ -44,6 +44,12 @@ This is a capability index for the declared v0.1–v0.14 profiles, not a PDF con
 | 14.7 logical structure | v0.10 selected tree/associations/semantics/node edits and page transfers | structure APIs and `extract_text_structure_order`; [model](../pdf/tests/v010_structure.rs), [associations](../pdf/tests/v010_structure_associations.rs), [semantics](../pdf/tests/v010_structure_semantics.rs), [edits](../pdf/tests/v010_structure_edit.rs), [transfer](../pdf/tests/v010_structure_transfer.rs) | [migration guide](structure-transfers.md), [v0.10 support](releases/v0.10-support.md); no PDF/UA or complete role inclusion certification |
 | 8.11 optional content | v0.10 explicit OCG/OCMD selection; v0.13 selected authoring, accepted within its frozen profile | snapshot/visibility APIs, `create_layer`, `write_layer_configuration`, `create_layer_membership`, segment/call binding; [read tests](../pdf/tests/v010_optional_content.rs), [edit tests](../pdf/tests/v013_optional_content_edit.rs) | [read guide](optional-content.md), [authoring guide](layer-authoring.md), [v0.13 boundary](releases/v0.13-boundaries.md); no OCProperties transfer, flattening or action runtime |
 
+Linearization (Annex F): complete-file reading and recognized-source conversion
+to ordinary PDF through all full-save layouts are supported within the
+[documented removal profile](advanced-saving.md). See [targeted tests](../pdf/tests/linearized_save.rs)
+and the [qpdf/MuPDF gate](check-linearized-save.py). Linearized output, progressive
+Range loading and linearized-source incremental saving remain unsupported.
+
 ## Reproducible evidence and licensing
 
 ### Accepted associated file profile

@@ -1051,3 +1051,99 @@ DeviceN 实现回归：依据 [Adobe PDF Reference 1.6 §4.5.5](https://opensour
 依据 [Adobe PDF Reference 1.3，§3.9](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/pdfreference1.3.pdf)，Type0 引入于 PDF 1.2，Type2/3/4 引入于 PDF 1.3。保存预检在输出前检查已知 FunctionType，包括间接字段；未知类型不由该版本检查判定合法性。
 
 验证命令：`cargo test -p pdf --lib --test feature_versions --test color_workflow --locked --quiet`。终态退出 0；516 单元、11 版本集成、10 颜色流程测试通过，0 失败/忽略。日志：`/tmp/rzpdf-function-version.log`。新增测试使用保留对象验证版本拒绝、原输出/revision 不变和显式升级后严格读回，不将这些对象视为合法可执行函数。不涵盖完整符合性、Type4 执行、预算峰值或最新全工作区门禁；未运行 fuzz。
+
+
+## Linearized input ordinary full-save regression
+
+2026-10-28: full rewrites recognize the immutable source parameter dictionary
+and its primary/overflow hint identities, then omit them from all three output
+layouts. Recognition and reference checks use bounded operations; no source
+store edits or blanket reachability collection are performed. Modified structures,
+unknown parameter/hint fields, malformed hint offsets/ranges, and active references
+refuse before host writes. Classic saving also rejects unrecognized declarations.
+Existing incremental and signature guards remain.
+
+The overflow fixture follows the concatenated decoded hint-data model in
+[Adobe PDF Reference 1.6, Annex F](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/pdfreference1.6.pdf).
+Its original hint data is split across two independently compressed streams;
+qpdf confirms the resulting input is linearized. The fixture is project-authored;
+qpdf's writer produces only primary hint streams, as described in its
+[linearization implementation notes](https://github.com/qpdf/qpdf/blob/main/manual/linearization.rst).
+
+Validation on macOS x86_64:
+
+```sh
+cargo test --locked -p pdf --test linearized_save --test v011_signature_history --test v05_signatures --test v012_xref_output --test v012_object_streams --test v05_incremental --test save_writer --test save_file --test v012_layout_security
+cargo clippy --locked -p pdf --lib --test linearized_save --test v011_signature_history --test v05_incremental -- -D warnings
+cargo fmt --all -- --check
+cargo build --locked -p pdf --example v012_layout
+/usr/local/bin/python3.11 docs/check-linearized-save.py output/linearized-save-NEW
+```
+
+All **90 targeted tests** passed, including seven focused linearization tests;
+strict Clippy, formatting and TypeScript build passed. Five committed fixtures
+cover classic and xref/object-stream sources, primary/overflow hints, real
+AES-256/R6 protection, and a real detached CMS approval appended to a linearized
+prefix. Their provenance/hashes are in [fixture notes](../pdf/tests/fixtures/linearized/README.md).
+Native tests require no qpdf, OpenSSL or certificate trust configuration.
+
+Tests check page edits, retained object identities/values, metadata, strict reopen,
+repeat saves, source stamps, output/operation budgets, host-write refusal and
+incremental refusal. R6 inputs exercise both user and owner authentication and
+all three layouts, retaining passwords, permissions and edited content. The
+previous synthetic-marker incremental test now uses a real linearized input
+because full saving no longer emits a false marker.
+
+The CMS fixture preserves the complete original prefix and adds a signed revision.
+It is no longer currently linearized; its original declaration remains in signed
+bytes. Independent OpenSSL verification of the committed CMS succeeds, without
+certificate-chain verification. The native history walker still does not support
+the forward-linked xref pair of a linearized base. It now returns explicit
+`UnsupportedFeature` instead of misleading `MalformedSignature`; no history
+acceptance or signature policy was relaxed. All full-save layouts and general
+edits refuse the signed source; failed edits may invalidate stamps on rollback,
+while committed state and readable page content remain intact.
+
+The [native independent gate](check-linearized-save.py) checked nine ordinary
+rewrites with qpdf and all 36 page/DPI pairs byte-for-byte with PyMuPDF 1.26.7.
+The [browser test](../web/tests/linearized-save.mjs) used the pinned optimized Wasm,
+Node 22.15.1 and Chrome 156.0.8078.48:
+
+```sh
+# Build using the existing pinned toolchain described in webassembly/build.md.
+python3 scripts/build_webassembly.py --package web-wasm --output output/wasm-build-NEW.json
+npm --prefix web run build
+env RZPDF_CHROMIUM="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  output/webassembly/toolchains/node-v22.15.1-darwin-x64/bin/node --input-type=module \
+  -e 'await import("./web/tests/linearized-save.mjs");'
+/usr/local/bin/python3.11 docs/check-linearized-followup.py output/webassembly/linearized-save output/linearized-followup-NEW
+```
+
+Both direct SDK and real Worker passed all **10 combinations**. Four inputs per
+transport exercise page rotation, visible annotation creation, save-budget failure
+and retry, complete save, strict reopen, exact pre-save/post-open page hashes at
+72/144 DPI, protection preservation and handle release. Signed-prefix inputs
+exercise normal structured refusal and continued rendering. Direct and Worker
+edited pixels agree. Assertions respect their different statistics contracts:
+only Worker additionally exposes a document count. RGBA arrays stay in the
+browser; only hashes and small saved PDFs cross the test bridge.
+
+The [follow-up independent gate](check-linearized-followup.py) checked all eight
+exported PDFs with qpdf (both passwords for encrypted outputs), verified rotation
+and annotation content with MuPDF, and compared 16 direct/Worker page/DPI pairs
+exactly. It also verified the committed CMS using OpenSSL. All passed.
+
+Local evidence is under `output/linearized-followup-20261028/`:
+`native-accepted.log`, `clippy-final.log`, `wasm-build.json`,
+`browser-verified/report.json`, `independent-native/report.json` and
+`independent-browser/report.json`. Initial browser iterations exposed missing
+explicit resource dictionaries and an unhidden appearance-less widget in test
+fixtures; fixtures were corrected and independently rechecked. The final corpus
+uses explicit empty Resources and a hidden signature widget. The follow-up
+[generator](../scripts/prepare_linearized_followup.py) writes into a new output
+directory; no private key is committed.
+
+The two older pikepdf-dependent v0.12 scripts were updated for the new policy but
+were not rerun here. This is not full-workspace, all-platform, encrypted-signature
+or linearized-signature-history acceptance. No linearized generation, progressive
+network loading, incremental policy expansion or fuzz work is included.

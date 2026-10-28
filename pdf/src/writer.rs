@@ -4,6 +4,7 @@ use std::path::Path;
 mod feature_versions;
 mod incremental;
 mod layout;
+mod linearization;
 mod object_stream;
 mod protection;
 mod xref;
@@ -253,6 +254,7 @@ fn write_document_output_with_layout<R: std::io::Read + std::io::Seek>(
     } else {
         (None, document.ctx().serializable_object_ids())
     };
+    let linearization = linearization::Removal::inspect(document, &object_ids, &crypto_budget)?;
     let max_obj_num = object_ids.iter().map(|id| id.obj_num()).max().unwrap_or(0);
     let encryption_id =
         if security.is_some() && layout == crate::document::save_options::SaveLayout::Classic {
@@ -320,7 +322,9 @@ fn write_document_output_with_layout<R: std::io::Read + std::io::Seek>(
         if plan.is_stream() && Some(object_id) == encryption_id {
             continue;
         }
-        if selection.as_ref().is_some_and(|s| s.removed(object_id)) {
+        if linearization.removed(object_id)
+            || selection.as_ref().is_some_and(|s| s.removed(object_id))
+        {
             plan.record_deleted(object_id)?;
             continue;
         }
@@ -413,7 +417,7 @@ fn write_document_output_with_layout<R: std::io::Read + std::io::Seek>(
         // Containers were allocated as groups were flushed. Check the final
         // generated range too, before any host writer/file receives bytes.
         for &id in &object_ids {
-            if selection.as_ref().is_some_and(|s| s.removed(id)) {
+            if linearization.removed(id) || selection.as_ref().is_some_and(|s| s.removed(id)) {
                 continue;
             }
             let loaded = document

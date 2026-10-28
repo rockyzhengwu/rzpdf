@@ -1,0 +1,22 @@
+{
+  "source_sha256": "ee09640c49f2b8792ca3783349d657bb07befa14f3092fd92045f7494884cdac",
+  "qpdf": "qpdf version 11.2.0\nRun qpdf --copyright to see copyright and license information.\n",
+  "openssl": "OpenSSL 4.0.3 29 Sep 2026 (Library: OpenSSL 4.0.3 29 Sep 2026)\n",
+  "fixtures": [
+    {
+      "file": "two-pages-overflow.pdf",
+      "sha256": "b6e081f96bda9a71229d2caa11a20e6242423baf2ea1096d2aa6640c8d101ab6",
+      "check": "checking two-pages-overflow.pdf\nPDF Version: 1.7\nFile is not encrypted\nFile is linearized\nNo syntax or stream encoding errors found; the file may still contain\nerrors that qpdf cannot detect\n"
+    },
+    {
+      "file": "two-pages-r6.pdf",
+      "sha256": "7220228c89c516095523232948a11723ed52a78bbe14865cb00effe158c942a1",
+      "check": "checking two-pages-r6.pdf\nPDF Version: 1.7 extension level 8\nR = 6\nP = -4\nUser password = synthetic-user\nSupplied password is user password\nextract for accessibility: allowed\nextract for any purpose: allowed\nprint low resolution: allowed\nprint high resolution: allowed\nmodify document assembly: allowed\nmodify forms: allowed\nmodify annotations: allowed\nmodify other: allowed\nmodify anything: allowed\nstream encryption method: AESv3\nstring encryption method: AESv3\nfile encryption method: AESv3\nFile is linearized\nNo syntax or stream encoding errors found; the file may still contain\nerrors that qpdf cannot detect\n"
+    },
+    {
+      "file": "two-pages-signed.pdf",
+      "sha256": "8b8c48cec2a155a420a8a917fa1965a2184abb6006a0a880b20e38fe69014f8f",
+      "check": "checking two-pages-signed.pdf\nPDF Version: 1.7\nFile is not encrypted\nFile is not linearized\nNo syntax or stream encoding errors found; the file may still contain\nerrors that qpdf cannot detect\n"
+    }
+  ]
+}

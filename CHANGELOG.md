@@ -2,6 +2,16 @@
 
 本文件只记录交付变化，不替代长期任务池或原始测试日志。版本范围见 [ROADMAP](ROADMAP.md)。
 
+## Unreleased — 线性化输入的普通完整保存
+
+三种完整保存布局支持将识别出的线性化来源转为普通 PDF，移除原参数字典和提示流，
+重建交叉引用，不修改源文档状态。结构被修改、带未知字段或被保留对象引用时拒绝；
+普通布局也不再保留无法识别的 Linearized 声明。增量保存仍拒绝线性化来源，
+本次不包含线性化生成或 HTTP Range 加载。新增有效溢出流、R6 与真实 CMS 签名来源样本，
+90 项定向测试及 SDK／Worker 10 组合通过，qpdf／MuPDF／OpenSSL 独立检查通过。
+签名历史的线性化基础 xref 对目前仍不支持，错误改为明确 Unsupported，不误报格式损坏。
+边界见[高级保存](docs/advanced-saving.md)与[验证记录](docs/testing.md#linearized-input-ordinary-full-save-regression)。
+
 ## Unreleased — Type3 矩形与密集字形兼容修复
 
 Type3 FontBBox 按 PDF rectangle 规则接受任意对角点顺序，模型规范化坐标，

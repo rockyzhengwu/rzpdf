@@ -209,7 +209,7 @@ fn contains_strings(object: &PdfObject) -> bool {
     }
 }
 
-fn visit_references(
+pub(super) fn visit_references(
     object: &PdfObject,
     max_depth: usize,
     depth: usize,

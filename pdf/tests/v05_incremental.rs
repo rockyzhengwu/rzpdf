@@ -153,7 +153,7 @@ fn live_references_to_deleted_objects_are_rejected_and_retry_succeeds() {
 
 #[test]
 fn source_preflight_cannot_be_bypassed_by_overwriting_signature_objects() {
-    for key in ["Type", "FT", "ByteRange", "Linearized"] {
+    for key in ["Type", "FT", "ByteRange"] {
         let created = Document::new().unwrap();
         created.add_page(0).unwrap();
         let mut dict = PdfDict::default();
@@ -162,11 +162,7 @@ fn source_preflight_cannot_be_bypassed_by_overwriting_signature_objects() {
         let id = created.try_insert_object(PdfObject::PdfDict(dict)).unwrap();
         let source = created.save_to_bytes().unwrap();
         let document = open(source);
-        if key == "Linearized" {
-            document.update_object(id, PdfObject::PdfNull).unwrap();
-        } else {
-            assert!(document.update_object(id, PdfObject::PdfNull).is_err());
-        }
+        assert!(document.update_object(id, PdfObject::PdfNull).is_err());
         assert!(
             matches!(
                 document.save_incremental_to_bytes(),
@@ -175,6 +171,21 @@ fn source_preflight_cannot_be_bypassed_by_overwriting_signature_objects() {
             "{key}"
         );
     }
+}
+
+#[test]
+fn linearized_source_preflight_survives_overwriting_the_parameter_dictionary() {
+    let document = open(include_bytes!("fixtures/linearized/two-pages.pdf").to_vec());
+    document
+        .update_object(
+            pdf::objects::object_id::ObjectId::new(4, 0),
+            PdfObject::PdfNull,
+        )
+        .unwrap();
+    assert!(matches!(
+        document.save_incremental_to_bytes(),
+        Err(PdfError::UnsupportedFeature(_))
+    ));
 }
 
 #[test]

@@ -146,9 +146,14 @@ for original in (source, objstm, mupdf, stream_source, hybrid):
 linearized = OUT / "linearized.pdf"
 run("linearized-produce", "qpdf", "--linearize", source, linearized)
 run("linearized-check", "qpdf", "--check", linearized)
-refused = OUT / "linearized-refused.pdf"
-run("linearized-refused", EXE, linearized, refused, "stream", success=False)
-assert not refused.exists()
+ordinary = OUT / "linearized-to-ordinary.pdf"
+run("linearized-rewrite", EXE, linearized, ordinary, "stream")
+assert "File is not linearized" in run("ordinary-check", "qpdf", "--check", ordinary)
+with pikepdf.Pdf.open(ordinary) as after, pikepdf.Pdf.open(linearized) as before:
+    assert not after.is_linearized
+    assert len(after.pages) == len(before.pages)
+    for a, b in zip(after.pages, before.pages):
+        assert a.Contents.read_bytes() == b.Contents.read_bytes()
 
 existing = OUT / "existing.pdf"
 existing.write_bytes(b"keep existing target")
@@ -156,7 +161,7 @@ run("no-overwrite", EXE, source, existing, "stream", success=False)
 assert existing.read_bytes() == b"keep existing target"
 (OUT / "manifest.json").write_text(json.dumps(dict(cases=records,pixels=pixels,
     versions=dict(pikepdf=pikepdf.__version__,qpdf=run("qpdf-version","qpdf","--version")),
-    provenance="pikepdf authored; qpdf ObjStm and linearized refusal; MuPDF rewrite; rzpdf xref stream; explicit synthetic hybrid",
+    provenance="pikepdf authored; qpdf ObjStm and linearized-to-ordinary rewrite; MuPDF rewrite; rzpdf xref stream; explicit synthetic hybrid",
     hashes={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in OUT.glob("*.pdf")},
     trust="No signatures, credentials, network, installs or fuzz. Projection compares decoded stream content and non-encoding dictionary keys."),indent=2)+"\n")
 print(f"PASS {len(records)} xref-stream rewrites, {len(pixels)} exact MuPDF page pairs, independent projections and no-overwrite")

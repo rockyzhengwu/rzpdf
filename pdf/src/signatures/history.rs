@@ -55,9 +55,27 @@ fn revisions(bytes: &[u8], options: ParseOptions) -> PdfResult<Vec<Revision>> {
         {
             return Err(invalid("encrypted signature history unsupported"));
         }
-        if !parser.get_next_word()?.is_equal(b"startxref")
-            || parser.get_next_word()?.as_u64_checked()? != offset
+        if !parser.get_next_word()?.is_equal(b"startxref") {
+            return Err(malformed("xref section is not followed by its startxref"));
+        }
+        let declared_xref = parser.get_next_word()?.as_u64_checked()?;
+        // A linearized base has an early startxref 0 and a forward Prev link
+        // to its main xref. Those sections belong to one file revision, which
+        // this history walker cannot yet reconstruct. Keep the fail-closed
+        // boundary explicit rather than reporting a valid layout as corrupt.
+        if declared_xref == 0
+            && table
+                .trailer()
+                .get("Prev")
+                .and_then(PdfObject::as_number)
+                .and_then(|n| n.as_u64_checked().ok())
+                .is_some_and(|p| p > offset)
         {
+            return Err(invalid(
+                "forward-linked/linearized signature history unsupported",
+            ));
+        }
+        if declared_xref != offset {
             return Err(malformed("xref section is not followed by its startxref"));
         }
         let mut end = parser.position() as usize;

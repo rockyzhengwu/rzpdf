@@ -31,12 +31,28 @@ effective PDF 1.5 or later; choose an explicit `SaveOptions.version` upgrade
 for a lower version. Existing R6 protection is preserved automatically and
 requires PDF 2.0 or the supported PDF 1.7 ADBE extension level 8 declaration.
 Adding or replacing R6 requires PDF 2.0, as with existing security saves.
-Source-signature checks remain in force. Retained Linearized declarations
-are refused; these profiles do not migrate hint tables or repair their offsets.
+Source-signature checks remain in force. Recognized linearized input can be
+fully rewritten as an ordinary, non-linearized PDF in all three layouts.
+The source parameter dictionary and its primary/overflow hint streams are
+omitted from output; their IDs become free entries. The in-memory document
+and original bytes are unchanged. This is not linearized output or a general
+garbage collector: unrelated objects retain their identities.
+
+Removal requires a source-first parameter dictionary with known fields and
+resolvable hint streams. Modified structures, unknown fields, malformed hints,
+or references to these structures from retained objects/trailer roots cause
+explicit refusal. Unrecognized `/Linearized` declarations also refuse in the
+classic layout rather than retaining stale offsets. Incremental saving of
+linearized input remains unsupported. No hint-table migration, Range loading
+or linearized generation is provided. Full saving does not remove declarations
+from signed source bytes: signed sources remain protected. A linearized base's
+forward-linked xref pair also remains outside signature-history verification;
+that path reports an explicit unsupported-feature error, not a corruption verdict.
+See the [native/browser validation record](testing.md#linearized-input-ordinary-full-save-regression).
 Stream-style incremental output has a separate explicit option described below.
 
-`SaveLayout::Classic` follows the existing serializer and preserves its default
-byte output. The new `XrefStream` profile emits independent objects and a fresh
+For non-linearized input, `SaveLayout::Classic` follows the existing serializer
+and preserves its default byte output. The new `XrefStream` profile emits independent objects and a fresh
 output-only xref object, with `/W [1 8 4]` and `/Index [0 Size]`; it does not
 mutate the document, reserve a persistent object ID or rebase its source.
 Holes remain free entries within the configured Size limit. The xref payload

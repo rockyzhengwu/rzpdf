@@ -6,6 +6,9 @@
 
 ## 当前检查点
 
+- [x] LIN-01：支持线性化输入完整重写为普通 PDF；三布局移除参数字典／提示流，保留编辑及源状态，拒绝引用或修改过的结构，增量保存规则不变。90 项定向测试、qpdf 九份输出和 MuPDF 36 次像素对比通过，见[验证记录](docs/testing.md#linearized-input-ordinary-full-save-regression)。
+- [x] LIN-02：补齐有效溢出提示流、R6 加密与签名来源保护样本，SDK／真实 Worker 共 10 组合通过；独立检查八份浏览器输出和 16 次跨传输像素对比，CMS 由 OpenSSL 验证。签名历史遇到线性化基础修订返回明确 Unsupported，仍不开放其签名历史验证；见同一[验证记录](docs/testing.md#linearized-input-ordinary-full-save-regression)。
+
 - [x] WR-01～06 浏览器资源专题实现／评估：能力与档位、结构化错误、缓存接口、1152 DPI 分块及受限 JPEG 降采样，详见[计划](docs/webassembly/resource-plan.md)。
 - [x] WR-07：用户授权安装固定环境后，优化 Wasm 构建及 Chromium 下直接／真实 Worker 资源门禁通过；指纹、源码边界和早期环境阻塞见[验收记录](docs/webassembly/resource-plan.md#authorized-environment-setup-and-real-browser-acceptance)。不外推其他编解码器／平台或整版浏览器发布。
 
