@@ -64,9 +64,9 @@ fn containers(bytes: &[u8]) -> Vec<(ObjectId, usize, Vec<u8>)> {
             continue;
         }
         let data = if stream.dict().contains_key("Filter") {
-            pdf::filter::apply_filter("FlateDecode", stream.raw_data(), None).unwrap()
+            pdf::filter::apply_filter("FlateDecode", stream.raw_data().unwrap(), None).unwrap()
         } else {
-            stream.raw_data().to_vec()
+            stream.raw_data().unwrap().to_vec()
         };
         let n = stream.dict().get("N").unwrap().as_u32().unwrap() as usize;
         let first = stream.dict().get("First").unwrap().as_u32().unwrap() as usize;

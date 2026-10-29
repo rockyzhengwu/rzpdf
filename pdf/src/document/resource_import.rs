@@ -156,7 +156,9 @@ impl<S: Read + Seek, T: Read + Seek> Importer<'_, S, T> {
                 Ok(PdfObject::PdfArray(output))
             }
             PdfObject::PdfStream(stream) => {
-                let (dict, data) = stream.into_raw_parts();
+                let (dict, data) = stream
+                    .materialize(self.source.ctx(), &limits.operation_budget())?
+                    .into_raw_parts()?;
                 if ["F", "FFilter", "FDecodeParms"]
                     .iter()
                     .any(|key| dict.contains_key(key))
@@ -888,7 +890,7 @@ mod tests {
         let mapped_stream = imported_dict.get("A").unwrap().as_reference().unwrap().id();
         let stream_object = target.resolve_object(mapped_stream).unwrap();
         let stream = stream_object.as_stream().unwrap();
-        assert_eq!(stream.raw_data(), b"4142>");
+        assert_eq!(stream.raw_data().unwrap(), b"4142>");
         assert_eq!(
             stream
                 .dict()

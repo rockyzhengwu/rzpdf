@@ -140,7 +140,11 @@ impl PdfImage {
                 .is_some_and(|name| matches!(name.name(), "DCT" | "DCTDecode")),
             _ => false,
         };
-        if !single_jpeg || !crate::filter::dct::sequential(stream.raw_data()) {
+        if !single_jpeg
+            || !crate::filter::dct::sequential(
+                &stream.read_raw_data(ctx, &ctx.limits().operation_budget())?,
+            )
+        {
             return Self::try_new(name, object, ctx);
         }
         let dimension = |key| -> PdfResult<u32> {
@@ -191,7 +195,7 @@ impl PdfImage {
             return Self::try_new(name, object, ctx);
         }
         let (width, height, data) = crate::filter::dct::decode_target(
-            stream.raw_data(),
+            &stream.read_raw_data(ctx, &ctx.limits().operation_budget())?,
             source,
             (
                 target.0.max(1.).min(f64::from(source.0)) as u32,

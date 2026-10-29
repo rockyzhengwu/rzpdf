@@ -294,7 +294,7 @@ fn unknown_encoding_is_preserved_for_raw_extraction_but_cannot_decode() {
             std::slice::from_ref(&name)
         );
         let source = page.extract_image_source(&name).unwrap();
-        assert_eq!(source.stream.raw_data(), bytes);
+        assert_eq!(source.stream.raw_data().unwrap(), bytes);
         assert_eq!(
             source
                 .stream
@@ -350,7 +350,7 @@ fn named_image_source_and_rgba_survive_save_without_painting() {
         (source.width, source.height, source.bits_per_component),
         (1, 1, Some(8))
     );
-    assert_eq!(source.stream.raw_data(), &[10, 20, 30]);
+    assert_eq!(source.stream.raw_data().unwrap(), &[10, 20, 30]);
     assert!(source.stream.dict().get("SMask").is_some());
     assert!(source.stream.dict().get("Filter").is_none());
     let reopened =

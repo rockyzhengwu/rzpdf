@@ -315,21 +315,29 @@ fn metadata_replacement_preserves_shared_old_stream() {
     );
     assert_eq!(
         reopened
-            .resolve_object(old_id)
+            .read_stream_data(
+                &reopened
+                    .resolve_object(old_id)
+                    .unwrap()
+                    .as_stream()
+                    .unwrap()
+            )
             .unwrap()
-            .as_stream()
-            .unwrap()
-            .raw_data(),
+            .as_ref(),
         b"<old/>"
     );
     reopened.set_metadata_packet(None).unwrap();
     assert_eq!(
         reopened
-            .resolve_object(old_id)
+            .read_stream_data(
+                &reopened
+                    .resolve_object(old_id)
+                    .unwrap()
+                    .as_stream()
+                    .unwrap()
+            )
             .unwrap()
-            .as_stream()
-            .unwrap()
-            .raw_data(),
+            .as_ref(),
         b"<old/>"
     );
 }

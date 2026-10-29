@@ -74,7 +74,8 @@ fn indirect_stream_reference_in_container_survives_strict_save() {
             .unwrap()
             .as_stream()
             .unwrap()
-            .raw_data(),
+            .raw_data()
+            .unwrap(),
         b"data"
     );
 }

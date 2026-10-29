@@ -23,6 +23,32 @@ use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, block_padding::Pk
 use std::io::{Read, Seek};
 use zeroize::{Zeroize, Zeroizing};
 
+#[derive(Clone)]
+pub(crate) struct PendingStreamCrypt {
+    method: Method,
+    key: std::rc::Rc<Zeroizing<Vec<u8>>>,
+}
+impl std::fmt::Debug for PendingStreamCrypt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PendingStreamCrypt")
+    }
+}
+impl PartialEq for PendingStreamCrypt {
+    fn eq(&self, other: &Self) -> bool {
+        self.method == other.method && self.key == other.key
+    }
+}
+impl PendingStreamCrypt {
+    pub(crate) fn decrypt(
+        &self,
+        input: &[u8],
+        limit: usize,
+        budget: &OperationBudget,
+    ) -> PdfResult<(Vec<u8>, MemoryLease)> {
+        crypt_bytes(self.method, &self.key, input, false, limit, budget)
+    }
+}
+
 #[derive(Clone, Copy)]
 struct ObjectCrypt<'a> {
     key: &'a [u8],
@@ -288,7 +314,8 @@ pub(crate) fn plain_output<R: Read + Seek>(
             let (dict, mut lease) =
                 rewrite_crypt_name(stream, &settings, "Identity", ctx.limits(), budget)?;
             let (data, mut child) =
-                BudgetedBytes::copy_from_slice(budget, stream.raw_data())?.into_reserved_parts();
+                BudgetedBytes::copy_from_slice(budget, &stream.read_raw_data(ctx, budget)?)?
+                    .into_reserved_parts();
             lease.absorb(&mut child)?;
             return Ok((PdfObject::PdfStream(PdfStream::new(dict, data)), lease));
         }
@@ -507,10 +534,34 @@ impl SecurityHandler {
                     .unwrap_or(stream.dict());
                 let (dict, mut lease) =
                     self.transform_dict(ctx, dict, crypt, budget, depth, nodes)?;
+                if !encrypt {
+                    // Identity is already plaintext: retain the source view
+                    // without allocating a key descriptor or plaintext copy.
+                    let pending = if method == Method::Identity {
+                        None
+                    } else {
+                        let (key, mut key_lease) =
+                            BudgetedBytes::copy_from_slice(budget, cipher_key)?
+                                .into_reserved_parts();
+                        lease.absorb(&mut key_lease)?;
+                        Some(PendingStreamCrypt {
+                            method,
+                            key: std::rc::Rc::new(Zeroizing::new(key)),
+                        })
+                    };
+                    let (mut result, mut payload_lease) =
+                        stream.with_source_crypt(dict, pending, budget)?;
+                    lease.absorb(&mut payload_lease)?;
+                    if settings.name.is_some() {
+                        result.mark_crypt_processed();
+                    }
+                    return Ok((PdfObject::PdfStream(result), lease));
+                }
+                let raw = stream.read_raw_data(ctx, budget)?;
                 let (data, mut data_lease) = crypt_bytes(
                     method,
                     cipher_key,
-                    stream.raw_data(),
+                    &raw,
                     encrypt,
                     limits.max_raw_stream_bytes,
                     budget,
@@ -531,6 +582,60 @@ impl SecurityHandler {
 mod tests {
     use super::*;
     use crate::{document::PdfDocument, security::EncryptionOptions};
+
+    #[test]
+    fn deferred_owned_ciphertext_copy_is_budgeted_and_plaintext_leases_release() {
+        let doc = PdfDocument::new().unwrap();
+        let setup = OperationBudget::new(4 * 1024 * 1024);
+        let (handler, _handler_lease) = SecurityHandler::generate(
+            &EncryptionOptions::new("user", "owner").unwrap(),
+            doc.ctx().limits(),
+            &setup,
+        )
+        .unwrap();
+        let original = PdfObject::PdfStream(PdfStream::new(PdfDict::default(), vec![42; 65536]));
+        let (encrypted, _encrypted_lease) = handler
+            .transform(doc.ctx(), &original, true, &setup)
+            .unwrap();
+        let encoded_len = encrypted.as_stream().unwrap().encoded_len();
+        let pool = OperationBudget::new(1024 * 1024);
+        let (deferred, lease) = handler
+            .transform_source(
+                doc.ctx(),
+                &encrypted,
+                crate::objects::object_id::ObjectId::new(7, 0),
+                &pool,
+            )
+            .unwrap();
+        assert!(deferred.as_stream().unwrap().raw_data().is_err());
+        assert!(lease.bytes() >= encoded_len);
+        assert_eq!(pool.live_bytes(), lease.bytes());
+        let peak = pool.peak_bytes();
+        let read = deferred
+            .as_stream()
+            .unwrap()
+            .read_raw_data(doc.ctx(), &pool)
+            .unwrap();
+        assert_eq!(
+            read.as_ref(),
+            original.as_stream().unwrap().raw_data().unwrap()
+        );
+        drop(read);
+        assert_eq!(pool.live_bytes(), lease.bytes());
+        drop((deferred, lease));
+        assert_eq!(pool.live_bytes(), 0);
+        let small = OperationBudget::new(peak - 1);
+        assert!(matches!(
+            handler.transform_source(
+                doc.ctx(),
+                &encrypted,
+                crate::objects::object_id::ObjectId::new(7, 0),
+                &small
+            ),
+            Err(PdfError::ResourceLimit(_))
+        ));
+        assert_eq!(small.live_bytes(), 0);
+    }
 
     #[test]
     fn object_stream_ciphertext_limits_include_iv_and_padding_and_release() {
@@ -600,7 +705,7 @@ mod tests {
                     .transform(doc.ctx(), &object, true, &budget)
                     .unwrap();
                 assert_eq!(
-                    encrypted.as_stream().unwrap().raw_data().len(),
+                    encrypted.as_stream().unwrap().raw_data().unwrap().len(),
                     if name == "Identity" {
                         length
                     } else {

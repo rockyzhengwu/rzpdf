@@ -1567,15 +1567,15 @@ mod tests {
             .unwrap();
         let expected = doc.get_page(0).unwrap().content_program().unwrap();
         let revision = doc.revision();
-        let budget = OperationBudget::new(16384);
-        let probe = OperationBudget::new(16384);
+        let budget = OperationBudget::new(32768);
+        let probe = OperationBudget::new(32768);
         let (_, page_lease) = doc
             .page_location_with_budget(0, &probe)
             .unwrap()
             .into_parts();
         let page_bytes = page_lease.bytes();
         let page_peak = probe.peak_bytes();
-        let snapshot_probe = OperationBudget::new(16384);
+        let snapshot_probe = OperationBudget::new(32768);
         doc.edit_transaction_with_budget(&snapshot_probe, |_| Ok(()))
             .unwrap();
         let snapshot_peak = snapshot_probe.peak_bytes();
@@ -2358,10 +2358,10 @@ mod tests {
         assert!(changed.dict().get("Filter").is_none());
         let private = PdfObject::PdfName(PdfName::new("Keep".into()));
         assert_eq!(changed.dict().get("Private"), Some(&private));
-        assert_eq!(changed.raw_data(), edited.stream_bytes(0).unwrap());
+        assert_eq!(changed.raw_data().unwrap(), edited.stream_bytes(0).unwrap());
         for (id, bytes) in [(shared, &encoded), (tail, &tail_encoded)] {
             let stream = doc.resolve_object(id).unwrap().into_stream().unwrap();
-            assert_eq!(stream.raw_data(), bytes);
+            assert_eq!(stream.raw_data().unwrap(), bytes);
             assert!(stream.dict().get("Filter").is_some());
         }
         let reopened = crate::document::owned::Document::from_bytes_with_mode(

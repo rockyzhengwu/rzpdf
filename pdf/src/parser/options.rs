@@ -14,6 +14,9 @@ pub struct Limits {
     /// Maximum bytes for one RGBA page surface, excluding backend overhead.
     pub max_render_bytes: usize,
     pub max_raw_stream_bytes: usize,
+    /// Owned encoded source buffers, including outstanding pinned reads.
+    /// Immutable input views are charged once as input instead. Larger single
+    /// streams use operation-scoped reads rather than cache admission.
     pub max_cached_stream_bytes: usize,
     pub max_content_operations: usize,
     /// Maximum retained content diagnostics per page.
@@ -155,7 +158,12 @@ mod tests {
         let stream = PdfStream::new(PdfDict::default(), b"12345".to_vec());
         assert!(matches!(
             stream.decode_data(doc.ctx()),
-            Err(PdfError::ResourceLimit(_))
+            Err(PdfError::ResourceLimitExceeded {
+                reason: "decoded_stream_bytes",
+                stage: "stream_decode",
+                limit: 4,
+                actual: 5
+            })
         ));
     }
 
@@ -750,14 +758,15 @@ mod tests {
             ..Default::default()
         };
         let doc = PdfDocument::from_bytes_with_options(bytes, options).unwrap();
-        assert!(doc.resolve_object(first).is_ok());
-        for _ in 0..2 {
-            assert!(matches!(
-                doc.resolve_object(second),
-                Err(PdfError::ResourceLimit(_))
-            ));
+        // Object dictionaries resolve independently of the raw cache. Reading
+        // a second payload evicts the unpinned first one instead of failing.
+        for id in [first, second, first, second] {
+            let object = doc.resolve_object(id).unwrap();
+            let data = doc.read_stream_data(object.as_stream().unwrap()).unwrap();
+            assert_eq!(&*data, if id == first { b"abc" } else { b"def" });
         }
-        assert!(doc.resolve_object(first).is_ok());
+        assert!(doc.source_stream_statistics().evictions >= 3);
+        assert!(doc.source_stream_statistics().peak_resident_bytes <= 5);
     }
 
     #[test]

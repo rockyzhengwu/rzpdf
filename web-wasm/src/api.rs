@@ -242,6 +242,10 @@ fn query(d: &Document, document: u32, request: &Value) -> ApiResult<Value> {
             Ok(value)
         },
         "cacheStatistics" => Ok(crate::resources::cache_statistics(d)),
+        "clearSourceStreamCache" => {
+            d.clear_source_stream_cache();
+            Ok(crate::resources::cache_statistics(d))
+        },
         "clearRenderCaches" => {
             d.clear_render_caches();
             #[cfg(target_os = "emscripten")]
@@ -348,7 +352,10 @@ pub extern "C" fn rz_query(document: u32, input: u32) -> u32 {
         } else {
             query(d, document, &request)?
         };
-        if matches!(operation, Some("cacheStatistics" | "clearRenderCaches")) {
+        if matches!(
+            operation,
+            Some("cacheStatistics" | "clearRenderCaches" | "clearSourceStreamCache")
+        ) {
             let statistics = s
                 .render_sessions
                 .get(&document)

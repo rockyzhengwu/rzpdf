@@ -288,8 +288,8 @@ fn import_remaps_shared_cycles_af_and_page_metadata_without_merging_catalog_meta
         .resolve_object(second.get("Metadata").unwrap().as_object_id().unwrap())
         .unwrap();
     assert_eq!(
-        packet.as_stream().unwrap().raw_data(),
-        object(&source, 9).as_stream().unwrap().raw_data()
+        packet.as_stream().unwrap().raw_data().unwrap(),
+        object(&source, 9).as_stream().unwrap().raw_data().unwrap()
     );
     assert_eq!(
         target.metadata_packet().unwrap().unwrap(),
@@ -327,7 +327,7 @@ fn same_document_copy_shares_ordinary_extensions_and_delete_keeps_shared_af_payl
     doc.delete_page(0).unwrap();
     assert_eq!(doc.try_page_count().unwrap(), 2);
     assert_eq!(
-        object(&doc, 8).as_stream().unwrap().raw_data(),
+        object(&doc, 8).as_stream().unwrap().raw_data().unwrap(),
         b"associated payload\0\xff"
     );
     for layout in LAYOUTS {
@@ -606,11 +606,11 @@ fn attachment_unlink_and_catalog_xmp_replacement_do_not_rewrite_page_af_or_share
         );
         assert_eq!(page.as_dict().unwrap().get("Metadata"), Some(&reference(9)));
         assert_eq!(
-            object(&doc, 9).as_stream().unwrap().raw_data(),
+            object(&doc, 9).as_stream().unwrap().raw_data().unwrap(),
             open(fixture("", "")).metadata_packet().unwrap().unwrap()
         );
         assert_eq!(
-            object(&doc, 8).as_stream().unwrap().raw_data(),
+            object(&doc, 8).as_stream().unwrap().raw_data().unwrap(),
             b"associated payload\0\xff"
         );
     }

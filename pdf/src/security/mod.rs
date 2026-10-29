@@ -166,3 +166,5 @@ pub enum SaveSecurity<'a> {
     Remove,
     Set(&'a EncryptionOptions),
 }
+
+pub(crate) use transform::PendingStreamCrypt;

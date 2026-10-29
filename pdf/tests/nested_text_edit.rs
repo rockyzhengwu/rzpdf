@@ -487,7 +487,8 @@ fn nested_composite_text_range_rejects_split_code_and_preserves_other_calls() {
                 .unwrap()
                 .into_stream()
                 .unwrap()
-                .raw_data(),
+                .raw_data()
+                .unwrap(),
             body.as_bytes()
         );
     }
@@ -566,7 +567,8 @@ fn nested_composite_text_range_rejects_split_code_and_preserves_other_calls() {
                 .unwrap()
                 .into_stream()
                 .unwrap()
-                .raw_data(),
+                .raw_data()
+                .unwrap(),
             array_body.as_bytes()
         );
     }
@@ -729,7 +731,8 @@ fn empty_nested_text_can_be_populated_without_character_event() {
                     .unwrap()
                     .as_stream()
                     .unwrap()
-                    .raw_data(),
+                    .raw_data()
+                    .unwrap(),
                 body
             );
         }
@@ -900,7 +903,8 @@ fn nested_unicode_replacement_inherits_caller_font_across_scoped_q_restore() {
                 .unwrap()
                 .into_stream()
                 .unwrap()
-                .raw_data(),
+                .raw_data()
+                .unwrap(),
             b"BT (AB) Tj ET"
         );
     }
@@ -944,7 +948,8 @@ fn nested_unicode_replacement_inherits_caller_font_across_scoped_q_restore() {
                 .unwrap()
                 .into_stream()
                 .unwrap()
-                .raw_data(),
+                .raw_data()
+                .unwrap(),
             b"BT (AB) Tj ET"
         );
     }
@@ -983,7 +988,8 @@ fn nested_unicode_replacement_inherits_caller_font_across_scoped_q_restore() {
                     .unwrap()
                     .into_stream()
                     .unwrap()
-                    .raw_data(),
+                    .raw_data()
+                    .unwrap(),
                 b"BT (AB) Tj ET"
             );
         }
@@ -1135,7 +1141,8 @@ fn nested_tj_and_quotes_clear_one_event_preserving_operator_state_and_other_call
                     .unwrap()
                     .into_stream()
                     .unwrap()
-                    .raw_data(),
+                    .raw_data()
+                    .unwrap(),
                 body.as_bytes()
             );
         }
@@ -1242,7 +1249,8 @@ fn nested_tj_and_quotes_clear_one_event_preserving_operator_state_and_other_call
                     .unwrap()
                     .into_stream()
                     .unwrap()
-                    .raw_data(),
+                    .raw_data()
+                    .unwrap(),
                 body.as_bytes()
             );
         }

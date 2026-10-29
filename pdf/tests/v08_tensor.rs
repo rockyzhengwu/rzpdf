@@ -159,7 +159,7 @@ fn truncated_tensor_registration_leaves_revision_and_page_unchanged() {
     let mut object = definition(false, false);
     let stream = object.as_stream().unwrap();
     let dict = stream.dict().clone();
-    let mut data = stream.raw_data().to_vec();
+    let mut data = stream.raw_data().unwrap().to_vec();
     data.pop();
     object = PdfObject::PdfStream(PdfStream::from_decoded_data(dict, data).unwrap());
     let id = doc.try_insert_object(object).unwrap();

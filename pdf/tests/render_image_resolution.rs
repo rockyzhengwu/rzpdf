@@ -261,7 +261,10 @@ fn masked_jpeg_retains_full_precision_and_matte_is_not_dropped() {
     .unwrap();
     doc.update_object(
         id,
-        PdfObject::PdfStream(PdfStream::new(dict, stream.raw_data().to_vec())),
+        PdfObject::PdfStream(PdfStream::new(
+            dict,
+            doc.read_stream_data(stream).unwrap().to_vec(),
+        )),
     )
     .unwrap();
     let page = doc.prepare_page_for_render(0, None, 72.).unwrap();

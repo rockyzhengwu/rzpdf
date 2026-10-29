@@ -19,17 +19,75 @@ pub enum StreamDataState {
 #[derive(Debug, Clone)]
 pub struct PdfStream {
     dict: PdfDict,
-    data: Vec<u8>,
+    data: StreamPayload,
+    pending_crypt: Option<crate::security::PendingStreamCrypt>,
     state: StreamDataState,
     /// An authenticated source handler already processed the explicit Crypt
     /// stage. Not a serialized key; new/raw caller streams start false.
     crypt_processed: bool,
 }
 
-// Preserve PDF object equality: interpretation provenance is not PDF content.
+#[derive(Clone)]
+enum StreamPayload {
+    Owned(Vec<u8>),
+    Shared {
+        bytes: std::rc::Rc<Vec<u8>>,
+        start: usize,
+        length: usize,
+    },
+    Source(crate::io::source_stream::SourceRange),
+    Leased(std::rc::Rc<crate::io::source_stream::RawAllocation>),
+}
+impl std::fmt::Debug for StreamPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let storage = match self {
+            Self::Owned(_) => "owned",
+            Self::Shared { .. } => "shared-input",
+            Self::Source(_) => "source-range",
+            Self::Leased(_) => "leased",
+        };
+        f.debug_struct("StreamPayload")
+            .field("storage", &storage)
+            .field("bytes", &self.len())
+            .finish()
+    }
+}
+impl StreamPayload {
+    fn resident(&self) -> Option<&[u8]> {
+        match self {
+            Self::Owned(data) => Some(data),
+            Self::Shared {
+                bytes,
+                start,
+                length,
+            } => Some(&bytes[*start..*start + *length]),
+            Self::Leased(data) => Some(&data.bytes),
+            Self::Source(_) => None,
+        }
+    }
+    fn len(&self) -> usize {
+        match self {
+            Self::Source(range) => range.length,
+            _ => self.resident().unwrap().len(),
+        }
+    }
+}
+
+// Equality never performs I/O: resident payloads compare bytes; unresolved
+// ranges compare source identity and range. Use read_raw_data for cross-source
+// content comparisons. Interpretation state alone is not PDF content.
 impl PartialEq for PdfStream {
     fn eq(&self, other: &Self) -> bool {
-        self.dict == other.dict && self.data == other.data
+        self.dict == other.dict
+            && self.pending_crypt == other.pending_crypt
+            && match (&self.data, &other.data) {
+                (StreamPayload::Source(a), StreamPayload::Source(b)) => a.matches(b),
+                _ => self
+                    .data
+                    .resident()
+                    .zip(other.data.resident())
+                    .is_some_and(|(a, b)| a == b),
+            }
     }
 }
 
@@ -37,7 +95,8 @@ impl PdfStream {
     pub fn new(dict: PdfDict, data: Vec<u8>) -> Self {
         PdfStream {
             dict,
-            data,
+            data: StreamPayload::Owned(data),
+            pending_crypt: None,
             state: StreamDataState::RawEncoded,
             crypt_processed: false,
         }
@@ -104,7 +163,8 @@ impl PdfStream {
         Ok((
             Self {
                 dict,
-                data,
+                data: StreamPayload::Owned(data),
+                pending_crypt: None,
                 state: StreamDataState::Decoded,
                 crypt_processed: false,
             },
@@ -120,8 +180,119 @@ impl PdfStream {
         &self.dict
     }
 
-    pub fn raw_data(&self) -> &[u8] {
-        self.data.as_slice()
+    /// Borrow already resident plaintext bytes. Source streams must be read
+    /// through `read_raw_data`; this accessor never performs hidden I/O.
+    pub fn raw_data(&self) -> PdfResult<&[u8]> {
+        if self.pending_crypt.is_some() {
+            return Err(PdfError::ObjectError(
+                "stream requires decryption; use read_raw_data".into(),
+            ));
+        }
+        self.data.resident().ok_or_else(|| {
+            PdfError::ObjectError("stream requires source I/O; use read_raw_data".into())
+        })
+    }
+
+    /// Encoded size (ciphertext size before lazy decryption).
+    pub fn encoded_len(&self) -> usize {
+        self.data.len()
+    }
+
+    pub fn read_raw_data<'a, R: Read + Seek>(
+        &'a self,
+        ctx: &PDFContext<R>,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<crate::io::source_stream::RawStreamData<'a>> {
+        use crate::io::source_stream::{RawAllocation, RawRead, RawStreamData};
+        let raw = match &self.data {
+            StreamPayload::Source(range) => {
+                RawStreamData(RawRead::Leased(ctx.read_source_range(range, budget)?))
+            }
+            _ => RawStreamData(RawRead::Borrowed(self.data.resident().unwrap())),
+        };
+        if let Some(crypt) = &self.pending_crypt {
+            let (bytes, lease) = crypt.decrypt(&raw, ctx.limits().max_raw_stream_bytes, budget)?;
+            Ok(RawStreamData(RawRead::Leased(std::rc::Rc::new(
+                ctx.track_transient_stream(RawAllocation {
+                    bytes,
+                    _lease: lease,
+                    _transient: None,
+                }),
+            ))))
+        } else {
+            Ok(raw)
+        }
+    }
+
+    pub(crate) fn from_source(
+        dict: PdfDict,
+        range: crate::io::source_stream::SourceRange,
+        bytes: Option<std::rc::Rc<Vec<u8>>>,
+    ) -> Self {
+        let data = if let Some(bytes) = bytes {
+            StreamPayload::Shared {
+                bytes,
+                start: range.start as usize,
+                length: range.length,
+            }
+        } else {
+            StreamPayload::Source(range)
+        };
+        Self {
+            dict,
+            data,
+            state: StreamDataState::RawEncoded,
+            crypt_processed: false,
+            pending_crypt: None,
+        }
+    }
+
+    pub(crate) fn with_source_crypt(
+        &self,
+        dict: PdfDict,
+        crypt: Option<crate::security::PendingStreamCrypt>,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<(Self, crate::budget::MemoryLease)> {
+        // Normal parsed sources share a range. Internal callers can also
+        // supply an owned ciphertext stream: copying it must reserve first.
+        let (data, lease) = match &self.data {
+            StreamPayload::Owned(bytes) => {
+                let (bytes, lease) = crate::budget::BudgetedBytes::copy_from_slice(budget, bytes)?
+                    .into_reserved_parts();
+                (StreamPayload::Owned(bytes), lease)
+            }
+            data => (data.clone(), budget.reserve(0)?),
+        };
+        Ok((
+            Self {
+                dict,
+                data,
+                pending_crypt: crypt,
+                state: self.state,
+                crypt_processed: self.crypt_processed,
+            },
+            lease,
+        ))
+    }
+
+    /// Pin just this stream for serialization/import. The pin owns its byte
+    /// reservation and is released with the returned temporary stream.
+    pub(crate) fn materialize<R: Read + Seek>(
+        mut self,
+        ctx: &PDFContext<R>,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<Self> {
+        use crate::io::source_stream::RawRead;
+        if self.pending_crypt.is_none() && self.data.resident().is_some() {
+            return Ok(self);
+        }
+        let data = match self.read_raw_data(ctx, budget)?.0 {
+            RawRead::Leased(data) => data,
+            RawRead::Borrowed(_) => unreachable!("nonresident or encrypted stream owns its read"),
+        };
+        self.data = StreamPayload::Leased(data);
+        self.pending_crypt = None;
+        Ok(self)
     }
 
     pub(crate) fn crypt_processed(&self) -> bool {
@@ -142,14 +313,21 @@ impl PdfStream {
         if self.data.len() > limits.max_raw_stream_bytes {
             return Err(PdfError::ResourceLimit("stream clone byte size".into()));
         }
-        let (data, mut data_lease) =
-            crate::budget::BudgetedBytes::copy_from_slice(budget, &self.data)?
-                .into_reserved_parts();
-        lease.absorb(&mut data_lease)?;
+        let data = match &self.data {
+            StreamPayload::Owned(bytes) => {
+                let (data, mut data_lease) =
+                    crate::budget::BudgetedBytes::copy_from_slice(budget, bytes)?
+                        .into_reserved_parts();
+                lease.absorb(&mut data_lease)?;
+                StreamPayload::Owned(data)
+            }
+            other => other.clone(),
+        };
         Ok((
             Self {
                 dict,
                 data,
+                pending_crypt: self.pending_crypt.clone(),
                 state: self.state,
                 crypt_processed: self.crypt_processed,
             },
@@ -158,8 +336,17 @@ impl PdfStream {
     }
 
     /// Consume the stream without decoding its payload.
-    pub fn into_raw_parts(self) -> (PdfDict, Vec<u8>) {
-        (self.dict, self.data)
+    pub fn into_raw_parts(self) -> PdfResult<(PdfDict, Vec<u8>)> {
+        if self.pending_crypt.is_some() || self.data.resident().is_none() {
+            return Err(PdfError::ObjectError(
+                "materialize stream before consuming its bytes".into(),
+            ));
+        }
+        let data = match self.data {
+            StreamPayload::Owned(data) => data,
+            data => data.resident().unwrap().to_vec(),
+        };
+        Ok((self.dict, data))
     }
 
     /// Replace the encoded payload with unfiltered, decoded bytes.
@@ -182,7 +369,8 @@ impl PdfStream {
         for key in ["Filter", "DecodeParms", "DL"] {
             self.dict.remove(key);
         }
-        self.data = data;
+        self.data = StreamPayload::Owned(data);
+        self.pending_crypt = None;
         self.state = StreamDataState::Decoded;
         self.crypt_processed = false;
         Ok(self)
@@ -248,10 +436,10 @@ impl PdfStream {
                     crate::filter::apply_filters_with_budget(filter, params, input, context, budget)
                 },
                 || {
-                    if self.data.len() > ctx.limits().max_decoded_bytes {
-                        return Err(PdfError::ResourceLimit("unfiltered stream size".into()));
-                    }
-                    crate::budget::BudgetedBytes::copy_from_slice(budget, &self.data)
+                    self.check_unfiltered_size(ctx, self.encoded_len())?;
+                    let data = self.read_raw_data(ctx, budget)?;
+                    self.check_decoded_size(ctx, data.len())?;
+                    crate::budget::BudgetedBytes::copy_from_slice(budget, &data)
                 },
             )
         })
@@ -351,10 +539,11 @@ impl PdfStream {
         {
             let recovered = std::cell::Cell::new(false);
             let recovered_parameters = std::cell::Cell::new(false);
+            let raw = self.read_raw_data(ctx, budget.unwrap_or(&local))?;
             let result = decode(
                 filter,
                 params.as_ref(),
-                self.data.as_slice(),
+                &raw,
                 FilterContext {
                     jpx_preserve_indices: false,
                     stream_dict: Some(
@@ -391,14 +580,41 @@ impl PdfStream {
         }
     }
 
-    fn copy_unfiltered_data<R: Seek + Read>(&self, ctx: &PDFContext<R>) -> PdfResult<Vec<u8>> {
-        if self.data.len() > ctx.limits().max_decoded_bytes {
-            return Err(PdfError::ResourceLimit("unfiltered stream size".into()));
+    fn check_unfiltered_size<R: Read + Seek>(
+        &self,
+        ctx: &PDFContext<R>,
+        size: usize,
+    ) -> PdfResult<()> {
+        // Ciphertext includes padding; only the plaintext length is definitive.
+        if self.pending_crypt.is_none() {
+            self.check_decoded_size(ctx, size)?;
         }
+        Ok(())
+    }
+    fn check_decoded_size<R: Read + Seek>(
+        &self,
+        ctx: &PDFContext<R>,
+        size: usize,
+    ) -> PdfResult<()> {
+        if size > ctx.limits().max_decoded_bytes {
+            return Err(PdfError::ResourceLimitExceeded {
+                reason: "decoded_stream_bytes",
+                stage: "stream_decode",
+                limit: ctx.limits().max_decoded_bytes as u64,
+                actual: size as u64,
+            });
+        }
+        Ok(())
+    }
+
+    fn copy_unfiltered_data<R: Seek + Read>(&self, ctx: &PDFContext<R>) -> PdfResult<Vec<u8>> {
+        self.check_unfiltered_size(ctx, self.encoded_len())?;
+        let raw = self.read_raw_data(ctx, &ctx.limits().operation_budget())?;
+        self.check_decoded_size(ctx, raw.len())?;
         let mut data = Vec::new();
-        data.try_reserve_exact(self.data.len())
+        data.try_reserve_exact(raw.len())
             .map_err(|_| PdfError::ResourceLimit("unfiltered stream allocation".into()))?;
-        data.extend_from_slice(&self.data);
+        data.extend_from_slice(&raw);
         Ok(data)
     }
 }
@@ -796,7 +1012,7 @@ mod setting_tests {
             Err(PdfError::ResourceLimit(_))
         ));
         assert_eq!(budget.live_bytes(), 1);
-        assert_eq!(stream.raw_data(), b"3631363236333E>");
+        assert_eq!(stream.raw_data().unwrap(), b"3631363236333E>");
         assert_eq!(stream.data_state(), StreamDataState::RawEncoded);
         drop(neighbor);
         let result = stream.decode_data_with_budget(&ctx, &budget).unwrap();
@@ -901,7 +1117,7 @@ mod setting_tests {
                     Err(PdfError::UnsupportedFeature(_))
                 ));
                 assert_eq!(stream.dict(), &dict);
-                assert_eq!(stream.raw_data(), b"inline placeholder");
+                assert_eq!(stream.raw_data().unwrap(), b"inline placeholder");
             }
         }
     }
@@ -927,7 +1143,7 @@ mod setting_tests {
         );
         let cloned = decoded.clone();
         assert_eq!(cloned.data_state(), StreamDataState::Decoded);
-        let (dict, data) = decoded.into_raw_parts();
+        let (dict, data) = decoded.into_raw_parts().unwrap();
         let reparsed = PdfStream::new(dict, data);
         assert_eq!(cloned, reparsed);
         assert_eq!(reparsed.data_state(), StreamDataState::RawEncoded);
@@ -943,7 +1159,12 @@ mod setting_tests {
         );
         assert!(matches!(
             cloned.decode_data(&limited),
-            Err(PdfError::ResourceLimit(_))
+            Err(PdfError::ResourceLimitExceeded {
+                reason: "decoded_stream_bytes",
+                stage: "stream_decode",
+                limit: 1,
+                ..
+            })
         ));
     }
 

@@ -231,11 +231,6 @@ fn write_document_output_with_layout<R: std::io::Read + std::io::Seek>(
         document.ctx().limits(),
         budget.as_ref(),
     )?;
-    if let Some(budget) = budget.as_ref() {
-        document.ctx().materialize_all_objects_with_budget(budget)?;
-    } else {
-        document.ctx().materialize_all_objects()?;
-    }
 
     append_formatted_output(
         &mut output,
@@ -676,6 +671,12 @@ fn prepare_document_output_object<R: std::io::Read + std::io::Seek>(
         document::save_options::StreamCompression,
         objects::pdf_stream::{PdfStream, resolve_setting_reference},
     };
+    let object = match object {
+        PdfObject::PdfStream(stream) => PdfObject::PdfStream(
+            stream.materialize(document.ctx(), &document.ctx().limits().operation_budget())?,
+        ),
+        object => object,
+    };
     if !matches!(compression, StreamCompression::FlateUnencoded) {
         return Ok(object);
     }
@@ -704,7 +705,7 @@ fn prepare_document_output_object<R: std::io::Read + std::io::Seek>(
         .map(|params| resolve_setting_reference(params, document.ctx()))
         .transpose()?
         .is_none_or(|params| matches!(params, PdfObject::PdfNull));
-    let (mut dict, data) = stream.into_raw_parts();
+    let (mut dict, data) = stream.into_raw_parts().unwrap();
     dict.remove("Filter");
     if null_params {
         dict.remove("DecodeParms");
@@ -784,6 +785,12 @@ fn prepare_document_output_object_with_budget<R: std::io::Read + std::io::Seek>(
         objects::pdf_stream::resolve_setting_reference_with_budget,
     };
     let mut lease = budget.reserve(0)?;
+    let object = match object {
+        PdfObject::PdfStream(stream) => {
+            PdfObject::PdfStream(stream.materialize(document.ctx(), budget)?)
+        }
+        object => object,
+    };
     if !matches!(compression, StreamCompression::FlateUnencoded) {
         return Ok((object, lease));
     }
@@ -821,11 +828,11 @@ fn prepare_document_output_object_with_budget<R: std::io::Read + std::io::Seek>(
     let limits = document.ctx().limits();
     crate::filter::check_output_size(
         0,
-        stream.raw_data().len(),
+        stream.raw_data().unwrap().len(),
         limits.max_raw_stream_bytes.min(limits.max_decoded_bytes),
         "unencoded compression input bytes",
     )?;
-    let bytes = compress_with_budget(stream.raw_data(), budget, limits)?;
+    let bytes = compress_with_budget(stream.raw_data().unwrap(), budget, limits)?;
     let (_name_lease, name) = {
         let (name, lease) = PdfName::new_from_buffer_with_budget(b"/FlateDecode", budget)?;
         (lease, PdfObject::PdfName(name))
@@ -884,7 +891,7 @@ fn prepare_output_object_with_limits(
     }
     crate::filter::check_output_size(
         0,
-        stream.raw_data().len(),
+        stream.raw_data().unwrap().len(),
         limits.max_raw_stream_bytes.min(limits.max_decoded_bytes),
         "unencoded compression input bytes",
     )?;
@@ -896,7 +903,7 @@ fn prepare_output_object_with_limits(
         flate2::Compression::default(),
     );
     encoder
-        .write_all(stream.raw_data())
+        .write_all(stream.raw_data().unwrap())
         .map_err(compression_error)?;
     let bytes = encoder.finish().map_err(compression_error)?.bytes;
     let mut dict = stream.dict().clone();
@@ -1267,7 +1274,7 @@ fn write_object_limited(
             let length = if let Some(budget) = output.budget() {
                 let mut buffer = [0u8; 20];
                 let mut start = buffer.len();
-                let mut value = stream.raw_data().len();
+                let mut value = stream.raw_data().unwrap().len();
                 loop {
                     start -= 1;
                     buffer[start] = b'0' + (value % 10) as u8;
@@ -1284,7 +1291,7 @@ fn write_object_limited(
                 crate::objects::pdf_number::PdfNumber::from_owned_lexeme(lexeme)?
             } else {
                 crate::objects::pdf_number::PdfNumber::new_from_lexeme(
-                    stream.raw_data().len().to_string().as_bytes(),
+                    stream.raw_data().unwrap().len().to_string().as_bytes(),
                 )?
             };
             let length = PdfObject::PdfNumber(length);
@@ -1303,7 +1310,7 @@ fn write_object_limited(
             };
             write_dict_limited(output, &dict, limit)?;
             append_output(output, b"\nstream\n", limit)?;
-            append_output(output, stream.raw_data(), limit)?;
+            append_output(output, stream.raw_data().unwrap(), limit)?;
             append_output(output, b"\nendstream", limit)
         }
         _ => {
@@ -1445,12 +1452,12 @@ fn write_stream(output: &mut Vec<u8>, stream: &PdfStream) -> PdfResult<()> {
     dict.insert(
         "Length".to_string(),
         PdfObject::PdfNumber(crate::objects::pdf_number::PdfNumber::new_from_lexeme(
-            stream.raw_data().len().to_string().as_bytes(),
+            stream.raw_data().unwrap().len().to_string().as_bytes(),
         )?),
     );
     write_dict(output, &dict)?;
     output.extend_from_slice(b"\nstream\n");
-    output.extend_from_slice(stream.raw_data());
+    output.extend_from_slice(stream.raw_data().unwrap());
     output.extend_from_slice(b"\nendstream");
     Ok(())
 }
@@ -2248,7 +2255,7 @@ mod tests {
     }
 
     #[test]
-    fn cold_source_save_budget_refuses_before_large_cache_publication() {
+    fn cold_source_save_budget_bounds_output_and_raw_residency() {
         use crate::{
             budget::OperationBudget,
             document::save_options::{SaveOptions, StreamCompression},
@@ -2285,7 +2292,12 @@ mod tests {
                 Err(crate::error::PdfError::ResourceLimit(_))
             ));
             assert_eq!(small.live_bytes(), 0);
-            assert!(!doc.ctx().source_object_is_cached(payload_id));
+            // Read-only metadata caches may warm before output refusal; raw
+            // residency stays bounded and the editable document is unchanged.
+            assert!(
+                doc.source_stream_statistics().peak_resident_bytes
+                    <= doc.resource_limits().max_cached_stream_bytes
+            );
             assert_eq!(doc.revision(), revision);
             let pool = OperationBudget::new(2 * 1024 * 1024);
             let output = super::write_document_with_budget(&doc, options, &pool).unwrap();
@@ -2576,7 +2588,9 @@ mod tests {
                 .unwrap()
                 .as_stream()
                 .unwrap()
-                .raw_data(),
+                .read_raw_data(reopened.ctx(), &reopened.ctx().limits().operation_budget())
+                .unwrap()
+                .as_ref(),
             b"valid"
         );
         assert_eq!(
@@ -2841,7 +2855,7 @@ mod tests {
         let empty = PdfObject::PdfStream(PdfStream::new(PdfDict::default(), Vec::new()));
         let compressed =
             super::prepare_output_object(empty.clone(), StreamCompression::FlateUnencoded).unwrap();
-        let length = compressed.as_stream().unwrap().raw_data().len();
+        let length = compressed.as_stream().unwrap().raw_data().unwrap().len();
         let limits = Limits {
             max_raw_stream_bytes: length,
             ..Default::default()
@@ -3690,7 +3704,9 @@ mod tests {
                 .unwrap()
                 .as_stream()
                 .unwrap()
-                .raw_data(),
+                .read_raw_data(doc.ctx(), &doc.ctx().limits().operation_budget())
+                .unwrap()
+                .as_ref(),
             b"q Q"
         );
         assert!(doc.get_page(index + 1).unwrap().display_list().is_ok());
@@ -3717,7 +3733,9 @@ mod tests {
                 .unwrap()
                 .as_stream()
                 .unwrap()
-                .raw_data(),
+                .read_raw_data(saved.ctx(), &saved.ctx().limits().operation_budget())
+                .unwrap()
+                .as_ref(),
             b"q Q"
         );
         assert!(saved.get_page(index).unwrap().display_list().is_ok());

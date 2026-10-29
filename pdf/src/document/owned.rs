@@ -273,7 +273,8 @@ impl Document {
     ) -> PdfResult<Self> {
         let bytes = SourceBytes(Rc::new(bytes));
         let reader: OwnedReader = Box::new(Cursor::new(bytes.clone()));
-        let inner = PdfDocument::from_reader_with_password_bytes(reader, options, password)?;
+        let inner =
+            PdfDocument::from_source_reader(reader, options, password, Some(bytes.0.clone()))?;
         let last_xref_offset = inner.source_xref_offset.ok_or_else(|| {
             PdfError::DocumentError("parsed source is missing its xref address".into())
         })?;
@@ -382,7 +383,7 @@ mod source_baseline_tests {
         let baseline = document.source_baseline.as_ref().unwrap();
         assert_eq!(baseline.bytes.as_ref().as_ptr(), address);
         assert_eq!(baseline.bytes.as_ref(), expected);
-        assert_eq!(Rc::strong_count(&baseline.bytes.0), 2);
+        assert_eq!(Rc::strong_count(&baseline.bytes.0), 3);
         assert_eq!(baseline.mode, ParseMode::Strict);
         let offset = usize::try_from(baseline.last_xref_offset).unwrap();
         assert!(baseline.bytes.as_ref()[offset..].starts_with(b"xref"));

@@ -3452,7 +3452,8 @@ mod tests {
                     .unwrap()
                     .as_stream()
                     .unwrap()
-                    .raw_data(),
+                    .raw_data()
+                    .unwrap(),
                 leaf_bytes
             );
             assert_eq!(
@@ -3460,7 +3461,8 @@ mod tests {
                     .unwrap()
                     .as_stream()
                     .unwrap()
-                    .raw_data(),
+                    .raw_data()
+                    .unwrap(),
                 outer_bytes
             );
             let reopened = PdfDocument::from_bytes_with_mode(

@@ -39,7 +39,7 @@ interface Module {
 }
 export interface OpenOptions { mode?: "strict" | "compatible"; password?: string; resourceProfile?: "default" | "conservative"; }
 export interface ResourceDetails {reason:string;stage:string;limit?:number;actual?:number;}
-export interface RenderCacheStatistics {pageHits:number;pageMisses:number;pageEntries:number;pageEstimatedBytes:number;fontHits:number;fontMisses:number;fontEntries:number;fontEstimatedBytes:number;byteAccounting:string;linearMemoryMayRemainGrown:boolean;callerBuffersReleased:boolean;skiaCacheScope:string;skiaFontBytes:number;skiaFontLimit:number;skiaResourceBytes:number;skiaResourceLimit:number;
+export interface RenderCacheStatistics {sourceInputBytes:number;rawStreamResidentBytes:number;rawStreamPinnedBytes:number;rawStreamTransientBytes:number;rawStreamPeakTransientBytes:number;rawStreamPeakResidentBytes:number;rawStreamLimitBytes:number;rawStreamEntries:number;rawStreamHits:number;rawStreamMisses:number;rawStreamEvictions:number;pageHits:number;pageMisses:number;pageEntries:number;pageEstimatedBytes:number;fontHits:number;fontMisses:number;fontEntries:number;fontEstimatedBytes:number;byteAccounting:string;linearMemoryMayRemainGrown:boolean;callerBuffersReleased:boolean;skiaCacheScope:string;skiaFontBytes:number;skiaFontLimit:number;skiaResourceBytes:number;skiaResourceLimit:number;
   renderSessionEstimatedBytes:number;renderSessionByteLimit:number;
   renderSessionFontManagerEntries:number;renderSessionFontManagerHits:number;renderSessionFontEntries:number;renderSessionImageEntries:number;renderSessionGeometryEntries:number;
   renderSessionFontHits:number;renderSessionImageHits:number;renderSessionGeometryHits:number;
@@ -145,10 +145,13 @@ export class PdfEngine {
       return action(input);
     } finally { this.release(input); }
   }
-  readBuffer(handle: number): Uint8Array<ArrayBuffer> {
+  readBuffer(handle: number, maximum=16*1024*1024): Uint8Array<ArrayBuffer> {
     const size = this.invoke(() => this.module._rz_buffer_len(handle));
     const ptr = this.invoke(() => this.module._rz_buffer_ptr(handle));
-    if (!ptr || size > 16 * 1024 * 1024 || ptr + size > this.module.HEAPU8.length) throw this.error("readBuffer");
+    if (!Number.isInteger(maximum) || maximum<1 || maximum>BUFFER_BUDGET)
+      throw new PdfApiError("invalid_argument","Invalid output buffer limit","readBuffer");
+    if (size>maximum)throw new PdfApiError("resource_limit","Output buffer exceeds the requested limit","readBuffer",undefined,undefined,undefined,{reason:"buffer_bytes",stage:"sdk_read",limit:maximum,actual:size});
+    if (!ptr || ptr + size > this.module.HEAPU8.length) throw new PdfApiError("internal","Invalid Wasm output buffer","readBuffer");
     return this.module.HEAPU8.slice(ptr, ptr + size);
   }
   query<T>(document: number, operation: string, page?: number,extra:Record<string,unknown>={}): T {
@@ -240,6 +243,7 @@ export class PdfDocument {
   links(page: number): PageLink[] { this.checkPage(page); return this.engine.query(this.handle, "links", page); }
   capabilities(): Record<string, unknown> { this.check(); return this.engine.query(this.handle, "capabilities"); }
   cacheStatistics():RenderCacheStatistics {this.check();return this.engine.query(this.handle,'cacheStatistics');}
+  clearSourceStreamCache():RenderCacheStatistics {this.check();return this.engine.query(this.handle,'clearSourceStreamCache');}
   clearRenderCaches():RenderCacheStatistics {this.check();return this.engine.query(this.handle,'clearRenderCaches');}
   diagnostics(): {reason:string;offset:number;object:number[]|null}[] { this.check(); return this.engine.query(this.handle, "diagnostics"); }
   private interaction<T extends {stamp:DocumentStamp}>(operation:string,page?:number):T {
@@ -255,7 +259,7 @@ export class PdfDocument {
     this.check();if(!Number.isInteger(maxBytes)||maxBytes<1||maxBytes>BUFFER_BUDGET)throw new PdfApiError("resource_limit","Save limit exceeds the shared buffer budget","save");
     const stamp=this.state().stamp,output=this.engine.invoke(()=>this.engine.module._rz_save(this.handle,maxBytes));
     if(!output)throw this.engine.error("save");
-    try {return {bytes:this.engine.readBuffer(output),stamp};}finally{this.engine.release(output);}
+    try {return {bytes:this.engine.readBuffer(output,maxBytes),stamp};}finally{this.engine.release(output);}
   }
   render(page = 0, dpi = 72,options:RenderOptions={}): RgbaPage {
     this.check();

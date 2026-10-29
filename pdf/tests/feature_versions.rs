@@ -392,7 +392,7 @@ fn external_filter_versions_are_checked_without_reading_external_payload() {
             let reopened = Document::from_bytes_with_mode(bytes, ParseMode::Strict).unwrap();
             let object = reopened.resolve_object(id).unwrap();
             let stream = object.as_stream().unwrap();
-            assert_eq!(stream.raw_data(), b"placeholder");
+            assert_eq!(stream.raw_data().unwrap(), b"placeholder");
             assert!(stream.dict().get("FFilter").is_some());
             assert!(stream.dict().get("F").is_some());
         }
@@ -456,6 +456,7 @@ fn preserved_structural_stream_types_require_1_5() {
                     .as_stream()
                     .unwrap()
                     .raw_data()
+                    .unwrap()
                     .is_empty()
             );
             assert_eq!(reopened.page_count(), 1);
@@ -527,7 +528,8 @@ fn sixteen_bit_image_requires_1_5_and_preserves_samples() {
                 .unwrap()
                 .as_stream()
                 .unwrap()
-                .raw_data(),
+                .raw_data()
+                .unwrap(),
             [0x80, 0]
         );
         assert_eq!(
@@ -602,7 +604,8 @@ fn low_level_metadata_stream_requires_explicit_version_upgrade() {
                 .unwrap()
                 .as_stream()
                 .unwrap()
-                .raw_data(),
+                .raw_data()
+                .unwrap(),
             b"<x/>"
         );
     }
@@ -858,7 +861,8 @@ fn preserved_encoded_filters_require_their_minimum_versions() {
                     .unwrap()
                     .as_stream()
                     .unwrap()
-                    .raw_data(),
+                    .raw_data()
+                    .unwrap(),
                 &[1, 2, 3]
             );
         }
@@ -894,7 +898,7 @@ fn real_flate_bytes_remain_encoded_after_version_upgrade() {
     .unwrap();
     let object = reopened.resolve_object(id).unwrap();
     let stream = object.as_stream().unwrap();
-    assert_eq!(stream.raw_data(), encoded);
+    assert_eq!(stream.raw_data().unwrap(), encoded);
     assert_eq!(
         stream
             .dict()
@@ -907,7 +911,7 @@ fn real_flate_bytes_remain_encoded_after_version_upgrade() {
     );
     let mut decoded = Vec::new();
     std::io::Read::read_to_end(
-        &mut flate2::read::ZlibDecoder::new(stream.raw_data()),
+        &mut flate2::read::ZlibDecoder::new(stream.raw_data().unwrap()),
         &mut decoded,
     )
     .unwrap();

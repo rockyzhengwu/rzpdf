@@ -112,6 +112,14 @@ def source_inventory():
         "web/tests/unicode-freetext-protocol.mjs", "web/tests/unicode-freetext-browser.mjs",
         "docs/check-unicode-freetext.py", "docs/unicode-freetext.md",
     ])
+    optional.extend([
+        "pdf/src/io/source_stream.rs", "pdf/src/io/stream_reader.rs", "pdf/src/io/mod.rs",
+        "pdf/src/signatures/changes.rs",
+        "pdf/src/parser/syntax.rs", "pdf/src/parser/parser.rs", "pdf/src/objects/pdf_stream.rs",
+        "pdf/src/security/transform.rs", "pdf/src/writer.rs", "pdf/src/writer/incremental.rs",
+        "pdf/tests/source_streams.rs", "scripts/source-stream-fixture.mjs",
+        "web/tests/source-streams-browser.mjs", "docs/source-streams.md",
+    ])
     files.extend(name for name in optional if (REPO / name).exists())
     files.extend(str(path.relative_to(REPO)) for directory in ["fonts", "afm", "cmaps", "licenses"]
                  for path in sorted((REPO / "font-data" / directory).iterdir()) if path.is_file())

@@ -57,7 +57,7 @@ fn jpeg_encoded_bytes_and_colorspace_survive_save_without_recompression() {
             assert!(document.get_page(0).unwrap().display_list().is_ok());
             let image = document.resolve_object(id).unwrap();
             let image = image.as_stream().unwrap();
-            assert_eq!(image.raw_data(), encoded);
+            assert_eq!(document.read_stream_data(image).unwrap().as_ref(), encoded);
             assert_eq!(
                 image
                     .dict()

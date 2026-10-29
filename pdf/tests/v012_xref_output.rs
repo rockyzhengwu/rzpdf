@@ -99,7 +99,7 @@ fn stream_has_self_entry_valid_offsets_and_preserves_document_projection() {
     );
     let object = reopened.resolve_object(self_id).unwrap();
     let stream = object.as_stream().unwrap();
-    assert_eq!(stream.raw_data().len(), size as usize * 13);
+    assert_eq!(stream.raw_data().unwrap().len(), size as usize * 13);
     let w: Vec<_> = stream
         .dict()
         .get("W")
@@ -121,7 +121,10 @@ fn stream_has_self_entry_valid_offsets_and_preserves_document_projection() {
         2
     );
     assert!(doc.is_stamp_current(&stamp));
-    assert_eq!(stream.raw_data()[self_id.obj_num() as usize * 13], 1);
+    assert_eq!(
+        stream.raw_data().unwrap()[self_id.obj_num() as usize * 13],
+        1
+    );
     assert_eq!(doc.commit_revision(), commit);
 }
 

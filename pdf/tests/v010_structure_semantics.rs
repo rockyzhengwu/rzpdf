@@ -521,7 +521,8 @@ fn attribute_streams_remain_opaque_and_unknown_values_do_not_get_dereferenced() 
             .unwrap()
             .as_stream()
             .unwrap()
-            .raw_data(),
+            .raw_data()
+            .unwrap(),
         b"\0\xff!?"
     );
 }

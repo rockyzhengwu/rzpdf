@@ -458,7 +458,9 @@ impl<R: Read + Seek> PdfDocument<R> {
                     PdfObject::PdfDict(dict)
                 }
                 PdfObject::PdfStream(stream) => {
-                    let (mut dict, data) = stream.into_raw_parts();
+                    let (mut dict, data) = stream
+                        .materialize(self.ctx(), &self.ctx().limits().operation_budget())?
+                        .into_raw_parts()?;
                     dict.try_insert(
                         if domain {
                             "StructParents"

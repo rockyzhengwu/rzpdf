@@ -50,7 +50,7 @@ fn png_rgb_rgba_and_gray_variants_embed_and_interpret_after_save() {
         let image = reopened.resolve_object(id).unwrap();
         let image = image.as_stream().unwrap();
         assert_eq!(
-            image.raw_data(),
+            reopened.read_stream_data(image).unwrap().as_ref(),
             match color {
                 png::ColorType::Rgb => vec![10, 20, 30, 40, 50, 60],
                 png::ColorType::Rgba => vec![10, 20, 30, 40, 50, 60],
@@ -67,11 +67,9 @@ fn png_rgb_rgba_and_gray_variants_embed_and_interpret_after_save() {
                 .id();
             assert_eq!(
                 reopened
-                    .resolve_object(id)
+                    .read_stream_data(&reopened.resolve_object(id).unwrap().as_stream().unwrap())
                     .unwrap()
-                    .as_stream()
-                    .unwrap()
-                    .raw_data(),
+                    .as_ref(),
                 &[0, 128]
             );
         }
@@ -125,7 +123,7 @@ fn indexed_png_palette_transparency_expands_to_rgb_and_soft_mask() {
         .id();
     let image = doc.resolve_object(id).unwrap();
     let image = image.as_stream().unwrap();
-    assert_eq!(image.raw_data(), &[10, 20, 30, 40, 50, 60]);
+    assert_eq!(image.raw_data().unwrap(), &[10, 20, 30, 40, 50, 60]);
     let id = image
         .dict()
         .get("SMask")
@@ -134,11 +132,9 @@ fn indexed_png_palette_transparency_expands_to_rgb_and_soft_mask() {
         .unwrap()
         .id();
     assert_eq!(
-        doc.resolve_object(id)
+        doc.read_stream_data(&doc.resolve_object(id).unwrap().as_stream().unwrap())
             .unwrap()
-            .as_stream()
-            .unwrap()
-            .raw_data(),
+            .as_ref(),
         &[0, 128]
     );
 }

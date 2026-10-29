@@ -221,7 +221,7 @@ pub fn parse_xref_stream<R: Seek + Read>(
         }
     }
 
-    let raw_data = stream.raw_data();
+    let raw_data = stream.raw_data()?;
     let buffer = match dict.get("Filter") {
         Some(filter) => apply_filters(
             filter,
@@ -628,6 +628,19 @@ impl<R: Seek + Read> PdfParser<R> {
     pub(crate) fn diagnostic_log(&self) -> super::diagnostic::DiagnosticLog {
         self.syntax.diagnostics.clone()
     }
+    pub(crate) fn enable_lazy_streams(&mut self) {
+        self.syntax.enable_lazy_streams();
+    }
+    pub(crate) fn source_bytes(&self) -> usize {
+        self.syntax.source_bytes()
+    }
+    pub(crate) fn read_source_range(
+        &mut self,
+        range: &crate::io::source_stream::SourceRange,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<crate::io::source_stream::RawAllocation> {
+        self.syntax.read_source_range(range, budget)
+    }
     pub fn mode(&self) -> super::syntax::ParseMode {
         self.syntax.mode()
     }
@@ -652,7 +665,9 @@ impl<R: Seek + Read> PdfParser<R> {
         self.syntax.set_pos(pos)?;
         let indirect = match self.syntax.get_indirect_object() {
             Ok(indirect) if indirect.id() == expected => indirect,
-            Err(error @ PdfError::ResourceLimit(_)) => return Err(error),
+            Err(error @ (PdfError::ResourceLimit(_) | PdfError::ResourceLimitExceeded { .. })) => {
+                return Err(error);
+            }
             result => {
                 if self.mode() != super::syntax::ParseMode::Compatible {
                     let indirect = result?;
@@ -685,7 +700,9 @@ impl<R: Seek + Read> PdfParser<R> {
         let (lease, indirect) = {
             let (indirect, lease) = match self.syntax.get_indirect_object_with_budget(budget) {
                 Ok((indirect, lease)) if indirect.id() == expected => (indirect, lease),
-                Err(error @ PdfError::ResourceLimit(_)) => return Err(error),
+                Err(
+                    error @ (PdfError::ResourceLimit(_) | PdfError::ResourceLimitExceeded { .. }),
+                ) => return Err(error),
                 result => {
                     if self.mode() != super::syntax::ParseMode::Compatible {
                         let (indirect, _lease) = result?;

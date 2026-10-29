@@ -58,6 +58,7 @@ async function execute(request:WorkerRequest):Promise<void> {
       case 'links':result=document(request).links(request.args[0] as number);break;
       case 'capabilities':result=request.document===undefined?engine.capabilities():document(request).capabilities();break;
       case 'cacheStatistics':result=document(request).cacheStatistics();break;
+      case 'clearSourceStreamCache':result=document(request).clearSourceStreamCache();break;
       case 'clearRenderCaches':result=document(request).clearRenderCaches();break;
       case 'diagnostics':result=document(request).diagnostics();break;
       default:throw new PdfApiError('unsupported','Unsupported Worker operation','protocol');

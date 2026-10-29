@@ -875,11 +875,11 @@ fn nested_mixed_cid_compensation_checks_w_w2_and_partial_suffix_boundaries() {
                         assert!(doc.is_stamp_current(&stamp));
                         assert_eq!(doc.get_page(0).unwrap().resource().unwrap(), resources);
                         assert_eq!(
-                            doc.resolve_object(leaf)
-                                .unwrap()
-                                .into_stream()
-                                .unwrap()
-                                .raw_data(),
+                            doc.read_stream_data(
+                                &doc.resolve_object(leaf).unwrap().into_stream().unwrap()
+                            )
+                            .unwrap()
+                            .as_ref(),
                             body.as_bytes()
                         );
                     }
@@ -891,11 +891,11 @@ fn nested_mixed_cid_compensation_checks_w_w2_and_partial_suffix_boundaries() {
                 for current in [&doc, &reopened] {
                     assert_eq!(
                         current
-                            .resolve_object(leaf)
+                            .read_stream_data(
+                                &current.resolve_object(leaf).unwrap().into_stream().unwrap()
+                            )
                             .unwrap()
-                            .into_stream()
-                            .unwrap()
-                            .raw_data(),
+                            .as_ref(),
                         body.as_bytes()
                     );
                     let edited = current
@@ -1048,11 +1048,15 @@ fn cross_invocation_mixed_cid_span_checks_boundaries_and_signed_advance() {
                         .unwrap();
                 assert_eq!(
                     reopened
-                        .resolve_object(leaf)
+                        .read_stream_data(
+                            &reopened
+                                .resolve_object(leaf)
+                                .unwrap()
+                                .into_stream()
+                                .unwrap()
+                        )
                         .unwrap()
-                        .into_stream()
-                        .unwrap()
-                        .raw_data(),
+                        .as_ref(),
                     body.as_bytes()
                 );
                 let after = reopened
@@ -1140,11 +1144,15 @@ fn nested_event_range_mixed_cid_inheritance_checks_signed_metrics_and_split_endp
                         .unwrap();
                 assert_eq!(
                     reopened
-                        .resolve_object(leaf)
+                        .read_stream_data(
+                            &reopened
+                                .resolve_object(leaf)
+                                .unwrap()
+                                .into_stream()
+                                .unwrap()
+                        )
                         .unwrap()
-                        .into_stream()
-                        .unwrap()
-                        .raw_data(),
+                        .as_ref(),
                     body.as_bytes()
                 );
                 let before = reopened
@@ -1268,11 +1276,9 @@ fn nested_compensation_preserves_inherited_layout_and_other_invocations() {
             let per_call = if event == "range" { 8 } else { 4 };
             assert_eq!(before.len(), per_call * 4);
             let original_outer = doc
-                .resolve_object(outer)
+                .read_stream_data(&doc.resolve_object(outer).unwrap().into_stream().unwrap())
                 .unwrap()
-                .into_stream()
-                .unwrap()
-                .raw_data()
+                .as_ref()
                 .to_vec();
             replace(&doc, &root, &source, event, text).unwrap();
             let reopened =
@@ -1280,20 +1286,24 @@ fn nested_compensation_preserves_inherited_layout_and_other_invocations() {
             for current in [&doc, &reopened] {
                 assert_eq!(
                     current
-                        .resolve_object(leaf)
+                        .read_stream_data(
+                            &current.resolve_object(leaf).unwrap().into_stream().unwrap()
+                        )
                         .unwrap()
-                        .into_stream()
-                        .unwrap()
-                        .raw_data(),
+                        .as_ref(),
                     body.as_bytes()
                 );
                 assert_eq!(
                     current
-                        .resolve_object(outer)
+                        .read_stream_data(
+                            &current
+                                .resolve_object(outer)
+                                .unwrap()
+                                .into_stream()
+                                .unwrap()
+                        )
                         .unwrap()
-                        .into_stream()
-                        .unwrap()
-                        .raw_data(),
+                        .as_ref(),
                     original_outer
                 );
                 let shared = current
@@ -1409,11 +1419,9 @@ fn nested_compensation_errors_outer_rollback_unwind_and_retry() {
         assert_eq!(doc.get_page(0).unwrap().resource().unwrap(), resources);
         assert_eq!(doc.resolve_object(outer).unwrap(), original_outer);
         assert_eq!(
-            doc.resolve_object(leaf)
+            doc.read_stream_data(&doc.resolve_object(leaf).unwrap().into_stream().unwrap())
                 .unwrap()
-                .into_stream()
-                .unwrap()
-                .raw_data(),
+                .as_ref(),
             body.as_bytes()
         );
         assert!(replace(&doc, &root, &source, event, "X").is_err());
@@ -1473,11 +1481,9 @@ fn nested_compensation_public_quota_rejection_keeps_resources_and_retry() {
         assert_eq!(doc.get_page(0).unwrap().resource().unwrap(), resources);
         assert_eq!(doc.resolve_object(outer).unwrap(), original_outer);
         assert_eq!(
-            doc.resolve_object(leaf)
+            doc.read_stream_data(&doc.resolve_object(leaf).unwrap().into_stream().unwrap())
                 .unwrap()
-                .into_stream()
-                .unwrap()
-                .raw_data(),
+                .as_ref(),
             body.as_bytes()
         );
         for page in [0, 1] {

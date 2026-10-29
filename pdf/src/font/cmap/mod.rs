@@ -777,7 +777,7 @@ mod tests {
         let peak = probe.peak_bytes();
         drop((cmap, lease));
         assert_eq!(probe.live_bytes(), 0);
-        assert!(peak >= stream.raw_data().len());
+        assert!(peak >= stream.raw_data().unwrap().len());
         let pool = OperationBudget::new(peak);
         let neighbor = pool.reserve(1).unwrap();
         assert!(matches!(

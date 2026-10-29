@@ -290,7 +290,8 @@ fn nested_path_numbers_cover_all_numeric_geometry_operators() {
                     .unwrap()
                     .into_stream()
                     .unwrap()
-                    .raw_data(),
+                    .raw_data()
+                    .unwrap(),
                 body
             );
         }
@@ -422,7 +423,8 @@ fn nested_path_numbers_change_only_selected_invocation() {
                 .unwrap()
                 .into_stream()
                 .unwrap()
-                .raw_data(),
+                .raw_data()
+                .unwrap(),
             b"% keep\n0 0 2 2 re f 10 10 3 3 re f"
         );
     }
@@ -503,9 +505,13 @@ fn nested_final_root_byte_limit_rolls_back_created_form_and_resource() {
                 .unwrap()
                 .into_stream()
                 .unwrap();
-            assert_eq!(edited.source_bytes().len() + copied.raw_data().len(), 514);
+            assert_eq!(
+                edited.source_bytes().len() + copied.raw_data().unwrap().len(),
+                514
+            );
             let program =
-                ContentProgram::from_decoded_bytes(copied.raw_data().to_vec(), options).unwrap();
+                ContentProgram::from_decoded_bytes(copied.raw_data().unwrap().to_vec(), options)
+                    .unwrap();
             assert_eq!(program.operations()[1].operator.name(), "n");
             assert_ne!(edited.stream_object_id(0), root.stream_object_id(0));
         } else {
@@ -532,7 +538,8 @@ fn nested_final_root_byte_limit_rolls_back_created_form_and_resource() {
                 .unwrap()
                 .into_stream()
                 .unwrap()
-                .raw_data(),
+                .raw_data()
+                .unwrap(),
             body
         );
     }
@@ -707,7 +714,7 @@ fn nested_edit_materializes_page_fallback_without_losing_font_bindings() {
         );
         let original = document.resolve_object(id).unwrap().into_stream().unwrap();
         assert!(original.dict().get("Resources").is_none());
-        assert_eq!(original.raw_data(), body.as_bytes());
+        assert_eq!(original.raw_data().unwrap(), body.as_bytes());
     }
     let root = doc.get_page(0).unwrap().content_program().unwrap();
     let list = doc.get_page(0).unwrap().display_list().unwrap();
@@ -756,7 +763,8 @@ fn nested_edit_materializes_page_fallback_without_losing_font_bindings() {
                 .unwrap()
                 .into_stream()
                 .unwrap()
-                .raw_data(),
+                .raw_data()
+                .unwrap(),
             body.as_bytes()
         );
     }
@@ -876,7 +884,10 @@ fn nested_path_removal_copies_selected_chain_and_rolls_back_whole_edit() {
             .unwrap()
             .into_stream()
             .unwrap();
-        assert_eq!(copied_outer.raw_data(), b"/FmEdit2 Do\n /FmEdit1 Do");
+        assert_eq!(
+            copied_outer.raw_data().unwrap(),
+            b"/FmEdit2 Do\n /FmEdit1 Do"
+        );
         for object in &list.objects()[1..] {
             let PageObject::Path(path) = object else {
                 panic!("missing unselected outer call")
@@ -911,7 +922,8 @@ fn nested_path_removal_copies_selected_chain_and_rolls_back_whole_edit() {
                 .unwrap()
                 .into_stream()
                 .unwrap()
-                .raw_data(),
+                .raw_data()
+                .unwrap(),
             b"0 0 2 2 re f"
         );
         assert_eq!(
@@ -920,7 +932,8 @@ fn nested_path_removal_copies_selected_chain_and_rolls_back_whole_edit() {
                 .unwrap()
                 .into_stream()
                 .unwrap()
-                .raw_data(),
+                .raw_data()
+                .unwrap(),
             b"/FmEdit1 Do /FmEdit1 Do"
         );
     }

@@ -374,7 +374,8 @@ fn form_replacement_isolates_one_call_and_rolls_back_resource_registration() {
                 .unwrap()
                 .into_stream()
                 .unwrap()
-                .raw_data(),
+                .raw_data()
+                .unwrap(),
             b"0 0 2 2 re f"
         );
         assert_eq!(
@@ -383,7 +384,8 @@ fn form_replacement_isolates_one_call_and_rolls_back_resource_registration() {
                 .unwrap()
                 .into_stream()
                 .unwrap()
-                .raw_data(),
+                .raw_data()
+                .unwrap(),
             b"0 0 3 3 re f"
         );
     }

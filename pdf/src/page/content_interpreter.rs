@@ -2357,6 +2357,9 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
         let image = op.inline_image().ok_or_else(|| {
             PdfError::PageOperatorError("BI requires a typed inline payload".into())
         })?;
+        if self.ctx.text_geometry_only() {
+            return Ok(());
+        }
         device.preflight_draw(&self.current_state.graphic_state, None)?;
         let mut dict = image.normalized_dict();
         if let Some(name) = dict.get("ColorSpace").and_then(PdfObject::as_name) {
@@ -2482,6 +2485,9 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
 
         match subtype {
             "Image" => {
+                if self.ctx.text_geometry_only() {
+                    return Ok(());
+                }
                 device.preflight_draw(&self.current_state.graphic_state, None)?;
                 if self.font_cache_revision != self.ctx.revision() {
                     self.font_cache.clear();

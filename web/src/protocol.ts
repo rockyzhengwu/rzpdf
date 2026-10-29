@@ -3,7 +3,7 @@ import {normalizeFontRegistration,normalizeFontStamp,type FontRegistration,type 
 import {BUFFER_BUDGET,normalizeRenderOptions,snapshotMutation,mutationAssetLimit} from "./interaction.js";
 import type { ErrorCode, OpenOptions } from './client.js';
 export const WORKER_PROTOCOL=2;
-export type WorkerOperation='open'|'font'|'registerFont'|'registerDocumentFont'|'fontRequirements'|'clearFonts'|'pageInfo'|'text'|'render'|'renderRegion'|'search'|'outlines'|'links'|'capabilities'|'diagnostics'|'close'|'statistics'|'state'|'annotations'|'formFields'|'apply'|'save'|'content'|'cacheStatistics'|'clearRenderCaches';
+export type WorkerOperation='open'|'font'|'registerFont'|'registerDocumentFont'|'fontRequirements'|'clearFonts'|'pageInfo'|'text'|'render'|'renderRegion'|'search'|'outlines'|'links'|'capabilities'|'diagnostics'|'close'|'statistics'|'state'|'annotations'|'formFields'|'apply'|'save'|'content'|'cacheStatistics'|'clearRenderCaches'|'clearSourceStreamCache';
 export interface WorkerRequest { protocol:number;session:string;id:number;operation:WorkerOperation|'initialize';document?:number;args:unknown[]; }
 export interface WorkerFailure { code:ErrorCode;message:string;operation:string;page?:number;fatal:boolean;resource?:import('./client.js').ResourceDetails; }
 export type WorkerResponse =
@@ -16,7 +16,7 @@ export type {OpenOptions};
 
 /** Validate before structuredClone so malformed calls cannot enqueue unbounded metadata. */
 export function validateArguments(operation:WorkerRequest['operation'],args:unknown[]):void {
-  const counts:Record<string,number>={initialize:0,open:2,font:2,registerFont:2,registerDocumentFont:3,fontRequirements:2,clearFonts:0,pageInfo:1,text:1,render:3,renderRegion:4,search:2,outlines:0,links:1,capabilities:0,diagnostics:0,close:0,statistics:0,state:0,annotations:1,formFields:0,apply:2,save:1,content:1,cacheStatistics:0,clearRenderCaches:0};
+  const counts:Record<string,number>={initialize:0,open:2,font:2,registerFont:2,registerDocumentFont:3,fontRequirements:2,clearFonts:0,pageInfo:1,text:1,render:3,renderRegion:4,search:2,outlines:0,links:1,capabilities:0,diagnostics:0,close:0,statistics:0,state:0,annotations:1,formFields:0,apply:2,save:1,content:1,cacheStatistics:0,clearRenderCaches:0,clearSourceStreamCache:0};
   const invalid=()=>{throw new RangeError('Invalid Worker arguments');};
   if(!Array.isArray(args)||counts[operation]!==args.length)invalid();
   const integer=(n:unknown)=>typeof n==='number'&&Number.isSafeInteger(n)&&n>=0&&n<=0xffffffff;

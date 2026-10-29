@@ -51,7 +51,7 @@ fn v01_independent_mupdf_sample_extracts_text_positions_and_image() {
                     .name(),
                 "FlateDecode"
             );
-            assert!(!raw.stream.raw_data().is_empty());
+            assert!(!raw.stream.raw_data().unwrap().is_empty());
             assert_eq!(
                 page.extract_decoded_image("Im0")
                     .unwrap()

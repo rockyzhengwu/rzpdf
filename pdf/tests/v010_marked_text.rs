@@ -699,7 +699,7 @@ fn form_mcid_domain_and_structure_order_are_independent_of_page_mcid() {
     doc.update_object(
         id,
         PdfObject::PdfStream(
-            PdfStream::from_decoded_data(dict, stream.raw_data().to_vec()).unwrap(),
+            PdfStream::from_decoded_data(dict, stream.raw_data().unwrap().to_vec()).unwrap(),
         ),
     )
     .unwrap();
@@ -1046,7 +1046,7 @@ fn optional_content_xobjects_require_the_future_visibility_model() {
     doc.update_object(
         id,
         PdfObject::PdfStream(
-            PdfStream::from_decoded_data(dict, stream.raw_data().to_vec()).unwrap(),
+            PdfStream::from_decoded_data(dict, stream.raw_data().unwrap().to_vec()).unwrap(),
         ),
     )
     .unwrap();

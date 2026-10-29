@@ -385,7 +385,7 @@ impl<R: Read + Seek> PdfDocument<R> {
             .cloned()
             .ok_or_else(|| invalid("appearance resources missing"))?;
         resources.try_insert("Font".into(), PdfObject::PdfDict(fonts))?;
-        let (mut appearance_dict, data) = appearance.into_raw_parts();
+        let (mut appearance_dict, data) = appearance.into_raw_parts()?;
         appearance_dict.try_insert("Resources".into(), PdfObject::PdfDict(resources))?;
         self.update_object(
             ap,

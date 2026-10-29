@@ -118,7 +118,7 @@ fn sparse_tail_has_self_entry_correct_prev_and_no_object_streams() {
         .map(|v| v.as_u32().unwrap() as usize)
         .sum();
     assert!(count < size as usize);
-    assert_eq!(stream.raw_data().len(), count * 13);
+    assert_eq!(stream.raw_data().unwrap().len(), count * 13);
     assert!(!bytes[source.len()..].windows(7).any(|s| s == b"/ObjStm"));
     assert_eq!(doc.stamp(), stamp);
     assert_eq!(doc.commit_revision(), revision);
@@ -756,7 +756,8 @@ fn changed_r6_streams_keep_clear_metadata_and_explicit_identity_exceptions() {
             .unwrap()
             .as_stream()
             .unwrap()
-            .raw_data(),
+            .raw_data()
+            .unwrap(),
         b"explicit-public-stream"
     );
 }

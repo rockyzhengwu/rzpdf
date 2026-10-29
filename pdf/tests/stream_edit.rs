@@ -42,7 +42,10 @@ fn decoded_replacement_clears_encoding_and_survives_save() {
         stream.data_state(),
         pdf::objects::pdf_stream::StreamDataState::RawEncoded
     );
-    assert_eq!(stream.raw_data(), b"decoded replacement");
+    assert_eq!(
+        reopened.read_stream_data(stream).unwrap().as_ref(),
+        b"decoded replacement"
+    );
     for key in ["Filter", "DecodeParms", "DL"] {
         assert!(stream.dict().get(key).is_none());
     }
@@ -105,11 +108,9 @@ fn external_page_content_is_not_interpreted_as_inline_content() {
     assert!(reopened.get_page(0).unwrap().display_list().is_err());
     assert_eq!(
         reopened
-            .resolve_object(id)
+            .read_stream_data(&reopened.resolve_object(id).unwrap().as_stream().unwrap())
             .unwrap()
-            .as_stream()
-            .unwrap()
-            .raw_data(),
+            .as_ref(),
         b"q Q"
     );
 }
@@ -146,11 +147,9 @@ fn replacement_limits_accept_boundary_and_reject_without_mutation() {
         assert_eq!(doc.resolve_object(id).unwrap(), before);
         doc.replace_stream_decoded_data(id, Vec::new()).unwrap();
         assert!(
-            doc.resolve_object(id)
+            doc.read_stream_data(&doc.resolve_object(id).unwrap().as_stream().unwrap())
                 .unwrap()
-                .as_stream()
-                .unwrap()
-                .raw_data()
+                .as_ref()
                 .is_empty()
         );
     }
@@ -191,7 +190,10 @@ fn flate_policy_preserves_external_streams() {
         let reopened = PdfDocument::from_bytes_with_mode(bytes, ParseMode::Strict).unwrap();
         let object = reopened.resolve_object(id).unwrap();
         let stream = object.as_stream().unwrap();
-        assert_eq!(stream.raw_data(), b"inline bytes");
+        assert_eq!(
+            reopened.read_stream_data(stream).unwrap().as_ref(),
+            b"inline bytes"
+        );
         assert!(stream.dict().get(key).is_some());
         assert!(stream.dict().get("Filter").is_none());
         assert!(doc.replace_stream_decoded_data(id, Vec::new()).is_err());
@@ -234,7 +236,7 @@ fn replacement_can_be_recompressed_without_mutating_document() {
         b"FlateDecode"
     );
     let mut decoded = Vec::new();
-    flate2::read::ZlibDecoder::new(stream.raw_data())
+    flate2::read::ZlibDecoder::new(reopened.read_stream_data(stream).unwrap().as_ref())
         .read_to_end(&mut decoded)
         .unwrap();
     assert_eq!(decoded, data);
@@ -245,7 +247,13 @@ fn replacement_can_be_recompressed_without_mutating_document() {
         PdfDocument::from_bytes_with_mode(reopened.save_to_bytes().unwrap(), ParseMode::Strict)
             .unwrap();
     let final_object = final_doc.resolve_object(id).unwrap();
-    assert_eq!(final_object.as_stream().unwrap().raw_data(), b"q Q\n");
+    assert_eq!(
+        final_doc
+            .read_stream_data(final_object.as_stream().unwrap())
+            .unwrap()
+            .as_ref(),
+        b"q Q\n"
+    );
     assert!(
         final_object
             .as_stream()
@@ -306,7 +314,7 @@ fn flate_save_classifies_latest_indirect_filter_and_null_parameters() {
     );
     assert!(stream.dict().get("DecodeParms").is_none());
     let mut decoded = Vec::new();
-    flate2::read::ZlibDecoder::new(stream.raw_data())
+    flate2::read::ZlibDecoder::new(reopened.read_stream_data(stream).unwrap().as_ref())
         .read_to_end(&mut decoded)
         .unwrap();
     assert_eq!(decoded, b"0102>");
@@ -323,7 +331,10 @@ fn flate_save_classifies_latest_indirect_filter_and_null_parameters() {
     .unwrap();
     let object = reopened.resolve_object(stream_id).unwrap();
     let stream = object.as_stream().unwrap();
-    assert_eq!(stream.raw_data(), b"0102>");
+    assert_eq!(
+        reopened.read_stream_data(stream).unwrap().as_ref(),
+        b"0102>"
+    );
     assert_eq!(
         stream
             .dict()

@@ -164,6 +164,27 @@ impl<R: Seek + Read> PdfDocument<R> {
     ) -> PdfResult<Vec<crate::parser::diagnostic::StructureDiagnostic>> {
         self.ctx.structure_diagnostics()
     }
+    /// Read encoded plaintext bytes, pinning any lazily loaded source buffer.
+    pub fn read_stream_data<'a>(
+        &self,
+        stream: &'a crate::objects::pdf_stream::PdfStream,
+    ) -> PdfResult<crate::io::source_stream::RawStreamData<'a>> {
+        stream.read_raw_data(&self.ctx, &self.ctx.limits().operation_budget())
+    }
+    pub fn read_stream_data_with_budget<'a>(
+        &self,
+        stream: &'a crate::objects::pdf_stream::PdfStream,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<crate::io::source_stream::RawStreamData<'a>> {
+        stream.read_raw_data(&self.ctx, budget)
+    }
+    pub fn source_stream_statistics(&self) -> crate::io::source_stream::SourceStreamStatistics {
+        self.ctx.source_stream_statistics()
+    }
+    /// Release rereadable source buffers; document edits and active readers survive.
+    pub fn clear_source_stream_cache(&self) {
+        self.ctx.clear_source_stream_cache();
+    }
     pub fn read_provenance(&self) -> crate::parser::diagnostic::ReadProvenance {
         self.ctx.read_provenance()
     }
@@ -259,8 +280,20 @@ impl<R: Seek + Read> PdfDocument<R> {
         options: crate::parser::options::ParseOptions,
         password: Option<&[u8]>,
     ) -> PdfResult<Self> {
+        Self::from_source_reader(reader, options, password, None)
+    }
+
+    pub(crate) fn from_source_reader(
+        reader: R,
+        options: crate::parser::options::ParseOptions,
+        password: Option<&[u8]>,
+        shared: Option<std::rc::Rc<Vec<u8>>>,
+    ) -> PdfResult<Self> {
         let reader = StreamReader::try_new(reader)?;
         let mut syntax = SyntaxParser::with_options(reader, options);
+        if let Some(bytes) = shared {
+            syntax.set_shared_source(bytes);
+        }
         let version = syntax.read_header()?.version().to_string();
         let (cross_ref_table, source_xref_offset) = parse_xref_with_offset(&mut syntax)?;
         let parser = PdfParser::new(syntax.with_xref_table(cross_ref_table.clone()));
@@ -1103,7 +1136,7 @@ mod builder_tests {
             .ctx
             .resolve(entries[0].page_dict.get("Contents").unwrap())
             .unwrap();
-        assert_eq!(content.as_stream().unwrap().raw_data(), b"q Q\n");
+        assert_eq!(content.as_stream().unwrap().raw_data().unwrap(), b"q Q\n");
     }
 
     #[test]

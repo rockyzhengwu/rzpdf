@@ -56,7 +56,7 @@ class FakeWorker {
     if(request.operation==='renderRegion'){send({kind:'error',error:{code:'resource_limit',message:'Image decoding limit',operation:'renderRegion',resource,fatal:false}});return;}
     const value=request.operation==='open'?{document:1,pageCount:1}:
       request.operation==='capabilities'?{maxFullPageDpi:288,maxRegionDpi:1152}:
-      request.operation==='cacheStatistics'?{pageEntries:1,pageHits:2}:request.operation==='clearRenderCaches'?{pageEntries:0}:null;
+      request.operation==='cacheStatistics'?{pageEntries:1,pageHits:2}:request.operation==='clearRenderCaches'?{pageEntries:0}:request.operation==='clearSourceStreamCache'?{rawStreamEntries:0}:null;
     send({kind:'result',value});
   });}
   terminate(){}
@@ -67,7 +67,24 @@ assert.equal((await worker.capabilities()).maxRegionDpi,1152);
 const remote=await worker.open(new Uint8Array([1]),{resourceProfile:'conservative'});
 assert.equal((await remote.cacheStatistics()).pageHits,2);
 assert.equal((await remote.clearRenderCaches()).pageEntries,0);
+assert.equal((await remote.clearSourceStreamCache()).rawStreamEntries,0);
 await assert.rejects(remote.renderRegion(0,{x:0,y:0,width:1,height:1},576),e=>e.code==='resource_limit'&&e.resource.reason==='image_pixels'&&e.resource.actual===8750000);
 assert.equal((await remote.capabilities()).maxFullPageDpi,288); // Nonfatal, retryable session.
 await remote.close();worker.dispose();
 console.log('Resource SDK/protocol: high-DPI modes, profiles, typed failures, engine queries and cache operations passed');
+
+// Binary PDF output uses its requested budget; JSON remains limited to 16 MiB.
+const binarySize=17*1024*1024;
+const binaryHeap=new Uint8Array(binarySize+1);binaryHeap[binarySize]=173;
+let releases=0;
+const binaryEngine=new PdfEngine({HEAPU8:binaryHeap,_rz_abi_version:()=>2,_rz_page_count:()=>1,
+  _rz_buffer_ptr:()=>1,_rz_buffer_len:()=>binarySize,_rz_save:()=>2,
+  _rz_release:()=>{releases++;return 1;},_rz_dispose:()=>1});
+const binaryDoc=new PdfDocument(binaryEngine,1);
+binaryDoc.state=()=>({stamp:{engine:binaryEngine.identity,document:1,revision:'0'}});
+assert.throws(()=>binaryEngine.readBuffer(2),e=>e.code==='resource_limit'&&e.resource.reason==='buffer_bytes'&&e.resource.limit===16*1024*1024&&e.resource.actual===binarySize);
+const binary=binaryDoc.save();assert.equal(binary.bytes.length,binarySize);assert.equal(binary.bytes.at(-1),173);
+assert.throws(()=>binaryDoc.save(16*1024*1024),e=>e.code==='resource_limit'&&e.resource.stage==='sdk_read');
+assert.equal(releases,2);binaryEngine.dispose();
+validateArguments('clearSourceStreamCache',[]);
+assert.throws(()=>validateArguments('clearSourceStreamCache',[1]));

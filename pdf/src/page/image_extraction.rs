@@ -212,7 +212,7 @@ impl<R: Read + Seek> PdfPage<'_, R> {
         let height = integer("Height")?
             .filter(|value| *value > 0)
             .ok_or_else(|| PdfError::ObjectError("image Height must be positive".into()))?;
-        if stream.raw_data().len() > self.ctx.limits().max_raw_stream_bytes {
+        if stream.encoded_len() > self.ctx.limits().max_raw_stream_bytes {
             return Err(PdfError::ResourceLimit(
                 "extracted image source bytes".into(),
             ));
@@ -228,7 +228,7 @@ impl<R: Read + Seek> PdfPage<'_, R> {
             width,
             height,
             bits_per_component,
-            stream,
+            stream: stream.materialize(self.ctx, &self.ctx.limits().operation_budget())?,
         })
     }
 

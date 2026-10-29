@@ -175,10 +175,22 @@ fn optional_flate_compression_preserves_pixels_and_source_objects() {
             .bytes(),
         b"FlateDecode"
     );
-    assert!(compressed.as_stream().unwrap().raw_data().len() < pixels.len());
+    assert!(
+        reopened
+            .read_stream_data(compressed.as_stream().unwrap())
+            .unwrap()
+            .as_ref()
+            .len()
+            < pixels.len()
+    );
     let mut decoded = Vec::new();
     std::io::Read::read_to_end(
-        &mut flate2::read::ZlibDecoder::new(compressed.as_stream().unwrap().raw_data()),
+        &mut flate2::read::ZlibDecoder::new(
+            reopened
+                .read_stream_data(compressed.as_stream().unwrap())
+                .unwrap()
+                .as_ref(),
+        ),
         &mut decoded,
     )
     .unwrap();
@@ -194,14 +206,21 @@ fn optional_flate_compression_preserves_pixels_and_source_objects() {
     let again = PdfDocument::from_bytes_with_mode(second, ParseMode::Strict).unwrap();
     assert_eq!(
         again
-            .get_page(0)
+            .read_stream_data(
+                &again
+                    .get_page(0)
+                    .unwrap()
+                    .get_xobject(&name)
+                    .unwrap()
+                    .as_stream()
+                    .unwrap()
+            )
             .unwrap()
-            .get_xobject(&name)
+            .as_ref(),
+        reopened
+            .read_stream_data(compressed.as_stream().unwrap())
             .unwrap()
-            .as_stream()
-            .unwrap()
-            .raw_data(),
-        compressed.as_stream().unwrap().raw_data()
+            .as_ref()
     );
     assert!(again.get_page(0).unwrap().display_list().is_ok());
 }

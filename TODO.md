@@ -6,6 +6,8 @@
 
 ## 当前检查点
 
+- [x] SS-01 / RZPDF-002：完成[源流存储重构](docs/source-streams.md)：解析器验证范围后延迟载荷读取；不可变输入共享字节、通用读取器使用可淘汰且带读取租约的有界缓存；延迟解密、文字提取跳过图片解码、逐流保存、资源统计／清理及结构化错误贯通 SDK／Worker。固定 22,023,982 字节七图样本在默认预算下两种传输各三轮翻页、搜索七处、编辑保存重开通过；1713 项 PDF、115 项渲染、25 项接口回归通过，1 项既有忽略。原生 raw_data／into_raw_parts 改为可失败访问，读取源流使用 read_stream_data；editor 仍需自行升级构建和接收。
+
 - [x] FT-01：完成 [Unicode FreeText](docs/unicode-freetext.md)：显式静态 TrueType、独立 AP 字体绑定、三种对齐／LF 与实际轮廓边界、保存重开更新、共享隔离、原生／WASM／SDK／Worker 资产及权限闭环。61＋15＋25 项原生／接口回归、两种浏览器传输、80 次外观文字／对齐和 68 次 MuPDF／PDFium 页面配对通过；旧 ASCII 保留，editor 需升级新操作正例后自行接收。
 
 - [x] LIN-01：支持线性化输入完整重写为普通 PDF；三布局移除参数字典／提示流，保留编辑及源状态，拒绝引用或修改过的结构，增量保存规则不变。90 项定向测试、qpdf 九份输出和 MuPDF 36 次像素对比通过，见[验证记录](docs/testing.md#linearized-input-ordinary-full-save-regression)。

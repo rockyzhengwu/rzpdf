@@ -133,7 +133,11 @@ fn external_pages_metadata_save_preserves_encoding_and_globals_import_outlives_s
             expected[i as usize]
         );
         assert_eq!(
-            page.extract_image_source("Im").unwrap().stream.raw_data(),
+            page.extract_image_source("Im")
+                .unwrap()
+                .stream
+                .raw_data()
+                .unwrap(),
             document
                 .get_page(i)
                 .unwrap()
@@ -141,6 +145,7 @@ fn external_pages_metadata_save_preserves_encoding_and_globals_import_outlives_s
                 .unwrap()
                 .stream
                 .raw_data()
+                .unwrap()
         );
     }
     let target = Document::new_with_version(pdf::document::save_options::PdfVersion::V1_5).unwrap();

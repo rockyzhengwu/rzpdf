@@ -1068,7 +1068,16 @@ pub(crate) mod tests {
             } else {
                 result.unwrap();
             }
-            assert_eq!(doc.resolve_object(handle).unwrap(), original);
+            let actual = doc.resolve_object(handle).unwrap();
+            assert_eq!(
+                actual.as_stream().unwrap().dict(),
+                original.as_stream().unwrap().dict()
+            );
+            assert_eq!(
+                &*doc.read_stream_data(actual.as_stream().unwrap()).unwrap(),
+                original.as_stream().unwrap().raw_data().unwrap()
+            );
+
             assert_eq!(pool.live_bytes(), 0);
             let reopened =
                 PdfDocument::from_bytes_with_mode(doc.save_to_bytes().unwrap(), ParseMode::Strict)

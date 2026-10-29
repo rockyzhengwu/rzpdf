@@ -45,9 +45,15 @@ pub fn profile(name: &str) -> ApiResult<Limits> {
 
 pub fn cache_statistics(document: &Document) -> Value {
     let c = document.render_cache_statistics();
+    let raw = document.source_stream_statistics();
     let [font_bytes, font_limit, resource_bytes, resource_limit] =
         render::backend_cache_statistics();
     json!({"pageHits":c.page_hits,"pageMisses":c.page_misses,"pageEntries":c.page_entries,
+        "sourceInputBytes":raw.source_bytes,"rawStreamResidentBytes":raw.resident_bytes,
+        "rawStreamTransientBytes":raw.transient_bytes,"rawStreamPeakTransientBytes":raw.peak_transient_bytes,
+        "rawStreamPinnedBytes":raw.pinned_bytes,"rawStreamPeakResidentBytes":raw.peak_resident_bytes,
+        "rawStreamLimitBytes":raw.limit_bytes,"rawStreamEntries":raw.entries,
+        "rawStreamHits":raw.hits,"rawStreamMisses":raw.misses,"rawStreamEvictions":raw.evictions,
         "pageEstimatedBytes":c.page_estimated_bytes,"fontHits":c.font_hits,"fontMisses":c.font_misses,
         "fontEntries":c.font_entries,"fontEstimatedBytes":c.font_estimated_bytes,
         "byteAccounting":"estimated-owned-storage-not-rss","linearMemoryMayRemainGrown":true,

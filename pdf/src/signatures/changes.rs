@@ -335,7 +335,7 @@ fn analyze<R: Read + Seek, S: Read + Seek>(
             .as_stream()
             .ok_or_else(|| malformed("new approval AP stream"))?;
         let d = stream.dict();
-        if !stream.raw_data().is_empty()
+        if stream.encoded_len() != 0
             || name_of(d, "Type") != Some("XObject")
             || name_of(d, "Subtype") != Some("Form")
             || d.get("Resources")
@@ -672,9 +672,23 @@ fn analyze<R: Read + Seek, S: Read + Seek>(
         return Err(invalid("new approval Widget missing from Annots"));
     }
     for id in &old_ids {
-        if object(before, *id, budget)? != object(after, *id, budget)? && !allowed_old.contains(id)
-        {
-            return Err(invalid("unclassified old object changed"));
+        let a = object(before, *id, budget)?;
+        let b = object(after, *id, budget)?;
+        if !allowed_old.contains(id) {
+            // Revision snapshots have different source identities. Compare
+            // encoded plaintext, not parser-local range handles, and release
+            // both read owners before visiting the next object.
+            let equal = match (a.as_stream(), b.as_stream()) {
+                (Some(a), Some(b)) if a.dict() == b.dict() => {
+                    let left = a.read_raw_data(before.ctx(), budget)?;
+                    let right = b.read_raw_data(after.ctx(), budget)?;
+                    left.as_ref() == right.as_ref()
+                }
+                _ => a == b,
+            };
+            if !equal {
+                return Err(invalid("unclassified old object changed"));
+            }
         }
     }
     if new_ids

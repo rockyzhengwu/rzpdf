@@ -176,7 +176,8 @@ fn form_affine_edits_compose_form_matrix_and_parent_ctm_without_changing_second_
                     .unwrap()
                     .into_stream()
                     .unwrap()
-                    .raw_data(),
+                    .raw_data()
+                    .unwrap(),
                 b"0 0 2 2 re f"
             );
         }
@@ -289,7 +290,8 @@ fn removing_one_form_call_preserves_repeated_and_shared_draws_and_rejects_leaf_s
                 .unwrap()
                 .into_stream()
                 .unwrap()
-                .raw_data(),
+                .raw_data()
+                .unwrap(),
             b"0 0 2 2 re f"
         );
     }

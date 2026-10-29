@@ -354,8 +354,30 @@ fn same_invocation_span_includes_intervening_child_text() {
                 );
             }
             assert_eq!(rollback.save_to_bytes().unwrap(), baseline);
-            assert_eq!(rollback.resolve_object(child).unwrap(), child_before);
-            assert_eq!(rollback.resolve_object(parent).unwrap(), parent_before);
+            let actual = rollback.resolve_object(child).unwrap();
+            assert_eq!(
+                actual.as_stream().unwrap().dict(),
+                child_before.as_stream().unwrap().dict()
+            );
+            assert_eq!(
+                rollback
+                    .read_stream_data(actual.as_stream().unwrap())
+                    .unwrap()
+                    .as_ref(),
+                child_before.as_stream().unwrap().raw_data().unwrap()
+            );
+            let actual = rollback.resolve_object(parent).unwrap();
+            assert_eq!(
+                actual.as_stream().unwrap().dict(),
+                parent_before.as_stream().unwrap().dict()
+            );
+            assert_eq!(
+                rollback
+                    .read_stream_data(actual.as_stream().unwrap())
+                    .unwrap()
+                    .as_ref(),
+                parent_before.as_stream().unwrap().raw_data().unwrap()
+            );
             // Rollback invalidates old snapshots; retry from fresh provenance.
             edit(&rollback).unwrap();
             let retried =

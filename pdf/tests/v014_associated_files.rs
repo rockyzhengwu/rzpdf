@@ -283,7 +283,7 @@ fn list_never_decodes_payload_and_data_retains_quota() {
         .unwrap()
         .id();
     let stream = d.resolve_object(id).unwrap().into_stream().unwrap();
-    let (mut dict, raw) = stream.into_raw_parts();
+    let (mut dict, raw) = stream.into_raw_parts().unwrap();
     dict.try_insert("Filter".into(), name("NotARealFilter"))
         .unwrap();
     d.update_object(id, PdfObject::PdfStream(PdfStream::new(dict, raw)))
@@ -366,7 +366,8 @@ fn mismatched_ef_mime_type_and_required_fields_refuse() {
         .unwrap()
         .into_stream()
         .unwrap()
-        .into_raw_parts();
+        .into_raw_parts()
+        .unwrap();
     dict.remove("Subtype");
     d.update_object(id, PdfObject::PdfStream(PdfStream::new(dict, raw)))
         .unwrap();
@@ -522,7 +523,8 @@ fn parameters_and_payload_limits_are_checked() {
         .unwrap()
         .into_stream()
         .unwrap()
-        .into_raw_parts();
+        .into_raw_parts()
+        .unwrap();
     let mut params = PdfDict::default();
     params
         .try_insert("Size".into(), PdfObject::PdfNumber(PdfNumber::new(4.0)))
@@ -1029,7 +1031,8 @@ fn bind_rejects_extended_specs_and_params_without_moddate() {
         .unwrap()
         .into_stream()
         .unwrap()
-        .into_raw_parts();
+        .into_raw_parts()
+        .unwrap();
     dict.try_insert("Params".into(), PdfObject::PdfDict(PdfDict::default()))
         .unwrap();
     d.update_object(id, PdfObject::PdfStream(PdfStream::new(dict, data)))

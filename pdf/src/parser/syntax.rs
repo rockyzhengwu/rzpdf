@@ -174,6 +174,9 @@ impl PdfWord {
 #[derive(Debug)]
 pub struct SyntaxParser<R: Seek + Read> {
     pos: u64,
+    source_id: crate::io::source_stream::SourceId,
+    shared_source: Option<std::rc::Rc<Vec<u8>>>,
+    lazy_streams: bool,
     reader: StreamReader<R>,
     mode: ParseMode,
     header: Option<PdfHeader>,
@@ -209,6 +212,9 @@ impl<R: Seek + Read> SyntaxParser<R> {
         let input_end = reader.length();
         Self {
             reader,
+            source_id: crate::io::source_stream::SourceId::new(),
+            shared_source: None,
+            lazy_streams: false,
             pos: 0,
             mode: options.mode,
             header: None,
@@ -220,6 +226,88 @@ impl<R: Seek + Read> SyntaxParser<R> {
             work_remaining: None,
             diagnostic_object: None,
         }
+    }
+
+    pub(crate) fn set_shared_source(&mut self, bytes: std::rc::Rc<Vec<u8>>) {
+        debug_assert_eq!(bytes.len() as u64, self.input_end);
+        self.shared_source = Some(bytes);
+    }
+    pub(crate) fn enable_lazy_streams(&mut self) {
+        self.lazy_streams = true;
+    }
+    pub(crate) fn source_bytes(&self) -> usize {
+        self.shared_source.as_ref().map_or(0, |bytes| bytes.len())
+    }
+    pub(crate) fn read_source_range(
+        &mut self,
+        range: &crate::io::source_stream::SourceRange,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<crate::io::source_stream::RawAllocation> {
+        if !self.source_id.matches(&range.source)
+            || range.start > self.input_end
+            || range.length as u64 > self.input_end - range.start
+        {
+            return Err(PdfError::InvalidReference(
+                "stream range does not belong to this source".into(),
+            ));
+        }
+        let actual = budget.live_bytes().saturating_add(range.length);
+        if actual > budget.maximum_bytes() {
+            return Err(PdfError::ResourceLimitExceeded {
+                reason: "raw_stream_inflight_bytes",
+                stage: "source_read",
+                limit: budget.maximum_bytes() as u64,
+                actual: actual as u64,
+            });
+        }
+        let saved = self.pos;
+        let result = (|| {
+            self.set_pos(range.start)?;
+            let bytes = self.reader.read_bytes_with_budget(range.length, budget)?;
+            let (bytes, lease) = bytes.into_reserved_parts();
+            Ok(crate::io::source_stream::RawAllocation {
+                bytes,
+                _lease: lease,
+                _transient: None,
+            })
+        })();
+        self.set_pos(saved)?;
+        result
+    }
+
+    fn read_stream_payload(
+        &mut self,
+        dict: PdfDict,
+        length: u64,
+        budget: Option<&crate::budget::OperationBudget>,
+    ) -> PdfResult<(PdfStream, Option<crate::budget::MemoryLease>)> {
+        if !self.lazy_streams {
+            let (bytes, lease) = self.read_stream_block(length, budget)?;
+            return Ok((PdfStream::new(dict, bytes), lease));
+        }
+        let length = usize::try_from(length)
+            .map_err(|_| PdfError::ResourceLimit("source stream length".into()))?;
+        if length > self.limits.max_raw_stream_bytes {
+            return Err(PdfError::ResourceLimitExceeded {
+                reason: "raw_stream_bytes",
+                stage: "stream_parse",
+                limit: self.limits.max_raw_stream_bytes as u64,
+                actual: length as u64,
+            });
+        }
+        if length as u64 > self.input_end.saturating_sub(self.pos) {
+            return Err(PdfError::ParserError("stream range exceeds input".into()));
+        }
+        let range = crate::io::source_stream::SourceRange {
+            source: self.source_id.clone(),
+            start: self.pos,
+            length,
+        };
+        self.set_pos(self.pos + length as u64)?;
+        Ok((
+            PdfStream::from_source(dict, range, self.shared_source.clone()),
+            None,
+        ))
     }
 
     pub fn with_xref_table(mut self, xref_table: CrossRefTable) -> Self {
@@ -815,9 +903,13 @@ impl<R: Seek + Read> SyntaxParser<R> {
         if let Some(data_len) = self.resolve_stream_length(&dict, budget)? {
             let start_pos = self.pos;
             if data_len <= self.input_end.saturating_sub(start_pos) {
-                let (data, lease) = self.read_stream_block(data_len, budget)?;
+                self.set_pos(start_pos + data_len)?;
                 if self.expect_endstream_after_data(budget)? {
-                    return Ok((PdfStream::new(dict, data), lease));
+                    let end = self.pos;
+                    self.set_pos(start_pos)?;
+                    let result = self.read_stream_payload(dict, data_len, budget)?;
+                    self.set_pos(end)?;
+                    return Ok(result);
                 }
             }
         }
@@ -838,7 +930,7 @@ impl<R: Seek + Read> SyntaxParser<R> {
         let end_of_stream = self.find_stream_end_pos()?;
         if let Some(end_pos) = end_of_stream {
             let data_len = end_pos.saturating_sub(self.pos);
-            let (data, lease) = self.read_stream_block(data_len, budget)?;
+            let (stream, lease) = self.read_stream_payload(dict, data_len, budget)?;
             // The recovery search locates the payload boundary, not the end of
             // the stream object. Consume endstream just as the Length path does;
             // leave endobj unread for the enclosing indirect-object parser.
@@ -847,7 +939,7 @@ impl<R: Seek + Read> SyntaxParser<R> {
             if !self.consume_endstream_word(&marker)? {
                 self.set_pos(marker_pos)?;
             }
-            return Ok((PdfStream::new(dict, data), lease));
+            return Ok((stream, lease));
         }
         self.set_pos(saved_pos)?;
         Err(PdfError::ParserError(
@@ -1280,7 +1372,9 @@ impl<R: Seek + Read> SyntaxParser<R> {
                 if stream {
                     let (stream, mut data_lease) =
                         self.read_pdf_stream_inner(dict, Some(budget))?;
-                    lease.absorb(data_lease.as_mut().unwrap())?;
+                    if let Some(data_lease) = data_lease.as_mut() {
+                        lease.absorb(data_lease)?;
+                    }
                     Ok((PdfObject::PdfStream(stream), lease))
                 } else {
                     self.set_pos(saved_pos)?;
@@ -1935,7 +2029,7 @@ mod tests {
             let (object, lease) = parser.get_content_object_with_budget(&budget).unwrap();
             assert_eq!(object, expected);
             assert_eq!(parser.position(), legacy.position());
-            assert_eq!(object.as_stream().unwrap().raw_data(), b"abc");
+            assert_eq!(object.as_stream().unwrap().raw_data().unwrap(), b"abc");
             let expected_bytes = if source.starts_with("<<>>") {
                 3
             } else {
@@ -2764,7 +2858,7 @@ mod tests {
         ));
         let mut parser = SyntaxParser::new(reader).with_xref_table(xref);
         let stream = parser.get_object().unwrap().into_stream().unwrap();
-        assert_eq!(stream.raw_data(), b"abcde");
+        assert_eq!(stream.raw_data().unwrap(), b"abcde");
         parser.set_pos(0).unwrap();
         let budget = crate::budget::OperationBudget::new(4096);
         let (object, lease) = parser.get_content_object_with_budget(&budget).unwrap();
@@ -2807,7 +2901,7 @@ mod tests {
                     .unwrap()
                     .into_stream()
                     .unwrap();
-                assert_eq!(stream.raw_data(), b"abc", "{source:?}");
+                assert_eq!(stream.raw_data().unwrap(), b"abc", "{source:?}");
             }
         }
         let source = "<< >> stream\n\nabc\nendstream";
@@ -2817,7 +2911,8 @@ mod tests {
                 .unwrap()
                 .into_stream()
                 .unwrap()
-                .raw_data(),
+                .raw_data()
+                .unwrap(),
             b"\nabc"
         );
         let source = "<< /Length 4 >> stream\nabc\rendstream";
@@ -2827,7 +2922,8 @@ mod tests {
                 .unwrap()
                 .into_stream()
                 .unwrap()
-                .raw_data(),
+                .raw_data()
+                .unwrap(),
             b"abc\r"
         );
     }
@@ -2847,7 +2943,10 @@ mod tests {
                 } else {
                     (parser.get_indirect_object().unwrap(), None)
                 };
-                assert_eq!(object.obj().as_stream().unwrap().raw_data(), b"abc");
+                assert_eq!(
+                    object.obj().as_stream().unwrap().raw_data().unwrap(),
+                    b"abc"
+                );
                 if budgeted {
                     assert!(budget.live_bytes() >= 3);
                 }
@@ -3039,7 +3138,10 @@ mod missing_endobj_tests {
                             assert!(result.is_err());
                         } else {
                             let (object, lease) = result.unwrap();
-                            assert_eq!(object.obj().as_stream().unwrap().raw_data(), b"abc");
+                            assert_eq!(
+                                object.obj().as_stream().unwrap().raw_data().unwrap(),
+                                b"abc"
+                            );
                             drop((object, lease));
                             assert_eq!(parser.get_indirect_object().unwrap().id().obj_num(), 2);
                         }
@@ -3049,7 +3151,13 @@ mod missing_endobj_tests {
                             assert!(result.is_err());
                         } else {
                             assert_eq!(
-                                result.unwrap().obj().as_stream().unwrap().raw_data(),
+                                result
+                                    .unwrap()
+                                    .obj()
+                                    .as_stream()
+                                    .unwrap()
+                                    .raw_data()
+                                    .unwrap(),
                                 b"abc"
                             );
                             assert_eq!(parser.get_indirect_object().unwrap().id().obj_num(), 2);

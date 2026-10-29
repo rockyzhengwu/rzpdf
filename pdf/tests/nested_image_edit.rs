@@ -172,7 +172,8 @@ fn nested_image_transform_is_relative_and_restores_neighbor_state() {
                     .unwrap()
                     .into_stream()
                     .unwrap()
-                    .raw_data(),
+                    .raw_data()
+                    .unwrap(),
                 outer_body
             );
             assert_eq!(
@@ -181,7 +182,8 @@ fn nested_image_transform_is_relative_and_restores_neighbor_state() {
                     .unwrap()
                     .into_stream()
                     .unwrap()
-                    .raw_data(),
+                    .raw_data()
+                    .unwrap(),
                 body.as_bytes()
             );
         }
@@ -491,7 +493,8 @@ fn nested_image_removal_isolates_one_call_keeps_shared_pixels_and_rolls_back() {
                 .unwrap()
                 .into_stream()
                 .unwrap()
-                .raw_data(),
+                .raw_data()
+                .unwrap(),
             body.as_bytes()
         );
         assert_eq!(
@@ -509,7 +512,8 @@ fn nested_image_removal_isolates_one_call_keeps_shared_pixels_and_rolls_back() {
                 .unwrap()
                 .into_stream()
                 .unwrap()
-                .raw_data(),
+                .raw_data()
+                .unwrap(),
             outer_body.as_bytes()
         );
     }

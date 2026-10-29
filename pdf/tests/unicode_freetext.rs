@@ -317,7 +317,7 @@ fn reopened_binding_rechecks_actual_embedding_rights_instead_of_trusting_marker(
         .unwrap()
         .id();
     let object = d.resolve_object(file).unwrap();
-    let mut data = object.as_stream().unwrap().raw_data().to_vec();
+    let mut data = object.as_stream().unwrap().raw_data().unwrap().to_vec();
     let sfnt =
         Sfnt::try_new_with_limits(&mut TrueTypeReader::new(&data), Limits::default()).unwrap();
     let offset = sfnt.get_table("OS/2").unwrap().offset() as usize + 8;

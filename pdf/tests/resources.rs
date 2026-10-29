@@ -86,7 +86,7 @@ fn packed_soft_masks_preserve_alpha_after_save_and_strict_reopen() {
         .unwrap();
         doc.update_object(
             image_id,
-            PdfObject::PdfStream(PdfStream::new(dict, image.raw_data().to_vec())),
+            PdfObject::PdfStream(PdfStream::new(dict, image.raw_data().unwrap().to_vec())),
         )
         .unwrap();
         let mut content = ContentBuilder::new();
@@ -118,7 +118,13 @@ fn packed_soft_masks_preserve_alpha_after_save_and_strict_reopen() {
                     .all(|p| p[..3] == [40, 40, 40])
             );
             let mask = document.resolve_object(mask_id).unwrap();
-            assert_eq!(mask.as_stream().unwrap().raw_data(), bytes);
+            assert_eq!(
+                document
+                    .read_stream_data(mask.as_stream().unwrap())
+                    .unwrap()
+                    .as_ref(),
+                bytes
+            );
         }
     }
 }
@@ -153,7 +159,10 @@ fn rgba_embedding_splits_straight_pixels_and_preserves_smask_on_save() {
         assert!(document.get_page(0).unwrap().display_list().is_ok());
         let image = document.resolve_object(id).unwrap();
         let image = image.as_stream().unwrap();
-        assert_eq!(image.raw_data(), &[255, 0, 0, 0, 128, 255]);
+        assert_eq!(
+            document.read_stream_data(image).unwrap().as_ref(),
+            &[255, 0, 0, 0, 128, 255]
+        );
         let mask_id = image
             .dict()
             .get("SMask")
@@ -163,7 +172,7 @@ fn rgba_embedding_splits_straight_pixels_and_preserves_smask_on_save() {
             .id();
         let mask = document.resolve_object(mask_id).unwrap();
         let mask = mask.as_stream().unwrap();
-        assert_eq!(mask.raw_data(), &[0, 128]);
+        assert_eq!(document.read_stream_data(mask).unwrap().as_ref(), &[0, 128]);
         assert_eq!(
             mask.dict()
                 .get("ColorSpace")
@@ -487,11 +496,9 @@ fn image_registration_resolves_subtype_and_preserves_stream_on_roundtrip() {
     );
     assert_eq!(
         reopened
-            .resolve_object(image)
+            .read_stream_data(&reopened.resolve_object(image).unwrap().as_stream().unwrap())
             .unwrap()
-            .as_stream()
-            .unwrap()
-            .raw_data(),
+            .as_ref(),
         &[255, 0, 0]
     );
 }
@@ -516,7 +523,10 @@ fn embedded_rgb_image_can_be_read_back_and_interpreted() {
     let mut page = reopened.get_page(0).unwrap();
     let image = page.get_xobject("Im1").unwrap();
     assert_eq!(
-        image.as_stream().unwrap().raw_data(),
+        reopened
+            .read_stream_data(image.as_stream().unwrap())
+            .unwrap()
+            .as_ref(),
         &[255, 0, 0, 0, 255, 0]
     );
     assert!(page.display_list().is_ok());

@@ -790,7 +790,7 @@ fn validate_cms(
 #[cfg(test)]
 mod tests {
     #[test]
-    fn tiny_prepare_budget_does_not_publish_a_large_source_cache() {
+    fn tiny_prepare_budget_does_not_copy_a_large_source_payload() {
         use crate::{
             budget::OperationBudget,
             document::Document,
@@ -817,7 +817,8 @@ mod tests {
                 .is_err()
         );
         assert_eq!(small.live_bytes(), 0);
-        assert!(!document.ctx().source_object_is_cached(payload));
+        assert!(document.ctx().source_object_is_cached(payload));
+        assert_eq!(document.source_stream_statistics().resident_bytes, 0);
         assert!(document.is_stamp_current(&stamp));
         let pool = OperationBudget::new(2 * 1024 * 1024);
         let prepared = document

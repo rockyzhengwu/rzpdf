@@ -471,9 +471,9 @@ impl<R: Read + Seek> ResourceManager<'_, R> {
             )?;
             let mut image_bytes = Vec::new();
             image_bytes
-                .try_reserve_exact(stream.raw_data().len())
+                .try_reserve_exact(stream.raw_data()?.len())
                 .map_err(|_| PdfError::ResourceLimit("RGBA image update allocation".into()))?;
-            image_bytes.extend_from_slice(stream.raw_data());
+            image_bytes.extend_from_slice(stream.raw_data()?);
             doc.update_object(id, PdfObject::PdfStream(PdfStream::new(dict, image_bytes)))?;
             Ok(name)
         })

@@ -181,7 +181,7 @@ export class WorkerPdfEngine extends EventTarget {
     this.checkSession(session);if(!this.documents.has(id))throw new PdfApiError('invalid_handle','Document is closed or belongs to another engine','document');
   }
   callDocument<T>(session:string,id:number,operation:WorkerOperation,args:unknown[],task:TaskOptions={}):Promise<T> {
-    try {this.checkDocument(session,id);if(!['pageInfo','text','render','renderRegion','search','outlines','links','capabilities','diagnostics','state','annotations','formFields','apply','save','content','fontRequirements','registerDocumentFont','cacheStatistics','clearRenderCaches'].includes(operation))throw new PdfApiError('invalid_argument','Not a document operation',operation);}catch(error){return Promise.reject(error);}
+    try {this.checkDocument(session,id);if(!['pageInfo','text','render','renderRegion','search','outlines','links','capabilities','diagnostics','state','annotations','formFields','apply','save','content','fontRequirements','registerDocumentFont','cacheStatistics','clearRenderCaches','clearSourceStreamCache'].includes(operation))throw new PdfApiError('invalid_argument','Not a document operation',operation);}catch(error){return Promise.reject(error);}
     if(operation==='registerDocumentFont') {
       try {
         validateArguments(operation,args);this.admit((args[0] as Uint8Array).length,'registerFont',task);
@@ -256,6 +256,7 @@ export class WorkerPdfDocument {
   links(page:number,task:TaskOptions={}):Promise<PageLink[]>{return this.call('links',[page],task);}
   capabilities(task:TaskOptions={}):Promise<Record<string,unknown>>{return this.call('capabilities',[],task);}
   cacheStatistics(task:TaskOptions={}):Promise<import('./client.js').RenderCacheStatistics>{return this.call('cacheStatistics',[],task);}
+  clearSourceStreamCache(task:TaskOptions={}):Promise<import('./client.js').RenderCacheStatistics>{return this.call('clearSourceStreamCache',[],task);}
   clearRenderCaches(task:TaskOptions={}):Promise<import('./client.js').RenderCacheStatistics>{return this.call('clearRenderCaches',[],task);}
   diagnostics(task:TaskOptions={}):Promise<{reason:string;offset:number;object:number[]|null}[]>{return this.call('diagnostics',[],task);}
   close():Promise<void>{if(this.closing)return this.closing;this.closed=true;this.closing=this.engine.closeDocument(this.session,this.id);return this.closing;}

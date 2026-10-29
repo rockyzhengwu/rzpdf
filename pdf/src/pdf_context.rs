@@ -35,7 +35,7 @@ pub struct PDFContext<R: Seek + Read> {
     #[cfg(feature = "prepare-diagnostics")]
     pub(crate) preparation_profile: RefCell<Option<crate::page::preparation_profile::Recorder>>,
     text_geometry_only: Cell<bool>,
-    cached_stream_bytes: Cell<usize>,
+    raw_stream_cache: crate::io::source_stream::RawStreamCache,
     source_resolution_depth: Cell<usize>,
     security: Option<crate::security::SecurityHandler>,
     encryption_dictionary_id: Option<ObjectId>,
@@ -73,6 +73,48 @@ impl Drop for BudgetedLoadingGuard<'_> {
 }
 
 impl<R: Seek + Read> PDFContext<R> {
+    pub(crate) fn read_source_range(
+        &self,
+        range: &crate::io::source_stream::SourceRange,
+        budget: &crate::budget::OperationBudget,
+    ) -> PdfResult<std::rc::Rc<crate::io::source_stream::RawAllocation>> {
+        if range.length > self.limits.max_cached_stream_bytes {
+            let data = self
+                .parser
+                .as_ref()
+                .ok_or_else(|| PdfError::InvalidReference("document has no source".into()))?
+                .try_borrow_mut()
+                .map_err(|_| PdfError::InvalidReference("recursive source reader access".into()))?
+                .read_source_range(range, budget)?;
+            return Ok(std::rc::Rc::new(self.track_transient_stream(data)));
+        }
+        self.raw_stream_cache.get_or_read(range, |budget| {
+            self.parser
+                .as_ref()
+                .ok_or_else(|| PdfError::InvalidReference("document has no source".into()))?
+                .try_borrow_mut()
+                .map_err(|_| PdfError::InvalidReference("recursive source reader access".into()))?
+                .read_source_range(range, budget)
+        })
+    }
+    pub(crate) fn track_transient_stream(
+        &self,
+        data: crate::io::source_stream::RawAllocation,
+    ) -> crate::io::source_stream::RawAllocation {
+        self.raw_stream_cache.track_transient(data)
+    }
+    pub fn source_stream_statistics(&self) -> crate::io::source_stream::SourceStreamStatistics {
+        let mut statistics = self.raw_stream_cache.statistics();
+        statistics.source_bytes = self
+            .parser
+            .as_ref()
+            .map_or(0, |parser| parser.borrow().source_bytes());
+        statistics
+    }
+    pub fn clear_source_stream_cache(&self) {
+        self.raw_stream_cache.clear();
+    }
+
     pub(crate) fn text_geometry_only(&self) -> bool {
         self.text_geometry_only.get()
     }
@@ -253,7 +295,9 @@ impl<R: Seek + Read> PDFContext<R> {
             #[cfg(feature = "prepare-diagnostics")]
             preparation_profile: RefCell::new(None),
             text_geometry_only: Cell::new(false),
-            cached_stream_bytes: Cell::new(0),
+            raw_stream_cache: crate::io::source_stream::RawStreamCache::new(
+                options.limits.max_cached_stream_bytes,
+            ),
             source_resolution_depth: Cell::new(0),
             security: None,
             encryption_dictionary_id: None,
@@ -299,6 +343,7 @@ impl<R: Seek + Read> PDFContext<R> {
         source_version: String,
         password: Option<&[u8]>,
     ) -> PdfResult<Self> {
+        parser.enable_lazy_streams();
         let limits = parser.limits();
         let mode = parser.mode();
         if cross_ref_table.objects().len() > limits.max_objects {
@@ -425,7 +470,9 @@ impl<R: Seek + Read> PDFContext<R> {
             #[cfg(feature = "prepare-diagnostics")]
             preparation_profile: RefCell::new(None),
             text_geometry_only: Cell::new(false),
-            cached_stream_bytes: Cell::new(0),
+            raw_stream_cache: crate::io::source_stream::RawStreamCache::new(
+                limits.max_cached_stream_bytes,
+            ),
             source_resolution_depth: Cell::new(0),
             security,
             encryption_dictionary_id,
@@ -944,6 +991,7 @@ impl<R: Seek + Read> PDFContext<R> {
         Ok((ids, lease))
     }
 
+    #[cfg(test)]
     pub(crate) fn materialize_all_objects_with_budget(
         &self,
         budget: &crate::budget::OperationBudget,
@@ -1080,16 +1128,6 @@ impl<R: Seek + Read> PDFContext<R> {
         } else {
             source
         };
-        let bytes = source
-            .as_stream()
-            .map(|stream| stream.raw_data().len())
-            .unwrap_or(0);
-        crate::filter::check_output_size(
-            self.cached_stream_bytes.get(),
-            bytes,
-            self.limits.max_cached_stream_bytes,
-            "cached raw streams",
-        )?;
         let (copy_lease, copy) = {
             let (copy, lease) =
                 crate::objects::clone_object_with_budget(&source, budget, self.limits, 0)?;
@@ -1099,8 +1137,6 @@ impl<R: Seek + Read> PDFContext<R> {
         // Publish only after both parse and owned-copy reservations succeed.
         // Persistent cache residency is not charged to the operation pool.
         let _ = cell.set(source);
-        self.cached_stream_bytes
-            .set(self.cached_stream_bytes.get() + bytes);
         Ok((copy, copy_lease))
     }
 
@@ -1321,19 +1357,7 @@ impl<R: Seek + Read> PDFContext<R> {
         } else {
             obj
         };
-        let bytes = obj
-            .as_stream()
-            .map(|stream| stream.raw_data().len())
-            .unwrap_or(0);
-        crate::filter::check_output_size(
-            self.cached_stream_bytes.get(),
-            bytes,
-            self.limits.max_cached_stream_bytes,
-            "cached raw streams",
-        )?;
         self.populate_object_stream_entries(&obj, expected)?;
-        self.cached_stream_bytes
-            .set(self.cached_stream_bytes.get() + bytes);
         Ok(obj)
     }
 
@@ -1682,7 +1706,9 @@ mod loading_tests {
             ));
             assert_eq!(pool.live_bytes(), 0);
             assert!(invalid.loading_objects.borrow().is_empty());
-            assert_eq!(invalid.cached_stream_bytes.get(), 0);
+            assert_eq!(invalid.source_stream_statistics().resident_bytes, 18);
+            invalid.clear_source_stream_cache();
+            assert_eq!(invalid.source_stream_statistics().resident_bytes, 0);
             for number in [1, 2, 10] {
                 assert!(
                     invalid.indirect_objects[&ObjectId::new(number, 0)]
@@ -1717,18 +1743,25 @@ mod loading_tests {
             b"1 0 obj << /A [(one) /Two 3] /B true >> endobj".to_vec(),
             stream_source,
         ] {
-            let ordinary = fixture(source.clone()).resolve_owned(&reference).unwrap();
+            let ordinary_ctx = fixture(source.clone());
+            let ordinary = ordinary_ctx.resolve_owned(&reference).unwrap();
             let ctx = fixture(source.clone());
             let pool = OperationBudget::new(1024 * 1024);
             let (copy, lease) = ctx.resolve_owned_with_budget(&reference, &pool).unwrap();
-            assert_eq!(copy, ordinary);
+            if let (Some(actual), Some(expected)) = (copy.as_stream(), ordinary.as_stream()) {
+                assert_eq!(actual.dict(), expected.dict());
+                assert_eq!(actual.encoded_len(), expected.encoded_len());
+                assert_eq!(actual.encoded_len(), 16384);
+            } else {
+                assert_eq!(copy, ordinary);
+            }
             assert_eq!(pool.live_bytes(), lease.bytes());
             assert!(ctx.indirect_objects.get(&id).unwrap().get().is_some());
             assert!(ctx.loading_objects.borrow().is_empty());
             let peak = pool.peak_bytes();
-            let retained = lease.bytes();
             if copy.as_stream().is_some() {
-                assert!(peak > retained * 3 / 2);
+                assert!(peak < 16384);
+                assert_eq!(ctx.source_stream_statistics().resident_bytes, 0);
             }
             drop((copy, lease));
             assert_eq!(pool.live_bytes(), 0);
@@ -1740,16 +1773,28 @@ mod loading_tests {
             ));
             assert_eq!(small.live_bytes(), 0);
             assert!(denied.indirect_objects.get(&id).unwrap().get().is_none());
-            assert_eq!(denied.cached_stream_bytes.get(), 0);
+            assert_eq!(denied.source_stream_statistics().resident_bytes, 0);
             assert!(denied.loading_objects.borrow().is_empty());
             let (copy, lease) = denied.resolve_owned_with_budget(&reference, &pool).unwrap();
-            assert_eq!(copy, ordinary);
+            if let (Some(actual), Some(expected)) = (copy.as_stream(), ordinary.as_stream()) {
+                assert_eq!(actual.dict(), expected.dict());
+                assert_eq!(actual.encoded_len(), expected.encoded_len());
+                assert_eq!(actual.encoded_len(), 16384);
+            } else {
+                assert_eq!(copy, ordinary);
+            }
             drop((copy, lease));
             assert_eq!(pool.live_bytes(), 0);
             // Cache residency is persistent; only the next owned copy is paid.
             let warm = OperationBudget::new(peak);
             let (copy, lease) = denied.resolve_owned_with_budget(&reference, &warm).unwrap();
-            assert_eq!(copy, ordinary);
+            if let (Some(actual), Some(expected)) = (copy.as_stream(), ordinary.as_stream()) {
+                assert_eq!(actual.dict(), expected.dict());
+                assert_eq!(actual.encoded_len(), expected.encoded_len());
+                assert_eq!(actual.encoded_len(), 16384);
+            } else {
+                assert_eq!(copy, ordinary);
+            }
             assert_eq!(warm.live_bytes(), lease.bytes());
             if copy.as_stream().is_some() {
                 assert!(warm.peak_bytes() < peak);
@@ -2042,7 +2087,9 @@ mod loading_tests {
                     for id in [1, 2, 10] {
                         assert!(ctx.indirect_objects[&ObjectId::new(id, 0)].get().is_none());
                     }
-                    assert_eq!(ctx.cached_stream_bytes.get(), 0);
+                    assert_eq!(ctx.source_stream_statistics().resident_bytes, 13);
+                    ctx.clear_source_stream_cache();
+                    assert_eq!(ctx.source_stream_statistics().resident_bytes, 0);
                     assert!(ctx.loading_objects.borrow().is_empty());
                 }
             } else {
@@ -2188,5 +2235,89 @@ mod loading_tests {
         );
         assert_eq!(ctx.source_resolution_depth.get(), 0);
         assert_eq!(ctx.resolve_object_owned(id).unwrap(), PdfObject::PdfNull);
+    }
+    #[test]
+    fn source_stream_ranges_survive_edits_rollback_and_clear_and_reject_foreign_readers() {
+        use crate::{
+            io::stream_reader::StreamReader,
+            objects::pdf_stream::PdfStream,
+            parser::{
+                options::{Limits, ParseOptions},
+                syntax::SyntaxParser,
+            },
+        };
+        let input = b"1 0 obj << /Length 3 >> stream\nABC\nendstream\nendobj";
+        let make = || {
+            let options = ParseOptions {
+                limits: Limits {
+                    max_cached_stream_bytes: 3,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let xref = CrossRefTable::new(
+                HashMap::from([(1, ObjectInfo::new(1, 0, 0, ObjectState::Normal))]),
+                PdfDict::default(),
+            );
+            let syntax = SyntaxParser::with_options(
+                StreamReader::try_new(std::io::Cursor::new(input.as_slice())).unwrap(),
+                options,
+            );
+            PDFContext::try_new(PdfParser::new(syntax), xref).unwrap()
+        };
+        let ctx = make();
+        let id = ObjectId::new(1, 0);
+        let source = ctx
+            .resolve_original_object(id)
+            .unwrap()
+            .as_stream()
+            .unwrap();
+        let pool = ctx.limits().operation_budget();
+        assert_eq!(source.read_raw_data(&ctx, &pool).unwrap().as_ref(), b"ABC");
+        ctx.update_object(
+            id,
+            PdfObject::PdfStream(PdfStream::new(PdfDict::default(), b"edited".to_vec())),
+        )
+        .unwrap();
+        let failed: PdfResult<()> = ctx.transaction(|| {
+            ctx.update_object(
+                id,
+                PdfObject::PdfStream(PdfStream::new(PdfDict::default(), b"tentative".to_vec())),
+            )?;
+            ctx.clear_source_stream_cache();
+            assert_eq!(source.read_raw_data(&ctx, &pool)?.as_ref(), b"ABC");
+            Err(PdfError::DocumentError("rollback".into()))
+        });
+        assert!(failed.is_err());
+        assert_eq!(
+            ctx.resolve_object_owned(id)
+                .unwrap()
+                .as_stream()
+                .unwrap()
+                .raw_data()
+                .unwrap(),
+            b"edited"
+        );
+        ctx.clear_source_stream_cache();
+        let original = ctx
+            .with_source_resolution(|| ctx.resolve_object_owned(id))
+            .unwrap();
+        assert_eq!(
+            original
+                .as_stream()
+                .unwrap()
+                .read_raw_data(&ctx, &pool)
+                .unwrap()
+                .as_ref(),
+            b"ABC"
+        );
+        let foreign = make();
+        assert!(matches!(
+            source.read_raw_data(&foreign, &pool),
+            Err(PdfError::InvalidReference(_))
+        ));
+        assert_eq!(foreign.source_stream_statistics().resident_bytes, 0);
+        assert_eq!(foreign.source_stream_statistics().entries, 0);
+        assert_eq!(pool.live_bytes(), 0);
     }
 }

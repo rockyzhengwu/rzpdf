@@ -206,7 +206,8 @@ fn identity_crypt_streams_are_explicit_not_accidentally_reencrypted() {
             .unwrap()
             .as_stream()
             .unwrap()
-            .raw_data(),
+            .raw_data()
+            .unwrap(),
         b"explicit-public-stream"
     );
 }

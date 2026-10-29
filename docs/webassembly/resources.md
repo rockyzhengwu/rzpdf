@@ -32,7 +32,7 @@ const effective = await doc.capabilities();
 | maxImagePixels | 4000000 | 2000000 | Decoded image pixels |
 | maxDecodedBytes | 16777216 | 8388608 | Decoded bytes / image RGBA ceiling |
 | maxOperationBytes | 67108864 | 33554432 | Logical operation accounting |
-| maxCachedStreamBytes | 16777216 | 8388608 | Decoded stream cache |
+| maxCachedStreamBytes | 16777216 | 8388608 | Owned encoded source-stream residency |
 | maxBufferBytes | 67108864 | 67108864 | Shared tracked input/output/font storage |
 | maxWasmMemoryBytes | 268435456 | 268435456 | Browser build ceiling, not free memory |
 
@@ -195,3 +195,33 @@ conversion work and smaller retained images; it never raises resource limits.
 Both policies keep the bounded full-resolution fallback for masks and
 unsupported codecs/processes. See [the API contract](api.md#image-decode-quality-policy).
 Cache statistics expose retained storage estimates, not process peak memory.
+
+## Source stream residency
+
+RZPDF-002 separates parser metadata from raw payload storage; see
+[source-backed streams](../source-streams.md) for native API migration and the
+fixed seven-image regression fixture. Browser byte input is immutable and range
+views share its existing allocation. Resolving image dictionaries or searching
+text does not copy all raw image bytes into a second permanent cache.
+
+`cacheStatistics()` adds `sourceInputBytes`, `rawStreamResidentBytes`,
+`rawStreamPinnedBytes`, `rawStreamPeakResidentBytes`, `rawStreamTransientBytes`,
+`rawStreamPeakTransientBytes`, `rawStreamLimitBytes`, `rawStreamEntries`,
+`rawStreamHits`, `rawStreamMisses`, and `rawStreamEvictions`. These report storage
+owned by the engine's source-stream subsystem, not decoded images, raster output,
+Skia allocations, all operation allocations, or process RSS. Immutable input
+views occupy source input storage once and contribute zero owned raw cache bytes.
+Temporary generic reads larger than the cache and plaintext AES buffers are
+operation-budgeted and counted as transient bytes until their owners are dropped.
+
+`doc.clearSourceStreamCache()` is available through both synchronous SDK and
+Worker and returns the same statistics. It releases rereadable owned source
+buffers. It leaves edits, active read owners, prepared rendering caches and the
+immutable input intact. Use `clearRenderCaches()` separately for derived rendering
+storage. Neither API promises to shrink WebAssembly linear memory.
+
+Raw residency failures have reason `raw_stream_residency`, stage `source_read`,
+and byte `limit`/`actual`. Unfiltered decoded stream failures use
+`decoded_stream_bytes` at `stream_decode`. Reducing DPI does not change the size
+of an encoded raw payload; callers should use the reported reason instead of
+repeatedly retrying unrelated rendering settings.

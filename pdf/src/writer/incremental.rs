@@ -611,6 +611,12 @@ fn write_incremental_inner<R: std::io::Read + std::io::Seek>(
                     format_args!("{} {} obj\n", id.obj_num(), id.gen_num()),
                     limit,
                 )?;
+                let object = match object {
+                    PdfObject::PdfStream(stream) => {
+                        PdfObject::PdfStream(stream.materialize(document.ctx(), budget)?)
+                    }
+                    object => object,
+                };
                 write_object_limited(&mut output, &object, limit)?;
                 append_output(&mut output, b"\nendobj\n", limit)?;
                 drop(object);
