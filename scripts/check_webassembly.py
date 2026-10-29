@@ -120,6 +120,16 @@ def source_inventory():
         "pdf/tests/source_streams.rs", "scripts/source-stream-fixture.mjs",
         "web/tests/source-streams-browser.mjs", "docs/source-streams.md",
     ])
+    optional.extend([
+        "pdf/src/filter/flate_image.rs", "pdf/src/filter/predictor.rs", "pdf/src/page/image_decode.rs", "pdf/src/page/mod.rs",
+        "pdf/src/budget.rs", "pdf/tests/image_preview.rs", "scripts/image-preview-fixtures.py",
+        "web/tests/image-preview-browser.mjs", "docs/image-preview.md", "docs/webassembly/api.md",
+        "pdf/tests/fixtures/image-preview/manifest.json", "pdf/tests/fixtures/image-preview/README.md",
+        "pdf/tests/fixtures/image-preview/preview-flate-corrupt.pdf",
+        "pdf/tests/fixtures/image-preview/preview-flate.pdf",
+        "pdf/tests/fixtures/image-preview/preview-jpeg.pdf",
+        "pdf/tests/fixtures/image-preview/preview-progressive.pdf",
+    ])
     files.extend(name for name in optional if (REPO / name).exists())
     files.extend(str(path.relative_to(REPO)) for directory in ["fonts", "afm", "cmaps", "licenses"]
                  for path in sorted((REPO / "font-data" / directory).iterdir()) if path.is_file())

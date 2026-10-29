@@ -3,7 +3,7 @@ use crate::{
     objects::pdf_dict::PdfDict,
 };
 
-pub(crate) const MAX_TARGET_SOURCE_PIXELS: u64 = 16_000_000;
+pub(crate) const MAX_TARGET_SOURCE_PIXELS: u64 = super::MAX_TARGET_SOURCE_IMAGE_PIXELS;
 
 /// Native IDCT reduction for render-only, sequential JPEG images. Source and
 /// output guards are independent; this never constructs full-size RGB pixels.
@@ -12,7 +12,8 @@ pub(crate) fn decode_target(
     source: (u32, u32),
     target: (u32, u32),
     context: crate::filter::FilterContext<'_>,
-) -> PdfResult<(u32, u32, Vec<u8>)> {
+    budget: &crate::budget::OperationBudget,
+) -> PdfResult<(u32, u32, crate::budget::BudgetedBytes)> {
     let action = || -> PdfResult<_> {
         let mut decoder = mozjpeg::Decompress::new_mem(input)
             .map_err(|e| PdfError::FilterError(format!("DCT header: {e}")))?;
@@ -66,11 +67,16 @@ pub(crate) fn decode_target(
         }
         decoder.scale(scale as u8);
         let size = pixels as usize * components;
-        let mut output = Vec::new();
-        output
-            .try_reserve_exact(size)
-            .map_err(|_| PdfError::ResourceLimit("JPEG reduced output allocation".into()))?;
-        output.resize(size, 0);
+        let actual = budget.live_bytes().saturating_add(size);
+        if actual > budget.maximum_bytes() {
+            return Err(PdfError::ResourceLimitExceeded {
+                reason: "image_operation_bytes",
+                stage: "image_decode",
+                limit: budget.maximum_bytes() as u64,
+                actual: actual as u64,
+            });
+        }
+        let mut output = crate::budget::BudgetedBytes::zeroed(budget, size)?;
         macro_rules! read {
             ($image:ident) => {{
                 if ($image.width(), $image.height()) != (width as usize, height as usize) {
@@ -78,7 +84,7 @@ pub(crate) fn decode_target(
                         "JPEG scaled dimensions disagree".into(),
                     ));
                 }
-                $image.read_scanlines_into::<u8>(&mut output)
+                $image.read_scanlines_into::<u8>(output.as_mut_slice())
             }};
         }
         let read = match decoder
@@ -110,38 +116,35 @@ pub(crate) fn decode_target(
 
 /// Only sequential SOF0 uses the bounded-scanline reduced path. Progressive
 /// coefficient storage can depend on the full source, even with reduced IDCT.
-pub(crate) fn sequential(input: &[u8]) -> bool {
+pub(crate) fn process(input: &[u8]) -> Option<&'static str> {
     if !input.starts_with(&[0xff, 0xd8]) {
-        return false;
+        return None;
     }
     let mut p = 2;
     while input.get(p) == Some(&0xff) {
         while input.get(p) == Some(&0xff) {
             p += 1;
         }
-        let Some(&marker) = input.get(p) else {
-            return false;
-        };
+        let &marker = input.get(p)?;
         p += 1;
         if marker == 0xc0 {
-            return true;
+            return Some("sequential");
+        }
+        if marker == 0xc2 {
+            return Some("progressive");
         }
         if matches!(marker, 0xc1..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf | 0xda | 0xd9) {
-            return false;
+            return None;
         }
-        let Some(bytes) = input.get(p..p + 2) else {
-            return false;
-        };
+        let bytes = input.get(p..p + 2)?;
         let size = usize::from(u16::from_be_bytes([bytes[0], bytes[1]]));
         if size < 2 {
-            return false;
+            return None;
         }
-        let Some(next) = p.checked_add(size) else {
-            return false;
-        };
+        let next = p.checked_add(size)?;
         p = next;
     }
-    false
+    None
 }
 
 pub fn dct_decode(input: &[u8], _params: Option<&PdfDict>) -> PdfResult<Vec<u8>> {

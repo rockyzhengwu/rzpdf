@@ -79,8 +79,8 @@ not all charged to OperationBudget. Original streams stay in the document for
 saving. Full-resolution image extraction and editing do not consume approximate
 render snapshots and can still reject the original large image.
 
-The Web text-geometry query and font preflight use render-friendly incidental
-images too; requesting metadata must not undo the preview's scan-image benefit.
+Web text-geometry queries and font preflight skip image pixel decoding;
+requesting text/font metadata does not force full-resolution image storage.
 Copy permission, text coordinates, layer visibility and font-redaction policies
 remain unchanged. General content inspection/source editing retains its existing
 full-resolution interpretation envelope.
@@ -96,7 +96,8 @@ Not enabled for reduction:
   wavelet levels, but our `scratch_envelope` also accounts for full-source sample
   and code-block metadata. Its safe reduced scratch accounting has not been
   established. `jpxTargetResolution` is explicitly false; merely setting the
-  hint would not establish lower peak memory. Other codecs are unchanged.
+  hint would not establish lower peak memory. Simple Flate support is described
+  below; remaining codecs retain bounded full decoding.
 
 ## Cache observation and release
 
@@ -141,7 +142,7 @@ The ABI retains the existing human-readable error string. Additive exports
 that changes state. The SDK copies the metadata before releasing any handles.
 
 Reducing tile size helps raster-output limits, not necessarily image decoding.
-Lower DPI can help the supported JPEG path. Unsupported image/mask paths may
+Lower DPI can help supported JPEG and simple Flate preview paths. Unsupported image/mask paths may
 still require a different source/profile or a clear limit message, not retries.
 
 ## Verification commands
@@ -186,11 +187,11 @@ precision. This changes fractional-page allocation dimensions from the older
 nearest-integer policy; consumers should query `rasterSize()` rather than
 reimplementing that policy.
 
-### Optional target-resolution JPEG decoding
+### Optional target-resolution image decoding
 
 Pass `{imageDecode: "target"}` to `render` or `renderRegion` to proactively
-reduce eligible JPEGs even when a full decode fits. The default `budgeted`
-policy remains unchanged. This trades some image detail for lower decode and
+reduce eligible JPEG or simple Flate images even when a full decode fits. The
+`budgeted` policy retains full pixels whenever they fit. This trades some image detail for lower decode and
 conversion work and smaller retained images; it never raises resource limits.
 Both policies keep the bounded full-resolution fallback for masks and
 unsupported codecs/processes. See [the API contract](api.md#image-decode-quality-policy).
@@ -225,3 +226,36 @@ and byte `limit`/`actual`. Unfiltered decoded stream failures use
 `decoded_stream_bytes` at `stream_decode`. Reducing DPI does not change the size
 of an encoded raw payload; callers should use the reported reason instead of
 repeatedly retrying unrelated rendering settings.
+
+## Bounded Flate image previews (RZPDF-003)
+
+`imageDecode: "target"` supports a single Flate filter with 8-bit DeviceRGB or
+DeviceGray samples, no masks or device-default color overrides, and Predictor 1
+or row-matched TIFF 2 / PNG 10–15. The default `budgeted` policy retains full
+pixels when they fit and can use this path when the full image exceeds limits.
+An integer area sampler reconstructs rows and generates only target-size samples.
+Decode mapping is applied before averaging; the complete zlib checksum and exact
+source sample length are checked before publication. The source PDF is unchanged.
+
+Capabilities add `flateTargetResolution`, `progressiveJpegTargetResolution`,
+`maxTargetSourcePixels`, `flateComponents`, `flateBitsPerComponent`,
+`flatePredictors`, `flateSourceBytesBoundedBy`, `flateSampling` and `flateStorage`
+inside `imageDecode`. Source work remains bounded to 16,000,000 pixels, and total
+inflated bytes including PNG row tags must fit the active `maxDecodedBytes`.
+Output pixels/RGBA and simultaneous row/target allocations have separate guards.
+Unsupported combinations retain their normal bounded full-fidelity path.
+
+Render-time errors preserve code/reason/stage/limit/actual and add
+`resource.image`: encoding, width, height, targetWidth, targetHeight,
+targetDecodeSupported, unsupportedReason and jpegProcess. `image_source_bytes`
+at `image_decode` means lowering output DPI cannot reduce the required source
+inflation. `image_operation_bytes` describes simultaneous decoder storage.
+Malformed zlib data keeps the `format` category, with image context; progressive
+JPEG remains outside target decoding and reports `jpegProcess: "progressive"`.
+The actual request target must still fit its budgets even when
+`targetDecodeSupported` is true. See [scope and acceptance](../image-preview.md).
+
+The first high-source-pixel Flate slice covers Image XObjects. Inline-image
+parsing retains its existing source-pixel limits; this does not authorize larger
+inline payloads. The render-only route can also sample eligible inline images
+that already pass those parser limits.

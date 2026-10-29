@@ -46,6 +46,20 @@ impl From<String> for ApiError {
 }
 impl From<PdfError> for ApiError {
     fn from(error: PdfError) -> Self {
+        if let PdfError::ImageDecode { details, source } = error {
+            let mut result = Self::from(*source);
+            let context = json!({"encoding":details.encoding,"width":details.width,"height":details.height,
+                "targetWidth":details.target_width,"targetHeight":details.target_height,
+                "targetDecodeSupported":details.target_decode_supported,
+                "unsupportedReason":details.unsupported_reason,"jpegProcess":details.jpeg_process});
+            result
+                .details
+                .get_or_insert_with(|| json!({"reason":"image_decode","stage":"image_decode"}))
+                .as_object_mut()
+                .unwrap()
+                .insert("image".into(), context);
+            return result;
+        }
         let code = match &error {
             PdfError::PasswordRequired => 2,
             PdfError::InvalidPassword => 3,

@@ -180,7 +180,7 @@ fn decode_png_predictor(
     Ok(data)
 }
 
-fn paeth_predictor(a: u8, b: u8, c: u8) -> u8 {
+pub(crate) fn paeth_predictor(a: u8, b: u8, c: u8) -> u8 {
     let p = a as i16 + b as i16 - c as i16;
     let pa = (p - a as i16).abs();
     let pb = (p - b as i16).abs();

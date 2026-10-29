@@ -261,6 +261,35 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
         Ok(value)
     }
 
+    fn image_device_color_override(&self, image: &PdfObject) -> PdfResult<bool> {
+        let Some(color) = image.get_attr("ColorSpace") else {
+            return Ok(false);
+        };
+        let color = self.ctx.resolve(color)?;
+        let key = match color.as_name().map(|v| v.name()) {
+            Some("DeviceRGB" | "RGB") => "DefaultRGB",
+            Some("DeviceGray" | "G") => "DefaultGray",
+            _ => return Ok(false),
+        };
+        let page_resources;
+        let resources = if let Some(scope) = &self.resource_scope {
+            scope
+        } else {
+            page_resources = self.page.resource()?;
+            &page_resources
+        };
+        let Some(colors) = resources.get("ColorSpace") else {
+            return Ok(false);
+        };
+        let colors = self.ctx.resolve(colors)?;
+        let colors = colors.as_dict().ok_or_else(|| {
+            PdfError::PageResourceError("ColorSpace resources must be a dictionary".into())
+        })?;
+        Ok(colors
+            .get(key)
+            .is_some_and(|value| !matches!(value, PdfObject::PdfNull)))
+    }
+
     fn resource_entry(&self, category: &str, name: &str) -> PdfResult<PdfObject> {
         let page_resources;
         let scope = if let Some(scope) = &self.resource_scope {
@@ -2406,7 +2435,9 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
             .ctm()
             .checked_mul(&self.page.page_matrix)?;
         let decoded = if self.pattern_depth == 0 && self.type3_depth == 0 {
-            PdfImage::try_new_for_render(String::new(), &stream, self.ctx, &image_matrix)?
+            PdfImage::try_new_for_render(String::new(), &stream, self.ctx, &image_matrix, || {
+                Ok(false)
+            })?
         } else {
             PdfImage::try_new(String::new(), &stream, self.ctx)?
         }
@@ -2497,9 +2528,9 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                 }
                 // A target-policy image depends on each draw's linear transform.
                 // Keep one bounded variant per name and replace it when needed.
-                let target_transform = if self.ctx.render_image_policy()
-                    == Some(crate::document::prepared_page::ImageDecodePolicy::TargetResolution)
-                {
+                let explicit_target = self.ctx.render_image_policy()
+                    == Some(crate::document::prepared_page::ImageDecodePolicy::TargetResolution);
+                let target_transform = if self.ctx.render_image_dpi().is_some() {
                     let m = self
                         .current_state
                         .ctm()
@@ -2513,11 +2544,12 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                 } else {
                     None
                 };
-                let pdfimage = if let Some(cached) = self
-                    .image_cache
-                    .get(name)
-                    .filter(|cached| cached.target_transform == target_transform)
-                {
+                let pdfimage = if let Some(cached) = self.image_cache.get(name).filter(|cached| {
+                    (cached.target_transform.is_none()
+                        || (self.pattern_depth == 0 && self.type3_depth == 0))
+                        && (cached.target_transform == target_transform
+                            || (!explicit_target && cached.target_transform.is_none()))
+                }) {
                     cached.image.clone()
                 } else {
                     let image_matrix = self
@@ -2531,6 +2563,7 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                                 &xobject,
                                 self.ctx,
                                 &image_matrix,
+                                || self.image_device_color_override(&xobject),
                             )?
                         } else {
                             PdfImage::try_new(name.to_string(), &xobject, self.ctx)?
@@ -2549,6 +2582,11 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                     let full_precision = self.ctx.render_image_dpi().is_none()
                         || (source_dimension("Width")? == Some(width)
                             && source_dimension("Height")? == Some(height));
+                    let target_transform = if explicit_target || !full_precision {
+                        target_transform
+                    } else {
+                        None
+                    };
                     if (target_transform.is_some() || full_precision)
                         && self.image_cache.len() < self.ctx.limits().max_objects
                         && bytes

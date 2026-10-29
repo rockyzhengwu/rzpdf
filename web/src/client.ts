@@ -38,7 +38,8 @@ interface Module {
   _rz_error_details_len?(): number;
 }
 export interface OpenOptions { mode?: "strict" | "compatible"; password?: string; resourceProfile?: "default" | "conservative"; }
-export interface ResourceDetails {reason:string;stage:string;limit?:number;actual?:number;}
+export interface ImageDecodeDetails {encoding:string;width:number;height:number;targetWidth:number|null;targetHeight:number|null;targetDecodeSupported:boolean;unsupportedReason:string|null;jpegProcess:string|null;}
+export interface ResourceDetails {reason:string;stage:string;limit?:number;actual?:number;image?:ImageDecodeDetails;}
 export interface RenderCacheStatistics {sourceInputBytes:number;rawStreamResidentBytes:number;rawStreamPinnedBytes:number;rawStreamTransientBytes:number;rawStreamPeakTransientBytes:number;rawStreamPeakResidentBytes:number;rawStreamLimitBytes:number;rawStreamEntries:number;rawStreamHits:number;rawStreamMisses:number;rawStreamEvictions:number;pageHits:number;pageMisses:number;pageEntries:number;pageEstimatedBytes:number;fontHits:number;fontMisses:number;fontEntries:number;fontEstimatedBytes:number;byteAccounting:string;linearMemoryMayRemainGrown:boolean;callerBuffersReleased:boolean;skiaCacheScope:string;skiaFontBytes:number;skiaFontLimit:number;skiaResourceBytes:number;skiaResourceLimit:number;
   renderSessionEstimatedBytes:number;renderSessionByteLimit:number;
   renderSessionFontManagerEntries:number;renderSessionFontManagerHits:number;renderSessionFontEntries:number;renderSessionImageEntries:number;renderSessionGeometryEntries:number;

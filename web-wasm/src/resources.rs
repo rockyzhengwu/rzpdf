@@ -6,6 +6,15 @@ pub const MAX_FULL_PAGE_DPI: f32 = 288.;
 pub const MAX_REGION_DPI: f32 = 1152.;
 
 pub fn capabilities(limits: Limits) -> Value {
+    let image_decode = json!({"jpegTargetResolution":true,"flateTargetResolution":true,"jpxTargetResolution":false,
+        "progressiveJpegTargetResolution":false,"maxTargetSourcePixels":16000000,
+        "flateComponents":["DeviceRGB","DeviceGray"],"flateBitsPerComponent":[8],
+        "flatePredictors":[1,2,10,11,12,13,14,15],"flateSourceBytesBoundedBy":"maxDecodedBytes",
+        "flateSampling":"area","flateStorage":"scanlines-and-target",
+        "maxJpegSourcePixels":16000000,"jpegProcesses":["sequential"],"maskedReduction":false,
+        "policy":"target-if-full-decode-exceeds-limits",
+        "defaultPolicy":"budgeted","supportedPolicies":["budgeted","target"],
+        "fallback":"bounded-full-resolution-or-error"});
     json!({"abi":2,"renderRegion":true,"regionRasterStatus":"experimental",
         "maxDpi":MAX_FULL_PAGE_DPI,"maxFullPageDpi":MAX_FULL_PAGE_DPI,"maxRegionDpi":MAX_REGION_DPI,
         "maxRegionSide":1024,"maxRasterSide":32768,
@@ -19,11 +28,7 @@ pub fn capabilities(limits: Limits) -> Value {
         "maxInputBytes":null,"maxBufferBytes":BUFFER_LIMIT,"maxJsonBytes":16*1024*1024,"maxWasmMemoryBytes":256*1024*1024,
         "effectiveProfile":if limits.max_operation_bytes==32*1024*1024 {"conservative"} else {"default"},
         "resourceProfiles":["default","conservative"],"cacheStatistics":true,
-        "imageDecode":{"jpegTargetResolution":true,"jpxTargetResolution":false,
-        "maxJpegSourcePixels":16000000,"jpegProcesses":["sequential"],"maskedReduction":false,
-        "policy":"target-if-full-decode-exceeds-limits",
-        "defaultPolicy":"budgeted","supportedPolicies":["budgeted","target"],
-        "fallback":"bounded-full-resolution-or-error"}})
+        "imageDecode":image_decode})
 }
 
 pub fn profile(name: &str) -> ApiResult<Limits> {

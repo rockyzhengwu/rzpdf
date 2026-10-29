@@ -1,7 +1,27 @@
 use thiserror::Error;
 
+/// Stable diagnostic context for a failed render-time image decode.
+#[derive(Debug, Clone)]
+pub struct ImageDecodeDetails {
+    pub encoding: &'static str,
+    pub width: u32,
+    pub height: u32,
+    pub target_width: Option<u32>,
+    pub target_height: Option<u32>,
+    pub target_decode_supported: bool,
+    pub unsupported_reason: Option<&'static str>,
+    pub jpeg_process: Option<&'static str>,
+}
+
 #[derive(Debug, Error)]
 pub enum PdfError {
+    #[error("{source}")]
+    ImageDecode {
+        details: Box<ImageDecodeDetails>,
+        #[source]
+        source: Box<PdfError>,
+    },
+
     #[error("malformed signature: {0}")]
     MalformedSignature(String),
 
@@ -116,5 +136,21 @@ pub type PdfResult<T> = std::result::Result<T, PdfError>;
 impl From<std::io::Error> for PdfError {
     fn from(error: std::io::Error) -> Self {
         Self::IOError(error.to_string())
+    }
+}
+
+impl PdfError {
+    /// The original error category remains available under image diagnostics.
+    pub fn root_cause(&self) -> &Self {
+        match self {
+            Self::ImageDecode { source, .. } => source.root_cause(),
+            error => error,
+        }
+    }
+    pub fn image_decode_details(&self) -> Option<&ImageDecodeDetails> {
+        match self {
+            Self::ImageDecode { details, .. } => Some(details),
+            _ => None,
+        }
     }
 }

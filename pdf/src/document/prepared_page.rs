@@ -15,13 +15,13 @@ use std::{
     rc::Rc,
 };
 
-/// Render-only JPEG decode policy. Neither variant changes extraction or saving.
+/// Render-only image decode policy. Neither variant changes extraction or saving.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ImageDecodePolicy {
     /// Keep full pixels when they fit; reduce only to meet resource limits.
     #[default]
     Budgeted,
-    /// Decode supported JPEGs at the smallest IDCT scale covering their draw size.
+    /// Decode supported images for their draw size (JPEG IDCT or Flate area sampling).
     /// This can change pixels compared with full decode followed by sampling.
     TargetResolution,
 }

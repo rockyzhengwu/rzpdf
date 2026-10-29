@@ -4,6 +4,7 @@ pub mod ccittfax;
 pub mod crypt;
 pub mod dct;
 pub mod flate;
+pub(crate) mod flate_image;
 pub mod jbig2;
 mod jbig2_native;
 pub mod jpx;
@@ -724,3 +725,6 @@ mod limit_tests {
         ));
     }
 }
+
+/// Independent work guard for render-only target decoders.
+pub(crate) const MAX_TARGET_SOURCE_IMAGE_PIXELS: u64 = 16_000_000;

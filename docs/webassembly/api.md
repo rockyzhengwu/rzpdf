@@ -364,9 +364,10 @@ PDF 打开和页面导入不再设置独立的 8 MiB 文件大小上限。`capab
 
 `render()` and `renderRegion()` accept `imageDecode: "budgeted" | "target"`.
 The default, `budgeted`, preserves full-resolution image pixels whenever they
-fit the existing budgets, and uses the existing reduced-JPEG fallback when
-they do not. `target` proactively selects the smallest supported JPEG IDCT
-scale covering the image's transformed drawing size at the requested DPI.
+fit the existing budgets, and can use bounded sequential-JPEG or simple-Flate
+previews when they do not. `target` proactively sizes eligible images for their
+transformed drawing size at the requested DPI: JPEG uses discrete IDCT scales,
+while Flate reconstructs rows and area-samples directly into target-size samples.
 It can change fine detail and edge pixels; it is an explicit preview/display
 quality choice, not a pixel-equivalent optimization.
 
@@ -384,11 +385,31 @@ cache identity. Tile bounds are not: every tile at the same DPI/quality uses
 one interpretation and consistent image samples. The caller must prepare
 again for a higher output DPI; replay cannot restore discarded detail.
 
-Only eligible external sequential JPEG images use reduced IDCT, at 1/8, 1/4
-or 1/2 resolution. Rotation and shear use both transformed axis lengths.
-Masks/SMask/Matte, progressive JPEG, unsupported filters and decoder parameters
-keep bounded full-resolution behavior. JPX and inline images are unchanged.
+Eligible sequential JPEG images use reduced IDCT, at 1/8, 1/4 or 1/2 resolution.
+Simple 8-bit DeviceRGB/DeviceGray Flate XObjects support bounded previews with
+Predictor 1 or row-matched TIFF 2 / PNG 10–15. Rotation and shear use both
+transformed axis lengths. Masks/SMask/Matte, progressive JPEG and unsupported filter/parameter combinations
+keep bounded full-resolution behavior. Flate device-default color overrides are
+also outside the simple preview route. JPX and inline source-pixel parser limits are unchanged.
+Flate cumulative inflated bytes must still fit maxDecodedBytes. See the
+[preview scope and acceptance](../image-preview.md).
 All existing pixel, byte and source limits still apply. Extraction, source
 images and serialization remain at source precision. Capability information
 lists `imageDecode.supportedPolicies` and `defaultPolicy`. WASM flags bit 4
 encodes `target`; bits 0–3 retain their prior meanings.
+
+### Image decode error context
+
+Render-time image failures preserve their existing category and resource fields,
+and add `error.resource.image` with `encoding`, source `width`/`height`, requested
+`targetWidth`/`targetHeight`, `targetDecodeSupported`, `unsupportedReason`, and
+`jpegProcess`. JPEG's actual IDCT dimensions may be larger than the requested
+target. Support indicates a decoder route, not that the requested output fits
+all budgets. Progressive JPEG reports `jpegProcess: "progressive"` and false
+for target support. Source-byte refusals (`image_source_bytes`) are independent
+of output DPI; malformed zlib data keeps the `format` error category.
+
+Native render callers can inspect `PdfError::root_cause()` and
+`image_decode_details()`. `PdfImage::source_pixel_dimensions()` retains original
+image dimensions when `pixel_dimensions()` describes reduced render samples.
+Full-fidelity extraction and save APIs continue to use the original image.

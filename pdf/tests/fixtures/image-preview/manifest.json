@@ -1,0 +1,19 @@
+{
+  "preview-flate.pdf": {
+    "bytes": 22601,
+    "sha256": "48b6c5d3ee04b49abdf5595e220065dfc4db6479eea1b318e8e9743bc0fbcc9b"
+  },
+  "preview-jpeg.pdf": {
+    "bytes": 167322,
+    "sha256": "c456c5932eb4d07cbde80f2d8c47c2de512424fcf5b599378c8b7ba77e8c0b86"
+  },
+  "preview-progressive.pdf": {
+    "bytes": 78875,
+    "sha256": "a5ea9e40640e49f79fc2a7ff32ee41deec9dd13e39154381f274eb7ae289e764"
+  },
+  "preview-flate-corrupt.pdf": {
+    "bytes": 22601,
+    "sha256": "220ce65280a6c11d6d6f2d06c274baf3b18a9d45ad784563b5a4ffeb6c5daea3",
+    "intent": "invalid-zlib-checksum"
+  }
+}

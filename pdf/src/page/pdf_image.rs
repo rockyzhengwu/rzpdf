@@ -13,7 +13,8 @@ pub struct PdfImage {
     width: u32,
     height: u32,
     colorspace: ColorSpace,
-    data: Vec<u8>,
+    data: ImageSamples,
+    source_dimensions: (u32, u32),
     is_mask: bool,
     is_inline: bool,
     interpolate: bool,
@@ -25,6 +26,32 @@ pub struct PdfImage {
     // unblending/colour conversion.
     color_sample_decode: Option<(usize, Vec<f64>)>,
     rendering_intent: Option<crate::color::conversion::RenderingIntent>,
+}
+
+#[derive(Debug, Clone)]
+enum ImageSamples {
+    Owned(Vec<u8>),
+    Budgeted(std::rc::Rc<crate::budget::BudgetedBytes>),
+}
+impl std::ops::Deref for ImageSamples {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            Self::Owned(bytes) => bytes,
+            Self::Budgeted(bytes) => bytes.as_slice(),
+        }
+    }
+}
+impl ImageSamples {
+    fn as_slice(&self) -> &[u8] {
+        self
+    }
+}
+struct DecodedImageSamples {
+    source: (u32, u32),
+    dimensions: (u32, u32),
+    samples: crate::budget::BudgetedBytes,
+    decode_applied: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -99,7 +126,46 @@ impl PdfImage {
         object: &PdfObject,
         ctx: &PDFContext<R>,
         matrix: &crate::geom::matrix::Matrix,
+        device_color_override: impl FnOnce() -> PdfResult<bool>,
     ) -> PdfResult<Self> {
+        // Full-fidelity extraction/display-list APIs keep their existing error
+        // shape; contextual diagnostics belong to render-time decoding.
+        if ctx.render_image_dpi().is_none() {
+            return Self::try_new(name, object, ctx);
+        }
+        let mut details = crate::error::ImageDecodeDetails {
+            encoding: "unknown",
+            width: 0,
+            height: 0,
+            target_width: None,
+            target_height: None,
+            target_decode_supported: false,
+            unsupported_reason: None,
+            jpeg_process: None,
+        };
+        Self::try_new_for_render_inner(
+            name,
+            object,
+            ctx,
+            matrix,
+            device_color_override,
+            &mut details,
+        )
+        .map_err(|source| PdfError::ImageDecode {
+            details: Box::new(details),
+            source: Box::new(source),
+        })
+    }
+
+    fn try_new_for_render_inner<R: Read + Seek>(
+        name: String,
+        object: &PdfObject,
+        ctx: &PDFContext<R>,
+        matrix: &crate::geom::matrix::Matrix,
+        device_color_override: impl FnOnce() -> PdfResult<bool>,
+        details: &mut crate::error::ImageDecodeDetails,
+    ) -> PdfResult<Self> {
+        use super::image_decode::ImageDecodePlan;
         let Some(dpi) = ctx.render_image_dpi() else {
             return Self::try_new(name, object, ctx);
         };
@@ -107,118 +173,233 @@ impl PdfImage {
         let Some(stream) = resolved.as_stream() else {
             return Self::try_new(name, object, ctx);
         };
-        for key in ["Mask", "SMask", "DecodeParms"] {
-            if let Some(value) = stream.dict().get(key)
-                && !matches!(ctx.resolve(value)?, PdfObject::PdfNull)
-            {
-                return Self::try_new(name, object, ctx);
-            }
-        }
-        if let Some(value) = stream.dict().get("ImageMask")
-            && !ctx
-                .resolve(value)?
-                .as_bool()
-                .is_some_and(|flag| !flag.value())
-        {
-            return Self::try_new(name, object, ctx);
-        }
-        if let Some(value) = stream.dict().get("SMaskInData")
-            && ctx.resolve(value)?.as_u32() != Some(0)
-        {
-            return Self::try_new(name, object, ctx);
-        }
-        let filter = stream
-            .dict()
-            .get("Filter")
-            .map(|value| crate::objects::pdf_stream::resolve_filter_setting(value, ctx, false))
-            .transpose()?;
-        let single_jpeg = match filter.as_ref() {
-            Some(PdfObject::PdfName(name)) => matches!(name.name(), "DCT" | "DCTDecode"),
-            Some(PdfObject::PdfArray(array)) if array.len() == 1 => array
-                .get(0)
-                .and_then(PdfObject::as_name)
-                .is_some_and(|name| matches!(name.name(), "DCT" | "DCTDecode")),
-            _ => false,
+        let pool = ctx.limits().operation_budget();
+        let (filter, _filter_lease) = match stream.dict().get("Filter") {
+            Some(value) => crate::objects::pdf_stream::resolve_filter_setting_with_budget(
+                value, ctx, false, &pool,
+            )?,
+            None => (PdfObject::PdfNull, pool.reserve(0)?),
         };
-        if !single_jpeg
-            || !crate::filter::dct::sequential(
-                &stream.read_raw_data(ctx, &ctx.limits().operation_budget())?,
-            )
-        {
-            return Self::try_new(name, object, ctx);
-        }
+        let filter_name = match &filter {
+            PdfObject::PdfName(name) => Some(name.name()),
+            PdfObject::PdfArray(array) if array.len() == 1 => {
+                array.get(0).and_then(PdfObject::as_name).map(|v| v.name())
+            }
+            _ => None,
+        };
+        details.encoding = match filter_name {
+            Some("DCT" | "DCTDecode") => "jpeg",
+            Some("Fl" | "FlateDecode") => "flate",
+            Some("JPXDecode") => "jpx",
+            Some("JBIG2Decode") => "jbig2",
+            Some("CCF" | "CCITTFaxDecode") => "ccitt",
+            None if matches!(filter, PdfObject::PdfNull) => "raw",
+            Some("LZW" | "LZWDecode") => "lzw",
+            Some("RL" | "RunLengthDecode") => "run_length",
+            None if matches!(filter, PdfObject::PdfArray(_)) => "filter_chain",
+            _ => "unknown",
+        };
         let dimension = |key| -> PdfResult<u32> {
-            let value = ctx.resolve(
+            ctx.resolve(
                 stream
                     .dict()
                     .get(key)
                     .ok_or_else(|| PdfError::ObjectError("image dimension missing".into()))?,
-            )?;
-            value
-                .as_number()
-                .ok_or_else(|| PdfError::ObjectError("image dimension must be integer".into()))?
-                .as_u32_checked()
+            )?
+            .as_number()
+            .ok_or_else(|| PdfError::ObjectError("image dimension must be integer".into()))?
+            .as_u32_checked()
         };
         let source = (dimension("Width")?, dimension("Height")?);
-        if source.0 == 0 || source.1 == 0 {
+        details.width = source.0;
+        details.height = source.1;
+        let plan = ImageDecodePlan::for_render(source, matrix, dpi)?;
+        details.target_width = Some(plan.target.0);
+        details.target_height = Some(plan.target.1);
+        if !matches!(details.encoding, "jpeg" | "flate") {
+            details.unsupported_reason = Some("encoding");
             return Self::try_new(name, object, ctx);
         }
-        let source_pixels = u64::from(source.0) * u64::from(source.1);
-        // The budgeted policy preserves full pixels whenever they fit. Reduced IDCT and full decode + filtering are not equal.
-        let full_fits = source_pixels <= ctx.limits().max_image_pixels
-            && source_pixels
-                .checked_mul(4)
-                .is_some_and(|bytes| bytes <= ctx.limits().max_decoded_bytes as u64);
+        for key in ["Mask", "SMask"] {
+            if let Some(value) = stream.dict().get(key)
+                && !matches!(ctx.resolve(value)?, PdfObject::PdfNull)
+            {
+                details.unsupported_reason = Some("mask");
+                return Self::try_new(name, object, ctx);
+            }
+        }
+        if stream
+            .dict()
+            .get("ImageMask")
+            .map(|v| ctx.resolve(v))
+            .transpose()?
+            .is_some_and(|v| v.as_bool().is_none_or(|flag| flag.value()))
+        {
+            details.unsupported_reason = Some("mask");
+            return Self::try_new(name, object, ctx);
+        }
+        if stream
+            .dict()
+            .get("SMaskInData")
+            .map(|v| ctx.resolve(v))
+            .transpose()?
+            .is_some_and(|v| v.as_u32() != Some(0))
+        {
+            details.unsupported_reason = Some("mask");
+            return Self::try_new(name, object, ctx);
+        }
+        if ["F", "FFilter", "FDecodeParms"]
+            .iter()
+            .any(|key| stream.dict().contains_key(key))
+        {
+            details.unsupported_reason = Some("external_stream");
+            return Self::try_new(name, object, ctx);
+        }
+        let bits = stream
+            .dict()
+            .get("BitsPerComponent")
+            .map(|v| ctx.resolve(v))
+            .transpose()?;
+        if bits.as_ref().map_or(Some(8), PdfObject::as_u32) != Some(8) {
+            details.unsupported_reason = Some("component_depth");
+            return Self::try_new(name, object, ctx);
+        }
+        let (params, _params_lease) = match stream.dict().get("DecodeParms") {
+            Some(value) => crate::objects::pdf_stream::resolve_filter_setting_with_budget(
+                value, ctx, true, &pool,
+            )?,
+            None => (PdfObject::PdfNull, pool.reserve(0)?),
+        };
+        let params = match &params {
+            PdfObject::PdfNull => None,
+            PdfObject::PdfDict(dict) => Some(dict),
+            PdfObject::PdfArray(array) if array.len() == 1 => match array.get(0) {
+                Some(PdfObject::PdfNull) => None,
+                Some(PdfObject::PdfDict(dict)) => Some(dict),
+                _ => {
+                    return Err(PdfError::FilterError(
+                        "invalid image DecodeParms entry".into(),
+                    ));
+                }
+            },
+            _ => return Err(PdfError::FilterError("invalid image DecodeParms".into())),
+        };
+        let full_fits = ImageDecodePlan::full_fits(source, ctx.limits());
         let target_policy = ctx.render_image_policy()
             == Some(crate::document::prepared_page::ImageDecodePolicy::TargetResolution);
+        if full_fits && !target_policy {
+            return Self::try_new(name, object, ctx);
+        }
+        if details.encoding == "jpeg" {
+            if params.is_some() {
+                details.unsupported_reason = Some("decode_parameters");
+                return Self::try_new(name, object, ctx);
+            }
+            let raw = stream.read_raw_data(ctx, &pool)?;
+            details.jpeg_process = crate::filter::dct::process(&raw);
+            if details.jpeg_process != Some("sequential") {
+                details.unsupported_reason = Some("jpeg_process");
+                return Self::try_new(name, object, ctx);
+            }
+            details.target_decode_supported = true;
+            // Keep the existing JPEG IDCT sizes and full-fidelity fallback.
+            if full_fits
+                && (u64::from(source.0) * u64::from(source.1)
+                    > crate::filter::dct::MAX_TARGET_SOURCE_PIXELS
+                    || plan.target.0 > source.0.div_ceil(2)
+                    || plan.target.1 > source.1.div_ceil(2))
+            {
+                return Self::try_new(name, object, ctx);
+            }
+            let (width, height, samples) = crate::filter::dct::decode_target(
+                &raw,
+                source,
+                plan.target,
+                crate::filter::FilterContext {
+                    max_image_pixels: ctx.limits().max_image_pixels,
+                    max_decoded_bytes: ctx.limits().max_decoded_bytes,
+                    ..Default::default()
+                },
+                &pool,
+            )?;
+            return Self::try_new_with_samples(
+                name,
+                object,
+                ctx,
+                Some(DecodedImageSamples {
+                    source,
+                    dimensions: (width, height),
+                    samples,
+                    decode_applied: false,
+                }),
+            );
+        }
         if full_fits
-            && (!target_policy || source_pixels > crate::filter::dct::MAX_TARGET_SOURCE_PIXELS)
+            && u64::from(source.0) * u64::from(source.1)
+                > crate::filter::MAX_TARGET_SOURCE_IMAGE_PIXELS
         {
             return Self::try_new(name, object, ctx);
         }
-        let scale = f64::from(dpi) / 72.;
-        let target = (
-            (f64::from(matrix.a()).hypot(f64::from(matrix.b())) * scale).ceil(),
-            (f64::from(matrix.c()).hypot(f64::from(matrix.d())) * scale).ceil(),
-        );
-        if !target.0.is_finite() || !target.1.is_finite() {
-            return Err(PdfError::ObjectError(
-                "image target dimensions nonfinite".into(),
-            ));
-        }
-        // If even half resolution cannot cover both axes there is no useful
-        // IDCT reduction. Keep the established full-decode behavior and limits.
-        if full_fits
-            && (target.0 > f64::from(source.0.div_ceil(2))
-                || target.1 > f64::from(source.1.div_ceil(2)))
-        {
+        if device_color_override()? {
+            details.unsupported_reason = Some("device_color_override");
             return Self::try_new(name, object, ctx);
         }
-        let (width, height, data) = crate::filter::dct::decode_target(
-            &stream.read_raw_data(ctx, &ctx.limits().operation_budget())?,
-            source,
-            (
-                target.0.max(1.).min(f64::from(source.0)) as u32,
-                target.1.max(1.).min(f64::from(source.1)) as u32,
-            ),
-            crate::filter::FilterContext {
-                max_image_pixels: ctx.limits().max_image_pixels,
-                max_decoded_bytes: ctx.limits().max_decoded_bytes,
-                ..Default::default()
+        let color = stream
+            .dict()
+            .get("ColorSpace")
+            .map(|v| ctx.resolve(v))
+            .transpose()?;
+        let components = match color
+            .as_ref()
+            .and_then(PdfObject::as_name)
+            .map(|v| v.name())
+        {
+            Some("DeviceRGB" | "RGB") => 3,
+            Some("DeviceGray" | "G") => 1,
+            _ => {
+                details.unsupported_reason = Some("color_space");
+                return Self::try_new(name, object, ctx);
+            }
+        };
+        let Some(predictor) =
+            crate::filter::flate_image::Predictor8::from_parameters(params, source.0, components)?
+        else {
+            details.unsupported_reason = Some("predictor_layout");
+            return Self::try_new(name, object, ctx);
+        };
+        details.target_decode_supported = true;
+        plan.validate(ctx.limits())?;
+        let decode = image_decode_endpoints(Some(components), stream.dict().get("Decode"), ctx)?;
+        let raw = stream.read_raw_data(ctx, &pool)?;
+        let decoded = crate::filter::flate_image::decode_target(
+            &raw,
+            crate::filter::flate_image::FlateImageRequest {
+                source: plan.source,
+                target: plan.target,
+                components,
+                predictor,
+                decode,
+                compatible: ctx.options().mode == crate::parser::syntax::ParseMode::Compatible,
+                limits: ctx.limits(),
             },
+            &pool,
         )?;
-        let mut dict = stream.dict().clone();
-        dict.remove("Filter");
-        dict.remove("DecodeParms");
-        dict.remove("Length");
-        for (key, value) in [("Width", width), ("Height", height)] {
-            dict.try_insert(
-                key.into(),
-                PdfObject::PdfNumber(crate::objects::pdf_number::PdfNumber::new(value as f32)),
+        if decoded.recovered_tail {
+            ctx.record_structure_recovery(
+                crate::parser::diagnostic::StructureReason::ImageTrailingBytes,
             )?;
         }
-        let decoded = PdfObject::PdfStream(crate::objects::pdf_stream::PdfStream::new(dict, data));
-        Self::try_new(name, &decoded, ctx)
+        Self::try_new_with_samples(
+            name,
+            object,
+            ctx,
+            Some(DecodedImageSamples {
+                source,
+                dimensions: plan.target,
+                samples: decoded.samples,
+                decode_applied: true,
+            }),
+        )
     }
     pub(crate) fn mark_inline(mut self) -> Self {
         self.is_inline = true;
@@ -228,6 +409,14 @@ impl PdfImage {
         name: String,
         image: &PdfObject,
         ctx: &PDFContext<R>,
+    ) -> PdfResult<Self> {
+        Self::try_new_with_samples(name, image, ctx, None)
+    }
+    fn try_new_with_samples<R: Seek + Read>(
+        name: String,
+        image: &PdfObject,
+        ctx: &PDFContext<R>,
+        supplied: Option<DecodedImageSamples>,
     ) -> PdfResult<Self> {
         let resolved = ctx.resolve(image)?;
         let image = &resolved;
@@ -396,8 +585,18 @@ impl PdfImage {
             }
             Ok(value)
         };
-        let height = dimension("Height")?;
-        let width = dimension("Width")?;
+        let source_dimensions = (dimension("Width")?, dimension("Height")?);
+        let (width, height) = supplied
+            .as_ref()
+            .map_or(source_dimensions, |v| v.dimensions);
+        if supplied
+            .as_ref()
+            .is_some_and(|v| v.source != source_dimensions)
+        {
+            return Err(PdfError::ObjectError(
+                "decoded image source dimensions disagree".into(),
+            ));
+        }
         if u64::from(width) * u64::from(height) > ctx.limits().max_image_pixels {
             return Err(PdfError::ResourceLimitExceeded {
                 reason: "image_pixels",
@@ -575,10 +774,16 @@ impl PdfImage {
             }
             _ => None,
         };
-        let mut data = if is_jpx {
-            stream.decode_jpx_image_data(ctx, jpx_preserve_indices)?
+        let (mut data, sample_lease, decode_applied) = if let Some(supplied) = supplied {
+            let (data, lease) = supplied.samples.into_reserved_parts();
+            (data, Some(lease), supplied.decode_applied)
         } else {
-            stream.decode_data(ctx)?
+            let data = if is_jpx {
+                stream.decode_jpx_image_data(ctx, jpx_preserve_indices)?
+            } else {
+                stream.decode_data(ctx)?
+            };
+            (data, None, false)
         };
         let embedded_alpha = if let Some(info) = jpx.filter(|info| info.has_alpha) {
             if data.len()
@@ -762,7 +967,7 @@ impl PdfImage {
             )?;
         } else if bits == 8 {
             // Decode is ignored for non-stencil JPX images (ISO image dictionary).
-            if jpx.is_none() {
+            if jpx.is_none() && !decode_applied {
                 apply_image_decode(&mut data, components, image.get_attr("Decode"), ctx)?;
             }
         } else {
@@ -895,7 +1100,14 @@ impl PdfImage {
             height,
             width,
             colorspace,
-            data,
+            data: if let Some(lease) = sample_lease {
+                ImageSamples::Budgeted(std::rc::Rc::new(
+                    crate::budget::BudgetedBytes::from_reserved_vec(data, lease)?,
+                ))
+            } else {
+                ImageSamples::Owned(data)
+            },
+            source_dimensions,
             is_inline: false,
             is_mask,
             interpolate,
@@ -922,6 +1134,10 @@ impl PdfImage {
     }
     pub fn pixel_dimensions(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+    /// Original PDF image dimensions, including for a render-only preview.
+    pub fn source_pixel_dimensions(&self) -> (u32, u32) {
+        self.source_dimensions
     }
     pub fn data(&self) -> &[u8] {
         self.data.as_slice()
@@ -1418,7 +1634,11 @@ fn image_mask_alpha<R: Read + Seek>(
                 "explicit Mask sample length mismatch".into(),
             ));
         }
-        let mut alpha = stencil.data;
+        let ImageSamples::Owned(mut alpha) = stencil.data else {
+            return Err(PdfError::ObjectError(
+                "stencil mask requires full-fidelity samples".into(),
+            ));
+        };
         for value in &mut alpha {
             *value = 255 - *value;
         }
@@ -1878,7 +2098,11 @@ mod tests {
             let dict = parse(&format!("<< /Width {width} /Height {height} /BitsPerComponent {bits} /ColorSpace [/Indexed /DeviceRGB 3 <FF000000FF000000FFFFFFFF>] {decode} >>")).into_dict().unwrap();
             let object = PdfObject::PdfStream(PdfStream::new(dict, bytes));
             let image = PdfImage::try_new("palette".into(), &object, &ctx).unwrap();
-            assert_eq!(image.data, expected, "bits={bits}, decode={decode}");
+            assert_eq!(
+                image.data.as_slice(),
+                expected,
+                "bits={bits}, decode={decode}"
+            );
             let expected_rgba = expected
                 .iter()
                 .flat_map(|index| palette[(*index as usize).min(3)])
@@ -2225,7 +2449,8 @@ mod tests {
             width: 1,
             height: 1,
             colorspace: ColorSpace::DeviceRgb(DeviceRgb::new()),
-            data: vec![10, 20, 30],
+            data: ImageSamples::Owned(vec![10, 20, 30]),
+            source_dimensions: (1, 1),
             is_mask: false,
             interpolate: false,
             is_inline: false,
@@ -2255,9 +2480,13 @@ mod tests {
             Err(PdfError::ResourceLimit(_))
         ));
         image.max_rgba_bytes = 4;
-        image.data.pop();
+        if let ImageSamples::Owned(data) = &mut image.data {
+            data.pop();
+        }
         assert!(image.rgba_buffer().is_err());
-        image.data.extend_from_slice(&[30, 40]);
+        if let ImageSamples::Owned(data) = &mut image.data {
+            data.extend_from_slice(&[30, 40]);
+        }
         assert!(image.rgba_buffer().is_err());
     }
 }
@@ -2391,7 +2620,7 @@ mod explicit_mask_tests {
             )
             .unwrap();
             image.colorspace = ColorSpace::IccBased(space);
-            image.data = data;
+            image.data = ImageSamples::Owned(data);
             image.color_sample_decode = Some((8, (0..n).flat_map(|_| [1., 0.]).collect()));
             let context = ColorConversionContext::default();
             let mut scalar = context.clone();
@@ -2401,9 +2630,13 @@ mod explicit_mask_tests {
             for short in [true, false] {
                 let mut invalid = image.clone();
                 if short {
-                    invalid.data.pop();
+                    if let ImageSamples::Owned(data) = &mut invalid.data {
+                        data.pop();
+                    }
                 } else {
-                    invalid.data.push(0);
+                    if let ImageSamples::Owned(data) = &mut invalid.data {
+                        data.push(0);
+                    }
                 }
                 assert!(matches!(
                     invalid.rgba_buffer_with_context(&context),

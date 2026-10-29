@@ -29,6 +29,7 @@ pub use font_binding::BudgetedFont as InspectedFont;
 pub mod general_state;
 pub mod graph_state;
 pub mod graphic_state;
+pub(crate) mod image_decode;
 pub mod image_extraction;
 pub mod image_object;
 pub mod inline_image;

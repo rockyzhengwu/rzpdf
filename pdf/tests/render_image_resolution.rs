@@ -98,7 +98,10 @@ fn scan_above_source_pixel_limit_decodes_for_render_without_changing_extraction_
     )
     .unwrap();
     assert!(matches!(
-        low_bytes.prepare_page_for_render(0, None, 144.),
+        low_bytes
+            .prepare_page_for_render(0, None, 144.)
+            .as_ref()
+            .map_err(PdfError::root_cause),
         Err(PdfError::ResourceLimitExceeded {
             reason: "decoded_bytes",
             limit: 4_000_000,
@@ -113,7 +116,9 @@ fn scan_above_source_pixel_limit_decodes_for_render_without_changing_extraction_
         &doc.prepare_page_for_render(0, None, 144.).unwrap()
     ));
     assert!(matches!(
-        doc.prepare_page_for_render(0, None, 576.),
+        doc.prepare_page_for_render(0, None, 576.)
+            .as_ref()
+            .map_err(PdfError::root_cause),
         Err(PdfError::ResourceLimitExceeded {
             reason: "image_pixels",
             ..
@@ -185,7 +190,10 @@ fn fitting_jpegs_keep_original_pixels_and_progressive_oversize_is_not_relaxed() 
     );
     let progressive = scan_with_process(4001, 1000, "q 16 0 0 16 0 0 cm /IMAGE Do Q", true);
     assert!(matches!(
-        progressive.prepare_page_for_render(0, None, 72.),
+        progressive
+            .prepare_page_for_render(0, None, 72.)
+            .as_ref()
+            .map_err(PdfError::root_cause),
         Err(PdfError::ResourceLimitExceeded {
             reason: "image_pixels",
             ..
@@ -193,7 +201,10 @@ fn fitting_jpegs_keep_original_pixels_and_progressive_oversize_is_not_relaxed() 
     ));
     let oversized_source = scan(4001, 4000, "q 16 0 0 16 0 0 cm /IMAGE Do Q");
     assert!(matches!(
-        oversized_source.prepare_page_for_render(0, None, 72.),
+        oversized_source
+            .prepare_page_for_render(0, None, 72.)
+            .as_ref()
+            .map_err(PdfError::root_cause),
         Err(PdfError::ResourceLimitExceeded {
             reason: "image_source_pixels",
             limit: 16_000_000,

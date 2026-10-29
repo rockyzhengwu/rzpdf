@@ -179,6 +179,19 @@ impl BudgetedBytes {
         Ok(Self { data, lease })
     }
 
+    pub(crate) fn zeroed(budget: &OperationBudget, length: usize) -> PdfResult<Self> {
+        let mut lease = budget.reserve(length)?;
+        let mut data = Vec::new();
+        data.try_reserve_exact(length)
+            .map_err(|_| PdfError::ResourceLimit("budgeted byte allocation".into()))?;
+        lease.resize(data.capacity())?;
+        data.resize(length, 0);
+        Ok(Self { data, lease })
+    }
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
+
     pub fn copy_from_slice(budget: &OperationBudget, source: &[u8]) -> PdfResult<Self> {
         let mut lease = budget.reserve(source.len())?;
         let mut data = Vec::new();
