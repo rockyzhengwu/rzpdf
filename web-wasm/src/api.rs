@@ -51,7 +51,9 @@ impl From<PdfError> for ApiError {
             let context = json!({"encoding":details.encoding,"width":details.width,"height":details.height,
                 "targetWidth":details.target_width,"targetHeight":details.target_height,
                 "targetDecodeSupported":details.target_decode_supported,
-                "unsupportedReason":details.unsupported_reason,"jpegProcess":details.jpeg_process});
+                "unsupportedReason":details.unsupported_reason,"jpegProcess":details.jpeg_process,
+                "maskKind":details.mask_kind,"maskWidth":details.mask_width,"maskHeight":details.mask_height,
+                "maskEncoding":details.mask_encoding,"maskBitsPerComponent":details.mask_bits_per_component,"mattePresent":details.matte_present});
             result
                 .details
                 .get_or_insert_with(|| json!({"reason":"image_decode","stage":"image_decode"}))

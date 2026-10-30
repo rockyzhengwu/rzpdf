@@ -11,7 +11,10 @@ pub fn capabilities(limits: Limits) -> Value {
         "flateComponents":["DeviceRGB","DeviceGray"],"flateBitsPerComponent":[8],
         "flatePredictors":[1,2,10,11,12,13,14,15],"flateSourceBytesBoundedBy":"maxDecodedBytes",
         "flateSampling":"area","flateStorage":"scanlines-and-target",
-        "maxJpegSourcePixels":16000000,"jpegProcesses":["sequential"],"maskedReduction":false,
+        "maxJpegSourcePixels":16000000,"jpegProcesses":["sequential"],"maskedReduction":true,
+        "maskedReductionKinds":["soft"],"softMaskEncoding":["flate"],"softMaskBitsPerComponent":[8],
+        "softMaskColorSpace":["DeviceGray"],"softMaskMatte":true,"softMaskInterpolate":false,
+        "maxMaskedSamplingWork":256000000,
         "policy":"target-if-full-decode-exceeds-limits",
         "defaultPolicy":"budgeted","supportedPolicies":["budgeted","target"],
         "fallback":"bounded-full-resolution-or-error"});

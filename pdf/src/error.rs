@@ -11,6 +11,12 @@ pub struct ImageDecodeDetails {
     pub target_decode_supported: bool,
     pub unsupported_reason: Option<&'static str>,
     pub jpeg_process: Option<&'static str>,
+    pub mask_kind: Option<&'static str>,
+    pub mask_width: Option<u32>,
+    pub mask_height: Option<u32>,
+    pub mask_encoding: Option<&'static str>,
+    pub mask_bits_per_component: Option<u32>,
+    pub matte_present: bool,
 }
 
 #[derive(Debug, Error)]

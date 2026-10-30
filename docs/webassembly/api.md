@@ -388,7 +388,9 @@ again for a higher output DPI; replay cannot restore discarded detail.
 Eligible sequential JPEG images use reduced IDCT, at 1/8, 1/4 or 1/2 resolution.
 Simple 8-bit DeviceRGB/DeviceGray Flate XObjects support bounded previews with
 Predictor 1 or row-matched TIFF 2 / PNG 10–15. Rotation and shear use both
-transformed axis lengths. Masks/SMask/Matte, progressive JPEG and unsupported filter/parameter combinations
+transformed axis lengths. Eligible 8-bit Gray Flate SMask images additionally use
+joint color/alpha sampling, including Matte and differing source dimensions.
+Unsupported mask combinations, progressive JPEG and unsupported filter/parameter combinations
 keep bounded full-resolution behavior. Flate device-default color overrides are
 also outside the simple preview route. JPX and inline source-pixel parser limits are unchanged.
 Flate cumulative inflated bytes must still fit maxDecodedBytes. See the
@@ -403,7 +405,10 @@ encodes `target`; bits 0–3 retain their prior meanings.
 Render-time image failures preserve their existing category and resource fields,
 and add `error.resource.image` with `encoding`, source `width`/`height`, requested
 `targetWidth`/`targetHeight`, `targetDecodeSupported`, `unsupportedReason`, and
-`jpegProcess`. JPEG's actual IDCT dimensions may be larger than the requested
+`jpegProcess`. Mask context additionally includes `maskKind`, `maskWidth`,
+`maskHeight`, `maskEncoding`, `maskBitsPerComponent` and `mattePresent`; it is
+available before decoding source pixels. See [masked preview scope](../masked-image-preview.md).
+JPEG's actual IDCT dimensions may be larger than the requested
 target. Support indicates a decoder route, not that the requested output fits
 all budgets. Progressive JPEG reports `jpegProcess: "progressive"` and false
 for target support. Source-byte refusals (`image_source_bytes`) are independent

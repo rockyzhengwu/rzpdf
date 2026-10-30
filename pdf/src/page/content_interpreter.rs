@@ -2580,7 +2580,8 @@ impl<'a, R: Seek + Read> Interpreter<'a, R> {
                     // Budgeted name-only entries retain full-size images. Target
                     // entries additionally validate the draw transform.
                     let full_precision = self.ctx.render_image_dpi().is_none()
-                        || (source_dimension("Width")? == Some(width)
+                        || (!image.is_render_preview()
+                            && source_dimension("Width")? == Some(width)
                             && source_dimension("Height")? == Some(height));
                     let target_transform = if explicit_target || !full_precision {
                         target_transform

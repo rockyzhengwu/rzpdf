@@ -89,7 +89,7 @@ Not enabled for reduction:
 
 - Progressive JPEG: coefficient storage can depend on full source size, even
   with reduced output. Existing bounded full decoding remains in force.
-- SMask/Mask/Matte, Type3 and tiling-pattern images: keep full interpretation and
+- Unsupported mask combinations, Type3 and tiling-pattern images: keep full interpretation and
   mask/colour processing, or fail at its limits. No alpha/matte is discarded.
 - Wrapped/multistage filters or non-null JPEG DecodeParms: unchanged full path.
 - JPX: hayro-jpeg2000 0.4.1 exposes `DecodeSettings.target_resolution` and skips
@@ -193,8 +193,9 @@ Pass `{imageDecode: "target"}` to `render` or `renderRegion` to proactively
 reduce eligible JPEG or simple Flate images even when a full decode fits. The
 `budgeted` policy retains full pixels whenever they fit. This trades some image detail for lower decode and
 conversion work and smaller retained images; it never raises resource limits.
-Both policies keep the bounded full-resolution fallback for masks and
-unsupported codecs/processes. See [the API contract](api.md#image-decode-quality-policy).
+Both policies keep the bounded full-resolution fallback for unsupported mask
+combinations and codecs/processes. Flate RGB/Gray with an eligible 8-bit Gray
+SMask uses joint bounded sampling, including Matte. See [the API contract](api.md#image-decode-quality-policy).
 Cache statistics expose retained storage estimates, not process peak memory.
 
 ## Source stream residency
@@ -247,7 +248,9 @@ Unsupported combinations retain their normal bounded full-fidelity path.
 
 Render-time errors preserve code/reason/stage/limit/actual and add
 `resource.image`: encoding, width, height, targetWidth, targetHeight,
-targetDecodeSupported, unsupportedReason and jpegProcess. `image_source_bytes`
+targetDecodeSupported, unsupportedReason and jpegProcess. Mask diagnostics also
+include maskKind, maskWidth, maskHeight, maskEncoding, maskBitsPerComponent and
+mattePresent; they require dictionary inspection only. `image_source_bytes`
 at `image_decode` means lowering output DPI cannot reduce the required source
 inflation. `image_operation_bytes` describes simultaneous decoder storage.
 Malformed zlib data keeps the `format` category, with image context; progressive
@@ -259,3 +262,19 @@ The first high-source-pixel Flate slice covers Image XObjects. Inline-image
 parsing retains its existing source-pixel limits; this does not authorize larger
 inline payloads. The render-only route can also sample eligible inline images
 that already pass those parser limits.
+
+
+## Bounded soft-mask previews (RZPDF-004)
+
+Single-stage 8-bit RGB/Gray Flate images with a single-stage 8-bit Gray Flate
+SMask support joint target-size color/alpha sampling. Different dimensions,
+Decode reversal and Matte are handled before area reduction. Targets preserve
+finer-mask detail; full-source sample buffers are not allocated. Default limits
+are unchanged. Both checksums are required before cache publication.
+
+Capabilities specify maskedReductionKinds=["soft"], softMaskEncoding=["flate"],
+softMaskBitsPerComponent=[8], softMaskColorSpace=["DeviceGray"], softMaskMatte=true,
+softMaskInterpolate=false and maxMaskedSamplingWork=256000000. Unsupported
+combinations retain full-fidelity bounded behavior. image_sampling_work is an
+independent joint-grid CPU guard. See [scope, diagnostics and
+acceptance](../masked-image-preview.md).

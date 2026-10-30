@@ -1,3 +1,4 @@
+mod mask_preview;
 use std::io::{Read, Seek};
 
 use crate::{
@@ -15,6 +16,7 @@ pub struct PdfImage {
     colorspace: ColorSpace,
     data: ImageSamples,
     source_dimensions: (u32, u32),
+    preview_alpha: Option<std::rc::Rc<crate::budget::BudgetedBytes>>,
     is_mask: bool,
     is_inline: bool,
     interpolate: bool,
@@ -52,6 +54,7 @@ struct DecodedImageSamples {
     dimensions: (u32, u32),
     samples: crate::budget::BudgetedBytes,
     decode_applied: bool,
+    alpha: Option<crate::budget::BudgetedBytes>,
 }
 
 #[derive(Debug, Clone)]
@@ -142,6 +145,12 @@ impl PdfImage {
             target_decode_supported: false,
             unsupported_reason: None,
             jpeg_process: None,
+            mask_kind: None,
+            mask_width: None,
+            mask_height: None,
+            mask_encoding: None,
+            mask_bits_per_component: None,
+            matte_present: false,
         };
         Self::try_new_for_render_inner(
             name,
@@ -216,36 +225,48 @@ impl PdfImage {
         let plan = ImageDecodePlan::for_render(source, matrix, dpi)?;
         details.target_width = Some(plan.target.0);
         details.target_height = Some(plan.target.1);
+        let mask = mask_preview::describe(stream, ctx, details)?;
+        if details.mask_kind.is_some() {
+            details.unsupported_reason = Some(match details.mask_kind {
+                Some("soft") => "mask_encoding",
+                Some("explicit") => "mask_explicit",
+                Some("color-key") => "mask_color_key",
+                Some("stencil") => "mask_stencil",
+                _ => "mask_embedded_alpha",
+            });
+            if details.encoding == "flate" && details.mask_kind == Some("soft") {
+                if device_color_override()? {
+                    details.unsupported_reason = Some("device_color_override");
+                    return Self::try_new(name, object, ctx);
+                }
+                // A finer mask can carry detail absent from a coarse color
+                // image. Size the common target against both source grids.
+                let target = ImageDecodePlan::for_render(
+                    (
+                        source.0.max(details.mask_width.unwrap_or(source.0)),
+                        source.1.max(details.mask_height.unwrap_or(source.1)),
+                    ),
+                    matrix,
+                    dpi,
+                )?
+                .target;
+                let plan = ImageDecodePlan { source, target };
+                details.target_width = Some(target.0);
+                details.target_height = Some(target.1);
+                return Self::try_new_soft_preview(
+                    name,
+                    &resolved,
+                    &mask
+                        .ok_or_else(|| PdfError::ObjectError("missing soft mask object".into()))?,
+                    ctx,
+                    plan,
+                    details,
+                );
+            }
+            return Self::try_new(name, object, ctx);
+        }
         if !matches!(details.encoding, "jpeg" | "flate") {
             details.unsupported_reason = Some("encoding");
-            return Self::try_new(name, object, ctx);
-        }
-        for key in ["Mask", "SMask"] {
-            if let Some(value) = stream.dict().get(key)
-                && !matches!(ctx.resolve(value)?, PdfObject::PdfNull)
-            {
-                details.unsupported_reason = Some("mask");
-                return Self::try_new(name, object, ctx);
-            }
-        }
-        if stream
-            .dict()
-            .get("ImageMask")
-            .map(|v| ctx.resolve(v))
-            .transpose()?
-            .is_some_and(|v| v.as_bool().is_none_or(|flag| flag.value()))
-        {
-            details.unsupported_reason = Some("mask");
-            return Self::try_new(name, object, ctx);
-        }
-        if stream
-            .dict()
-            .get("SMaskInData")
-            .map(|v| ctx.resolve(v))
-            .transpose()?
-            .is_some_and(|v| v.as_u32() != Some(0))
-        {
-            details.unsupported_reason = Some("mask");
             return Self::try_new(name, object, ctx);
         }
         if ["F", "FFilter", "FDecodeParms"]
@@ -331,6 +352,7 @@ impl PdfImage {
                     dimensions: (width, height),
                     samples,
                     decode_applied: false,
+                    alpha: None,
                 }),
             );
         }
@@ -398,6 +420,7 @@ impl PdfImage {
                 dimensions: plan.target,
                 samples: decoded.samples,
                 decode_applied: true,
+                alpha: None,
             }),
         )
     }
@@ -416,7 +439,7 @@ impl PdfImage {
         name: String,
         image: &PdfObject,
         ctx: &PDFContext<R>,
-        supplied: Option<DecodedImageSamples>,
+        mut supplied: Option<DecodedImageSamples>,
     ) -> PdfResult<Self> {
         let resolved = ctx.resolve(image)?;
         let image = &resolved;
@@ -685,10 +708,15 @@ impl PdfImage {
         } else {
             None
         };
-        let resolved_soft_mask = image
-            .get_attr("SMask")
-            .map(|mask| ctx.resolve(mask))
-            .transpose()?;
+        let has_preview_alpha = supplied.as_ref().is_some_and(|s| s.alpha.is_some());
+        let resolved_soft_mask = if has_preview_alpha {
+            None
+        } else {
+            image
+                .get_attr("SMask")
+                .map(|mask| ctx.resolve(mask))
+                .transpose()?
+        };
         let matte = resolved_soft_mask
             .as_ref()
             .map(|mask| image_matte(mask, &colorspace, ctx))
@@ -774,6 +802,10 @@ impl PdfImage {
             }
             _ => None,
         };
+        let preview_alpha = supplied
+            .as_mut()
+            .and_then(|s| s.alpha.take())
+            .map(std::rc::Rc::new);
         let (mut data, sample_lease, decode_applied) = if let Some(supplied) = supplied {
             let (data, lease) = supplied.samples.into_reserved_parts();
             (data, Some(lease), supplied.decode_applied)
@@ -918,9 +950,10 @@ impl PdfImage {
         }
         // SMask takes precedence over Mask. Colour keys compare encoded samples
         // before Decode, colour conversion, or indexed palette lookup.
-        let hard_mask_alpha = if resolved_soft_mask
-            .as_ref()
-            .is_some_and(|value| !matches!(value, PdfObject::PdfNull))
+        let hard_mask_alpha = if has_preview_alpha
+            || resolved_soft_mask
+                .as_ref()
+                .is_some_and(|value| !matches!(value, PdfObject::PdfNull))
         {
             None
         } else if let Some(value) = image.get_attr("Mask") {
@@ -1108,6 +1141,7 @@ impl PdfImage {
                 ImageSamples::Owned(data)
             },
             source_dimensions,
+            preview_alpha,
             is_inline: false,
             is_mask,
             interpolate,
@@ -1135,6 +1169,11 @@ impl PdfImage {
     pub fn pixel_dimensions(&self) -> (u32, u32) {
         (self.width, self.height)
     }
+    /// Render samples can depend on scale even when color dimensions match
+    /// the source: a finer mask may have been reduced to that same size.
+    pub(crate) fn is_render_preview(&self) -> bool {
+        self.preview_alpha.is_some() || self.source_dimensions != (self.width, self.height)
+    }
     /// Original PDF image dimensions, including for a render-only preview.
     pub fn source_pixel_dimensions(&self) -> (u32, u32) {
         self.source_dimensions
@@ -1147,7 +1186,12 @@ impl PdfImage {
         let bytes = self
             .data
             .len()
-            .checked_add(self.soft_mask.as_ref().map_or(0, |mask| mask.data.len()))
+            .checked_add(
+                self.preview_alpha
+                    .as_ref()
+                    .map_or(0, |alpha| alpha.as_slice().len()),
+            )
+            .and_then(|n| n.checked_add(self.soft_mask.as_ref().map_or(0, |mask| mask.data.len())))
             .and_then(|n| {
                 n.checked_add(
                     self.hard_mask_alpha
@@ -1534,6 +1578,14 @@ impl PdfImage {
                 let alpha =
                     mask.alpha_at(index as u32 % width, index as u32 / width, width, height);
                 pixel[3] = ((u16::from(pixel[3]) * u16::from(alpha) + 127) / 255) as u8;
+            }
+        }
+        if let Some(alpha) = &self.preview_alpha {
+            if alpha.as_slice().len() != self.pixel_count {
+                return Err(PdfError::ObjectError("preview alpha size mismatch".into()));
+            }
+            for (index, pixel) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                pixel[3] = alpha.as_slice()[source_index(index)];
             }
         }
         Ok(rgba)
@@ -2460,6 +2512,7 @@ mod tests {
             hard_mask_alpha: None,
             color_sample_decode: None,
             rendering_intent: None,
+            preview_alpha: None,
         };
         assert_eq!(image.rgba_buffer().unwrap(), vec![10, 20, 30, 255]);
         image.soft_mask = Some(ImageSoftMask {

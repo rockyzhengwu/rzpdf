@@ -9,6 +9,7 @@ pub mod jbig2;
 mod jbig2_native;
 pub mod jpx;
 pub mod lzw;
+pub(crate) mod masked_image;
 pub mod pnm;
 pub mod predictor;
 pub mod run_length;

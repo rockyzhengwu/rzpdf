@@ -121,6 +121,13 @@ def source_inventory():
         "web/tests/source-streams-browser.mjs", "docs/source-streams.md",
     ])
     optional.extend([
+        "pdf/src/filter/masked_image.rs", "pdf/src/page/pdf_image/mask_preview.rs",
+        "render/examples/masked_preview.rs", "scripts/masked-preview-fixtures.py", "scripts/masked-preview-references.py",
+        "web/tests/masked-preview-browser.mjs", "docs/masked-image-preview.md",
+        "pdf/tests/fixtures/masked-preview/manifest.json", "pdf/tests/fixtures/masked-preview/README.md",
+        "pdf/tests/fixtures/masked-preview/soft-white.pdf", "pdf/tests/fixtures/masked-preview/soft-dark.pdf",
+        "pdf/tests/fixtures/masked-preview/soft-checker.pdf", "pdf/tests/fixtures/masked-preview/soft-matte.pdf",
+        "pdf/tests/fixtures/masked-preview/soft-different.pdf", "pdf/tests/fixtures/masked-preview/soft-corrupt.pdf",
         "pdf/src/filter/flate_image.rs", "pdf/src/filter/predictor.rs", "pdf/src/page/image_decode.rs", "pdf/src/page/mod.rs",
         "pdf/src/budget.rs", "pdf/tests/image_preview.rs", "scripts/image-preview-fixtures.py",
         "web/tests/image-preview-browser.mjs", "docs/image-preview.md", "docs/webassembly/api.md",

@@ -1,0 +1,26 @@
+{
+  "soft-white.pdf": {
+    "bytes": 59511,
+    "sha256": "7009be04f67dcf6accca99d718612f4459c58f869299db7c4d4bdcbdc5a064ad"
+  },
+  "soft-dark.pdf": {
+    "bytes": 59543,
+    "sha256": "e452325faa96d3927fd78fcd3a796ff1efd0625e6f244906f2f8828f2294384f"
+  },
+  "soft-checker.pdf": {
+    "bytes": 70104,
+    "sha256": "b25ece296ce9e8e95be93fe5a86c725089353f1da5b5848bdd0f3a1e9504561d"
+  },
+  "soft-matte.pdf": {
+    "bytes": 42959,
+    "sha256": "4ad8e6bcff9de7c0b22f36397ec70b1cbce1a48c7603bc788ddea54d387825ef"
+  },
+  "soft-different.pdf": {
+    "bytes": 33358,
+    "sha256": "93f1a5c341c9dc9c45fff238dc1291acceff100e6d13a603db5b86bb54527287"
+  },
+  "soft-corrupt.pdf": {
+    "bytes": 59511,
+    "sha256": "ba8a5bf59b5d9e603891aa080ffc777af7cfc90aef560720d9059e7e5d630d0d"
+  }
+}

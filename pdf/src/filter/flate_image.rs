@@ -205,6 +205,7 @@ pub(crate) struct FlatePreview {
     pub recovered_tail: bool,
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct FlateImageRequest {
     pub source: (u32, u32),
     pub target: (u32, u32),
@@ -213,6 +214,104 @@ pub(crate) struct FlateImageRequest {
     pub decode: Option<[f64; 8]>,
     pub compatible: bool,
     pub limits: Limits,
+}
+
+/// Forward-only source rows shared by opaque and masked preview decoders.
+/// Predictor history always retains original samples, before Decode/Matte.
+pub(crate) struct FlateRows<'a> {
+    zlib: InflateRows<'a>,
+    request: FlateImageRequest,
+    row: BudgetedBytes,
+    previous: BudgetedBytes,
+    count: u32,
+}
+impl<'a> FlateRows<'a> {
+    pub fn new(
+        input: &'a [u8],
+        request: FlateImageRequest,
+        pool: &OperationBudget,
+    ) -> PdfResult<Self> {
+        let (row_bytes, history_bytes) = Self::storage_bytes(request)?;
+        Ok(Self {
+            zlib: InflateRows::new(input),
+            request,
+            row: BudgetedBytes::zeroed(pool, row_bytes)?,
+            previous: BudgetedBytes::zeroed(pool, history_bytes)?,
+            count: 0,
+        })
+    }
+    pub fn storage_bytes(request: FlateImageRequest) -> PdfResult<(usize, usize)> {
+        let pixels = u64::from(request.source.0) * u64::from(request.source.1);
+        if pixels == 0 || !matches!(request.components, 1 | 3) {
+            return Err(PdfError::ObjectError(
+                "invalid Flate source dimensions/components".into(),
+            ));
+        }
+        if pixels > super::MAX_TARGET_SOURCE_IMAGE_PIXELS {
+            return Err(limit(
+                "image_source_pixels",
+                super::MAX_TARGET_SOURCE_IMAGE_PIXELS,
+                pixels,
+            ));
+        }
+        let row_bytes = (request.source.0 as usize)
+            .checked_mul(request.components)
+            .ok_or_else(|| PdfError::ResourceLimit("Flate row size".into()))?;
+        let inflated = row_bytes
+            .checked_add(usize::from(request.predictor.png()))
+            .and_then(|n| n.checked_mul(request.source.1 as usize))
+            .ok_or_else(|| PdfError::ResourceLimit("Flate source size".into()))?;
+        if inflated > request.limits.max_decoded_bytes {
+            return Err(limit(
+                "image_source_bytes",
+                request.limits.max_decoded_bytes as u64,
+                inflated as u64,
+            ));
+        }
+        Ok((
+            row_bytes,
+            if request.predictor.png() {
+                row_bytes
+            } else {
+                0
+            },
+        ))
+    }
+    pub fn next(&mut self) -> PdfResult<()> {
+        if self.count >= self.request.source.1 {
+            return Err(PdfError::FilterError("too many Flate row reads".into()));
+        }
+        if self.count > 0 && self.request.predictor.png() {
+            std::mem::swap(&mut self.row, &mut self.previous);
+        }
+        let mut filter = [0];
+        if self.request.predictor.png() {
+            self.zlib.exact(&mut filter)?;
+        }
+        self.zlib.exact(self.row.as_mut_slice())?;
+        self.request.predictor.restore(
+            self.row.as_mut_slice(),
+            self.previous.as_slice(),
+            self.request.components,
+            filter[0],
+        )?;
+        self.count += 1;
+        Ok(())
+    }
+    pub fn samples(&self) -> &[u8] {
+        self.row.as_slice()
+    }
+    pub fn finish(&mut self) -> PdfResult<bool> {
+        if self.count != self.request.source.1 {
+            return Err(PdfError::FilterError(
+                "incomplete Flate row traversal".into(),
+            ));
+        }
+        self.zlib.finish(
+            self.request.compatible && self.request.predictor.value == 1,
+            self.request.limits.max_decoded_bytes,
+        )
+    }
 }
 
 /// Area-average in integer source/destination coordinates. One reconstructed
@@ -229,7 +328,7 @@ pub(crate) fn decode_target(
         components,
         predictor,
         decode,
-        compatible,
+        compatible: _,
         limits,
     } = request;
     let (sw, sh, tw, th) = (
@@ -310,8 +409,7 @@ pub(crate) fn decode_target(
             .checked_mul(th)
             .ok_or_else(|| PdfError::ResourceLimit("image target samples".into()))?,
     )?;
-    let mut row = BudgetedBytes::zeroed(pool, row_bytes)?;
-    let mut previous = BudgetedBytes::zeroed(pool, if predictor.png() { row_bytes } else { 0 })?;
+    let mut rows = FlateRows::new(input, request, pool)?;
     let (mut horizontal, _horizontal_lease) = zeros_u64(pool, slots)?;
     let (mut accumulated, _accumulated_lease) = zeros_u64(pool, slots)?;
     let mut table = [[0u8; 256]; 3];
@@ -329,20 +427,9 @@ pub(crate) fn decode_target(
             };
         }
     }
-    let mut zlib = InflateRows::new(input);
     let mut output_y = 0usize;
     for y in 0..sh {
-        let mut filter = [0u8];
-        if predictor.png() {
-            zlib.exact(&mut filter)?;
-        }
-        zlib.exact(row.as_mut_slice())?;
-        predictor.restore(
-            row.as_mut_slice(),
-            previous.as_slice(),
-            components,
-            filter[0],
-        )?;
+        rows.next()?;
         horizontal.fill(0);
         for x in 0..tw {
             let start = x as u64 * sw as u64;
@@ -351,7 +438,7 @@ pub(crate) fn decode_target(
                 let weight = end.min((sx + 1) * tw as u64) - start.max(sx * tw as u64);
                 for c in 0..components {
                     horizontal[x * components + c] +=
-                        u64::from(table[c][row.as_slice()[sx as usize * components + c] as usize])
+                        u64::from(table[c][rows.samples()[sx as usize * components + c] as usize])
                             * weight;
                 }
             }
@@ -376,17 +463,13 @@ pub(crate) fn decode_target(
                 output_y += 1;
             }
         }
-        if predictor.png() {
-            std::mem::swap(&mut row, &mut previous);
-        }
     }
     if output_y != th {
         return Err(PdfError::IOError(
             io::Error::other("image sampling coverage").to_string(),
         ));
     }
-    let recovered_tail =
-        zlib.finish(compatible && predictor.value == 1, limits.max_decoded_bytes)?;
+    let recovered_tail = rows.finish()?;
     Ok(FlatePreview {
         samples: output,
         recovered_tail,

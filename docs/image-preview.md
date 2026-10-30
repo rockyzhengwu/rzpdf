@@ -1,5 +1,8 @@
 # Bounded image previews (RZPDF-003)
 
+Follow-up: [RZPDF-004 masked previews](masked-image-preview.md) extends the original
+unmasked boundary documented here.
+
 Scope: render-only target decoding, with the existing default browser budgets.
 Source PDF streams, full-fidelity extraction and save/edit behavior stay separate.
 
