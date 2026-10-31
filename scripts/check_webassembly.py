@@ -121,6 +121,12 @@ def source_inventory():
         "web/tests/source-streams-browser.mjs", "docs/source-streams.md",
     ])
     optional.extend([
+        "render/src/group_target.rs", "render/src/icc_group_tests.rs", "render/src/owned_raster.rs",
+        "render/examples/group_resources.rs", "web/tests/group-resources-browser.mjs", "docs/render-group-resources.md",
+        "pdf/tests/fixtures/group-resources/manifest.json", "pdf/tests/fixtures/group-resources/README.md",
+        "pdf/tests/fixtures/group-resources/local-icc.pdf", "pdf/tests/fixtures/group-resources/nested.pdf",
+        "pdf/tests/fixtures/group-resources/rotated.pdf", "pdf/tests/fixtures/group-resources/soft-mask.pdf",
+        "pdf/tests/fixtures/group-resources/knockout.pdf", "pdf/tests/fixtures/group-resources/large-group.pdf",
         "pdf/src/filter/masked_image.rs", "pdf/src/page/pdf_image/mask_preview.rs",
         "render/examples/masked_preview.rs", "scripts/masked-preview-fixtures.py", "scripts/masked-preview-references.py",
         "web/tests/masked-preview-browser.mjs", "docs/masked-image-preview.md",
@@ -137,6 +143,23 @@ def source_inventory():
         "pdf/tests/fixtures/image-preview/preview-jpeg.pdf",
         "pdf/tests/fixtures/image-preview/preview-progressive.pdf",
     ])
+    optional.extend([
+        "web-wasm/build.rs", "web/src/render-planner.ts", "web/tests/render-planner.mjs",
+        "web/tests/compatibility-resources-browser.mjs", "web/tests/compatibility-corpus-browser.mjs",
+        "web/tests/fixtures/blob-ids-worker.mjs", "web/tests/owned-browser.mjs",
+        "scripts/compatibility_corpus.py", "scripts/inventory_pdf_corpus.py",
+        "scripts/compatibility_visual_worker.py", "scripts/compare_compatibility_reports.py",
+        "scripts/run_browser_compatibility.py", "scripts/test_browser_compatibility.py",
+        "scripts/compatibility_hint_fixture.py",
+        "docs/compatibility-program.md", "pdf/examples/compatibility_fixtures.rs",
+        "render/examples/compatibility_probe.rs",
+        "pdf/tests/fixtures/compatibility/manifest.json", "pdf/tests/fixtures/compatibility/README.md",
+        "pdf/tests/fixtures/compatibility/scan-jbig2.pdf", "pdf/tests/fixtures/compatibility/scan-ccitt.pdf", "pdf/tests/fixtures/compatibility/scan-flate.pdf",
+        "pdf/tests/fixtures/compatibility/hint-failed.pdf", "pdf/tests/fixtures/compatibility/hint-reference.pdf",
+    ])
+    # Include newly introduced modules automatically, including the C source bridge.
+    optional.extend(str(path.relative_to(REPO)) for directory in ["pdf/src", "render/src", "web-wasm/src", "web/src"]
+                    for path in sorted((REPO / directory).rglob("*")) if path.suffix in [".rs", ".c", ".h", ".ts"])
     files.extend(name for name in optional if (REPO / name).exists())
     files.extend(str(path.relative_to(REPO)) for directory in ["fonts", "afm", "cmaps", "licenses"]
                  for path in sorted((REPO / "font-data" / directory).iterdir()) if path.is_file())

@@ -253,7 +253,7 @@ fn query(d: &Document, document: u32, request: &Value) -> ApiResult<Value> {
             let mut value = crate::resources::capabilities(d.resource_limits());
             value.as_object_mut().unwrap().extend(json!({"abi":2,"text":true,"navigation":true,"passwordOpen":true,
             "annotations":true,"forms":true,"editing":true,"save":true,"renderRegion":true,"maxRegionSide":1024,"maxRasterSide":32768,"regionRasterStatus":"experimental",
-            "textOrder":"paint","maxInputBytes":null,"maxBufferBytes":BUFFER_LIMIT,"maxJsonBytes":OUTPUT_LIMIT,
+            "textOrder":"paint","maxBufferBytes":BUFFER_LIMIT,"maxJsonBytes":OUTPUT_LIMIT,
             "revision":d.revision()}).as_object().unwrap().clone());
             Ok(value)
         },
@@ -310,33 +310,38 @@ fn query(d: &Document, document: u32, request: &Value) -> ApiResult<Value> {
 pub extern "C" fn rz_error_code() -> u32 {
     STATE.with(|s| s.borrow().error_code)
 }
+pub(crate) fn open_options(
+    s: &State,
+    options: u32,
+) -> ApiResult<(ParseMode, Limits, Option<Zeroizing<String>>)> {
+    let Value::Object(mut options) = request(s, options)? else {
+        unreachable!()
+    };
+    let mode = match options.remove("mode") {
+        None => ParseMode::Strict,
+        Some(Value::String(mode)) if mode == "strict" => ParseMode::Strict,
+        Some(Value::String(mode)) if mode == "compatible" => ParseMode::Compatible,
+        _ => return Err("mode must be strict or compatible".into()),
+    };
+    let policy = match options.remove("resourceProfile") {
+        None => limits(),
+        Some(Value::String(name)) => crate::resources::profile(&name)?,
+        _ => return Err("resourceProfile must be a supported profile name".into()),
+    };
+    let password = match options.remove("password") {
+        None => None,
+        Some(Value::String(password)) if password.len() <= 1024 => Some(Zeroizing::new(password)),
+        _ => return Err("password must be a UTF-8 string of at most 1024 bytes".into()),
+    };
+    if !options.is_empty() {
+        return Err("unknown open option".into());
+    }
+    Ok((mode, policy, password))
+}
 #[unsafe(no_mangle)]
 pub extern "C" fn rz_open_with_options(input: u32, options: u32) -> u32 {
     call(|s| {
-        let Value::Object(mut options) = request(s, options)? else {
-            unreachable!()
-        };
-        let mode = match options.remove("mode") {
-            None => ParseMode::Strict,
-            Some(Value::String(mode)) if mode == "strict" => ParseMode::Strict,
-            Some(Value::String(mode)) if mode == "compatible" => ParseMode::Compatible,
-            _ => return Err("mode must be strict or compatible".into()),
-        };
-        let policy = match options.remove("resourceProfile") {
-            None => limits(),
-            Some(Value::String(name)) => crate::resources::profile(&name)?,
-            _ => return Err("resourceProfile must be a supported profile name".into()),
-        };
-        let password = match options.remove("password") {
-            None => None,
-            Some(Value::String(password)) if password.len() <= 1024 => {
-                Some(Zeroizing::new(password))
-            }
-            _ => return Err("password must be a UTF-8 string of at most 1024 bytes".into()),
-        };
-        if !options.is_empty() {
-            return Err("unknown open option".into());
-        }
+        let (mode, policy, password) = open_options(s, options)?;
         open_with_policy(
             s,
             input,

@@ -799,7 +799,7 @@ pub(crate) fn resolve_setting_reference<R: Seek + Read>(
     Ok(object)
 }
 
-fn resolve_jbig2_globals_with_budget<R: Seek + Read>(
+pub(crate) fn resolve_jbig2_globals_with_budget<R: Seek + Read>(
     params: Option<&PdfObject>,
     ctx: &PDFContext<R>,
     budget: &crate::budget::OperationBudget,

@@ -44,6 +44,7 @@ struct Envelope {
     scratch: usize,
     work: usize,
     symbols: bool,
+    native_preview: bool,
 }
 fn preflight(
     data: &[u8],
@@ -236,14 +237,16 @@ fn preflight(
             }
             _ => return Err(unsupported("segment type outside region baseline")),
         }
-        state.scratch = state
-            .scratch
-            .checked_add(
-                bitmap_pixels
-                    .checked_mul(16)
-                    .ok_or_else(|| limit("scratch multiplication"))?,
-            )
-            .ok_or_else(|| limit("scratch envelope"))?;
+        if !state.native_preview {
+            state.scratch = state
+                .scratch
+                .checked_add(
+                    bitmap_pixels
+                        .checked_mul(16)
+                        .ok_or_else(|| limit("scratch multiplication"))?,
+                )
+                .ok_or_else(|| limit("scratch envelope"))?;
+        }
         state.work = state
             .work
             .checked_add(bitmap_pixels)
@@ -299,12 +302,33 @@ pub fn decode_with_budget(
     context: FilterContext<'_>,
     budget: &OperationBudget,
 ) -> PdfResult<BudgetedBytes> {
+    decode_inner(input, context, budget, None, |_| Ok(()))
+}
+
+/// Decode only a packed source bitmap; native scratch uses live allocation leases.
+pub(crate) fn decode_preview(
+    input: &[u8],
+    context: FilterContext<'_>,
+    budget: &OperationBudget,
+    source: (u32, u32),
+    charge: impl FnOnce(u64) -> PdfResult<()>,
+) -> PdfResult<BudgetedBytes> {
+    decode_inner(input, context, budget, Some(source), charge)
+}
+fn decode_inner(
+    input: &[u8],
+    context: FilterContext<'_>,
+    budget: &OperationBudget,
+    source: Option<(u32, u32)>,
+    charge: impl FnOnce(u64) -> PdfResult<()>,
+) -> PdfResult<BudgetedBytes> {
     let mut envelope = Envelope {
         page: None,
         segments: Vec::new(),
         scratch: 1024 * 1024,
         work: 0,
         symbols: false,
+        native_preview: source.is_some(),
     };
     let _headers = budget.reserve(1024 * std::mem::size_of::<(u32, u8)>())?;
     envelope
@@ -318,6 +342,10 @@ pub fn decode_with_budget(
     let (width, height) = envelope
         .page
         .ok_or_else(|| error("missing page information"))?;
+    if source.is_some_and(|size| size != (width, height)) {
+        return Err(error("image dictionary/header mismatch"));
+    }
+    charge((envelope.work as u64).saturating_add(u64::from(width) * u64::from(height)))?;
     if let Some(dict) = context.stream_dict {
         for (key, expected) in [
             ("Width", width),
@@ -336,6 +364,15 @@ pub fn decode_with_budget(
         .checked_mul(height as usize)
         .filter(|n| *n <= context.max_decoded_bytes)
         .ok_or_else(|| limit("packed output bytes"))?;
+    if source.is_some() {
+        return super::jbig2_native::decode_preview(
+            input,
+            context.jbig2_globals,
+            width,
+            height,
+            budget,
+        );
+    }
     if envelope.symbols {
         return super::jbig2_native::decode(input, context.jbig2_globals, width, height, budget);
     }
@@ -382,4 +419,66 @@ pub fn jbig2_decode(
     Ok(decode_with_budget(input, context, &pool)?
         .into_reserved_parts()
         .0)
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+    use crate::filter::bilevel_preview::{Request, Sampler};
+    use crate::parser::options::Limits;
+    #[test]
+    fn packed_native_preview_matches_independent_full_decoder_and_shared_globals() {
+        let generic = include_bytes!("../../tests/fixtures/v06/generic-mmr.jb2").as_slice();
+        let arithmetic = include_bytes!("../../tests/fixtures/v06/jbig2enc-generic.jb2").as_slice();
+        let half = include_bytes!("../../tests/fixtures/v06/halftone-0.jb2").as_slice();
+        let globals = include_bytes!("../../tests/fixtures/v06/patterns-global.jb2").as_slice();
+        for (input, globals, source) in [
+            (generic, None, (32, 32)),
+            (arithmetic, None, (32, 32)),
+            (half, Some(globals), (32, 32)),
+        ] {
+            let pool = OperationBudget::new(8 * 1024 * 1024);
+            let context = FilterContext {
+                jbig2_globals: globals,
+                ..Default::default()
+            };
+            let expected = decode_with_budget(input, context, &pool).unwrap();
+            let mut charged = 0;
+            let actual = decode_preview(input, context, &pool, source, |work| {
+                charged = work;
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(actual.as_slice(), expected.as_slice());
+            assert!(charged >= 1024);
+            let mut sampler = Sampler::new(
+                Request {
+                    source,
+                    target: (4, 4),
+                    decode: [0., 1.],
+                    limits: Limits::default(),
+                },
+                &pool,
+            )
+            .unwrap();
+            sampler.push_packed(actual.as_slice()).unwrap();
+            assert_eq!(sampler.finish().unwrap().as_slice().len(), 16);
+            drop(actual);
+            drop(expected);
+            assert_eq!(pool.live_bytes(), 0);
+            assert!(decode_preview(input, context, &pool, (31, 32), |_| Ok(())).is_err());
+            assert!(
+                decode_preview(
+                    &input[..input.len() / 2],
+                    context,
+                    &pool,
+                    source,
+                    |_| Ok(())
+                )
+                .is_err()
+            );
+            assert!(decode_preview(input, context, &pool, source, |_| Err(limit("work"))).is_err());
+            assert_eq!(pool.live_bytes(), 0);
+        }
+    }
 }

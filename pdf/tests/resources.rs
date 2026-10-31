@@ -496,7 +496,7 @@ fn image_registration_resolves_subtype_and_preserves_stream_on_roundtrip() {
     );
     assert_eq!(
         reopened
-            .read_stream_data(&reopened.resolve_object(image).unwrap().as_stream().unwrap())
+            .read_stream_data(reopened.resolve_object(image).unwrap().as_stream().unwrap())
             .unwrap()
             .as_ref(),
         &[255, 0, 0]

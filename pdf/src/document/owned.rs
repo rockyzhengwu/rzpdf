@@ -235,6 +235,19 @@ impl Document {
             source_baseline: None,
         })
     }
+    /// Seekable owned input with password authentication. Reader-backed inputs
+    /// support full saves; incremental signatures require immutable byte input.
+    pub fn from_reader_with_password_and_options<R: Read + Seek + 'static>(
+        reader: R,
+        password: &str,
+        options: ParseOptions,
+    ) -> PdfResult<Self> {
+        let reader: OwnedReader = Box::new(reader);
+        Ok(Self {
+            inner: PdfDocument::from_reader_with_password_and_options(reader, password, options)?,
+            source_baseline: None,
+        })
+    }
     pub fn from_reader_with_mode<R: Read + Seek + 'static>(
         reader: R,
         mode: ParseMode,

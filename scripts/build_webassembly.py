@@ -154,6 +154,15 @@ def main():
         report.update(status="passed" if code == 0 else "failed", returncode=code,
                       seconds=round(time.monotonic() - start, 3))
         if code == 0:
+            # Do not publish an artifact with a source manifest captured before
+            # concurrent edits. Include newly added modules, not just old paths.
+            final_hashes = source_inventory()["source_sha256"]
+            original_hashes = inventory["source_sha256"]
+            changed = sorted(name for name in original_hashes.keys() | final_hashes.keys()
+                             if original_hashes.get(name) != final_hashes.get(name))
+            if changed:
+                report["changed_sources_during_build"] = changed
+                raise ValueError("source changed during build; rebuild from stable inputs")
             if args.package in ["render", "web-wasm"]:
                 skia_root = Path(skia["manifest_path"]).parent / "skia"
                 deps_hash = hashlib.sha256((skia_root / "DEPS").read_bytes()).hexdigest()

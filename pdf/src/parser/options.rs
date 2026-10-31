@@ -5,6 +5,13 @@ pub struct Limits {
     pub max_objects: usize,
     pub max_depth: usize,
     pub max_decoded_bytes: usize,
+    /// Cumulative inflated bytes for one streaming image, not resident memory.
+    pub max_image_source_bytes: usize,
+    /// Retained display-list payload, separate from a single decoded stream.
+    pub max_display_list_bytes: usize,
+    /// Conservative source-sample and mask-grid work units in one preparation.
+    /// Cached previews do not consume this work a second time.
+    pub max_image_decode_work: u64,
     /// Shared live-byte ceiling for allocations explicitly attached to one
     /// OperationBudget. Not automatically enforced by legacy entry points.
     pub max_operation_bytes: usize,
@@ -38,6 +45,9 @@ impl Default for Limits {
             max_objects: 1_000_000,
             max_depth: 128,
             max_decoded_bytes: 256 * 1024 * 1024,
+            max_image_source_bytes: 512 * 1024 * 1024,
+            max_display_list_bytes: 256 * 1024 * 1024,
+            max_image_decode_work: 2 * 1024 * 1024 * 1024,
             max_operation_bytes: 512 * 1024 * 1024,
             max_image_pixels: 100_000_000,
             max_render_pixels: 100_000_000,

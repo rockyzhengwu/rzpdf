@@ -81,9 +81,8 @@ try{
     let failure;try{await damaged.render(0,72,{imageDecode:'target'});}catch(e){failure=e;}
     check(failure?.code==='format'&&failure.resource.image.maskKind==='soft'&&failure.resource.image.targetDecodeSupported,'checksum diagnostic');
     check((await damaged.cacheStatistics()).pageEntries===0,'partial publication');check((await damaged.state()).commitRevision===stamp.commitRevision,'failed decode mutation');await damaged.render(1,72);await damaged.close();
-    stage='source budget';const small=await engine.open(await bytes('soft-white.pdf'),{mode:'strict',resourceProfile:'conservative'});
-    let limit;try{await small.render(0,18);}catch(e){limit=e;}
-    check(limit?.code==='resource_limit'&&limit.resource.reason==='image_source_bytes'&&limit.resource.image.maskKind==='soft','source budget');await small.render(1,72);await small.close();
+    stage='source/resident separation';const small=await engine.open(await bytes('soft-white.pdf'),{mode:'strict',resourceProfile:'conservative'});
+    await small.render(0,18);await small.render(1,72);await small.close();
     let cancellation=false;
     if(worker){stage='cancel';const disposable=await engine.open(await bytes('soft-white.pdf'),{mode:'strict'}),controller=new AbortController();
      const pending=disposable.render(0,72,{imageDecode:'target',signal:controller.signal}).catch(e=>e);controller.abort();check((await pending).code==='cancelled','cancel');
@@ -91,7 +90,7 @@ try{
      const recovered=await engine.open(await bytes('soft-white.pdf'),{mode:'strict'});await recovered.render(0,72);await recovered.close();cancellation=true;
     }
     const released=await engine.statistics();check(released.handles===0&&released.retainedBytes===0,'retained resources');
-    checks.push({transport:worker?'worker':'sync',comparisons,sourceError:limit.resource,targetError:targetError.resource,corruptMask:true,saveReopen:true,cancellation,released});
+    checks.push({transport:worker?'worker':'sync',comparisons,sourceResidentSeparation:true,targetError:targetError.resource,corruptMask:true,saveReopen:true,cancellation,released});
    }catch(error){throw Error(JSON.stringify({transport:worker?'worker':'sync',stage,message:error.message,code:error.code,resource:error.resource,stack:error.stack}));}finally{engine.dispose();}
   }return checks;
  },names);

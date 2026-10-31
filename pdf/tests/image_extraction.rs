@@ -140,6 +140,7 @@ fn image_draw_sample_budget_counts_distinct_images_and_shared_repeated_draws() {
         let doc = Document::new_with_options(ParseOptions {
             limits: Limits {
                 max_decoded_bytes: budget,
+                max_display_list_bytes: budget,
                 ..Default::default()
             },
             ..Default::default()
@@ -181,7 +182,13 @@ fn image_draw_sample_budget_counts_distinct_images_and_shared_repeated_draws() {
             assert!(display.is_ok());
         } else {
             assert!(
-                matches!(display, Err(PdfError::ResourceLimit(_))),
+                matches!(
+                    display,
+                    Err(PdfError::ResourceLimitExceeded {
+                        reason: "display_list_bytes",
+                        ..
+                    })
+                ),
                 "{display:?}"
             );
         }
@@ -189,6 +196,15 @@ fn image_draw_sample_budget_counts_distinct_images_and_shared_repeated_draws() {
         let result = doc.get_page(0).unwrap().extract_images_paint_order();
         if extraction_success {
             assert_eq!(result.unwrap().len(), draws);
+        } else if !success {
+            // Extraction first prepares the same bounded display list.
+            assert!(matches!(
+                result,
+                Err(PdfError::ResourceLimitExceeded {
+                    reason: "display_list_bytes",
+                    ..
+                })
+            ));
         } else {
             assert!(matches!(result, Err(PdfError::ResourceLimit(_))));
         }

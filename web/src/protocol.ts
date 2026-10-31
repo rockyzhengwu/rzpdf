@@ -3,7 +3,7 @@ import {normalizeFontRegistration,normalizeFontStamp,type FontRegistration,type 
 import {BUFFER_BUDGET,normalizeRenderOptions,snapshotMutation,mutationAssetLimit} from "./interaction.js";
 import type { ErrorCode, OpenOptions } from './client.js';
 export const WORKER_PROTOCOL=2;
-export type WorkerOperation='open'|'font'|'registerFont'|'registerDocumentFont'|'fontRequirements'|'clearFonts'|'pageInfo'|'text'|'render'|'renderRegion'|'search'|'outlines'|'links'|'capabilities'|'diagnostics'|'close'|'statistics'|'state'|'annotations'|'formFields'|'apply'|'save'|'content'|'cacheStatistics'|'clearRenderCaches'|'clearSourceStreamCache';
+export type WorkerOperation='openBlob'|'open'|'font'|'registerFont'|'registerDocumentFont'|'fontRequirements'|'clearFonts'|'pageInfo'|'text'|'render'|'renderRegion'|'search'|'outlines'|'links'|'capabilities'|'diagnostics'|'close'|'statistics'|'state'|'annotations'|'formFields'|'apply'|'save'|'content'|'cacheStatistics'|'clearRenderCaches'|'clearSourceStreamCache';
 export interface WorkerRequest { protocol:number;session:string;id:number;operation:WorkerOperation|'initialize';document?:number;args:unknown[]; }
 export interface WorkerFailure { code:ErrorCode;message:string;operation:string;page?:number;fatal:boolean;resource?:import('./client.js').ResourceDetails; }
 export type WorkerResponse =
@@ -16,7 +16,7 @@ export type {OpenOptions};
 
 /** Validate before structuredClone so malformed calls cannot enqueue unbounded metadata. */
 export function validateArguments(operation:WorkerRequest['operation'],args:unknown[]):void {
-  const counts:Record<string,number>={initialize:0,open:2,font:2,registerFont:2,registerDocumentFont:3,fontRequirements:2,clearFonts:0,pageInfo:1,text:1,render:3,renderRegion:4,search:2,outlines:0,links:1,capabilities:0,diagnostics:0,close:0,statistics:0,state:0,annotations:1,formFields:0,apply:2,save:1,content:1,cacheStatistics:0,clearRenderCaches:0,clearSourceStreamCache:0};
+  const counts:Record<string,number>={initialize:0,open:2,openBlob:2,font:2,registerFont:2,registerDocumentFont:3,fontRequirements:2,clearFonts:0,pageInfo:1,text:1,render:3,renderRegion:4,search:2,outlines:0,links:1,capabilities:0,diagnostics:0,close:0,statistics:0,state:0,annotations:1,formFields:0,apply:2,save:1,content:1,cacheStatistics:0,clearRenderCaches:0,clearSourceStreamCache:0};
   const invalid=()=>{throw new RangeError('Invalid Worker arguments');};
   if(!Array.isArray(args)||counts[operation]!==args.length)invalid();
   const integer=(n:unknown)=>typeof n==='number'&&Number.isSafeInteger(n)&&n>=0&&n<=0xffffffff;
@@ -31,8 +31,9 @@ export function validateArguments(operation:WorkerRequest['operation'],args:unkn
     if((maximum>0)!==(args[1]!==undefined)||args[1]!==undefined&&(!(args[1] instanceof Uint8Array)||!args[1].length||args[1].length>maximum))invalid();
   }
   if(operation==='save'&&(!integer(args[0])||(args[0] as number)<1||(args[0] as number)>BUFFER_BUDGET))invalid();
-  if(operation==='open') {
-    if(!(args[0] instanceof Uint8Array)||!args[0].length||args[0].length>BUFFER_BUDGET)invalid();
+  if(operation==='open'||operation==='openBlob') {
+    if(operation==='open'&&(!(args[0] instanceof Uint8Array)||!args[0].length||args[0].length>BUFFER_BUDGET))invalid();
+    if(operation==='openBlob'&&(!(args[0] instanceof Blob)||args[0].size<1||args[0].size>2*1024*1024*1024))invalid();
     const options=args[1];
     if(!record(options)||Object.keys(options).some(k=>!['mode','password','resourceProfile'].includes(k)))invalid();
     const opts=options as Record<string,unknown>;

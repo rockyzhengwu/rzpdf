@@ -165,7 +165,7 @@ fn repeated_image_draws_with_different_rotated_or_sheared_scales_do_not_alias() 
 }
 
 #[test]
-fn fitting_jpegs_keep_original_pixels_and_progressive_oversize_is_not_relaxed() {
+fn fitting_jpegs_keep_original_pixels_and_progressive_oversize_reduces() {
     let small = scan(
         256,
         256,
@@ -189,29 +189,23 @@ fn fitting_jpegs_keep_original_pixels_and_progressive_oversize_is_not_relaxed() 
         "full-size image cache should remain shared"
     );
     let progressive = scan_with_process(4001, 1000, "q 16 0 0 16 0 0 cm /IMAGE Do Q", true);
-    assert!(matches!(
-        progressive
-            .prepare_page_for_render(0, None, 72.)
-            .as_ref()
-            .map_err(PdfError::root_cause),
-        Err(PdfError::ResourceLimitExceeded {
-            reason: "image_pixels",
-            ..
-        })
-    ));
+    assert_eq!(
+        dimensions(
+            &progressive,
+            &progressive.prepare_page_for_render(0, None, 72.).unwrap()
+        ),
+        [(501, 125)]
+    );
     let oversized_source = scan(4001, 4000, "q 16 0 0 16 0 0 cm /IMAGE Do Q");
-    assert!(matches!(
-        oversized_source
-            .prepare_page_for_render(0, None, 72.)
-            .as_ref()
-            .map_err(PdfError::root_cause),
-        Err(PdfError::ResourceLimitExceeded {
-            reason: "image_source_pixels",
-            limit: 16_000_000,
-            actual: 16_004_000,
-            ..
-        })
-    ));
+    assert_eq!(
+        dimensions(
+            &oversized_source,
+            &oversized_source
+                .prepare_page_for_render(0, None, 72.)
+                .unwrap()
+        ),
+        [(501, 500)]
+    );
 }
 
 #[test]
@@ -337,7 +331,7 @@ fn target_policy_is_opt_in_and_cache_identity_includes_policy_and_dpi() {
 }
 
 #[test]
-fn target_policy_observes_each_draw_transform_and_progressive_fallback() {
+fn target_policy_observes_each_draw_transform_and_progressive_reduction() {
     use pdf::document::prepared_page::ImageDecodePolicy::TargetResolution;
     let doc = scan(
         1600,
@@ -361,5 +355,5 @@ fn target_policy_observes_each_draw_transform_and_progressive_fallback() {
     let target = progressive
         .prepare_page_for_render_with_policy(0, None, 72., TargetResolution)
         .unwrap();
-    assert_eq!(dimensions(&progressive, &target), [(256, 256)]);
+    assert_eq!(dimensions(&progressive, &target), [(32, 32)]);
 }

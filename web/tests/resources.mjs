@@ -88,3 +88,36 @@ assert.throws(()=>binaryDoc.save(16*1024*1024),e=>e.code==='resource_limit'&&e.r
 assert.equal(releases,2);binaryEngine.dispose();
 validateArguments('clearSourceStreamCache',[]);
 assert.throws(()=>validateArguments('clearSourceStreamCache',[1]));
+
+// The C ABI delivers u32 source IDs through signed i32 JS imports. Keep both
+// high-bit identities readable and release the original unsigned map key.
+const previousReader=globalThis.FileReaderSync;
+try {
+  globalThis.FileReaderSync=class {readAsArrayBuffer(){return Uint8Array.of(66).buffer;}};
+  let active=0,sourceId=0;
+  const module={HEAPU8:new Uint8Array(4096),_rz_abi_version:()=>2,
+    _rz_alloc(){active++;return 1;},_rz_buffer_ptr:()=>128,
+    _rz_open_blob(id){
+      sourceId=id;active++;
+      assert.equal(module.rzBlobRead(id|0,0,1024,1),1);
+      assert.equal(module.HEAPU8[1024],66);
+      return 2;
+    },
+    _rz_release(handle){active--;if(handle===2)module.rzBlobRelease(sourceId|0);return 1;},
+    _rz_handle_count:()=>active,_rz_retained_bytes:()=>0,_rz_dispose:()=>1,
+  };
+  const owner=new PdfEngine(module);
+  for(const seed of [0x7fffffff,0xfffffffe]){
+    owner.nextBlob=seed; // Seed the private counter only for ABI boundary QA.
+    const doc=owner.openBlob(new Blob(['B']));
+    assert.equal(owner.statistics().externalSources,1);
+    doc.close();
+    assert.equal(owner.statistics().externalSources,0);
+    assert.equal(owner.statistics().handles,0);
+  }
+  assert.throws(()=>owner.openBlob(new Blob(['B'])),e=>e.code==='resource_limit');
+  owner.dispose();
+} finally {
+  if(previousReader===undefined)delete globalThis.FileReaderSync;
+  else globalThis.FileReaderSync=previousReader;
+}

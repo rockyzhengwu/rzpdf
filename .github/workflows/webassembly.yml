@@ -35,6 +35,7 @@ jobs:
           python3 output/webassembly/toolchains/emsdk/emsdk.py activate 3.1.64
       - name: Build native reference and browser module
         run: |
+          cargo test --locked -p pdf -p render -p web-wasm --lib --test image_preview --test render_image_resolution --test display_payload_budget
           cargo build --locked -p render --example rgba_reference
           python3 scripts/build_webassembly.py --package web-wasm --output output/webassembly/wa03-build.json
           npm --prefix web run build
@@ -42,7 +43,11 @@ jobs:
           node web/tests/geometry.mjs
           node web/tests/viewport-raster.mjs
           node web/tests/worker.mjs
+          node web/tests/resources.mjs
+          node web/tests/render-planner.mjs
+          python3 -m unittest discover -s scripts -p test_browser_compatibility.py
           node web/tests/font-resources.mjs
+          cargo run --locked -p pdf --example compatibility_fixtures -- output/compatibility-fixtures
           python3 scripts/prepare_webassembly_fixtures.py
           python3 scripts/prepare_web_font_matrix.py
           node web/tests/package-assets.mjs
@@ -54,6 +59,8 @@ jobs:
           node web/tests/interaction.mjs
           node web/tests/render-cache.mjs
           node web/tests/large-input.mjs
+          node web/tests/compatibility-resources-browser.mjs
+          node web/tests/image-preview-browser.mjs
           node web/tests/outline-recovery.mjs
           node web/tests/reader-shell.mjs
           node web/tests/viewer.mjs
@@ -80,6 +87,7 @@ jobs:
             output/webassembly/interaction-browser/
             output/webassembly/render-cache/
             output/webassembly/large-input/
+            output/compatibility-resources/report.json
             output/webassembly/outline-recovery/
             output/webassembly/reader-shell/
             output/webassembly/viewer-browser/

@@ -1,5 +1,6 @@
 pub mod ascii_85;
 pub mod ascii_hex;
+pub(crate) mod bilevel_preview;
 pub mod ccittfax;
 pub mod crypt;
 pub mod dct;
@@ -415,6 +416,9 @@ fn apply_filter_chain<'a, T: AsRef<[u8]>>(
     }
 }
 
+/// Independent work guard for render-only target decoders.
+pub(crate) const MAX_MASKED_SAMPLING_WORK: u64 = 256_000_000;
+
 #[cfg(test)]
 mod limit_tests {
     use super::*;
@@ -726,6 +730,3 @@ mod limit_tests {
         ));
     }
 }
-
-/// Independent work guard for render-only target decoders.
-pub(crate) const MAX_TARGET_SOURCE_IMAGE_PIXELS: u64 = 16_000_000;

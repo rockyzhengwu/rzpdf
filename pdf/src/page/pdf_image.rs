@@ -1,3 +1,4 @@
+mod bilevel_preview;
 mod mask_preview;
 use std::io::{Read, Seek};
 
@@ -182,7 +183,7 @@ impl PdfImage {
         let Some(stream) = resolved.as_stream() else {
             return Self::try_new(name, object, ctx);
         };
-        let pool = ctx.limits().operation_budget();
+        let pool = ctx.image_operation_budget();
         let (filter, _filter_lease) = match stream.dict().get("Filter") {
             Some(value) => crate::objects::pdf_stream::resolve_filter_setting_with_budget(
                 value, ctx, false, &pool,
@@ -226,6 +227,18 @@ impl PdfImage {
         details.target_width = Some(plan.target.0);
         details.target_height = Some(plan.target.1);
         let mask = mask_preview::describe(stream, ctx, details)?;
+        if matches!(details.encoding, "ccitt" | "jbig2")
+            && matches!(details.mask_kind, None | Some("stencil"))
+            && (!ImageDecodePlan::full_fits(source, ctx.limits())
+                || ctx.render_image_policy()
+                    == Some(crate::document::prepared_page::ImageDecodePolicy::TargetResolution))
+        {
+            if details.mask_kind.is_none() && device_color_override()? {
+                details.unsupported_reason = Some("device_color_override");
+                return Self::try_new(name, object, ctx);
+            }
+            return Self::try_new_bilevel_preview(name, &resolved, ctx, plan, details);
+        }
         if details.mask_kind.is_some() {
             details.unsupported_reason = Some(match details.mask_kind {
                 Some("soft") => "mask_encoding",
@@ -318,17 +331,14 @@ impl PdfImage {
             }
             let raw = stream.read_raw_data(ctx, &pool)?;
             details.jpeg_process = crate::filter::dct::process(&raw);
-            if details.jpeg_process != Some("sequential") {
+            if !matches!(details.jpeg_process, Some("sequential" | "progressive")) {
                 details.unsupported_reason = Some("jpeg_process");
                 return Self::try_new(name, object, ctx);
             }
             details.target_decode_supported = true;
             // Keep the existing JPEG IDCT sizes and full-fidelity fallback.
             if full_fits
-                && (u64::from(source.0) * u64::from(source.1)
-                    > crate::filter::dct::MAX_TARGET_SOURCE_PIXELS
-                    || plan.target.0 > source.0.div_ceil(2)
-                    || plan.target.1 > source.1.div_ceil(2))
+                && (plan.target.0 > source.0.div_ceil(2) || plan.target.1 > source.1.div_ceil(2))
             {
                 return Self::try_new(name, object, ctx);
             }
@@ -342,6 +352,8 @@ impl PdfImage {
                     ..Default::default()
                 },
                 &pool,
+                ctx.limits().max_image_source_bytes,
+                |bytes| ctx.charge_image_decode_work(bytes),
             )?;
             return Self::try_new_with_samples(
                 name,
@@ -355,12 +367,6 @@ impl PdfImage {
                     alpha: None,
                 }),
             );
-        }
-        if full_fits
-            && u64::from(source.0) * u64::from(source.1)
-                > crate::filter::MAX_TARGET_SOURCE_IMAGE_PIXELS
-        {
-            return Self::try_new(name, object, ctx);
         }
         if device_color_override()? {
             details.unsupported_reason = Some("device_color_override");
@@ -392,20 +398,18 @@ impl PdfImage {
         details.target_decode_supported = true;
         plan.validate(ctx.limits())?;
         let decode = image_decode_endpoints(Some(components), stream.dict().get("Decode"), ctx)?;
+        let request = crate::filter::flate_image::FlateImageRequest {
+            source: plan.source,
+            target: plan.target,
+            components,
+            predictor,
+            decode,
+            compatible: ctx.options().mode == crate::parser::syntax::ParseMode::Compatible,
+            limits: ctx.limits(),
+        };
+        ctx.charge_image_decode_work(request.source_bytes()?)?;
         let raw = stream.read_raw_data(ctx, &pool)?;
-        let decoded = crate::filter::flate_image::decode_target(
-            &raw,
-            crate::filter::flate_image::FlateImageRequest {
-                source: plan.source,
-                target: plan.target,
-                components,
-                predictor,
-                decode,
-                compatible: ctx.options().mode == crate::parser::syntax::ParseMode::Compatible,
-                limits: ctx.limits(),
-            },
-            &pool,
-        )?;
+        let decoded = crate::filter::flate_image::decode_target(&raw, request, &pool)?;
         if decoded.recovered_tail {
             ctx.record_structure_recovery(
                 crate::parser::diagnostic::StructureReason::ImageTrailingBytes,
@@ -666,6 +670,11 @@ impl PdfImage {
         } else {
             None
         };
+        let bilevel_preview = (is_ccitt || is_jbig2)
+            && supplied
+                .as_ref()
+                .is_some_and(|samples| samples.decode_applied);
+        let bits = if bilevel_preview { 8 } else { bits };
         let colorspace = if is_mask {
             // Internal sample carrier only: a stencil has no PDF ColorSpace.
             ColorSpace::DeviceGray(crate::color::device_gray::DeviceGray::new())
@@ -875,7 +884,7 @@ impl PdfImage {
             None
         };
 
-        if is_ccitt {
+        if is_ccitt && !bilevel_preview {
             // The legacy fax filter returns one 0/255 byte per sample. Adapt
             // that contract to PDF's row-padded 1-bit samples before applying
             // Decode or stencil semantics; do not unpack the expanded bytes.
@@ -922,23 +931,22 @@ impl PdfImage {
         let expected = packed_row
             .checked_mul(height as usize)
             .ok_or_else(|| PdfError::ResourceLimit("image packed bytes".into()))?;
-        if !is_mask
-            && (filter
-                .as_ref()
-                .is_none_or(|filter| matches!(filter, PdfObject::PdfNull))
-                || filter.as_ref().is_some_and(|filter| match filter {
-                    PdfObject::PdfName(name) => {
+        if (filter
+            .as_ref()
+            .is_none_or(|filter| matches!(filter, PdfObject::PdfNull))
+            || filter.as_ref().is_some_and(|filter| match filter {
+                PdfObject::PdfName(name) => {
+                    matches!(name.name(), "FlateDecode" | "Fl" | "LZWDecode" | "LZW")
+                }
+                PdfObject::PdfArray(filters) => filters
+                    .into_iter()
+                    .last()
+                    .and_then(PdfObject::as_name)
+                    .is_some_and(|name| {
                         matches!(name.name(), "FlateDecode" | "Fl" | "LZWDecode" | "LZW")
-                    }
-                    PdfObject::PdfArray(filters) => filters
-                        .into_iter()
-                        .last()
-                        .and_then(PdfObject::as_name)
-                        .is_some_and(|name| {
-                            matches!(name.name(), "FlateDecode" | "Fl" | "LZWDecode" | "LZW")
-                        }),
-                    _ => false,
-                }))
+                    }),
+                _ => false,
+            }))
             && data.len() > expected
             && matches!(&data[expected..], b"\r\n" | b"\n" | b"\r")
             && ctx.options().mode == crate::parser::syntax::ParseMode::Compatible
@@ -2556,6 +2564,54 @@ mod image_tail_whitespace_tests {
             syntax::{ParseMode, SyntaxParser},
         },
     };
+    #[test]
+    fn stencil_eol_recovery_is_compatible_only_and_never_pads_missing_samples() {
+        use crate::color::value::ColorRgb;
+        for mode in [ParseMode::Strict, ParseMode::Compatible] {
+            let context: PDFContext<std::io::Cursor<Vec<u8>>> = PDFContext::new_without_source(
+                Default::default(),
+                crate::parser::options::ParseOptions {
+                    mode,
+                    ..Default::default()
+                },
+            );
+            let dict = SyntaxParser::new(
+                StreamReader::try_new(std::io::Cursor::new(
+                    b"<< /Subtype /Image /Width 8 /Height 1 /BitsPerComponent 1 /ImageMask true >>"
+                        .to_vec(),
+                ))
+                .unwrap(),
+            )
+            .get_object()
+            .unwrap()
+            .into_dict()
+            .unwrap();
+            for (bytes, recoverable) in [
+                (vec![0, 10], true),
+                (vec![0, 13, 10], true),
+                (vec![0, 32], false),
+                (vec![], false),
+            ] {
+                let object = PdfObject::PdfStream(PdfStream::new(dict.clone(), bytes));
+                let result =
+                    PdfImage::try_new("stencil".into(), &object, &context).and_then(|image| {
+                        image.rgba_buffer_with_stencil_color(&ColorRgb::new(1., 0., 0.))
+                    });
+                if mode == ParseMode::Compatible && recoverable {
+                    assert!(
+                        result
+                            .unwrap()
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .all(|pixel| *pixel == [255, 0, 0, 255])
+                    );
+                } else {
+                    assert!(result.is_err());
+                }
+            }
+        }
+    }
     #[test]
     fn compatible_short_whitespace_surplus_is_diagnosed_without_hiding_other_size_errors() {
         for mode in [ParseMode::Strict, ParseMode::Compatible] {

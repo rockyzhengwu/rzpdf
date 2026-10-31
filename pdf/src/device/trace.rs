@@ -18,6 +18,8 @@ pub struct TraceDevice {
     limits: Option<crate::parser::options::Limits>,
     retained_payload_bytes: usize,
     retained_images: std::collections::HashSet<usize>,
+    retained_resources: std::collections::HashSet<(u8, usize)>,
+    pending_resources: Vec<(u8, usize)>,
     retained_path_segments: usize,
     objects: Vec<PageObject>,
     page_width: f32,
@@ -39,10 +41,31 @@ impl Device for TraceDevice {
             ..Default::default()
         };
         state.general_state.soft_mask = group.soft_mask.clone();
-        let payload = self.next_draw_bytes(None, &state)?;
+        let mut payload = self.next_draw_bytes(None, &state)?;
+        if let Some(profile) = &group.blending_profile {
+            payload = payload
+                .checked_add(self.resource_bytes(
+                    0,
+                    profile.storage_identity(),
+                    profile.retained_source_bytes(),
+                )?)
+                .ok_or_else(|| PdfError::ResourceLimit("group profile storage".into()))?;
+        }
+        if self
+            .limits
+            .is_some_and(|limits| payload > limits.max_display_list_bytes)
+        {
+            return Err(PdfError::ResourceLimitExceeded {
+                reason: "display_list_bytes",
+                stage: "page_prepare",
+                limit: self.limits.unwrap().max_display_list_bytes as u64,
+                actual: payload as u64,
+            });
+        }
         let segments = self.next_retained_segments(None, &state)?;
         self.retained_path_segments = segments;
         self.retained_payload_bytes = payload;
+        self.commit_resources();
         self.objects.push(PageObject::GroupBegin(group));
         Ok(())
     }
@@ -59,17 +82,25 @@ impl Device for TraceDevice {
     fn do_shading(&mut self, shading: crate::page::shading_object::ShadingObject) -> PdfResult<()> {
         self.reserve_object()?;
         let segments = self.next_retained_segments(None, &shading.graphic_state)?;
-        let total = self
-            .next_draw_bytes(shading.nested_source(), &shading.graphic_state)?
-            .checked_add(shading.retained_payload_bytes()?)
+        let base = self.next_draw_bytes(shading.nested_source(), &shading.graphic_state)?;
+        let shared = self.resource_bytes(
+            3,
+            std::sync::Arc::as_ptr(&shading.shading) as usize,
+            shading.retained_payload_bytes()?,
+        )?;
+        let total = base
+            .checked_add(shared)
             .ok_or_else(|| PdfError::ResourceLimit("display retained payload overflow".into()))?;
         if self
             .limits
-            .is_some_and(|limits| total > limits.max_decoded_bytes)
+            .is_some_and(|limits| total > limits.max_display_list_bytes)
         {
-            return Err(PdfError::ResourceLimit(
-                "display retained payload bytes".into(),
-            ));
+            return Err(PdfError::ResourceLimitExceeded {
+                reason: "display_list_bytes",
+                stage: "page_prepare",
+                limit: self.limits.unwrap().max_display_list_bytes as u64,
+                actual: total as u64,
+            });
         }
         if self.collect_xml {
             let mut event = BytesStart::new("shading");
@@ -77,6 +108,7 @@ impl Device for TraceDevice {
             self.writer.write_event(Event::Empty(event))?;
         }
         self.retained_payload_bytes = total;
+        self.commit_resources();
         self.retained_path_segments = segments;
         self.objects.push(PageObject::Shading(shading));
         Ok(())
@@ -110,11 +142,14 @@ impl Device for TraceDevice {
             .ok_or_else(|| PdfError::ResourceLimit("display retained payload overflow".into()))?;
         if self
             .limits
-            .is_some_and(|limits| total > limits.max_decoded_bytes)
+            .is_some_and(|limits| total > limits.max_display_list_bytes)
         {
-            return Err(PdfError::ResourceLimit(
-                "display retained payload bytes".into(),
-            ));
+            return Err(PdfError::ResourceLimitExceeded {
+                reason: "display_list_bytes",
+                stage: "page_prepare",
+                limit: self.limits.unwrap().max_display_list_bytes as u64,
+                actual: total as u64,
+            });
         }
         self.add_xml_image(&imageobject)?;
         if first {
@@ -124,6 +159,7 @@ impl Device for TraceDevice {
             self.retained_images.insert(identity);
         }
         self.retained_payload_bytes = total;
+        self.commit_resources();
         self.retained_path_segments = segments;
         self.objects.push(PageObject::Image(imageobject));
         Ok(())
@@ -139,6 +175,7 @@ impl Device for TraceDevice {
         self.add_xml_path(name, &pathobject)?;
         self.retained_path_segments = segments;
         self.retained_payload_bytes = payload;
+        self.commit_resources();
         self.objects.push(PageObject::Path(pathobject));
         Ok(())
     }
@@ -153,6 +190,7 @@ impl Device for TraceDevice {
         self.add_xml_path(name, &pathobject)?;
         self.retained_path_segments = segments;
         self.retained_payload_bytes = payload;
+        self.commit_resources();
         self.objects.push(PageObject::Path(pathobject));
         Ok(())
     }
@@ -167,6 +205,7 @@ impl Device for TraceDevice {
         self.add_xml_path(name, &pathobject)?;
         self.retained_path_segments = segments;
         self.retained_payload_bytes = payload;
+        self.commit_resources();
         self.objects.push(PageObject::Path(pathobject));
         Ok(())
     }
@@ -209,14 +248,18 @@ impl Device for TraceDevice {
         }
         if self
             .limits
-            .is_some_and(|limits| total > limits.max_decoded_bytes)
+            .is_some_and(|limits| total > limits.max_display_list_bytes)
         {
-            return Err(PdfError::ResourceLimit(
-                "display retained payload bytes".into(),
-            ));
+            return Err(PdfError::ResourceLimitExceeded {
+                reason: "display_list_bytes",
+                stage: "page_prepare",
+                limit: self.limits.unwrap().max_display_list_bytes as u64,
+                actual: total as u64,
+            });
         }
         self.add_xml_text(&textobject)?;
         self.retained_payload_bytes = total;
+        self.commit_resources();
         self.retained_path_segments = segments;
         self.objects.push(PageObject::Text(textobject));
         Ok(())
@@ -238,46 +281,92 @@ impl TraceDevice {
             .ok_or_else(|| PdfError::ResourceLimit("pattern retained storage overflow".into()))?;
         if self
             .limits
-            .is_some_and(|limits| bytes > limits.max_decoded_bytes)
+            .is_some_and(|limits| bytes > limits.max_display_list_bytes)
         {
-            return Err(PdfError::ResourceLimit("pattern retained storage".into()));
+            return Err(PdfError::ResourceLimitExceeded {
+                reason: "display_list_bytes",
+                stage: "page_prepare",
+                limit: self.limits.unwrap().max_display_list_bytes as u64,
+                actual: bytes as u64,
+            });
         }
         Ok((bytes, self.retained_path_segments))
     }
 
+    fn resource_bytes(&mut self, kind: u8, identity: usize, bytes: usize) -> PdfResult<usize> {
+        let key = (kind, identity);
+        if self.retained_resources.contains(&key) || self.pending_resources.contains(&key) {
+            return Ok(0);
+        }
+        self.pending_resources
+            .try_reserve(1)
+            .map_err(|_| PdfError::ResourceLimit("display resource identities".into()))?;
+        self.retained_resources
+            .try_reserve(self.pending_resources.len() + 1)
+            .map_err(|_| PdfError::ResourceLimit("display resource identities".into()))?;
+        self.pending_resources.push(key);
+        Ok(bytes)
+    }
+    fn commit_resources(&mut self) {
+        self.retained_resources
+            .extend(self.pending_resources.drain(..));
+    }
     fn next_draw_bytes(
-        &self,
+        &mut self,
         source: Option<&crate::page::source_provenance::NestedDrawSource>,
         state: &crate::page::graphic_state::GraphicState,
     ) -> PdfResult<usize> {
+        self.pending_resources.clear();
         let mut total = self.next_nested_source_bytes(source)?;
         if let Some(mask) = &state.general_state.soft_mask {
             total = total
-                .checked_add(mask.retained_bytes)
+                .checked_add(self.resource_bytes(
+                    1,
+                    std::sync::Arc::as_ptr(mask) as usize,
+                    mask.retained_bytes,
+                )?)
                 .ok_or_else(|| PdfError::ResourceLimit("soft mask draw payload overflow".into()))?;
         }
         for space in [
             &state.color_state.fill_color_space,
             &state.color_state.stroke_color_space,
         ] {
-            total = total
-                .checked_add(space.retained_profile_bytes()?)
-                .ok_or_else(|| {
-                    PdfError::ResourceLimit("colour profile draw payload overflow".into())
-                })?;
+            space.visit_profiles(&mut |profile| {
+                total = total
+                    .checked_add(self.resource_bytes(
+                        0,
+                        profile.storage_identity(),
+                        profile.retained_source_bytes(),
+                    )?)
+                    .ok_or_else(|| {
+                        PdfError::ResourceLimit("colour profile draw payload overflow".into())
+                    })?;
+                Ok(())
+            })?;
             if let crate::color::colorspace::ColorSpace::Pattern(space) = space
                 && let Some(paint) = space.paint()
             {
-                total = total.checked_add(paint.retained_bytes).ok_or_else(|| {
-                    PdfError::ResourceLimit("pattern draw payload overflow".into())
-                })?;
+                total = total
+                    .checked_add(self.resource_bytes(
+                        2,
+                        paint as *const _ as usize,
+                        paint.retained_bytes,
+                    )?)
+                    .ok_or_else(|| {
+                        PdfError::ResourceLimit("pattern draw payload overflow".into())
+                    })?;
             }
         }
         if self
             .limits
-            .is_some_and(|limits| total > limits.max_decoded_bytes)
+            .is_some_and(|limits| total > limits.max_display_list_bytes)
         {
-            return Err(PdfError::ResourceLimit("pattern draw payload bytes".into()));
+            return Err(PdfError::ResourceLimitExceeded {
+                reason: "display_list_bytes",
+                stage: "page_prepare",
+                limit: self.limits.unwrap().max_display_list_bytes as u64,
+                actual: total as u64,
+            });
         }
         Ok(total)
     }
@@ -294,11 +383,14 @@ impl TraceDevice {
             })?;
         if self
             .limits
-            .is_some_and(|limits| total > limits.max_decoded_bytes)
+            .is_some_and(|limits| total > limits.max_display_list_bytes)
         {
-            return Err(PdfError::ResourceLimit(
-                "display nested source bytes".into(),
-            ));
+            return Err(PdfError::ResourceLimitExceeded {
+                reason: "display_list_bytes",
+                stage: "page_prepare",
+                limit: self.limits.unwrap().max_display_list_bytes as u64,
+                actual: total as u64,
+            });
         }
         Ok(total)
     }
@@ -309,6 +401,8 @@ impl TraceDevice {
             limits: None,
             retained_payload_bytes: 0,
             retained_images: Default::default(),
+            retained_resources: Default::default(),
+            pending_resources: Vec::new(),
             retained_path_segments: 0,
             objects: Vec::new(),
             page_width: 0.0,
@@ -561,7 +655,8 @@ mod collection_tests {
     use super::*;
 
     #[test]
-    fn shading_collection_counts_shared_function_payload_per_draw() {
+    #[allow(clippy::arc_with_non_send_sync)] // ShadingObject owns an Arc in the public, single-threaded model.
+    fn shading_collection_counts_shared_function_payload_once() {
         use crate::{
             color::shading::Shading,
             document::PdfDocument,
@@ -583,15 +678,25 @@ mod collection_tests {
         let clone = shading.clone();
         assert!(std::sync::Arc::ptr_eq(&clone.shading, &shading.shading));
         let mut trace = TraceDevice::for_display_list(crate::parser::options::Limits {
-            max_decoded_bytes: bytes,
+            max_display_list_bytes: bytes,
             ..Default::default()
         });
         trace.start_page(10.0, 10.0).unwrap();
         trace.do_shading(shading.clone()).unwrap();
-        assert!(
-            matches!(trace.do_shading(clone), Err(PdfError::ResourceLimit(message)) if message == "display retained payload bytes")
-        );
-        assert_eq!(trace.objects().len(), 1);
+        trace.do_shading(clone).unwrap();
+        assert_eq!(trace.objects().len(), 2);
+        let mut independent = shading.clone();
+        independent.shading = std::sync::Arc::new((*independent.shading).clone());
+        assert!(matches!(
+            trace.do_shading(independent),
+            Err(PdfError::ResourceLimitExceeded {
+                reason: "display_list_bytes",
+                ..
+            })
+        ));
+        // The failed draw must not publish its pending resource identities.
+        trace.do_shading(shading.clone()).unwrap();
+        assert_eq!(trace.objects().len(), 3);
         assert_eq!(trace.to_xml(), "");
         let mut trace = TraceDevice::for_display_list(crate::parser::options::Limits {
             max_objects: 1,

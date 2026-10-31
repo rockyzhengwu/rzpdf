@@ -3,6 +3,48 @@
 use super::*;
 
 impl SkiaRender {
+    /// FreeType can return empty hinted metrics after a font's bytecode fails.
+    /// Preserve legitimate empty glyphs, and retry only when unhinted metrics
+    /// prove that visible geometry was lost. Scratch is bounded independently
+    /// of the text run length. CoreText/DirectWrite retain their own policy.
+    pub(super) fn recover_empty_hinted_glyphs(
+        font: &skia_safe::Font,
+        glyphs: &[u16],
+        global: &Matrix,
+    ) -> Option<skia_safe::Font> {
+        if cfg!(any(target_vendor = "apple", target_os = "windows")) {
+            return None;
+        }
+        let scale = global
+            .a()
+            .hypot(global.b())
+            .max(global.c().hypot(global.d()));
+        let size = font.size() * scale;
+        if !size.is_finite() || size <= 0. || size > 256. {
+            return None;
+        }
+        let mut hinted = font.clone();
+        hinted.set_size(size);
+        let mut plain = hinted.clone();
+        plain.set_hinting(skia_safe::FontHinting::None);
+        let mut bounds = [skia_safe::Rect::default(); 128];
+        for chunk in glyphs.chunks(bounds.len()) {
+            hinted.get_bounds(chunk, &mut bounds[..chunk.len()], None);
+            for (&glyph, bounds) in chunk.iter().zip(&bounds) {
+                if bounds.is_empty() {
+                    let mut retry = [skia_safe::Rect::default()];
+                    plain.get_bounds(&[glyph], &mut retry, None);
+                    if !retry[0].is_empty() {
+                        let mut recovered = font.clone();
+                        recovered.set_hinting(skia_safe::FontHinting::None);
+                        return Some(recovered);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     pub(super) fn try_draw_glyph_run(
         &mut self,
         font: &skia_safe::Font,

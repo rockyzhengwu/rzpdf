@@ -207,7 +207,7 @@ fn optional_flate_compression_preserves_pixels_and_source_objects() {
     assert_eq!(
         again
             .read_stream_data(
-                &again
+                again
                     .get_page(0)
                     .unwrap()
                     .get_xobject(&name)

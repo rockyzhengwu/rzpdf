@@ -187,7 +187,10 @@ fn limit(reason: &'static str, maximum: u64, actual: u64) -> PdfError {
         actual,
     }
 }
-fn zeros_u64(pool: &OperationBudget, slots: usize) -> PdfResult<(Vec<u64>, MemoryLease)> {
+pub(crate) fn zeros_u64(
+    pool: &OperationBudget,
+    slots: usize,
+) -> PdfResult<(Vec<u64>, MemoryLease)> {
     let size = slots
         .checked_mul(8)
         .ok_or_else(|| PdfError::ResourceLimit("image sampling accumulators".into()))?;
@@ -214,6 +217,15 @@ pub(crate) struct FlateImageRequest {
     pub decode: Option<[f64; 8]>,
     pub compatible: bool,
     pub limits: Limits,
+}
+impl FlateImageRequest {
+    pub fn source_bytes(self) -> PdfResult<u64> {
+        u64::from(self.source.0)
+            .checked_mul(self.components as u64)
+            .and_then(|row| row.checked_add(u64::from(self.predictor.png())))
+            .and_then(|row| row.checked_mul(u64::from(self.source.1)))
+            .ok_or_else(|| PdfError::ResourceLimit("Flate source work overflow".into()))
+    }
 }
 
 /// Forward-only source rows shared by opaque and masked preview decoders.
@@ -247,13 +259,6 @@ impl<'a> FlateRows<'a> {
                 "invalid Flate source dimensions/components".into(),
             ));
         }
-        if pixels > super::MAX_TARGET_SOURCE_IMAGE_PIXELS {
-            return Err(limit(
-                "image_source_pixels",
-                super::MAX_TARGET_SOURCE_IMAGE_PIXELS,
-                pixels,
-            ));
-        }
         let row_bytes = (request.source.0 as usize)
             .checked_mul(request.components)
             .ok_or_else(|| PdfError::ResourceLimit("Flate row size".into()))?;
@@ -261,10 +266,10 @@ impl<'a> FlateRows<'a> {
             .checked_add(usize::from(request.predictor.png()))
             .and_then(|n| n.checked_mul(request.source.1 as usize))
             .ok_or_else(|| PdfError::ResourceLimit("Flate source size".into()))?;
-        if inflated > request.limits.max_decoded_bytes {
+        if inflated > request.limits.max_image_source_bytes {
             return Err(limit(
                 "image_source_bytes",
-                request.limits.max_decoded_bytes as u64,
+                request.limits.max_image_source_bytes as u64,
                 inflated as u64,
             ));
         }
@@ -309,7 +314,7 @@ impl<'a> FlateRows<'a> {
         }
         self.zlib.finish(
             self.request.compatible && self.request.predictor.value == 1,
-            self.request.limits.max_decoded_bytes,
+            self.request.limits.max_image_source_bytes,
         )
     }
 }
@@ -350,13 +355,6 @@ pub(crate) fn decode_target(
         ));
     }
     let source_pixels = u64::from(source.0) * u64::from(source.1);
-    if source_pixels > super::MAX_TARGET_SOURCE_IMAGE_PIXELS {
-        return Err(limit(
-            "image_source_pixels",
-            super::MAX_TARGET_SOURCE_IMAGE_PIXELS,
-            source_pixels,
-        ));
-    }
     let pixels = u64::from(target.0) * u64::from(target.1);
     if pixels > limits.max_image_pixels {
         return Err(limit("image_pixels", limits.max_image_pixels, pixels));
@@ -375,10 +373,10 @@ pub(crate) fn decode_target(
         .checked_add(usize::from(predictor.png()))
         .and_then(|n| n.checked_mul(sh))
         .ok_or_else(|| PdfError::ResourceLimit("Flate image source byte size".into()))?;
-    if inflated > limits.max_decoded_bytes {
+    if inflated > limits.max_image_source_bytes {
         return Err(limit(
             "image_source_bytes",
-            limits.max_decoded_bytes as u64,
+            limits.max_image_source_bytes as u64,
             inflated as u64,
         ));
     }
@@ -657,6 +655,38 @@ mod tests {
         assert_eq!(small.live_bytes(), 0);
     }
     #[test]
+    fn source_work_exceeding_resident_limit_streams_without_full_source_storage() {
+        for width in [2500, 5000] {
+            // Includes an ordinary 8.75 MP scan and a 17.5 MP scan, beyond
+            // the old unconditional 16 MP preview ceiling.
+            let mut encoder =
+                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+            let row = vec![121; width * 3];
+            for _ in 0..3500 {
+                encoder.write_all(&row).unwrap();
+            }
+            let input = encoder.finish().unwrap();
+            let mut spec = request((width as u32, 3500), (700, 980), 3, 1);
+            spec.limits.max_decoded_bytes = 16 * 1024 * 1024;
+            spec.limits.max_image_source_bytes = 128 * 1024 * 1024;
+            let pool = OperationBudget::new(64 * 1024 * 1024);
+            let output = decode_target(&input, spec, &pool).unwrap();
+            assert!(output.samples.as_slice().iter().all(|v| *v == 121));
+            assert!(pool.peak_bytes() < 3 * 1024 * 1024);
+            drop(output);
+            assert_eq!(pool.live_bytes(), 0);
+            spec.limits.max_image_source_bytes = width * 3500 * 3 - 1;
+            assert!(matches!(
+                decode_target(&input, spec, &pool),
+                Err(PdfError::ResourceLimitExceeded {
+                    reason: "image_source_bytes",
+                    ..
+                })
+            ));
+            assert_eq!(pool.live_bytes(), 0);
+        }
+    }
+    #[test]
     fn truncation_checksum_excess_samples_and_invalid_png_filter_never_publish() {
         let encoded = compress(&[1, 2, 3, 4]);
         let mut checksum = encoded.clone();
@@ -704,8 +734,8 @@ mod tests {
                 (1, 1),
                 1,
                 4_000_000,
-                16 * 1024 * 1024,
-                "image_source_pixels",
+                16_000_000,
+                "image_source_bytes",
             ),
             (
                 (3000, 2000),
@@ -728,6 +758,7 @@ mod tests {
             let mut spec = request(source, target, components, 1);
             spec.limits.max_image_pixels = pixels;
             spec.limits.max_decoded_bytes = decoded;
+            spec.limits.max_image_source_bytes = decoded;
             assert!(
                 matches!(decode_target(&[],spec,&pool),Err(PdfError::ResourceLimitExceeded{reason:r,..})if r==reason)
             );

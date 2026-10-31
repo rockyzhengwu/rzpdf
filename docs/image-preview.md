@@ -24,12 +24,15 @@ Implementation and acceptance checklist:
 The first slice supports a single Flate filter, 8-bit DeviceRGB/DeviceGray,
 Predictor 1 or row-matched Predictor 2/10–15, and finite Decode endpoints. Masks,
 complex color spaces/device-default overrides, other component depths/filter chains and unsupported
-predictor layouts keep the normal bounded path. Progressive JPEG target decoding
-is deliberately unavailable. Ordinary JPEG retains its existing IDCT choices.
+predictor layouts keep the normal bounded path. Sequential and progressive JPEG
+use IDCT reduction; progressive coefficient storage is separately preflighted.
+CCITT Gray/stencil images have a run-based target decoder; see
+[compatibility resources](compatibility-program.md).
 
-Target decoders retain a 16,000,000 source-pixel work guard. Flate's total inflated
-bytes (including PNG row tags) must still fit maxDecodedBytes; streaming does not
-raise this ceiling. The operation pool covers raw read/decryption owners when
+JPEG and Flate cumulative source bytes
+(including PNG row tags) use maxImageSourceBytes, independently of the target
+RGBA/maxDecodedBytes ceiling. Preview decoders share a per-preparation work meter
+(maxImageDecodeWork) and operation pool. The operation pool covers raw read/decryption owners when
 needed, target samples, current/previous rows and both sampling accumulators.
 Zlib-private fixed state and fixed stack lookup tables are excluded from that
 logical accounting. Raster/Skia storage has its existing independent limits.
@@ -75,7 +78,7 @@ Chromium synchronous/Worker acceptance records three rounds at 72/36/18 DPI,
 independent color probes across every white stripe, per-frame hashes, budgeted
 fallback, viewer-rotation context and actual page rotation/restoration, cache
 limits, unmodified render revision, strict saved reopen, source/output budget
-refusals, progressive JPEG negatives, late-checksum failure atomicity, and active
+refusals, progressive JPEG positives, late-checksum failure atomicity, and active
 Worker cancellation followed by session recovery. The conservative profile
 continues to reject this RGB source above its 8 MiB inflated-byte limit; lowering
 DPI cannot bypass that independent source-work budget.
@@ -89,3 +92,17 @@ The first high-source-pixel slice covers Image XObjects. Inline-image parsing
 retains its own existing source-pixel admission limit. This change does not lift
 that parser limit; eligible inline images already admitted by it may reuse the
 render-only target decoder.
+
+### Bilevel target previews
+
+CCITT and JBIG2 support one-bit DeviceGray and stencil images on the target
+preview path. They share area coverage sampling, including Decode inversion and
+fractional stencil alpha, preserving fine scan strokes during minification. CCITT
+samples runs directly; JBIG2 retains a packed source bitmap with native allocation
+leases and does not allocate a full-source Gray or RGBA buffer. JBIG2 Globals,
+header/dictionary agreement, encoded input bounds and segment restrictions still
+apply. Source work, packed decoder storage, target bytes and cumulative operation
+work remain independently bounded. Extra masks, filter chains and other color
+spaces retain their existing bounded fallback or explicit errors. The default
+budgeted policy still keeps full-resolution images that fit; explicit target
+previews perform reduction even when the source fits.

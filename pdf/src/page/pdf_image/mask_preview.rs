@@ -241,7 +241,18 @@ impl PdfImage {
         details.target_decode_supported = true;
         details.unsupported_reason = None;
         plan.validate(ctx.limits())?;
-        let pool = ctx.limits().operation_budget();
+        let pool = ctx.image_operation_budget();
+        // The merged mask grid may cost much more than reading either source
+        // (opposing aspect ratios). Charge its conservative cell/sample bound
+        // to the same preparation meter, not only to a per-image guard.
+        let grid =
+            (u64::from(color.source.0) + u64::from(alpha.source.0) + u64::from(plan.target.0))
+                .saturating_mul(u64::from(color.source.1) + u64::from(alpha.source.1));
+        let units = color
+            .source_bytes()?
+            .saturating_add(alpha.source_bytes()?)
+            .saturating_add(grid.saturating_mul(color.components as u64 + 1));
+        ctx.charge_image_decode_work(units)?;
         let raw = image.read_raw_data(ctx, &pool)?;
         let mask_raw = mask_stream.read_raw_data(ctx, &pool)?;
         let decoded = crate::filter::masked_image::decode_soft_mask(

@@ -51,7 +51,7 @@ try{
    try{
     const doc=await engine.open(flate,{mode:'compatible'}),cap=await doc.capabilities();
     check(cap.maxImagePixels===4000000&&cap.maxDecodedBytes===16777216&&cap.maxOperationBytes===67108864,'default budgets changed');
-    check(cap.imageDecode.flateTargetResolution&&cap.imageDecode.flateStorage==='scanlines-and-target'&&!cap.imageDecode.progressiveJpegTargetResolution,'capabilities');
+    check(cap.imageDecode.flateTargetResolution&&cap.imageDecode.flateStorage==='scanlines-and-target'&&cap.imageDecode.progressiveJpegTargetResolution,'capabilities');
     const originalState=await doc.state(),baseline=new Map(),rounds=[];
     for(let round=0;round<3;round++){
      for(const dpi of [72,36,18]){
@@ -80,16 +80,18 @@ try{
     stage='save';const saved=await doc.save();await doc.close();
     const reopened=await engine.open(saved.bytes,{mode:'strict'});oracle(await reopened.render(1,72,{imageDecode:'target'}));
     check(await hash((await reopened.render(1,72,{imageDecode:'target'})).pixels)===baseline.get(72),'saved preview differs');await reopened.close();
-    stage='source budget';const small=await engine.open(flate,{mode:'compatible',resourceProfile:'conservative'});
-    const sourceError=await reject(()=>small.render(1,18,{imageDecode:'target'}),'image_source_bytes');
-    check(sourceError.resource.limit===8388608&&sourceError.resource.actual===15318420,'source byte limit');await small.render(0,72);await small.close();
-    stage='JPEG regression';const sequential=await engine.open(jpeg,{mode:'compatible'});for(const dpi of [72,36,18])await sequential.render(1,dpi,{imageDecode:'target'});await sequential.close();
-    stage='progressive negative';const unsupported=await engine.open(progressive,{mode:'compatible'});
-    for(const dpi of [72,36,18]){
-     const error=await reject(()=>unsupported.render(1,dpi,{imageDecode:'target'}),'image_pixels');
-     check(error.resource.image.encoding==='jpeg'&&error.resource.image.jpegProcess==='progressive'&&!error.resource.image.targetDecodeSupported,'progressive diagnostic');
+    stage='source/resident separation';const small=await engine.open(flate,{mode:'compatible',resourceProfile:'conservative'});
+    oracle(await small.render(1,18,{imageDecode:'target'}));await small.render(0,72);await small.close();
+    stage='JPEG regression';
+    for(const input of [jpeg,progressive]){
+     const jpegDoc=await engine.open(input,{mode:'compatible'});
+     for(const dpi of [72,36,18]){
+      const frame=await jpegDoc.render(1,dpi,{imageDecode:'target'});
+      check(frame.width===Math.ceil(595*dpi/72)&&frame.height===Math.ceil(842*dpi/72),'JPEG preview geometry');
+      check(frame.pixels.some((v,i)=>i%4!==3&&v<200),'nonblank JPEG preview');
+     }
+     await jpegDoc.close();
     }
-    await unsupported.state();await unsupported.render(0,72);await unsupported.close();
     stage='corrupt Flate atomicity';const damaged=await engine.open(corrupt,{mode:'compatible'}),beforeFailure=await damaged.state();
     let invalidData;try{await damaged.render(1,72,{imageDecode:'target'});}catch(e){invalidData=e;}
     check(invalidData?.code==='format'&&invalidData.resource?.image?.encoding==='flate'&&invalidData.resource.image.targetDecodeSupported,'corrupt Flate diagnostic '+JSON.stringify({code:invalidData?.code,resource:invalidData?.resource}));
@@ -104,7 +106,7 @@ try{
      const restored=await engine.open(flate,{mode:'compatible'});oracle(await restored.render(1,72,{imageDecode:'target'}));await restored.close();cancellation=true;
     }
     const released=await engine.statistics();check(released.handles===0&&released.retainedBytes===0,'resource release');
-    checks.push({transport:worker?'worker':'sync',rounds,sourceBudget:sourceError.resource,progressiveNegative:true,cancellation,strictSavedReopen:true,savedBytes:saved.bytes.length,savedSha256:await hash(saved.bytes),released});
+    checks.push({transport:worker?'worker':'sync',rounds,sourceResidentSeparation:true,progressivePositive:true,cancellation,strictSavedReopen:true,savedBytes:saved.bytes.length,savedSha256:await hash(saved.bytes),released});
    }catch(error){throw Error(JSON.stringify({transport:worker?'worker':'sync',stage,message:error.message,code:error.code,resource:error.resource,stack:error.stack}),{cause:error});}
    finally{engine.dispose();}
   }return checks;

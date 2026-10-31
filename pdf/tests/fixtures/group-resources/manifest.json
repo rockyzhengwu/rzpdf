@@ -1,0 +1,26 @@
+{
+  "knockout.pdf": {
+    "bytes": 1581,
+    "sha256": "849554bd5018ae40bab7edcbc54171dff14bd83ed27efcf56a77fd51bea0d945"
+  },
+  "large-group.pdf": {
+    "bytes": 1531,
+    "sha256": "e261f54db8e4a18323c6b367569ebaa5063598b50160e42cfcfdb4bf762c9aca"
+  },
+  "local-icc.pdf": {
+    "bytes": 1560,
+    "sha256": "092f067eeca9850112682ab3c870190078a0fc2d00f9504d1f9fb3055222eb10"
+  },
+  "nested.pdf": {
+    "bytes": 1778,
+    "sha256": "64faee5afad96844c8fb26f217b8a45b2728825a1ddf26a2f6a74f3b28c6fb3e"
+  },
+  "rotated.pdf": {
+    "bytes": 1583,
+    "sha256": "d351f86132c38b9ba846fb6cc7fb1d40406f63e8764b48ca31274664f25e0974"
+  },
+  "soft-mask.pdf": {
+    "bytes": 2088,
+    "sha256": "637fde2cc792f1f309a8b1fbcefabcd7f53b80ace081cdcb4a7e62ab994dff5b"
+  }
+}

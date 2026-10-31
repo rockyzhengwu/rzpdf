@@ -1,0 +1,22 @@
+{
+  "hint-failed.pdf": {
+    "bytes": 1830,
+    "sha256": "d9099b493e690e4d27a22956bdae9614111a671896114eb9a24359aa42503c59"
+  },
+  "hint-reference.pdf": {
+    "bytes": 1810,
+    "sha256": "b185a7c45364538face3d79107fc74c2f73d80a6f7d9e5347df6475a189c30fa"
+  },
+  "scan-ccitt.pdf": {
+    "bytes": 2187,
+    "sha256": "f4666633c3c0437f36e2531690491adaf4369692dc1dce897de5ef3ce752f582"
+  },
+  "scan-flate.pdf": {
+    "bytes": 26317,
+    "sha256": "637d970126b2079567560e873059404ef16b14879c9afa50320e54249cfd2e54"
+  },
+  "scan-jbig2.pdf": {
+    "bytes": 275531,
+    "sha256": "ea5651b29754e9497ed47621b1e6937f23a34e6e04a1aa1fe6b56017a258b01d"
+  }
+}

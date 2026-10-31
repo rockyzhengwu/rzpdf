@@ -32,6 +32,8 @@ pub struct PDFContext<R: Seek + Read> {
     color_depth: Cell<usize>,
     active_color_spaces: RefCell<Vec<ObjectId>>,
     render_image_settings: Cell<Option<(f32, ImageDecodePolicy)>>,
+    render_image_work: Cell<Option<u64>>,
+    render_image_budget: RefCell<Option<crate::budget::OperationBudget>>,
     #[cfg(feature = "prepare-diagnostics")]
     pub(crate) preparation_profile: RefCell<Option<crate::page::preparation_profile::Recorder>>,
     text_geometry_only: Cell<bool>,
@@ -190,7 +192,53 @@ impl<R: Seek + Read> PDFContext<R> {
             &self.render_image_settings,
             self.render_image_settings.replace(Some((dpi, policy))),
         );
+        // Nested interpretation shares the enclosing preparation. Error and
+        // panic unwinding restore the previous scope, including its work meter.
+        struct Resources<'a> {
+            ctx: &'a Cell<Option<u64>>,
+            previous: Option<u64>,
+            budget: &'a RefCell<Option<crate::budget::OperationBudget>>,
+            previous_budget: Option<crate::budget::OperationBudget>,
+        }
+        impl Drop for Resources<'_> {
+            fn drop(&mut self) {
+                self.ctx.set(self.previous);
+                self.budget.replace(self.previous_budget.take());
+            }
+        }
+        let _resources = self.render_image_work.get().is_none().then(|| Resources {
+            ctx: &self.render_image_work,
+            previous: self.render_image_work.replace(Some(0)),
+            budget: &self.render_image_budget,
+            previous_budget: self
+                .render_image_budget
+                .replace(Some(self.limits.operation_budget())),
+        });
         action()
+    }
+
+    pub(crate) fn charge_image_decode_work(&self, units: u64) -> PdfResult<()> {
+        let Some(previous) = self.render_image_work.get() else {
+            return Ok(());
+        };
+        let actual = previous.saturating_add(units);
+        if actual > self.limits.max_image_decode_work {
+            return Err(PdfError::ResourceLimitExceeded {
+                reason: "image_decode_work",
+                stage: "page_prepare",
+                limit: self.limits.max_image_decode_work,
+                actual,
+            });
+        }
+        self.render_image_work.set(Some(actual));
+        Ok(())
+    }
+
+    pub(crate) fn image_operation_budget(&self) -> crate::budget::OperationBudget {
+        self.render_image_budget
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| self.operation_budget())
     }
     pub(crate) fn cached_font(
         &self,
@@ -292,6 +340,8 @@ impl<R: Seek + Read> PDFContext<R> {
             color_depth: Cell::new(0),
             active_color_spaces: RefCell::new(Vec::new()),
             render_image_settings: Cell::new(None),
+            render_image_work: Cell::new(None),
+            render_image_budget: RefCell::new(None),
             #[cfg(feature = "prepare-diagnostics")]
             preparation_profile: RefCell::new(None),
             text_geometry_only: Cell::new(false),
@@ -467,6 +517,8 @@ impl<R: Seek + Read> PDFContext<R> {
             color_depth: Cell::new(0),
             active_color_spaces: RefCell::new(Vec::new()),
             render_image_settings: Cell::new(None),
+            render_image_work: Cell::new(None),
+            render_image_budget: RefCell::new(None),
             #[cfg(feature = "prepare-diagnostics")]
             preparation_profile: RefCell::new(None),
             text_geometry_only: Cell::new(false),
@@ -1520,6 +1572,55 @@ impl<R: Seek + Read> PDFContext<R> {
 
 #[cfg(test)]
 mod loading_tests {
+    #[test]
+    fn render_work_and_memory_share_nested_scope_and_recover_after_failure() {
+        use crate::{
+            document::Document,
+            document::prepared_page::ImageDecodePolicy,
+            parser::options::{Limits, ParseOptions},
+        };
+        let source = Document::new().unwrap().save_to_bytes().unwrap();
+        let doc = Document::from_bytes_with_options(
+            source,
+            ParseOptions {
+                limits: Limits {
+                    max_image_decode_work: 10,
+                    max_operation_bytes: 4096,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let ctx = doc.ctx();
+        let result = ctx.with_render_image_policy(72., ImageDecodePolicy::Budgeted, || {
+            ctx.charge_image_decode_work(6)?;
+            let lease = ctx.image_operation_budget().reserve(2500)?;
+            ctx.with_render_image_policy(36., ImageDecodePolicy::Budgeted, || {
+                assert!(ctx.image_operation_budget().reserve(2000).is_err());
+                ctx.charge_image_decode_work(5)
+            })?;
+            drop(lease);
+            Ok(())
+        });
+        assert!(matches!(
+            result,
+            Err(PdfError::ResourceLimitExceeded {
+                reason: "image_decode_work",
+                actual: 11,
+                limit: 10,
+                ..
+            })
+        ));
+        assert!(ctx.render_image_work.get().is_none());
+        assert!(ctx.render_image_budget.borrow().is_none());
+        ctx.with_render_image_policy(72., ImageDecodePolicy::Budgeted, || {
+            ctx.charge_image_decode_work(10)?;
+            assert!(ctx.image_operation_budget().reserve(4096).is_ok());
+            Ok(())
+        })
+        .unwrap();
+    }
     #[test]
     fn save_budget_ids_preserve_edits_tombstones_and_original_materialization() {
         use crate::{budget::OperationBudget, objects::pdf_string::PdfString};

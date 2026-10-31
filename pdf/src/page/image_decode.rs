@@ -43,11 +43,6 @@ impl ImageDecodePlan {
     pub fn validate(&self, limits: Limits) -> PdfResult<()> {
         for (reason, actual, limit) in [
             (
-                "image_source_pixels",
-                u64::from(self.source.0) * u64::from(self.source.1),
-                crate::filter::MAX_TARGET_SOURCE_IMAGE_PIXELS,
-            ),
-            (
                 "image_pixels",
                 u64::from(self.target.0) * u64::from(self.target.1),
                 limits.max_image_pixels,

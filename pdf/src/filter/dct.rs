@@ -3,9 +3,7 @@ use crate::{
     objects::pdf_dict::PdfDict,
 };
 
-pub(crate) const MAX_TARGET_SOURCE_PIXELS: u64 = super::MAX_TARGET_SOURCE_IMAGE_PIXELS;
-
-/// Native IDCT reduction for render-only, sequential JPEG images. Source and
+/// Native IDCT reduction for render-only JPEG images. Source and
 /// output guards are independent; this never constructs full-size RGB pixels.
 pub(crate) fn decode_target(
     input: &[u8],
@@ -13,6 +11,8 @@ pub(crate) fn decode_target(
     target: (u32, u32),
     context: crate::filter::FilterContext<'_>,
     budget: &crate::budget::OperationBudget,
+    max_source_bytes: usize,
+    charge_work: impl FnOnce(u64) -> PdfResult<()>,
 ) -> PdfResult<(u32, u32, crate::budget::BudgetedBytes)> {
     let action = || -> PdfResult<_> {
         let mut decoder = mozjpeg::Decompress::new_mem(input)
@@ -23,14 +23,6 @@ pub(crate) fn decode_target(
             ));
         }
         let source_pixels = u64::from(source.0) * u64::from(source.1);
-        if source_pixels > MAX_TARGET_SOURCE_PIXELS {
-            return Err(PdfError::ResourceLimitExceeded {
-                reason: "image_source_pixels",
-                stage: "image_decode",
-                limit: MAX_TARGET_SOURCE_PIXELS,
-                actual: source_pixels,
-            });
-        }
         let scale = [1u32, 2, 4, 8]
             .into_iter()
             .find(|n| {
@@ -48,6 +40,57 @@ pub(crate) fn decode_target(
             mozjpeg::ColorSpace::JCS_CMYK | mozjpeg::ColorSpace::JCS_YCCK => 4,
             _ => 3,
         };
+        let source_bytes = source_pixels.saturating_mul(components as u64);
+        if source_bytes > max_source_bytes as u64 {
+            return Err(PdfError::ResourceLimitExceeded {
+                reason: "image_source_bytes",
+                stage: "image_decode",
+                limit: max_source_bytes as u64,
+                actual: source_bytes,
+            });
+        }
+        charge_work(source_bytes)?;
+        // Progressive decoding retains source-sized DCT coefficient arrays,
+        // even at 1/8 IDCT. Charge padded MCU storage before start_decompress.
+        // The remaining envelope covers scanline buffers and decoder tables;
+        // it is an estimate, not a replacement allocator for libjpeg.
+        let progressive = process(input) == Some("progressive");
+        let max_h = decoder
+            .components()
+            .iter()
+            .map(|c| c.h_samp_factor)
+            .max()
+            .unwrap_or(0);
+        let max_v = decoder
+            .components()
+            .iter()
+            .map(|c| c.v_samp_factor)
+            .max()
+            .unwrap_or(0);
+        if !(1..=4).contains(&max_h) || !(1..=4).contains(&max_v) {
+            return Err(PdfError::FilterError(
+                "invalid JPEG sampling factors".into(),
+            ));
+        }
+        let mut scratch = 1024 * 1024 + source.0 as usize * components * 64;
+        if progressive {
+            for component in decoder.components() {
+                if !(1..=4).contains(&component.h_samp_factor)
+                    || !(1..=4).contains(&component.v_samp_factor)
+                {
+                    return Err(PdfError::FilterError(
+                        "invalid JPEG component sampling".into(),
+                    ));
+                }
+                let blocks = (source.0 as usize).div_ceil(8 * max_h as usize)
+                    * component.h_samp_factor as usize
+                    * (source.1 as usize).div_ceil(8 * max_v as usize)
+                    * component.v_samp_factor as usize;
+                scratch = scratch
+                    .checked_add(blocks * (64 * 2 + 16))
+                    .ok_or_else(|| PdfError::ResourceLimit("JPEG coefficient storage".into()))?;
+            }
+        }
         if pixels > context.max_image_pixels {
             return Err(PdfError::ResourceLimitExceeded {
                 reason: "image_pixels",
@@ -67,7 +110,10 @@ pub(crate) fn decode_target(
         }
         decoder.scale(scale as u8);
         let size = pixels as usize * components;
-        let actual = budget.live_bytes().saturating_add(size);
+        let actual = budget
+            .live_bytes()
+            .saturating_add(size)
+            .saturating_add(scratch);
         if actual > budget.maximum_bytes() {
             return Err(PdfError::ResourceLimitExceeded {
                 reason: "image_operation_bytes",
@@ -76,6 +122,7 @@ pub(crate) fn decode_target(
                 actual: actual as u64,
             });
         }
+        let _decoder_storage = budget.reserve(scratch)?;
         let mut output = crate::budget::BudgetedBytes::zeroed(budget, size)?;
         macro_rules! read {
             ($image:ident) => {{
@@ -114,8 +161,7 @@ pub(crate) fn decode_target(
     }
 }
 
-/// Only sequential SOF0 uses the bounded-scanline reduced path. Progressive
-/// coefficient storage can depend on the full source, even with reduced IDCT.
+/// Identify supported DCT processes without entering entropy decoding.
 pub(crate) fn process(input: &[u8]) -> Option<&'static str> {
     if !input.starts_with(&[0xff, 0xd8]) {
         return None;

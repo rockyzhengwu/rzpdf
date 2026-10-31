@@ -19,6 +19,12 @@ pub struct Separation {
 }
 
 impl Separation {
+    pub(crate) fn visit_profiles(
+        &self,
+        visitor: &mut impl FnMut(&crate::color::icc_profile::ICCProfile) -> PdfResult<()>,
+    ) -> PdfResult<()> {
+        self.alternate_space.visit_profiles(visitor)
+    }
     pub(crate) fn retained_profile_bytes(&self) -> PdfResult<usize> {
         self.alternate_space.retained_profile_bytes()
     }

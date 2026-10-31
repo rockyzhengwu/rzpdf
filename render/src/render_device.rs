@@ -18,6 +18,9 @@ use std::{fs::File, io::Write};
 #[cfg(test)]
 #[path = "annotation_tests.rs"]
 mod annotation_tests;
+#[path = "group_target.rs"]
+mod group_target;
+use group_target::RasterTarget;
 #[path = "coverage_blend.rs"]
 mod coverage_blend;
 #[path = "coverage_spans.rs"]
@@ -187,6 +190,7 @@ pub struct SkiaRender {
 struct RenderGroup {
     parent_color_context: pdf::color::conversion::ColorConversionContext,
     parent: Surface,
+    parent_target: RasterTarget,
     limits: Limits,
     paint: pdf::page::transparency::GroupPaint,
     coverage: Option<Surface>,
@@ -281,6 +285,7 @@ impl SkiaRender {
         image: skia_safe::Image,
         source: &pdf::color::conversion::ColorConversionContext,
         paint: &pdf::page::transparency::GroupPaint,
+        held_pixels: u64,
     ) -> PdfResult<skia_safe::Image> {
         if self.shape_mode
             || source
@@ -289,19 +294,14 @@ impl SkiaRender {
         {
             return Ok(image);
         }
-        let bytes = (self.page_width as usize)
-            .checked_mul(self.page_height as usize)
-            .and_then(|n| n.checked_mul(4))
-            .ok_or_else(|| PdfError::ResourceLimit("ICC group raster size".into()))?;
-        // Parent, group, converted Rust bytes and Skia's owned copy coexist.
-        if bytes
-            .checked_mul(4)
-            .is_none_or(|peak| peak > self.limits.max_render_bytes)
-            || (self.page_width as u64 * self.page_height as u64).saturating_mul(4)
-                > self.limits.max_render_pixels
-        {
-            return Err(PdfError::ResourceLimit("ICC group conversion peak".into()));
-        }
+        let (width, height) = (image.width(), image.height());
+        let image_pixels = width as u64 * height as u64;
+        let bytes = usize::try_from(image_pixels.saturating_mul(4))
+            .map_err(|_| PdfError::ResourceLimit("ICC group raster size".into()))?;
+        self.check_group_peak(
+            held_pixels.saturating_add(image_pixels),
+            "group_color_conversion",
+        )?;
         let pixels = image
             .peek_pixels()
             .ok_or_else(|| PdfError::ResourceLimit("ICC group pixels".into()))?;
@@ -311,8 +311,8 @@ impl SkiaRender {
             .try_reserve_exact(bytes)
             .map_err(|_| PdfError::ResourceLimit("ICC group conversion buffer".into()))?;
         converted.resize(bytes, 0);
-        for y in 0..self.page_height {
-            for x in 0..self.page_width {
+        for y in 0..height {
+            for x in 0..width {
                 let color = pixels.get_color((x, y));
                 if color.a() == 0 {
                     continue;
@@ -327,7 +327,7 @@ impl SkiaRender {
                     ],
                     &target,
                 )?;
-                let offset = (y as usize * self.page_width as usize + x as usize) * 4;
+                let offset = (y as usize * width as usize + x as usize) * 4;
                 converted[offset..offset + 4].copy_from_slice(&[
                     rgb.r(),
                     rgb.g(),
@@ -336,18 +336,7 @@ impl SkiaRender {
                 ]);
             }
         }
-        let info = skia_safe::ImageInfo::new(
-            (self.page_width, self.page_height),
-            skia_safe::ColorType::RGBA8888,
-            skia_safe::AlphaType::Unpremul,
-            None,
-        );
-        skia_safe::images::raster_from_data(
-            &info,
-            skia_safe::Data::new_copy(&converted),
-            self.page_width as usize * 4,
-        )
-        .ok_or_else(|| PdfError::ResourceLimit("ICC group converted image".into()))
+        crate::owned_raster::from_rgba(width, height, converted)
     }
     /// Explicit substitute for fonts without a program. PDF advances remain
     /// authoritative; glyphs are resolved through proven Unicode mappings.
@@ -452,6 +441,8 @@ impl SkiaRender {
         &mut self,
         image: &skia_safe::Image,
         group: &pdf::page::transparency::GroupPaint,
+        offset: (i32, i32),
+        held_pixels: u64,
     ) -> PdfResult<()> {
         let mut paint = Paint::default();
         paint.set_alpha(Self::opacity_byte(group.alpha, self.shape_mode));
@@ -466,9 +457,45 @@ impl SkiaRender {
                 )
                 .ok_or_else(|| PdfError::ResourceLimit("group image shader".into()))?;
             self.paint.set_shader(image_shader);
-            self.apply_soft_mask(Some(mask), &Matrix::identity())?;
-            paint = self.paint.clone();
+            // Evaluate the mask on the same local grid as the group, not on
+            // the restored parent page. Reserve frozen parent/group owners
+            // before handing the remaining budget to the mask renderer.
+            let parent = self.raster_target();
+            let local = parent.image_target(image.width(), image.height(), offset);
+            self.check_group_peak(
+                held_pixels.saturating_add(local.pixels().saturating_mul(5)),
+                "group_soft_mask",
+            )?;
+            let old_limits = self.limits;
+            let reserved = (parent.pixels() + held_pixels).saturating_mul(4);
+            let available = (old_limits.max_render_bytes as u64)
+                .checked_sub(reserved)
+                .ok_or(PdfError::ResourceLimitExceeded {
+                    reason: "render_live_bytes",
+                    stage: "group_soft_mask",
+                    limit: old_limits.max_render_bytes as u64,
+                    actual: reserved,
+                });
+            let result = match available {
+                Ok(available) => {
+                    self.use_target(&local);
+                    self.limits.max_render_bytes = available as usize;
+                    self.apply_soft_mask(Some(mask), &Matrix::identity())
+                }
+                Err(error) => Err(error),
+            };
+            self.use_target(&parent);
+            self.limits = old_limits;
+            let shader = self.paint.shader();
             self.paint.set_shader(None);
+            result?;
+            paint = self.paint.clone();
+            paint.set_shader(shader.map(|shader| {
+                shader.with_local_matrix(&skia_safe::Matrix::translate((
+                    offset.0 as f32,
+                    offset.1 as f32,
+                )))
+            }));
         }
         let save = self.surface.canvas().save_count();
         self.surface.canvas().save();
@@ -477,13 +504,20 @@ impl SkiaRender {
             self.surface.canvas().reset_matrix();
             if group.soft_mask.is_some() && !self.shape_mode {
                 self.surface.canvas().draw_rect(
-                    skia_safe::Rect::from_wh(self.page_width as f32, self.page_height as f32),
+                    skia_safe::Rect::from_xywh(
+                        offset.0 as f32,
+                        offset.1 as f32,
+                        image.width() as f32,
+                        image.height() as f32,
+                    ),
                     &paint,
                 );
             } else {
-                self.surface
-                    .canvas()
-                    .draw_image(image, (0., 0.), Some(&paint));
+                self.surface.canvas().draw_image(
+                    image,
+                    (offset.0 as f32, offset.1 as f32),
+                    Some(&paint),
+                );
             }
             Ok(())
         })();
@@ -2027,64 +2061,76 @@ impl Device for SkiaRender {
         if self.group_stack.len() >= self.limits.max_depth || self.group_stack.len() >= 128 {
             return Err(PdfError::ResourceLimit("render group depth".into()));
         }
-        let pixels = self.page_width as u64 * self.page_height as u64;
-        let bytes = usize::try_from(pixels)
-            .ok()
-            .and_then(|v| v.checked_mul(4))
-            .ok_or_else(|| PdfError::ResourceLimit("render group bytes".into()))?;
-        let (clip_bytes, clip_pixels) = self.clip_image_usage()?;
-        let mut limits = self.limits;
+        let parent_target = self.raster_target();
+        let target = self.group_target(&group)?;
+        let pixels = target.pixels();
+        if pixels > self.limits.max_render_pixels {
+            return Err(PdfError::ResourceLimitExceeded {
+                reason: "render_pixels",
+                stage: "render_group",
+                limit: self.limits.max_render_pixels,
+                actual: pixels,
+            });
+        }
+        let bytes = usize::try_from(pixels * 4)
+            .map_err(|_| PdfError::ResourceLimit("render group bytes".into()))?;
         let needs_shape =
             group.knockout || self.group_stack.last().is_some_and(|g| g.shape.is_some());
-        // A retained initial backdrop may trigger copy-on-write when nested
-        // inside an isolated knockout group, so reserve that page as well.
-        let count = (if group.isolated { 1 } else { 3 }) + usize::from(needs_shape);
-        let reserved = bytes
-            .checked_mul(count)
-            .ok_or_else(|| PdfError::ResourceLimit("aggregate group surface bytes".into()))?;
+        let auxiliaries = usize::from(!group.isolated) * 2 + usize::from(needs_shape);
+        self.check_group_peak(pixels * (1 + auxiliaries as u64), "render_group")?;
+        let mut limits = self.limits;
+        // Ancestor targets are already charged in the inherited available
+        // budget. Retain this parent plus this group's auxiliary buffers.
+        let reserved = parent_target.pixels() * 4 + bytes as u64 * auxiliaries as u64;
         limits.max_render_bytes = limits
             .max_render_bytes
-            .checked_sub(reserved)
-            .filter(|v| v.checked_sub(clip_bytes).is_some_and(|n| n >= bytes))
-            .ok_or_else(|| PdfError::ResourceLimit("aggregate group surface bytes".into()))?;
-        limits.max_render_pixels = limits
-            .max_render_pixels
-            .checked_sub(pixels * count as u64)
-            .filter(|v| v.checked_sub(clip_pixels).is_some_and(|n| n >= pixels))
-            .ok_or_else(|| PdfError::ResourceLimit("aggregate group surface pixels".into()))?;
+            .checked_sub(reserved as usize)
+            .ok_or_else(|| PdfError::ResourceLimit("render group reservation".into()))?;
+        let parent_origin = parent_target.origin();
+        let origin = target.origin();
+        let offset = (origin.0 - parent_origin.0, origin.1 - parent_origin.1);
         self.group_stack
             .try_reserve(1)
             .map_err(|_| PdfError::ResourceLimit("render group stack".into()))?;
-        let mut surface = surfaces::raster_n32_premul((self.page_width, self.page_height))
+        let mut surface = surfaces::raster_n32_premul((target.width, target.height))
             .ok_or_else(|| PdfError::ResourceLimit("group offscreen surface".into()))?;
         surface.canvas().clear(Color::TRANSPARENT);
         let initial = if group.isolated {
             None
         } else {
             let image = if let Some(image) = self.initial_override.take() {
-                image
+                Some(image)
             } else if let Some(parent) = self.group_stack.last_mut().filter(|g| g.paint.knockout) {
                 if parent.paint.isolated {
-                    surface.image_snapshot()
+                    None
                 } else {
-                    parent.initial.as_ref().unwrap().clone()
+                    parent.initial.clone()
                 }
             } else {
-                self.surface.image_snapshot()
+                Some(self.surface.image_snapshot())
             };
-            surface.canvas().draw_image(&image, (0., 0.), None);
-            Some(image)
+            if let Some(image) = image {
+                surface
+                    .canvas()
+                    .draw_image(&image, (-(offset.0 as f32), -(offset.1 as f32)), None);
+            }
+            // The snapshot is local. Its copy-on-write storage is included in
+            // the auxiliary reservation and never aliases the frozen parent.
+            Some(surface.image_snapshot())
         };
         let coverage = if group.isolated {
             None
         } else {
-            let mut coverage = surfaces::raster_n32_premul((self.page_width, self.page_height))
+            let mut coverage = surfaces::raster_n32_premul((target.width, target.height))
                 .ok_or_else(|| PdfError::ResourceLimit("group alpha surface".into()))?;
             coverage.canvas().clear(Color::TRANSPARENT);
             Some(coverage)
         };
         let shape = if needs_shape {
-            Some(self.empty_object_surface()?)
+            let mut shape = surfaces::raster_n32_premul((target.width, target.height))
+                .ok_or_else(|| PdfError::ResourceLimit("group shape surface".into()))?;
+            shape.canvas().clear(Color::TRANSPARENT);
+            Some(shape)
         } else {
             None
         };
@@ -2092,12 +2138,14 @@ impl Device for SkiaRender {
         self.group_stack.push(RenderGroup {
             parent_color_context: self.color_context.clone(),
             parent,
+            parent_target,
             limits: self.limits,
             paint: group,
             coverage,
             shape,
             initial,
         });
+        self.use_target(&target);
         self.limits = limits;
         self.color_context = working_context;
         Ok(())
@@ -2109,30 +2157,29 @@ impl Device for SkiaRender {
             .group_stack
             .pop()
             .ok_or_else(|| PdfError::PageOperatorError("unmatched render group end".into()))?;
+        let target = self.raster_target();
         let mut surface = std::mem::replace(&mut self.surface, group.parent);
         let working_context =
             std::mem::replace(&mut self.color_context, group.parent_color_context.clone());
+        self.use_target(&group.parent_target);
         self.limits = group.limits;
+        let origin = target.origin();
+        let parent_origin = group.parent_target.origin();
+        let offset = (origin.0 - parent_origin.0, origin.1 - parent_origin.1);
+        let (width, height) = (target.width, target.height);
+        let corrected = group.coverage.is_some();
         if !commit {
             return Ok(());
         }
         let image = if let Some(mut coverage) = group.coverage.take() {
-            let bytes = (self.page_width as usize)
-                .checked_mul(self.page_height as usize)
+            let bytes = (width as usize)
+                .checked_mul(height as usize)
                 .and_then(|v| v.checked_mul(4))
                 .ok_or_else(|| PdfError::ResourceLimit("group uncompositing bytes".into()))?;
-            // Parent, initial backdrop, colour, opacity, optional shape, plus
-            // output Vec/native copy. Initial may alias but is counted in full.
-            let peak = 6 + usize::from(group.shape.is_some());
-            if bytes
-                .checked_mul(peak)
-                .is_none_or(|v| v > self.limits.max_render_bytes)
-                || (self.page_width as u64 * self.page_height as u64)
-                    .checked_mul(peak as u64)
-                    .is_none_or(|v| v > self.limits.max_render_pixels)
-            {
-                return Err(PdfError::ResourceLimit("group uncompositing peak".into()));
-            }
+            self.check_group_peak(
+                target.pixels() * (4 + u64::from(group.shape.is_some())),
+                "group_uncompositing",
+            )?;
             let source = surface
                 .peek_pixels()
                 .ok_or_else(|| PdfError::ResourceLimit("group colour pixels".into()))?;
@@ -2167,29 +2214,37 @@ impl Device for SkiaRender {
                     "nonisolated group native big-endian pixels".into(),
                 ));
             }
-            for y in 0..self.page_height as usize {
-                for x in 0..self.page_width as usize {
+            for y in 0..height as usize {
+                for x in 0..width as usize {
                     let a = mask[y * alpha.row_bytes() + x * 4 + 3];
                     let inverse = 1. - f64::from(a) / 255.;
                     for channel in 0..3 {
                         let v = f64::from(src[y * source.row_bytes() + x * 4 + channel])
                             - inverse * f64::from(bg[y * backdrop.row_bytes() + x * 4 + channel]);
-                        output[(y * self.page_width as usize + x) * 4 + channel] =
+                        output[(y * width as usize + x) * 4 + channel] =
                             v.round().clamp(0., f64::from(a)) as u8;
                     }
-                    output[(y * self.page_width as usize + x) * 4 + 3] = a;
+                    output[(y * width as usize + x) * 4 + 3] = a;
                 }
             }
-            skia_safe::images::raster_from_data(
-                &self.surface.image_info(),
-                skia_safe::Data::new_copy(&output),
-                self.page_width as usize * 4,
-            )
-            .ok_or_else(|| PdfError::ResourceLimit("group corrected image".into()))?
+            crate::owned_raster::from_pixels(&surface.image_info(), output)?
         } else {
             surface.image_snapshot()
         };
-        let image = self.convert_group_space(image, &working_context, &group.paint)?;
+        let mut held_pixels = target.pixels()
+            * (1 + u64::from(group.initial.is_some())
+                + u64::from(group.shape.is_some())
+                + u64::from(corrected));
+        let converted = !self.shape_mode
+            && !working_context
+                .output_profile()
+                .same_profile(self.color_context.output_profile());
+        let image = self.convert_group_space(image, &working_context, &group.paint, held_pixels)?;
+        // Conversion replaces a corrected independent image, but an original
+        // surface snapshot still has its backing surface alive in this scope.
+        if converted && !corrected {
+            held_pixels = held_pixels.saturating_add(target.pixels());
+        }
         let shape = group.shape.as_mut().map(Surface::image_snapshot);
         if self.dispatch_group_object(|device| {
             let source = if device.shape_mode {
@@ -2197,14 +2252,17 @@ impl Device for SkiaRender {
             } else {
                 &image
             };
-            device
-                .capture_group_alpha(|device| device.composite_group_image(source, &group.paint))?;
-            device.composite_group_image(source, &group.paint)
+            device.capture_group_alpha(|device| {
+                device.composite_group_image(source, &group.paint, offset, held_pixels)
+            })?;
+            device.composite_group_image(source, &group.paint, offset, held_pixels)
         })? {
             return Ok(());
         }
-        self.capture_group_alpha(|device| device.composite_group_image(&image, &group.paint))?;
-        self.composite_group_image(&image, &group.paint)
+        self.capture_group_alpha(|device| {
+            device.composite_group_image(&image, &group.paint, offset, held_pixels)
+        })?;
+        self.composite_group_image(&image, &group.paint, offset, held_pixels)
     }
 
     fn start_page(&mut self, page_width: f32, page_height: f32) -> PdfResult<()> {
@@ -2694,6 +2752,9 @@ impl Device for SkiaRender {
                 let global = Matrix::new(a, b, c, d, position_matrix.e(), position_matrix.f());
                 for (i, (start, run_font)) in runs.iter().enumerate() {
                     let end = runs.get(i + 1).map_or(glyphs.len(), |r| r.0);
+                    let recovered =
+                        Self::recover_empty_hinted_glyphs(run_font, &glyphs[*start..end], &global);
+                    let run_font = recovered.as_ref().unwrap_or(run_font);
                     if stroke_paint.is_none()
                         && self.try_draw_glyph_run(
                             run_font,

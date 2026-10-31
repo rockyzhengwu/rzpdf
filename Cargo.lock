@@ -1169,6 +1169,7 @@ dependencies = [
 name = "web-wasm"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "pdf",
  "render",
  "serde_json",

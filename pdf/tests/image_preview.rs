@@ -177,22 +177,47 @@ fn rejected(doc: &Document) -> PdfError {
         .unwrap_err()
 }
 #[test]
-fn progressive_and_masked_images_keep_typed_negative_results_and_can_recover() {
+fn progressive_coefficients_and_source_work_are_bounded_before_output_publication() {
+    for (operation, source, reason) in [
+        (8 * 1024 * 1024, 128 * 1024 * 1024, "image_operation_bytes"),
+        (64 * 1024 * 1024, 14 * 1024 * 1024, "image_source_bytes"),
+    ] {
+        let mut options = options();
+        options.limits.max_operation_bytes = operation;
+        options.limits.max_image_source_bytes = source;
+        let doc = Document::from_bytes_with_options(
+            include_bytes!("fixtures/image-preview/preview-progressive.pdf").to_vec(),
+            options,
+        )
+        .unwrap();
+        let revision = doc.revision();
+        let error = rejected(&doc);
+        assert!(
+            matches!(error.root_cause(),PdfError::ResourceLimitExceeded {reason:r,..} if *r==reason)
+        );
+        assert_eq!(
+            error.image_decode_details().unwrap().jpeg_process,
+            Some("progressive")
+        );
+        assert!(
+            error
+                .image_decode_details()
+                .unwrap()
+                .target_decode_supported
+        );
+        assert_eq!(doc.render_cache_statistics().page_entries, 0);
+        assert_eq!(doc.revision(), revision);
+        assert!(doc.prepare_page_for_render(0, None, 72.).is_ok());
+    }
+}
+#[test]
+fn progressive_reduction_and_invalid_mask_failure_can_recover() {
     let progressive = fixed("progressive");
-    let error = rejected(&progressive);
-    assert!(matches!(
-        error.root_cause(),
-        PdfError::ResourceLimitExceeded {
-            reason: "image_pixels",
-            actual: 5106140,
-            limit: 4000000,
-            ..
-        }
-    ));
-    let info = error.image_decode_details().unwrap();
-    assert_eq!(info.encoding, "jpeg");
-    assert_eq!(info.jpeg_process, Some("progressive"));
-    assert!(!info.target_decode_supported);
+    let prepared = progressive
+        .prepare_page_for_render_with_policy(1, None, 72., ImageDecodePolicy::TargetResolution)
+        .unwrap();
+    let reduced = images(&progressive, &prepared);
+    assert_eq!(reduced[0].image.pixel_dimensions(), (958, 1333));
     assert!(progressive.prepare_page_for_render(0, None, 72.).is_ok());
     let doc = fixed("flate");
     let original = doc.resolve_object(ObjectId::new(7, 0)).unwrap();
@@ -723,5 +748,137 @@ fn shared_indirect_mask_revision_invalidates_combined_previews() {
     assert!(old.replay(&doc, &mut Images::default()).is_err());
     for image in images(&doc, &new) {
         assert_eq!(pixel(&image, 20, 20)[3], 255);
+    }
+}
+
+#[test]
+fn jbig2_target_stencil_preserves_thin_strokes_and_original_source() {
+    let source = include_bytes!("fixtures/compatibility/scan-jbig2.pdf");
+    let doc = Document::from_bytes_with_options(source.to_vec(), options()).unwrap();
+    let saved = doc.save_to_bytes().unwrap();
+    for dpi in [18., 36., 72.] {
+        let page = doc
+            .prepare_page_for_render_with_policy(0, None, dpi, ImageDecodePolicy::TargetResolution)
+            .unwrap();
+        let draws = images(&doc, &page);
+        assert_eq!(draws.len(), 1);
+        let image = &draws[0];
+        assert_eq!(image.image.source_pixel_dimensions(), (2500, 3500));
+        let (w, h) = image.image.pixel_dimensions();
+        assert_eq!(stencil_pixel(image, w / 4, h / 2)[3], 255);
+        for x in w * 3 / 5..w * 9 / 10 {
+            assert!(
+                (58..=73).contains(&stencil_pixel(image, x, h / 2)[3]),
+                "thin source strokes must survive minification"
+            );
+        }
+    }
+    assert_eq!(doc.save_to_bytes().unwrap(), saved);
+    let reopened = Document::from_bytes_with_options(saved, options()).unwrap();
+    assert!(
+        reopened
+            .prepare_page_for_render_with_policy(0, None, 36., ImageDecodePolicy::TargetResolution)
+            .is_ok()
+    );
+}
+
+#[test]
+fn jbig2_source_work_and_live_native_allocation_fail_atomically() {
+    let source = include_bytes!("fixtures/compatibility/scan-jbig2.pdf");
+    let mut parse = options();
+    parse.limits.max_image_decode_work = 1;
+    let doc = Document::from_bytes_with_options(source.to_vec(), parse).unwrap();
+    let error = doc
+        .prepare_page_for_render_with_policy(0, None, 18., ImageDecodePolicy::TargetResolution)
+        .unwrap_err();
+    assert!(
+        matches!(
+            error.root_cause(),
+            PdfError::ResourceLimitExceeded {
+                reason: "image_decode_work",
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(doc.render_cache_statistics().page_entries, 0);
+    let mut parse = options();
+    parse.limits.max_operation_bytes = 512 * 1024;
+    let doc = Document::from_bytes_with_options(source.to_vec(), parse).unwrap();
+    let error = doc
+        .prepare_page_for_render_with_policy(0, None, 18., ImageDecodePolicy::TargetResolution)
+        .unwrap_err();
+    assert!(
+        matches!(error.root_cause(), PdfError::ResourceLimitExceeded { reason:"image_operation_bytes",actual,limit,.. } if actual>limit),
+        "{error:?}"
+    );
+    assert_eq!(doc.render_cache_statistics().page_entries, 0);
+    assert!(doc.get_page(0).unwrap().geometry().is_ok());
+}
+
+fn stencil_pixel(image: &ImageObject, x: u32, y: u32) -> [u8; 4] {
+    let rgba = image
+        .image
+        .rgba_buffer_with_stencil_color(&pdf::color::value::ColorRgb::new(1., 0., 0.))
+        .unwrap();
+    let width = image.image.pixel_dimensions().0;
+    rgba[((y * width + x) * 4) as usize..((y * width + x) * 4 + 4) as usize]
+        .try_into()
+        .unwrap()
+}
+#[test]
+fn jbig2_gray_and_inverse_stencil_decode_keep_sample_polarity() {
+    for stencil in [false, true] {
+        let doc = Document::from_bytes_with_options(
+            include_bytes!("fixtures/compatibility/scan-jbig2.pdf").to_vec(),
+            options(),
+        )
+        .unwrap();
+        let id = ObjectId::new(5, 0);
+        let original = doc.resolve_object(id).unwrap();
+        let stream = original.as_stream().unwrap();
+        let mut dict = stream.dict().clone();
+        if stencil {
+            let mut decode = pdf::objects::pdf_array::PdfArray::default();
+            for value in [1., 0.] {
+                decode
+                    .try_add_obj(PdfObject::PdfNumber(
+                        pdf::objects::pdf_number::PdfNumber::new(value),
+                    ))
+                    .unwrap();
+            }
+            dict.try_insert("Decode".into(), PdfObject::PdfArray(decode))
+                .unwrap();
+        } else {
+            dict.remove("ImageMask");
+            dict.try_insert(
+                "ColorSpace".into(),
+                PdfObject::PdfName(PdfName::new("DeviceGray".into())),
+            )
+            .unwrap();
+        }
+        doc.update_object(
+            id,
+            PdfObject::PdfStream(PdfStream::new(
+                dict,
+                doc.read_stream_data(stream).unwrap().to_vec(),
+            )),
+        )
+        .unwrap();
+        let page = doc
+            .prepare_page_for_render_with_policy(0, None, 18., ImageDecodePolicy::TargetResolution)
+            .unwrap();
+        let draws = images(&doc, &page);
+        let image = &draws[0];
+        let (w, h) = image.image.pixel_dimensions();
+        if stencil {
+            assert_eq!(stencil_pixel(image, w / 4, h / 2)[3], 0);
+            assert!((185..=198).contains(&stencil_pixel(image, w * 3 / 4, h / 2)[3]));
+        } else {
+            assert_eq!(pixel(image, w / 4, h / 2), [0, 0, 0, 255]);
+            let gray = pixel(image, w * 3 / 4, h / 2);
+            assert!((185..=198).contains(&gray[0]));
+            assert_eq!(gray, [gray[0], gray[0], gray[0], 255]);
+        }
     }
 }

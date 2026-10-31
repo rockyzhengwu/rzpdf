@@ -1,5 +1,6 @@
 //! WA-04/05 C ABI. Handles are module-local and never reused.
 mod api;
+mod blob_source;
 mod content;
 mod fonts;
 mod interaction;
@@ -24,6 +25,9 @@ fn limits() -> Limits {
         max_objects: 100_000,
         max_depth: 64,
         max_decoded_bytes: 16 * 1024 * 1024,
+        max_image_source_bytes: 128 * 1024 * 1024,
+        max_display_list_bytes: 32 * 1024 * 1024,
+        max_image_decode_work: 512 * 1024 * 1024,
         max_operation_bytes: 64 * 1024 * 1024,
         max_image_pixels: 4_000_000,
         max_render_pixels: 4_000_000,

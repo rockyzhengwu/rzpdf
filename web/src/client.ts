@@ -1,3 +1,6 @@
+import {PdfApiError,type ErrorCode,type ResourceDetails} from './errors.js';
+export {PdfApiError} from './errors.js';
+export type {ErrorCode,ResourceDetails,ImageDecodeDetails} from './errors.js';
 import {normalizeRasterRegion,MAX_REGION_DPI,type RasterRegion} from "./raster.js";
 export type {RasterRegion} from "./raster.js";
 import {normalizeFontRegistration,normalizeFontStamp,type FontRegistration,type FontIdentity,type FontStamp,type FontRequirements} from "./fonts.js";
@@ -7,6 +10,9 @@ export type * from "./interaction.js";
 import { searchPage, validateQuery, type TextMatch } from "./text.js";
 /** WA-04/05 adapter. Every returned byte array owns its memory. */
 interface Module {
+  _rz_open_blob?(id:number,length:number,options:number):number;
+  rzBlobRead?:(id:number,offset:number,target:number,length:number)=>number;
+  rzBlobRelease?:(id:number)=>void;
   HEAPU8: Uint8Array;
   _rz_abi_version(): number;
   _rz_alloc(n: number): number;
@@ -38,8 +44,6 @@ interface Module {
   _rz_error_details_len?(): number;
 }
 export interface OpenOptions { mode?: "strict" | "compatible"; password?: string; resourceProfile?: "default" | "conservative"; }
-export interface ImageDecodeDetails {encoding:string;width:number;height:number;targetWidth:number|null;targetHeight:number|null;targetDecodeSupported:boolean;unsupportedReason:string|null;jpegProcess:string|null;maskKind:string|null;maskWidth:number|null;maskHeight:number|null;maskEncoding:string|null;maskBitsPerComponent:number|null;mattePresent:boolean;}
-export interface ResourceDetails {reason:string;stage:string;limit?:number;actual?:number;image?:ImageDecodeDetails;}
 export interface RenderCacheStatistics {sourceInputBytes:number;rawStreamResidentBytes:number;rawStreamPinnedBytes:number;rawStreamTransientBytes:number;rawStreamPeakTransientBytes:number;rawStreamPeakResidentBytes:number;rawStreamLimitBytes:number;rawStreamEntries:number;rawStreamHits:number;rawStreamMisses:number;rawStreamEvictions:number;pageHits:number;pageMisses:number;pageEntries:number;pageEstimatedBytes:number;fontHits:number;fontMisses:number;fontEntries:number;fontEstimatedBytes:number;byteAccounting:string;linearMemoryMayRemainGrown:boolean;callerBuffersReleased:boolean;skiaCacheScope:string;skiaFontBytes:number;skiaFontLimit:number;skiaResourceBytes:number;skiaResourceLimit:number;
   renderSessionEstimatedBytes:number;renderSessionByteLimit:number;
   renderSessionFontManagerEntries:number;renderSessionFontManagerHits:number;renderSessionFontEntries:number;renderSessionImageEntries:number;renderSessionGeometryEntries:number;
@@ -64,17 +68,14 @@ export interface PageTarget { kind: "page"; page: number; view: {kind: string; l
 export type LinkTarget = PageTarget | { kind: "uri"; uri: string };
 export interface PageLink { rect: [number,number,number,number]; coordinateSpace: "pdf-user"; target: LinkTarget; }
 export interface OutlineItem { id: [number,number]; parent: [number,number] | null; title: string; open: boolean; target: PageTarget; }
-export type ErrorCode = "format" | "password_required" | "password_invalid" | "permission" | "unsupported" | "font" | "resource_limit" | "invalid_handle" | "invalid_argument" | "internal" | "cancelled";
 const errorCodes: ErrorCode[] = ["internal","format","password_required","password_invalid","permission","unsupported","font","resource_limit","invalid_handle","invalid_argument","internal","cancelled"];
-export class PdfApiError extends Error {
-  override name = "PdfApiError";
-  constructor(readonly code: ErrorCode, message: string, readonly operation: string, readonly page?: number, readonly taskId?: number, readonly session?: string, readonly resource?: ResourceDetails) { super(message); }
-}
 export interface SearchMatch extends TextMatch { page: number; }
 export interface SearchReport { matches: SearchMatch[]; truncated: boolean; pagesScanned: number; missingUnicode: number; diagnostics: number; }
 export interface RgbaPage { width: number; height: number; pixels: Uint8ClampedArray<ArrayBuffer>; }
 export interface RgbaRegion extends RgbaPage {x:number;y:number;}
 export class PdfEngine {
+  private nextBlob=0;
+  private blobs=new Map<number,Blob>();
   readonly identity = Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,"0")).join("");
   private alive = true;
   private disposed = false;
@@ -86,16 +87,16 @@ export class PdfEngine {
     if (!this.alive) throw new PdfApiError("internal", "Wasm session failed; recreate the engine", "session");
     try { return fn(); } catch (e) {
       // A trap/abort invalidates every handle in this module. No catch_unwind promise.
-      this.alive = false; throw new PdfApiError("internal", "Wasm execution failed; recreate the engine", "session");
+      this.alive = false;this.blobs.clear(); throw new PdfApiError("internal", "Wasm execution failed; recreate the engine", "session");
     }
   }
-  statistics(): {handles:number;retainedBytes:number} {
-    return this.invoke(()=>({handles:this.module._rz_handle_count(),retainedBytes:this.module._rz_retained_bytes()}));
+  statistics(): {handles:number;retainedBytes:number;linearMemoryCapacityBytes:number;externalSourceBytes:number;externalSources:number} {
+    return this.invoke(()=>({handles:this.module._rz_handle_count(),retainedBytes:this.module._rz_retained_bytes(),linearMemoryCapacityBytes:this.module.HEAPU8.buffer.byteLength,externalSourceBytes:[...this.blobs.values()].reduce((sum,blob)=>sum+blob.size,0),externalSources:this.blobs.size}));
   }
   dispose(): void {
     if(this.disposed)return;
     try { if(this.alive)this.invoke(()=>this.module._rz_dispose()); }
-    finally { this.disposed=true;this.alive=false; }
+    finally { this.blobs.clear();this.disposed=true;this.alive=false; }
   }
   error(operation = "api", page?: number): PdfApiError {
     const code = errorCodes[this.module._rz_error_code()] ?? "internal";
@@ -160,7 +161,11 @@ export class PdfEngine {
     return this.withInput(bytes, input => {
       const output = this.invoke(() => this.module._rz_query(document, input));
       if (!output) throw this.error(operation, page);
-      try { return JSON.parse(new TextDecoder("utf-8", {fatal:true}).decode(this.readBuffer(output))) as T; }
+      try {
+        const value=JSON.parse(new TextDecoder("utf-8", {fatal:true}).decode(this.readBuffer(output)));
+        if(operation==='capabilities')value.blobInput=Boolean(value.blobInput&&this.module._rz_open_blob&&typeof (globalThis as unknown as {FileReaderSync?:unknown}).FileReaderSync==='function');
+        return value as T;
+      }
       finally { this.release(output); }
     });
   }
@@ -192,6 +197,35 @@ export class PdfEngine {
         return new PdfDocument(this, handle);
       }));
     } finally { settings.fill(0); }
+  }
+  /** Worker-only immutable source. Reads at most 64 KiB at a time; the whole
+   * Blob is never copied into linear memory. Full-save output stays bounded. */
+  openBlob(blob:Blob,options:OpenOptions={}):PdfDocument {
+    this.invoke(()=>0);
+    const Reader=(globalThis as unknown as {FileReaderSync?:new()=>{readAsArrayBuffer(blob:Blob):ArrayBuffer}}).FileReaderSync;
+    if(!Reader||!this.module._rz_open_blob)throw new PdfApiError('unsupported','Blob sources require a dedicated Worker','openBlob');
+    if(!(blob instanceof Blob)||blob.size<1||blob.size>2*1024*1024*1024)throw new PdfApiError('resource_limit','Blob source must contain 1 byte to 2 GiB','openBlob');
+    if(this.nextBlob>=0xffffffff)throw new PdfApiError('resource_limit','Source IDs exhausted; recreate the engine','openBlob');
+    const settings=new TextEncoder().encode(JSON.stringify(options));
+    const id=++this.nextBlob,reader=new Reader();
+    this.blobs.set(id,blob);
+    this.module.rzBlobRead=(source,offset,target,length)=>{
+      // Wasm imports pass i32 values to JS, including opaque u32 IDs.
+      const input=this.blobs.get(source>>>0);
+      if(!input||![offset,target,length].every(Number.isSafeInteger)||offset<0||target<0||length<1||length>65536||offset+length>input.size||target+length>this.module.HEAPU8.length)return -1;
+      const block=reader.readAsArrayBuffer(input.slice(offset,offset+length));
+      if(block.byteLength!==length)return -1;
+      this.module.HEAPU8.set(new Uint8Array(block),target);return length;
+    };
+    this.module.rzBlobRelease=source=>{this.blobs.delete(source>>>0);};
+    try{
+      return this.withInput(settings,opts=>{
+        const handle=this.invoke(()=>this.module._rz_open_blob!(id,blob.size,opts));
+        if(!handle)throw this.error('openBlob');
+        return new PdfDocument(this,handle);
+      });
+    }catch(error){this.blobs.delete(id);throw error;}
+    finally{settings.fill(0);}
   }
 }
 export class PdfDocument {
@@ -305,3 +339,6 @@ export async function createEngine(): Promise<PdfEngine> {
   const { default: factory } = await import(url.href);
   return new PdfEngine(await factory());
 }
+
+export {planTiles,renderTiles,renderPreview} from './render-planner.js';
+export type {TilePlan,TileOptions,PreviewOptions} from './render-planner.js';

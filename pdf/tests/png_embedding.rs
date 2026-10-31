@@ -67,7 +67,7 @@ fn png_rgb_rgba_and_gray_variants_embed_and_interpret_after_save() {
                 .id();
             assert_eq!(
                 reopened
-                    .read_stream_data(&reopened.resolve_object(id).unwrap().as_stream().unwrap())
+                    .read_stream_data(reopened.resolve_object(id).unwrap().as_stream().unwrap())
                     .unwrap()
                     .as_ref(),
                 &[0, 128]
@@ -132,7 +132,7 @@ fn indexed_png_palette_transparency_expands_to_rgb_and_soft_mask() {
         .unwrap()
         .id();
     assert_eq!(
-        doc.read_stream_data(&doc.resolve_object(id).unwrap().as_stream().unwrap())
+        doc.read_stream_data(doc.resolve_object(id).unwrap().as_stream().unwrap())
             .unwrap()
             .as_ref(),
         &[0, 128]

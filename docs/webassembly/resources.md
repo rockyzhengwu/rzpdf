@@ -31,6 +31,9 @@ const effective = await doc.capabilities();
 | maxRenderBytes | 16000000 | 8000000 | Raster surface bytes, not MiB |
 | maxImagePixels | 4000000 | 2000000 | Decoded image pixels |
 | maxDecodedBytes | 16777216 | 8388608 | Decoded bytes / image RGBA ceiling |
+| maxImageSourceBytes | 134217728 | 67108864 | Cumulative streaming-image source bytes |
+| maxImageDecodeWork | 536870912 | 268435456 | Target-decoder source-sample/mask-grid units per preparation |
+| maxDisplayListBytes | 33554432 | 16777216 | Retained display-list payload |
 | maxOperationBytes | 67108864 | 33554432 | Logical operation accounting |
 | maxCachedStreamBytes | 16777216 | 8388608 | Owned encoded source-stream residency |
 | maxBufferBytes | 67108864 | 67108864 | Shared tracked input/output/font storage |
@@ -38,8 +41,14 @@ const effective = await doc.capabilities();
 
 Capabilities also expose maxHandles, maxPreparedPages, the per-document prepared
 page/font estimated-byte cache limits, maxJsonBytes and the image decode policy.
-`maxInputBytes: null` means no separate file-size ceiling, **not** unlimited input:
-the source copy, handles and shared buffer budget still constrain opening.
+`maxInputBytes` is 2147483648 for the Worker Blob/File reader. `maxByteInputBytes`
+is 33554432 for byte-array opening, whose input and immutable source coexist;
+other retained buffers can lower the available quota. `openBlob(file)` reads
+at most sourceReadBlockBytes (65536) per callback without importing the entire
+file into linear memory. Blob backing storage remains owned by the browser.
+The source is released on document close, failed open or engine disposal.
+Reader-backed sources support bounded full save; incremental signatures still
+require the immutable byte-source API.
 Per-document budgets, native decoder/Skia allocations and JS-owned tiles do not
 form a single aggregate RSS bound. Opening several documents multiplies some
 cache costs. Query/cache-release and application scheduling remain necessary.
@@ -58,18 +67,20 @@ Existing NoZoom/NoRotate annotation view options and revision identity remain
 part of the key. Render-specific snapshots should be replayed at their requested
 resolution; the ordinary `prepare_page()` remains full fidelity.
 
-## Target-resolution JPEG: bounded first slice
+## Target-resolution JPEG
 
 The enabled policy is `target-if-full-decode-exceeds-limits`. Images already
 fitting the full-decode limits keep their original path and pixel output: native
 reduced IDCT and full decode followed by raster filtering need not be identical.
 
-For an otherwise oversized, single-stage **sequential SOF0 JPEG**, without masks
+For an otherwise oversized, single-stage **sequential SOF0 or progressive SOF2 JPEG**, without masks
 or non-null DecodeParms, rendering derives a target from both image-to-page
 transform axes and DPI. JPEG IDCT uses 1/8, 1/4 or 1/2 output when sufficient;
-otherwise full resolution must still fit. A separate 16000000 source-pixel guard
-is retained, actual JPEG/dictionary dimensions must agree, and decoded pixel and
-RGBA budgets are checked before allocating output. Rotations/shears and repeated
+otherwise full resolution must still fit. Source component bytes are checked
+against `maxImageSourceBytes` and charged to preparation work. Progressive padded
+MCU coefficient storage and a conservative scratch allowance are reserved before
+starting decompression. Actual JPEG/dictionary dimensions must agree; target
+pixels and RGBA budgets are checked before allocating output. Rotations/shears and repeated
 uses at different scales do not share an undersized image by resource name.
 
 This is decoder-native reduction, not full RGB/RGBA followed by resize. Codec
@@ -87,8 +98,6 @@ full-resolution interpretation envelope.
 
 Not enabled for reduction:
 
-- Progressive JPEG: coefficient storage can depend on full source size, even
-  with reduced output. Existing bounded full decoding remains in force.
 - Unsupported mask combinations, Type3 and tiling-pattern images: keep full interpretation and
   mask/colour processing, or fail at its limits. No alpha/matte is discarded.
 - Wrapped/multistage filters or non-null JPEG DecodeParms: unchanged full path.
@@ -241,8 +250,12 @@ source sample length are checked before publication. The source PDF is unchanged
 Capabilities add `flateTargetResolution`, `progressiveJpegTargetResolution`,
 `maxTargetSourcePixels`, `flateComponents`, `flateBitsPerComponent`,
 `flatePredictors`, `flateSourceBytesBoundedBy`, `flateSampling` and `flateStorage`
-inside `imageDecode`. Source work remains bounded to 16,000,000 pixels, and total
-inflated bytes including PNG row tags must fit the active `maxDecodedBytes`.
+inside `imageDecode`. JPEG and Flate use
+`maxImageSourceBytes` for total inflation, including PNG row tags. CCITT counts
+expanded source sample work without materializing those samples. Target routes
+charge the shared `maxImageDecodeWork` meter per preparation. Its unit is
+source samples plus the conservative component-weighted joint mask grid; it is
+a work bound, not resident memory.
 Output pixels/RGBA and simultaneous row/target allocations have separate guards.
 Unsupported combinations retain their normal bounded full-fidelity path.
 
@@ -253,8 +266,9 @@ include maskKind, maskWidth, maskHeight, maskEncoding, maskBitsPerComponent and
 mattePresent; they require dictionary inspection only. `image_source_bytes`
 at `image_decode` means lowering output DPI cannot reduce the required source
 inflation. `image_operation_bytes` describes simultaneous decoder storage.
-Malformed zlib data keeps the `format` category, with image context; progressive
-JPEG remains outside target decoding and reports `jpegProcess: "progressive"`.
+Malformed zlib data keeps the `format` category, with image context. Progressive
+JPEG target decoding preflights padded MCU coefficient storage as well as its
+reduced output; failures report image_operation_bytes before decompression.
 The actual request target must still fit its budgets even when
 `targetDecodeSupported` is true. See [scope and acceptance](../image-preview.md).
 
@@ -269,8 +283,9 @@ that already pass those parser limits.
 Single-stage 8-bit RGB/Gray Flate images with a single-stage 8-bit Gray Flate
 SMask support joint target-size color/alpha sampling. Different dimensions,
 Decode reversal and Matte are handled before area reduction. Targets preserve
-finer-mask detail; full-source sample buffers are not allocated. Default limits
-are unchanged. Both checksums are required before cache publication.
+finer-mask detail; full-source sample buffers are not allocated. Resident/output
+limits remain unchanged; source work has the independent ceilings listed above.
+Both checksums are required before cache publication.
 
 Capabilities specify maskedReductionKinds=["soft"], softMaskEncoding=["flate"],
 softMaskBitsPerComponent=[8], softMaskColorSpace=["DeviceGray"], softMaskMatte=true,
@@ -278,3 +293,50 @@ softMaskInterpolate=false and maxMaskedSamplingWork=256000000. Unsupported
 combinations retain full-fidelity bounded behavior. image_sampling_work is an
 independent joint-grid CPU guard. See [scope, diagnostics and
 acceptance](../masked-image-preview.md).
+
+
+## Local transparency resources
+
+Transparency groups use a local device target bounded by geometric clipping
+(and a two-pixel edge halo). Group masks and ICC conversion keep that grid.
+Within this compositor, maxRenderPixels limits each raster geometry while
+maxRenderBytes bounds simultaneously live parent/group/conversion storage.
+Defaults are unchanged. renderResources advertises this scoped policy.
+
+Group budget failures use reason=render_live_bytes, a specific render_group,
+group_color_conversion, group_uncompositing or group_soft_mask stage, and limit/actual
+bytes. A smaller tile can reduce raster scratch; it cannot remove independent
+image source-work/decode limits. See [implementation and evidence](../render-group-resources.md).
+
+## Shared render planning and large sources
+
+```js
+import {createWorkerEngine, renderPreview, renderTiles} from './worker-client.js';
+const engine = await createWorkerEngine();
+const doc = await engine.openBlob(file, {mode: 'compatible'});
+try {
+  const preview = await renderPreview(doc, 0, {maxWidth: 1200, maxHeight: 1200});
+  // preview.dpi is explicit; output fits the requested bounds and engine quotas.
+  for await (const tile of renderTiles(doc, 0, {dpi: 576, tileSide: 512})) {
+    consumeTile(tile); // Consume/release progressively; retained tiles cost JS memory.
+  }
+} finally { await doc.close(); engine.dispose(); }
+```
+
+The planner reserves raster headroom by selecting small tiles; it cannot promise
+that every complex page fits. Source-image errors propagate unchanged, without
+unproductive tile retries. Preview uses target decoding by default; ordinary
+render() retains its existing quality policy. AbortSignal cancellation in the
+planner is cooperative between tiles. In-flight Worker task cancellation keeps
+its existing session-reset semantics. Coordinate font-registry changes with the
+application: the planner checks document revision, not a separate font epoch.
+
+Engine statistics include linearMemoryCapacityBytes (capacity, not live usage),
+externalSources and externalSourceBytes (browser Blob backing, not Wasm bytes).
+A closed document releases its Blob reference even if linear memory capacity
+remains grown. See [the compatibility program](../compatibility-program.md).
+
+JBIG2 capabilities advertise `jbig2TargetResolution`, `jbig2Components`,
+`jbig2Sampling: "area"` and `jbig2Storage: "packed-source-and-target"`. This path
+keeps a packed source bitmap; it is not native reduced-resolution decoding.
+Only DeviceGray and stencil images without extra masks use this preview path.

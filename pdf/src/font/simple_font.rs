@@ -37,6 +37,38 @@ mod safety_tests {
     use std::collections::HashMap;
 
     #[test]
+    fn unembedded_nonsymbolic_differences_inherit_standard_encoding() {
+        use crate::{io::stream_reader::StreamReader, parser::syntax::SyntaxParser};
+        let doc = crate::document::Document::new().unwrap();
+        for (flags, expected) in [(32, Some("A")), (4, None), (36, None), (0, None)] {
+            let bytes = format!(
+                "<< /Subtype /TrueType /BaseFont /Geneva /FontDescriptor << /Flags {flags} /FontName /Geneva >> /Encoding << /Differences [66 /C 90 /UnknownGlyph] >> >>"
+            );
+            let mut parser = SyntaxParser::new(
+                StreamReader::try_new(std::io::Cursor::new(bytes.into_bytes())).unwrap(),
+            );
+            let dict = parser.get_object().unwrap().into_dict().unwrap();
+            let font = SimpleFont::try_new(&dict, doc.ctx()).unwrap();
+            assert_eq!(
+                font.unicode_mapping(&CharCode::new(65, 1, 0.))
+                    .unwrap()
+                    .as_deref(),
+                expected
+            );
+            assert_eq!(
+                font.unicode_mapping(&CharCode::new(66, 1, 0.))
+                    .unwrap()
+                    .as_deref(),
+                Some("C")
+            );
+            assert_eq!(
+                font.unicode_mapping(&CharCode::new(90, 1, 0.)).unwrap(),
+                None
+            );
+        }
+    }
+
+    #[test]
     fn simple_unicode_uses_exact_byte_entries_with_a_copied_identity_codespace() {
         let mut font = SimpleFont {
             to_unicode: Some(Cmap::try_new(b"1 begincodespacerange <0000> <FFFF> endcodespacerange 3 beginbfchar <30> <0030> <31> <0031> <0032> <4E2D> endbfchar".to_vec()).unwrap()),
@@ -1300,6 +1332,24 @@ impl SimpleFont {
                 _ => "StandardEncoding",
             };
             encoding.default_base(base)?;
+        }
+
+        // PDF 1.7 table 5.11 and the TrueType selection rules on pp. 430-431:
+        // an unembedded, explicitly nonsymbolic font inherits StandardEncoding
+        // when an Encoding dictionary omits BaseEncoding. Differences remain
+        // authoritative, including unknown names. Symbolic/embedded programs
+        // must keep their own actual built-in mapping.
+        if !self.descriptor.is_embed()
+            && self
+                .descriptor
+                .flags()
+                .is_some_and(|flags| flags & (4 | 32) == 32)
+        {
+            if let Some(encoding) = &mut self.encoding {
+                encoding.default_base("StandardEncoding")?;
+            } else {
+                self.encoding = Some(Encoding::new_from_name("StandardEncoding")?);
+            }
         }
 
         // TODO set default encoding

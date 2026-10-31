@@ -28,9 +28,10 @@ async function execute(request:WorkerRequest):Promise<void> {
     send(request,{kind:'started'});
     let result:unknown;
     switch(request.operation) {
+      case 'openBlob':
       case 'open': {
         if(nextDocument>=0xffffffff)throw new PdfApiError('resource_limit','Document ID exhausted','open');
-        const doc=engine.open(request.args[0] as Uint8Array,request.args[1] as OpenOptions);
+        const doc=request.operation==='openBlob'?engine.openBlob(request.args[0] as Blob,request.args[1] as OpenOptions):engine.open(request.args[0] as Uint8Array,request.args[1] as OpenOptions);
         let count:number;
         try {count=doc.pageCount;} catch(error) {doc.close();throw error;}
         const id=++nextDocument;documents.set(id,doc);

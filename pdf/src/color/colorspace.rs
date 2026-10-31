@@ -30,6 +30,22 @@ pub enum ColorSpace {
 }
 
 impl ColorSpace {
+    pub(crate) fn visit_profiles(
+        &self,
+        visitor: &mut impl FnMut(&super::icc_profile::ICCProfile) -> PdfResult<()>,
+    ) -> PdfResult<()> {
+        match self {
+            Self::IccBased(space) => space.visit_profiles(visitor),
+            Self::Indexed(space) => space.visit_profiles(visitor),
+            Self::Separation(space) => space.visit_profiles(visitor),
+            Self::DeviceN(space) => space.visit_profiles(visitor),
+            Self::Pattern(space) => space
+                .base
+                .as_ref()
+                .map_or(Ok(()), |base| base.visit_profiles(visitor)),
+            _ => Ok(()),
+        }
+    }
     pub(crate) fn retained_profile_bytes(&self) -> PdfResult<usize> {
         match self {
             Self::IccBased(space) => space.retained_profile_bytes(),

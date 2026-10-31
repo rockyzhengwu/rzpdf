@@ -73,7 +73,7 @@ pub(crate) fn decode_soft_mask(
     // image alone. Bound that independently of output and source byte budgets.
     let work = (u64::from(sw) + u64::from(mw) + u64::from(tw))
         .saturating_mul(u64::from(sh) + u64::from(mh));
-    const MAX_SAMPLING_WORK: u64 = super::MAX_TARGET_SOURCE_IMAGE_PIXELS * 16;
+    const MAX_SAMPLING_WORK: u64 = super::MAX_MASKED_SAMPLING_WORK;
     if work > MAX_SAMPLING_WORK {
         return Err(PdfError::ResourceLimitExceeded {
             reason: "image_sampling_work",
@@ -441,7 +441,7 @@ mod tests {
         let c = request((2, 2), (1, 1), 3);
         let m = request((2, 2), (1, 1), 1);
         for (mut color, mut mask, reason) in [
-            (c, request((4001, 4000), (1, 1), 1), "image_source_pixels"),
+            (c, request((4001, 4000), (1, 1), 1), "image_source_bytes"),
             (request((6000, 1000), (1, 1), 3), m, "image_source_bytes"),
             (c, m, "decoded_bytes"),
             (
@@ -450,6 +450,10 @@ mod tests {
                 "image_sampling_work",
             ),
         ] {
+            if reason == "image_source_bytes" {
+                color.limits.max_image_source_bytes = 16 * 1024 * 1024;
+                mask.limits.max_image_source_bytes = 16_000_000;
+            }
             if reason == "decoded_bytes" {
                 color.limits.max_decoded_bytes = 3;
                 mask.limits = color.limits;

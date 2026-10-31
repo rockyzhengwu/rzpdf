@@ -130,6 +130,7 @@ fn display_retained_unicode_and_image_bytes_share_a_budget_in_either_order() {
             let doc = Document::new_with_options(ParseOptions {
                 limits: Limits {
                     max_decoded_bytes: 128,
+                    max_display_list_bytes: 128,
                     ..Default::default()
                 },
                 ..Default::default()
@@ -180,7 +181,13 @@ fn display_retained_unicode_and_image_bytes_share_a_budget_in_either_order() {
             if success {
                 assert_eq!(result.unwrap().objects().len(), 2);
             } else {
-                assert!(matches!(result, Err(PdfError::ResourceLimit(_))));
+                assert!(matches!(
+                    result,
+                    Err(PdfError::ResourceLimitExceeded {
+                        reason: "display_list_bytes",
+                        ..
+                    })
+                ));
             }
             assert_eq!(doc.revision(), revision);
         }

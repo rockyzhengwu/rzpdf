@@ -30,8 +30,9 @@ alpha are published, with shared budget leases. Neither source RGB/RGBA nor a
 full-source alpha array is generated. Original streams, dictionaries, extraction
 and save/edit semantics remain unchanged.
 
-Each source independently has a 16,000,000 pixel work guard; its total inflated
-bytes including predictor tags must fit maxDecodedBytes. Target pixels and RGBA
+Each source independently checks total inflated bytes including predictor tags
+against maxImageSourceBytes, not the resident maxDecodedBytes ceiling. Both
+sources charge the shared preparation work meter. Target pixels and RGBA
 have their existing independent limits. Simultaneous raw/decryption owners,
 source rows, target samples/alpha and floating-point accumulators share one
 operation pool. Fixed zlib-private state, small stack values, output raster,

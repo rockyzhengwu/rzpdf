@@ -356,9 +356,11 @@ RGBA 缓存上限 16 MiB／128 项、显示画布上限 32 MiB，单个在途块
 
 ### PDF 输入大小
 
-PDF 打开和页面导入不再设置独立的 8 MiB 文件大小上限。`capabilities.maxInputBytes` 为 `null`，`maxBufferBytes` 为 64 MiB：输入传输、打开时的源码副本、其他活跃文档、输出和字体共享缓冲预算，因此 64 MiB 不是对单个 PDF 可打开大小的保证。超出剩余预算返回 `resource_limit`，不启动不可满足的复制。保存默认 `maxBytes` 同步调整到 64 MiB，调用方仍可指定更低值。
+PDF 字节数组打开和页面导入不再设置独立的 8 MiB 文件大小上限。`maxByteInputBytes` 为 32 MiB，实际还受剩余共享预算限制；`maxInputBytes` 为 2 GiB，表示 Worker Blob/File 输入的逻辑长度上限，不能用来分配字节数组。`maxBufferBytes` 为 64 MiB：输入传输、打开时的源码副本、其他活跃文档、输出和字体共享缓冲预算，因此 64 MiB 不是对单个 PDF 可打开大小的保证。超出剩余预算返回 `resource_limit`，不启动不可满足的复制。保存默认 `maxBytes` 同步调整到 64 MiB，调用方仍可指定更低值。
 
 此变更不调整字体程序 32 MiB、替换图片 8 MiB、内容元数据 8 MiB、解码流 16 MiB、绘制像素与线性内存等独立资源预算。
+
+Worker 的 `openBlob(file, options)` 通过有界 Read/Seek 桥接读取文件，不先复制整个文件到线性内存。主线程同步接口不支持 FileReaderSync 时，`blobInput` 为 false。完整契约见 [资源模型](resources.md) 与 [兼容性专项](../compatibility-program.md)。
 
 ### Image decode quality policy
 

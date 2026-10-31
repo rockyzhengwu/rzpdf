@@ -237,6 +237,9 @@ impl ICCProfile {
     pub fn number_of_components(&self) -> usize {
         self.inner.components
     }
+    pub(crate) fn storage_identity(&self) -> usize {
+        Arc::as_ptr(&self.inner) as usize
+    }
     pub(crate) fn retained_source_bytes(&self) -> usize {
         self.inner.raw.capacity()
     }

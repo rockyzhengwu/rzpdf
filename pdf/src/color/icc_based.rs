@@ -32,6 +32,16 @@ impl Default for IccBased {
 }
 
 impl IccBased {
+    pub(crate) fn visit_profiles(
+        &self,
+        visitor: &mut impl FnMut(&crate::color::icc_profile::ICCProfile) -> PdfResult<()>,
+    ) -> PdfResult<()> {
+        self.alternate.visit_profiles(visitor)?;
+        if let Some(profile) = &self.profile {
+            visitor(profile)?;
+        }
+        Ok(())
+    }
     pub(crate) fn retained_profile_bytes(&self) -> PdfResult<usize> {
         self.alternate
             .retained_profile_bytes()?

@@ -240,7 +240,7 @@ fn child_failure_discards_group_and_restores_canvas_and_limits() {
 #[test]
 fn group_surface_budget_counts_parent_and_retries_cleanly() {
     let doc = document(false);
-    let peak = 30 * 20 * 4 * 2;
+    let peak = (30 * 20 + 22 * 20) * 4;
     for allowance in [peak - 1, peak] {
         let mut render = SkiaRender::with_limits(
             72.,
@@ -253,7 +253,14 @@ fn group_surface_budget_counts_parent_and_retries_cleanly() {
         .unwrap();
         let result = doc.get_page(0).unwrap().display(&mut render);
         if allowance < peak {
-            assert!(matches!(result, Err(PdfError::ResourceLimit(_))));
+            assert!(matches!(
+                result,
+                Err(PdfError::ResourceLimitExceeded {
+                    reason: "render_live_bytes",
+                    stage: "render_group",
+                    ..
+                })
+            ));
             assert!(render.group_stack.is_empty());
         } else {
             result.unwrap();

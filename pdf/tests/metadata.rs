@@ -316,7 +316,7 @@ fn metadata_replacement_preserves_shared_old_stream() {
     assert_eq!(
         reopened
             .read_stream_data(
-                &reopened
+                reopened
                     .resolve_object(old_id)
                     .unwrap()
                     .as_stream()
@@ -330,7 +330,7 @@ fn metadata_replacement_preserves_shared_old_stream() {
     assert_eq!(
         reopened
             .read_stream_data(
-                &reopened
+                reopened
                     .resolve_object(old_id)
                     .unwrap()
                     .as_stream()

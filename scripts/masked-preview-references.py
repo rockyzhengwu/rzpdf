@@ -4,18 +4,26 @@ import hashlib
 import ctypes
 import math
 import json
-import sys
+import argparse
 from pathlib import Path
 import fitz
 import pypdfium2 as pdfium
 
-source, out = map(Path, sys.argv[1:])
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('source', type=Path)
+parser.add_argument('output', type=Path)
+parser.add_argument('--pattern', default='soft-*.pdf')
+parser.add_argument('--dpis', nargs='+', type=int, default=[72, 36, 18])
+args = parser.parse_args()
+if any(dpi < 1 or dpi > 1152 for dpi in args.dpis):
+    parser.error('reference DPI must be in 1..1152')
+source, out = args.source, args.output
 out.mkdir(parents=True, exist_ok=True)
 report = {'mupdf': fitz.VersionFitz, 'pdfium': str(pdfium.PDFIUM_INFO), 'transform': 'exact DPI matrix; ceil-sized white destination, no fit-to-bitmap stretch', 'files': []}
-for path in sorted(source.glob('soft-*.pdf')):
+for path in sorted(source.glob(args.pattern)):
     if 'corrupt' in path.name:
         continue
-    for dpi in (72, 36, 18):
+    for dpi in args.dpis:
         for engine in ('mupdf', 'pdfium'):
             output = out / f'{path.stem}-{engine}-{dpi}.png'
             if engine == 'mupdf':

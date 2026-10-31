@@ -115,7 +115,7 @@ export class WorkerPdfEngine extends EventTarget {
     try {
       this.valid();validateTask(task);
       args=args.slice();
-      if(['open','search'].includes(operation)&&args[1]&&typeof args[1]==='object'&&!Array.isArray(args[1]))args[1]={...args[1]};
+      if(['open','openBlob','search'].includes(operation)&&args[1]&&typeof args[1]==='object'&&!Array.isArray(args[1]))args[1]={...args[1]};
       if(operation==='apply')args[0]=snapshotMutation(args[0] as MutationRequest);
       if(operation==='render'||operation==='renderRegion')args[2]=normalizeRenderOptions(args[2] as RenderOptions);
       if(operation==='renderRegion')args[3]=normalizeRasterRegion(args[3] as RasterRegion);
@@ -154,6 +154,17 @@ export class WorkerPdfEngine extends EventTarget {
     this.documents.add(result.document);
     return new WorkerPdfDocument(this,session,result.document,result.pageCount,documentKey);
   }
+  async openBlob(blob:Blob,options:OpenOptions={},task:TaskOptions={}):Promise<WorkerPdfDocument> {
+    this.valid();validateTask(task);
+    try{validateArguments('openBlob',[blob,options]);}catch{throw new PdfApiError('invalid_argument','Invalid Blob source or open options','openBlob');}
+    // Blob structured clones retain immutable backing storage, not a byte copy.
+    // Queue depth is still bounded; source bytes are external to linear memory.
+    this.admit(0,'openBlob',task);
+    const opening=this.enqueue<OpenedDocument>('openBlob',[blob,options],undefined,task);
+    const session=this.session,result=await opening;this.checkSession(session);
+    this.documents.add(result.document);
+    return new WorkerPdfDocument(this,session,result.document,result.pageCount,documentKey);
+  }
   async registerFont(bytes:Uint8Array,options:FontRegistration,task:TaskOptions={}):Promise<FontIdentity> {
     this.valid();validateTask(task);
     let metadata:Required<FontRegistration>;
@@ -172,7 +183,7 @@ export class WorkerPdfEngine extends EventTarget {
     const owned=bytes?.slice();
     await this.enqueue('font',[owned,index],undefined,task,owned?.length??0,owned?[owned.buffer]:[]);
   }
-  statistics(task:TaskOptions={}):Promise<{handles:number;retainedBytes:number;documents:number}> {return this.enqueue('statistics',[],undefined,task);}
+  statistics(task:TaskOptions={}):Promise<{handles:number;retainedBytes:number;documents:number;linearMemoryCapacityBytes:number;externalSourceBytes:number;externalSources:number}> {return this.enqueue('statistics',[],undefined,task);}
   capabilities(task:TaskOptions={}):Promise<Record<string,unknown>> {return this.enqueue('capabilities',[],undefined,task);}
   checkSession(session:string):void {
     this.valid();if(session!==this.session||!this.worker)throw new PdfApiError('invalid_handle','Document belongs to an expired Worker session','session',undefined,undefined,session);
@@ -264,3 +275,6 @@ export class WorkerPdfDocument {
 export async function createWorkerEngine(options:WorkerEngineOptions={}):Promise<WorkerPdfEngine> {
   const engine=new WorkerPdfEngine(options);try {await engine.initialize();return engine;}catch(error){engine.dispose();throw error;}
 }
+
+export {planTiles,renderTiles,renderPreview} from './render-planner.js';
+export type {TilePlan,TileOptions,PreviewOptions} from './render-planner.js';

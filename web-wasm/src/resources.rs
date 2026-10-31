@@ -6,12 +6,12 @@ pub const MAX_FULL_PAGE_DPI: f32 = 288.;
 pub const MAX_REGION_DPI: f32 = 1152.;
 
 pub fn capabilities(limits: Limits) -> Value {
-    let image_decode = json!({"jpegTargetResolution":true,"flateTargetResolution":true,"jpxTargetResolution":false,
-        "progressiveJpegTargetResolution":false,"maxTargetSourcePixels":16000000,
+    let image_decode = json!({"jbig2TargetResolution":true,"jbig2Components":["DeviceGray","stencil"],"jbig2Sampling":"area","jbig2Storage":"packed-source-and-target","ccittTargetResolution":true,"ccittComponents":["DeviceGray","stencil"],"ccittStorage":"runs-and-target","jpegTargetResolution":true,"flateTargetResolution":true,"jpxTargetResolution":false,
+        "progressiveJpegTargetResolution":true,"maxTargetSourcePixels":limits.max_image_source_bytes,"sourcePixelLimitKind":"upper-bound-before-components-and-scratch","sourceWorkBoundedBy":"maxImageSourceBytes",
         "flateComponents":["DeviceRGB","DeviceGray"],"flateBitsPerComponent":[8],
-        "flatePredictors":[1,2,10,11,12,13,14,15],"flateSourceBytesBoundedBy":"maxDecodedBytes",
+        "flatePredictors":[1,2,10,11,12,13,14,15],"flateSourceBytesBoundedBy":"maxImageSourceBytes",
         "flateSampling":"area","flateStorage":"scanlines-and-target",
-        "maxJpegSourcePixels":16000000,"jpegProcesses":["sequential"],"maskedReduction":true,
+        "maxJpegSourcePixels":limits.max_image_source_bytes,"jpegSourceBytesBoundedBy":"maxImageSourceBytes","jpegProcesses":["sequential","progressive"],"jpegDecoderStorage":"conservative-MCU-coefficient-envelope", "flateSourcePixelsBoundedBy":"maxImageSourceBytes","maskedReduction":true,
         "maskedReductionKinds":["soft"],"softMaskEncoding":["flate"],"softMaskBitsPerComponent":[8],
         "softMaskColorSpace":["DeviceGray"],"softMaskMatte":true,"softMaskInterpolate":false,
         "maxMaskedSamplingWork":256000000,
@@ -22,15 +22,20 @@ pub fn capabilities(limits: Limits) -> Value {
         "maxDpi":MAX_FULL_PAGE_DPI,"maxFullPageDpi":MAX_FULL_PAGE_DPI,"maxRegionDpi":MAX_REGION_DPI,
         "maxRegionSide":1024,"maxRasterSide":32768,
         "maxRenderPixels":limits.max_render_pixels,"maxRenderBytes":limits.max_render_bytes,
+        "maxDisplayListBytes":limits.max_display_list_bytes,"displayListResourceAccounting":"unique-shared-owners",
+        "maxImageSourceBytes":limits.max_image_source_bytes,"maxImageDecodeWork":limits.max_image_decode_work,
+        "imageDecodeWorkUnit":"source-samples-plus-mask-grid-cells","imageDecodeWorkScope":"target-decoders",
         "maxImagePixels":limits.max_image_pixels,"maxDecodedBytes":limits.max_decoded_bytes,
         "maxOperationBytes":limits.max_operation_bytes,"maxCachedStreamBytes":limits.max_cached_stream_bytes,
         "maxIccTransformEstimatedBytes":pdf::color::icc_profile::MAX_WASM_ICC_TRANSFORM_ESTIMATED_BYTES,
         "maxHandles":8,"maxPreparedPages":2,
         "maxPreparedPageEstimatedBytes":limits.max_operation_bytes.min(32*1024*1024),
         "maxFontCacheEstimatedBytes":limits.max_operation_bytes.min(16*1024*1024),
-        "maxInputBytes":null,"maxBufferBytes":BUFFER_LIMIT,"maxJsonBytes":16*1024*1024,"maxWasmMemoryBytes":256*1024*1024,
+        "maxInputBytes":crate::blob_source::MAX_SOURCE_BYTES,"maxByteInputBytes":BUFFER_LIMIT/2,
+        "blobInput":cfg!(target_os="emscripten"),"blobInputContext":"dedicated-worker","sourceReadBlockBytes":crate::blob_source::SOURCE_BLOCK_BYTES,"maxBufferBytes":BUFFER_LIMIT,"maxJsonBytes":16*1024*1024,"maxWasmMemoryBytes":256*1024*1024,
         "effectiveProfile":if limits.max_operation_bytes==32*1024*1024 {"conservative"} else {"default"},
         "resourceProfiles":["default","conservative"],"cacheStatistics":true,
+        "renderResources":{"localTransparencyGroups":true,"groupPixelAccounting":"per-surface", "groupByteAccounting":"simultaneously-live", "groupBudgetField":"maxRenderBytes"},
         "imageDecode":image_decode})
 }
 
@@ -41,6 +46,9 @@ pub fn profile(name: &str) -> ApiResult<Limits> {
         "conservative" => {
             policy.max_image_pixels = 2_000_000;
             policy.max_decoded_bytes = 8 * 1024 * 1024;
+            policy.max_image_source_bytes = 64 * 1024 * 1024;
+            policy.max_display_list_bytes = 16 * 1024 * 1024;
+            policy.max_image_decode_work = 256 * 1024 * 1024;
             policy.max_operation_bytes = 32 * 1024 * 1024;
             policy.max_render_pixels = 2_000_000;
             policy.max_render_bytes = 8_000_000;
@@ -119,12 +127,16 @@ mod tests {
     #[test]
     fn capabilities_before_open_and_immutable_profiles() {
         let caps = read(0, "capabilities");
+        assert_eq!(caps["maxInputBytes"], crate::blob_source::MAX_SOURCE_BYTES);
+        assert_eq!(caps["maxByteInputBytes"], BUFFER_LIMIT / 2);
         assert_eq!(caps["maxRegionDpi"], 1152.);
         assert_eq!(caps["maxFullPageDpi"], 288.);
         assert_eq!(caps["maxWasmMemoryBytes"], 256 * 1024 * 1024);
         assert_eq!(document("invalid"), 0);
         let doc = document("conservative");
         let caps = read(doc, "capabilities");
+        assert_eq!(caps["maxInputBytes"], crate::blob_source::MAX_SOURCE_BYTES);
+        assert_eq!(caps["maxByteInputBytes"], BUFFER_LIMIT / 2);
         assert_eq!(caps["maxImagePixels"], 2_000_000);
         assert_eq!(caps["maxDecodedBytes"], 8 * 1024 * 1024);
         assert_eq!(read(0, "capabilities")["maxImagePixels"], 4_000_000);

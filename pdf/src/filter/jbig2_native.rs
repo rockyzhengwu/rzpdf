@@ -23,6 +23,7 @@ struct Allocator {
     callbacks: Callbacks,
     budget: OperationBudget,
     failed: Cell<bool>,
+    required: Cell<usize>,
 }
 #[repr(C, align(16))]
 struct Header {
@@ -41,6 +42,11 @@ unsafe extern "C" fn allocate(a: *mut Callbacks, size: usize) -> *mut c_void {
     };
     let Ok(lease) = a.budget.reserve(layout.size()) else {
         a.failed.set(true);
+        a.required.set(
+            a.required
+                .get()
+                .max(a.budget.live_bytes().saturating_add(layout.size())),
+        );
         return ptr::null_mut();
     };
     // SAFETY: valid nonzero layout; the header preserves ownership until free.
@@ -150,6 +156,25 @@ pub(super) fn decode(
     height: u32,
     budget: &OperationBudget,
 ) -> PdfResult<BudgetedBytes> {
+    decode_inner(input, globals, width, height, budget, false)
+}
+pub(super) fn decode_preview(
+    input: &[u8],
+    globals: Option<&[u8]>,
+    width: u32,
+    height: u32,
+    budget: &OperationBudget,
+) -> PdfResult<BudgetedBytes> {
+    decode_inner(input, globals, width, height, budget, true)
+}
+fn decode_inner(
+    input: &[u8],
+    globals: Option<&[u8]>,
+    width: u32,
+    height: u32,
+    budget: &OperationBudget,
+    structured: bool,
+) -> PdfResult<BudgetedBytes> {
     let allocator = Allocator {
         callbacks: Callbacks {
             alloc: allocate,
@@ -158,11 +183,20 @@ pub(super) fn decode(
         },
         budget: budget.clone(),
         failed: Cell::new(false),
+        required: Cell::new(0),
     };
     let fatal = Cell::new(false);
     let failure = || {
         if allocator.failed.get() {
-            limit("native allocation budget")
+            if structured && allocator.required.get() > 0 {
+                super::bilevel_preview::limit(
+                    "image_operation_bytes",
+                    budget.maximum_bytes() as u64,
+                    allocator.required.get() as u64,
+                )
+            } else {
+                limit("native allocation budget")
+            }
         } else {
             error("invalid symbol/region data")
         }
@@ -222,7 +256,17 @@ pub(super) fn decode(
     let length = row
         .checked_mul(height as usize)
         .ok_or_else(|| limit("output size"))?;
-    let lease = budget.reserve(length)?;
+    let lease = budget.reserve(length).map_err(|err| {
+        if structured {
+            super::bilevel_preview::limit(
+                "image_operation_bytes",
+                budget.maximum_bytes() as u64,
+                budget.live_bytes().saturating_add(length) as u64,
+            )
+        } else {
+            err
+        }
+    })?;
     let mut data = Vec::new();
     data.try_reserve_exact(length)
         .map_err(|_| limit("output allocation"))?;
@@ -252,6 +296,7 @@ mod tests {
             },
             budget: budget.clone(),
             failed: Cell::new(false),
+            required: Cell::new(0),
         };
         unsafe {
             let p = allocate(&mut a.callbacks, 32);

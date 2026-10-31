@@ -18,6 +18,12 @@ pub struct Indexed {
 }
 
 impl Indexed {
+    pub(crate) fn visit_profiles(
+        &self,
+        visitor: &mut impl FnMut(&crate::color::icc_profile::ICCProfile) -> PdfResult<()>,
+    ) -> PdfResult<()> {
+        self.base.visit_profiles(visitor)
+    }
     pub(crate) fn retained_profile_bytes(&self) -> PdfResult<usize> {
         self.base.retained_profile_bytes()
     }

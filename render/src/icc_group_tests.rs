@@ -27,10 +27,13 @@ fn linear_profile() -> Vec<u8> {
 }
 
 fn document(inner_space: Option<&str>, half_group: bool) -> Document {
+    document_sized(inner_space, half_group, (30., 20.))
+}
+fn document_sized(inner_space: Option<&str>, half_group: bool, size: (f32, f32)) -> Document {
     let doc = Document::new().unwrap();
     doc.add_page_with_builder(
         0,
-        PageBuilder::new().size(30., 20.).resources(
+        PageBuilder::new().size(size.0, size.1).resources(
             object("<< /ExtGState << /Half << /ca 0.5 >> >> >>")
                 .into_dict()
                 .unwrap(),
@@ -157,4 +160,145 @@ fn failed_group_restores_colour_context_without_committing_pixels() {
     render.end_group(false).unwrap();
     assert!(render.color_context.output_profile().is_builtin_srgb());
     assert_eq!(pixel(&mut render, 10), [0; 4]);
+}
+
+#[test]
+fn small_icc_and_nested_groups_fit_browser_limits_on_a_large_page() {
+    let limits = Limits {
+        max_render_pixels: 4_000_000,
+        max_render_bytes: 16_000_000,
+        ..Default::default()
+    };
+    for inner in [None, Some("/I false"), Some("/I true /CS /DeviceRGB")] {
+        let doc = document_sized(inner, false, (600., 840.));
+        let page = doc.get_page(0).unwrap().display_list().unwrap();
+        let mut render = SkiaRender::with_limits(144., 144., limits).unwrap();
+        page.replay(&mut render).unwrap();
+        assert_eq!((render.page_width, render.page_height), (1200, 1680));
+        assert!(render.group_stack.is_empty());
+        assert!(render.region.is_none());
+        assert_eq!(render.limits.max_render_bytes, limits.max_render_bytes);
+        let image = render.to_rgba().unwrap();
+        let offset = ((1680 - 20) * 1200 + 20) * 4;
+        let expected = if inner == Some("/I true /CS /DeviceRGB") {
+            128
+        } else {
+            188
+        };
+        assert!(
+            image.pixels[offset..offset + 3]
+                .iter()
+                .all(|v| (i32::from(*v) - expected).abs() <= 3)
+        );
+        let whole = image.pixels;
+        let region = RasterRegion {
+            x: 0,
+            y: 1620,
+            width: 96,
+            height: 60,
+        };
+        render.set_region(Some(region)).unwrap();
+        page.replay(&mut render).unwrap();
+        let tile = render.to_rgba().unwrap();
+        for y in 0..60 {
+            for x in 0..96 {
+                assert_eq!(
+                    &tile.pixels[(y * 96 + x) * 4..(y * 96 + x + 1) * 4],
+                    &whole[((y + 1620) * 1200 + x) * 4..((y + 1620) * 1200 + x + 1) * 4]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn local_group_color_conversion_rejection_restores_parent_geometry_and_retries() {
+    let doc = document_sized(None, false, (600., 840.));
+    let list = doc.get_page(0).unwrap().display_list().unwrap();
+    let root = 1200 * 1680 * 4;
+    let mut render = SkiaRender::with_limits(
+        144.,
+        144.,
+        Limits {
+            max_render_pixels: 4_000_000,
+            max_render_bytes: root + 44 * 42 * 4,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let error = list.replay(&mut render).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            PdfError::ResourceLimitExceeded {
+                reason: "render_live_bytes",
+                stage: "group_color_conversion",
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert!(render.group_stack.is_empty());
+    assert_eq!((render.page_width, render.page_height), (1200, 1680));
+    assert!(render.region.is_none());
+    render.limits.max_render_bytes = 16_000_000;
+    list.replay(&mut render).unwrap();
+    assert!(render.group_stack.is_empty());
+}
+
+#[test]
+fn rotated_group_bounds_are_geometric_even_when_skia_uses_a_shader_clip() {
+    let doc = document_sized(None, false, (600., 840.));
+    let resources = doc.get_page(0).unwrap().resource().unwrap();
+    let name = resources
+        .get("XObject")
+        .unwrap()
+        .as_dict()
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap()
+        .0;
+    doc.replace_page_contents(
+        0,
+        format!("q 0.8660254 0.5 -0.5 0.8660254 150 700 cm /{name} Do Q").into_bytes(),
+    )
+    .unwrap();
+    let list = doc.get_page(0).unwrap().display_list().unwrap();
+    let group = list
+        .objects()
+        .iter()
+        .find_map(|object| {
+            if let pdf::page::page_object::PageObject::GroupBegin(paint) = object {
+                Some(paint)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    let mut render = SkiaRender::with_limits(
+        144.,
+        144.,
+        Limits {
+            max_render_pixels: 4_000_000,
+            max_render_bytes: 16_000_000,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    render.start_page(600., 840.).unwrap();
+    let target = render.group_target(group).unwrap();
+    assert!(
+        target.width < 64 && target.height < 64,
+        "{}x{}",
+        target.width,
+        target.height
+    );
+    assert!(
+        render.clip_images.is_empty(),
+        "sizing must not rasterize the clip"
+    );
+    list.replay(&mut render).unwrap();
+    assert!(render.group_stack.is_empty());
+    assert!(render.region.is_none());
 }

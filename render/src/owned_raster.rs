@@ -82,12 +82,26 @@ pub(crate) fn from_rgba(width: i32, height: i32, bytes: Vec<u8>) -> PdfResult<Im
         AlphaType::Unpremul,
         None,
     );
+    from_pixels(&info, bytes)
+}
+
+/// Transfer tightly packed native RGBA/BGRA bytes without a second Skia copy.
+/// Keep the caller's alpha convention (group correction produces premultiplied
+/// N32, whereas decoded images and ICC conversion produce straight RGBA).
+pub(crate) fn from_pixels(info: &ImageInfo, bytes: Vec<u8>) -> PdfResult<Image> {
+    if !matches!(info.color_type(), ColorType::RGBA8888 | ColorType::BGRA8888)
+        || info.width() <= 0
+        || info.height() <= 0
+        || info.min_row_bytes().checked_mul(info.height() as usize) != Some(bytes.len())
+    {
+        return Err(PdfError::ObjectError("owned raster layout mismatch".into()));
+    }
     let pixels = Box::new(Pixels {
         bytes: bytes.into_boxed_slice(),
         #[cfg(test)]
         dropped: None,
     });
-    install(&info, info.min_row_bytes(), pixels)
+    install(info, info.min_row_bytes(), pixels)
         .ok_or_else(|| PdfError::ResourceLimit("Skia rejected image pixel buffer".into()))
 }
 

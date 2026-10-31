@@ -1,3 +1,4 @@
+pub(crate) mod preview;
 use crate::{
     error::{PdfError, PdfResult},
     objects::pdf_dict::PdfDict,

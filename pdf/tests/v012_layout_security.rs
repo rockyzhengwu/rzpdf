@@ -273,7 +273,7 @@ fn clear_metadata_and_explicit_identity_stream_remain_clear() {
         assert!(!reopened.security_report().unwrap().encrypt_metadata);
         assert_eq!(
             reopened
-                .read_stream_data(&reopened.resolve_object(id).unwrap().as_stream().unwrap())
+                .read_stream_data(reopened.resolve_object(id).unwrap().as_stream().unwrap())
                 .unwrap()
                 .as_ref(),
             payload
